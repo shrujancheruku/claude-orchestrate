@@ -1,0 +1,13 @@
+{
+  "name": "claude-orchestrate",
+  "owner": { "name": "Shrujan Cheruku" },
+  "description": "The orchestrate plugin for Claude Code.",
+  "plugins": [
+    {
+      "name": "orchestrate",
+      "source": "./",
+      "description": "Parallel backlog orchestration: Opus plans and merges, Sonnet builds, Haiku scouts and does the grunt work.",
+      "category": "engineering"
+    }
+  ]
+}

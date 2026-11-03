@@ -1,0 +1,8 @@
+{
+  "name": "orchestrate",
+  "version": "0.1.0",
+  "description": "Run a sequenced backlog in parallel lanes: an orchestrator hands tickets to worktree-isolated workers, pushes searches and mechanical edits to cheaper agents, reviews each PR at a tier sized to it, and merges by the repo's own rule.",
+  "author": { "name": "Shrujan Cheruku" },
+  "repository": "https://github.com/shrujancheruku/claude-orchestrate",
+  "keywords": ["orchestration", "subagents", "worktrees", "backlog", "code-review"]
+}
