@@ -29,6 +29,7 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook. Ru
    - `/orchestrate:run status` reports without dispatching or merging.
    - `/orchestrate:run <ticket>` narrows a pass to one ticket; `/orchestrate:run <parent issue>` to its sub-issues.
    - `/loop /orchestrate:run` keeps going: worker completions wake the orchestrator, and it schedules its own checks on CI.
+   - Add `--profile` to any of these to profile the session as it runs: see [Profiling](#profiling).
 
 ### Concepts
 
@@ -75,6 +76,35 @@ Every agent draws on your plan, so a usage limit tends to stop several workers a
 - `.claude/orchestrate-state.json` (gitignored) remembers each ticket's worker and worktree between passes. The tracker stays the source of truth.
 
 For unattended `/loop /orchestrate:run`, turn on **Continue automatically at usage limit** in `/config` (`autoContinueAtUsageLimit`). Without it, a loop whose own turn hits the limit ends after one retry about 20 minutes later; restart it with `/loop /orchestrate:run` and the next pass picks up where things stopped. A fallback model doesn't help: rate-limit errors never trigger one, and the orchestrator never switches models on its own.
+
+## Profiling
+
+`/orchestrate:run --profile` (or `/loop /orchestrate:run --profile`) runs normal passes, and at the end of each one records the pass and saves a profile of the session so far:
+
+```
+Profile · session 346d1ea2 · 21m · 2 slots
+slots   occupied 59%  (building 37%, review/merge 22%)  idle: overlap 5m, empty 7m
+tokens  orchestrator 4.8M (33%) · workers 8.3M · reviewers 1.0M · scouts 433k · cache hits 96%
+tickets 2 merged, 4.8M each
+plan    5h window 22% → 51%, peak 51% · 0 limit hits
+saved   .claude/orchestrate-profiles/2026-11-03-346d1ea2.json  (+ .html)
+```
+
+- **Slot efficiency:** how much of the session's slot time held a ticket, split into building and review or waiting to merge, and why idle slots were idle (overlap, gate, nothing takeable, usage limit).
+- **Usage efficiency:** tokens by role and model (input, output, cache read, cache write), tokens per merged ticket, the orchestrator's share, cache hits.
+- **Headroom:** your plan's 5-hour and 7-day usage over the session; 5-hour windows that reset under 50% (`--threshold`) while every slot was full and tickets waited; usage-limit hits. A profile recommends one more or one fewer slot when the history supports it; the per-pass [slot suggestion](#choosing-a-slot-count) is separate.
+
+Profiles live in `.claude/orchestrate-profiles/` (gitignore it). Open the `.html` beside each one, a copy of `viewer/profile.html` with the profile embedded: a slot timeline, tokens by role, plan usage over time, and tables behind each. Drop several profile JSON files on any copy to compare sessions.
+
+**Plan usage needs the status-line tap.** Claude Code shows plan usage only to the status line, so `/orchestrate:setup` offers to pipe yours through `scripts/usage-tap.py`, which logs changes to `~/.claude/orchestrate/usage.jsonl` and prints nothing. By hand: copy it to `~/.claude/orchestrate/usage-tap.py` and add `echo "$input" | python3 -I ~/.claude/orchestrate/usage-tap.py` to your status-line script. Only subscribers get usage figures.
+
+Any past session can be profiled after the fact, without `--profile`, by its ID or transcript path:
+
+```sh
+python3 scripts/profile.py <session id> [--repo PATH] [--slots N] [--threshold 50]
+```
+
+Without a pass log, idle reasons and whether slots were full with work waiting show as unknown.
 
 ## Limits
 

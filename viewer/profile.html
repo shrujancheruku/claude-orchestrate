@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orchestrate profile</title>
+<!--
+  Viewer for /orchestrate:run --profile. scripts/profile.py writes a copy of this file next to each
+  profile with the data embedded below; open the copy, or open this file and drop profile JSON on it.
+  Several profiles at once add a comparison table. No network, no dependencies.
+-->
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11, 11, 11, 0.10);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --critical: #d03b3b;
+  --warning: #fab219;
+  --good: #0ca30c;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --ring: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --ring: rgba(255, 255, 255, 0.10);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); }
+main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; justify-content: space-between; }
+h1 { font-size: 20px; margin: 0; font-weight: 650; }
+h2 { font-size: 15px; margin: 0 0 4px; font-weight: 650; }
+.sub { color: var(--ink-2); margin: 2px 0 0; }
+.note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+select, button, label.file {
+  font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--ring);
+  border-radius: 6px; padding: 5px 10px; cursor: pointer;
+}
+label.file input { display: none; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 16px; margin-top: 16px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; }
+.tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 12px 14px; }
+.tile .label { color: var(--ink-2); font-size: 12px; }
+.tile .value { font-size: 26px; font-weight: 600; margin-top: 2px; }
+.tile .detail { color: var(--muted); font-size: 12px; }
+.advice { margin-top: 16px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--ring); background: var(--surface); }
+.advice::before { content: "ⓘ "; color: var(--series-1); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--ink-2); font-size: 12px; margin: 6px 0 10px; }
+.legend span::before { content: ""; display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; background: var(--k); }
+.legend .swatch::before { height: 10px; width: 10px; }
+.legend .ring::before { background: transparent; border: 2px solid var(--k); height: 8px; width: 8px; border-radius: 50%; }
+svg { display: block; width: 100%; min-width: 640px; height: auto; overflow: visible; }
+.chart { overflow-x: auto; }
+svg text { font: 11px var(--font); fill: var(--muted); }
+svg .ink { fill: var(--ink-2); }
+.tip {
+  position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); max-width: 320px; display: none;
+}
+.tip b { display: block; font-size: 13px; }
+.tip .row { display: flex; gap: 6px; align-items: center; color: var(--ink-2); }
+.tip .key { width: 12px; height: 3px; border-radius: 2px; background: var(--k); flex: none; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); }
+th { color: var(--ink-2); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+details summary { cursor: pointer; color: var(--ink-2); margin-top: 10px; }
+.scroll { overflow-x: auto; }
+.empty { text-align: center; padding: 64px 16px; color: var(--ink-2); border: 2px dashed var(--axis); border-radius: 12px; margin-top: 24px; }
+body.drag .empty, body.drag main { outline: 2px solid var(--series-1); outline-offset: 4px; }
+.status-critical { color: var(--critical); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1 id="title">Orchestrate profile</h1>
+      <p class="sub" id="subtitle"></p>
+    </div>
+    <div class="controls">
+      <select id="pick" aria-label="Profile" hidden></select>
+      <label class="file">Open profiles…<input id="files" type="file" accept=".json,application/json" multiple></label>
+    </div>
+  </header>
+  <div id="empty" class="empty" hidden>Drop one or more profile JSON files here, or use <b>Open profiles…</b>.<br>They live in <code>.claude/orchestrate-profiles/</code>.</div>
+  <div id="view"></div>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+<script id="profile-data" type="application/json">null</script>
+<script>
+"use strict";
+const profiles = [];
+const $ = (id) => document.getElementById(id);
+const SVG = "http://www.w3.org/2000/svg";
+const ROLES = ["orchestrator", "worker", "reviewer", "scout", "mechanic"];
+const CLASSES = { total: "All tokens", output: "Output", cache_read: "Cache read", cache_write: "Cache write", input: "Input" };
+let tokenClass = "total";
+
+function el(tag, attrs, text) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+function sv(tag, attrs, text) {
+  const n = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+const t = (s) => (s ? new Date(s).getTime() : null);
+function fmtTok(n) {
+  if (n == null) return "–";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return Math.round(n / 1e3) + "k";
+  return String(Math.round(n));
+}
+function fmtDur(s) {
+  if (s >= 3600) return (s / 3600).toFixed(1) + "h";
+  return Math.round(s / 60) + "m";
+}
+const pct = (x) => (x == null ? "–" : Math.round(x * 100) + "%");
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const sum = (o) => Object.values(o || {}).reduce((a, b) => a + b, 0);
+
+// Tooltip: rows of [label, value, colourVar?]. Text only, never HTML: labels come from tickets and agents.
+const tip = $("tip");
+function showTip(ev, title, rows) {
+  tip.replaceChildren(el("b", {}, title));
+  for (const [label, value, key] of rows) {
+    const r = el("div", { class: "row" });
+    if (key) { const k = el("span", { class: "key" }); k.style.setProperty("--k", `var(${key})`); r.append(k); }
+    r.append(el("strong", {}, value), document.createTextNode(" " + label));
+    tip.append(r);
+  }
+  tip.style.display = "block";
+  const x = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  const y = Math.min(ev.clientY + 14, window.innerHeight - tip.offsetHeight - 8);
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+const hideTip = () => { tip.style.display = "none"; };
+function hover(node, title, rows) {
+  node.addEventListener("pointermove", (ev) => showTip(ev, title, typeof rows === "function" ? rows() : rows));
+  node.addEventListener("pointerleave", hideTip);
+}
+
+function timeTicks(a, b, max) {
+  const steps = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map((m) => m * 60000);
+  const step = steps.find((s) => (b - a) / s <= max) || steps[steps.length - 1];
+  const out = [];
+  for (let v = Math.ceil(a / step) * step; v <= b; v += step) out.push(v);
+  return out;
+}
+
+function chart(svg) {
+  const d = el("div", { class: "chart" });
+  d.append(svg);
+  return d;
+}
+function tile(label, value, detail) {
+  const d = el("div", { class: "tile" });
+  d.append(el("div", { class: "label" }, label), el("div", { class: "value" }, value));
+  if (detail) d.append(el("div", { class: "detail" }, detail));
+  return d;
+}
+function legend(items) {
+  const l = el("div", { class: "legend" });
+  for (const [label, key, cls] of items) {
+    const s = el("span", { class: cls || "" }, label);
+    s.style.setProperty("--k", `var(${key})`);
+    l.append(s);
+  }
+  return l;
+}
+function table(head, rows, numeric) {
+  const wrap = el("div", { class: "scroll" });
+  const tb = el("table");
+  const tr = el("tr");
+  head.forEach((h, i) => tr.append(el("th", numeric.includes(i) ? { class: "num" } : {}, h)));
+  tb.append(tr);
+  for (const row of rows) {
+    const r = el("tr");
+    row.forEach((c, i) => r.append(el("td", numeric.includes(i) ? { class: "num" } : {}, c)));
+    tb.append(r);
+  }
+  wrap.append(tb);
+  return wrap;
+}
+
+// Timeline: one row per slot. Each ticket's bar is building (series 1) then review/merge (series 2).
+function timeline(p) {
+  const card = el("section", { class: "card" });
+  card.append(el("h2", {}, "Slots over time"));
+  card.append(el("p", { class: "sub" }, `${pct(p.metrics.occupancy)} occupied: building ${pct(p.metrics.building_share)}, in review or waiting to merge ${pct(p.metrics.review_share)}.`));
+  card.append(legend([["Building", "--series-1", "swatch"], ["Review / merge", "--series-2", "swatch"], ["Reviewer or scout run", "--muted", "ring"], ["Usage limit", "--critical"]]));
+  const a = t(p.start), b = t(p.end);
+  const W = 1000, L = 64, R = 12, ROW = 34, BAR = 18, TOP = 16;
+  const rows = Math.max(p.slots, ...p.tickets.map((x) => x.slot + 1), 1);
+  const helpersY = TOP + rows * ROW + 8;
+  const H = helpersY + 26 + 24;
+  const x = (ms) => L + ((ms - a) / Math.max(b - a, 1)) * (W - L - R);
+  const s = sv("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Slot timeline" });
+  for (const v of timeTicks(a, b, 8)) {
+    s.append(sv("line", { x1: x(v), x2: x(v), y1: TOP, y2: H - 22, stroke: "var(--grid)", "stroke-width": 1 }));
+    s.append(sv("text", { x: x(v), y: H - 6, "text-anchor": "middle" }, clock(v)));
+  }
+  for (let i = 0; i < rows; i++) {
+    s.append(sv("text", { x: 0, y: TOP + i * ROW + ROW / 2 + 4, class: "ink" }, `Slot ${i + 1}`));
+  }
+  s.append(sv("text", { x: 0, y: helpersY + 13, class: "ink" }, "Helpers"));
+  for (const tk of p.tickets) {
+    const y = TOP + tk.slot * ROW + (ROW - BAR) / 2;
+    const s0 = t(tk.start), s1 = t(tk.end);
+    const g = sv("g");
+    g.append(sv("rect", { x: x(s0), y, width: Math.max(x(s1) - x(s0), 2), height: BAR, rx: 4, fill: "var(--series-2)" }));
+    for (const [bs, be] of tk.building) {
+      // A 2px surface gap either side keeps adjacent states apart.
+      g.append(sv("rect", { x: x(t(bs)), y, width: Math.max(x(t(be)) - x(t(bs)), 3), height: BAR, rx: 4, fill: "var(--series-1)", stroke: "var(--surface)", "stroke-width": 2 }));
+    }
+    g.append(sv("rect", { x: x(s0), y: y - 6, width: Math.max(x(s1) - x(s0), 24), height: BAR + 12, fill: "transparent" }));
+    const label = `#${tk.ticket}`;
+    if (x(s1) - x(s0) > 40) g.append(sv("text", { x: x(s0) + 6, y: y + BAR / 2 + 4, fill: "#fff", style: "fill:#fff;font-weight:600" }, label));
+    const built = tk.building.reduce((acc, [bs, be]) => acc + (t(be) - t(bs)) / 1000, 0);
+    hover(g, `Ticket ${label}${tk.pr ? ` · PR #${tk.pr}` : ""}`, [
+      [tk.outcome, ""],
+      ["in the slot", fmtDur((s1 - s0) / 1000)],
+      ["building", fmtDur(built), "--series-1"],
+      ["review / merge", fmtDur((s1 - s0) / 1000 - built), "--series-2"],
+      ["tokens", fmtTok(tk.tokens)],
+      [`${clock(s0)} → ${clock(s1)}`, ""],
+    ]);
+    s.append(g);
+  }
+  for (const ag of p.agents.filter((g) => g.role !== "worker" && g.segments.length)) {
+    const ms = t(ag.segments[0][0]);
+    const c = sv("circle", { cx: x(ms), cy: helpersY + 9, r: 5, fill: "var(--surface)", stroke: "var(--muted)", "stroke-width": 2 });
+    const hit = sv("circle", { cx: x(ms), cy: helpersY + 9, r: 12, fill: "transparent" });
+    const g = sv("g"); g.append(c, hit);
+    hover(g, ag.description || ag.role, [[ag.role, ""], [ag.model || "", ""], ["tokens", fmtTok(sum(ag.tokens))]]);
+    s.append(g);
+  }
+  for (const lim of p.limits) {
+    const ms = t(lim.ts);
+    if (ms == null) continue;
+    const g = sv("g");
+    g.append(sv("line", { x1: x(ms), x2: x(ms), y1: 0, y2: H - 22, stroke: "var(--critical)", "stroke-width": 2 }));
+    g.append(sv("text", { x: x(ms) + 4, y: 10, style: "fill:var(--critical)" }, "⚠ limit"));
+    g.append(sv("rect", { x: x(ms) - 8, y: 0, width: 16, height: H - 22, fill: "transparent" }));
+    hover(g, "Usage limit", [[lim.source, ""], [lim.resets_at ? "resets " + clock(t(lim.resets_at)) : "reset unknown", ""], [lim.detail || "", ""]]);
+    s.append(g);
+  }
+  card.append(chart(s));
+  const idle = Object.entries(p.metrics.idle_s).filter(([, v]) => v >= 60);
+  card.append(el("p", { class: "note" }, "Idle slot time: " + (idle.length ? idle.map(([k, v]) => `${k} ${fmtDur(v)}`).join(" · ") : "none") +
+    (p.sources.pass_log ? "" : ". No pass log for this session, so idle reasons are unknown.")));
+  const det = el("details");
+  det.append(el("summary", {}, "Tickets as a table"));
+  det.append(table(["Ticket", "PR", "Outcome", "Slot", "Start", "End", "Building", "Tokens"], p.tickets.map((tk) => [
+    "#" + tk.ticket, tk.pr ? "#" + tk.pr : "–", tk.outcome, String(tk.slot + 1), clock(t(tk.start)), clock(t(tk.end)),
+    fmtDur(tk.building.reduce((acc, [bs, be]) => acc + (t(be) - t(bs)) / 1000, 0)), fmtTok(tk.tokens),
+  ]), [3, 6, 7]));
+  card.append(det);
+  return card;
+}
+
+// Tokens: one bar per role for the chosen token class. A single series, so no legend.
+function tokens(p) {
+  const card = el("section", { class: "card" });
+  const head = el("div", { style: "display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:baseline" });
+  const titleBox = el("div");
+  titleBox.append(el("h2", {}, "Tokens by role"));
+  titleBox.append(el("p", { class: "sub" }, `Orchestrator ${pct(p.metrics.orchestrator_share)} of all tokens · cache hits ${pct(p.metrics.cache_hit_ratio)}`));
+  const sel = el("select", { "aria-label": "Token class" });
+  for (const [k, v] of Object.entries(CLASSES)) { const o = el("option", { value: k }, v); if (k === tokenClass) o.selected = true; sel.append(o); }
+  sel.addEventListener("change", () => { tokenClass = sel.value; render(); });
+  head.append(titleBox, sel);
+  card.append(head);
+  const byRole = p.metrics.tokens_by_role;
+  const roles = ROLES.filter((r) => byRole[r]);
+  const val = (r) => (tokenClass === "total" ? sum(byRole[r]) : byRole[r][tokenClass] || 0);
+  const max = Math.max(...roles.map(val), 1);
+  const W = 1000, L = 104, R = 70, ROW = 34, BAR = 20;
+  const H = roles.length * ROW + 4;
+  const s = sv("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Tokens by role" });
+  s.append(sv("line", { x1: L, x2: L, y1: 0, y2: H, stroke: "var(--axis)", "stroke-width": 1 }));
+  roles.forEach((r, i) => {
+    const v = val(r), w = (v / max) * (W - L - R), y = i * ROW + (ROW - BAR) / 2;
+    s.append(sv("text", { x: 0, y: y + BAR / 2 + 4, class: "ink" }, r));
+    const g = sv("g");
+    // Rounded at the data end, square at the baseline.
+    g.append(sv("path", { d: `M${L},${y}h${Math.max(w - 4, 0)}a4,4 0 0 1 4,4v${BAR - 8}a4,4 0 0 1 -4,4h${-Math.max(w - 4, 0)}z`, fill: "var(--series-1)" }));
+    g.append(sv("rect", { x: L, y: y - 6, width: Math.max(w, 24), height: BAR + 12, fill: "transparent" }));
+    s.append(sv("text", { x: L + w + 6, y: y + BAR / 2 + 4, class: "ink" }, fmtTok(v)));
+    hover(g, r, Object.entries(CLASSES).filter(([k]) => k !== "total").map(([k, lbl]) => [lbl.toLowerCase(), fmtTok(byRole[r][k])]));
+    s.append(g);
+  });
+  card.append(chart(s));
+  const det = el("details");
+  det.append(el("summary", {}, "By model and by agent"));
+  det.append(table(["Model", "Input", "Output", "Cache read", "Cache write"], Object.entries(p.metrics.tokens_by_model).map(([m, tk]) =>
+    [m, fmtTok(tk.input), fmtTok(tk.output), fmtTok(tk.cache_read), fmtTok(tk.cache_write)]), [1, 2, 3, 4]));
+  det.append(table(["Agent", "Role", "Model", "Ticket", "Tokens"], p.agents.map((g) =>
+    [g.description || g.id || "", g.role, g.model || "", g.ticket ? "#" + g.ticket : "–", fmtTok(sum(g.tokens))]), [4]));
+  card.append(det);
+  return card;
+}
+
+// Plan usage: 5-hour and 7-day % on one 0–100 axis, crosshair readout.
+function usage(p) {
+  const card = el("section", { class: "card" });
+  card.append(el("h2", {}, "Plan usage"));
+  const rows = p.usage.map((u) => ({ ms: t(u.ts), five: u.five_hour, week: u.seven_day })).filter((u) => u.ms != null);
+  if (!rows.length) {
+    card.append(el("p", { class: "sub" }, "No usage samples for this session. Pipe your status line through scripts/usage-tap.py to record them (see the README)."));
+    return card;
+  }
+  const wins = p.metrics.windows;
+  const under = wins.filter((w) => w.underused).length;
+  card.append(el("p", { class: "sub" }, `Peak 5-hour ${Math.round(p.metrics.five_hour_peak)}% · ${p.metrics.limit_hits} limit hit${p.metrics.limit_hits === 1 ? "" : "s"} · ${under} window${under === 1 ? "" : "s"} reset under ${p.threshold}% while slots were full`));
+  card.append(legend([["5-hour window", "--series-1"], ["7-day window", "--series-2"], ["Underuse threshold", "--muted"], ["Usage limit", "--critical"]]));
+  const a = t(p.start), b = t(p.end);
+  const W = 1000, L = 40, R = 70, H = 220, T = 8, B = 26;
+  const x = (ms) => L + ((ms - a) / Math.max(b - a, 1)) * (W - L - R);
+  const y = (v) => T + (1 - v / 100) * (H - T - B);
+  const s = sv("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Plan usage over time" });
+  for (const v of [0, 25, 50, 75, 100]) {
+    s.append(sv("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: v === 0 ? "var(--axis)" : "var(--grid)", "stroke-width": 1 }));
+    s.append(sv("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, v + "%"));
+  }
+  for (const v of timeTicks(a, b, 8)) s.append(sv("text", { x: x(v), y: H - 6, "text-anchor": "middle" }, clock(v)));
+  s.append(sv("line", { x1: L, x2: W - R, y1: y(p.threshold), y2: y(p.threshold), stroke: "var(--muted)", "stroke-width": 1, "stroke-opacity": 0.6 }));
+  // Step lines: a sample holds until the next one changes it.
+  const step = (key) => {
+    const pts = rows.filter((r) => r[key] != null);
+    if (!pts.length) return null;
+    let d = `M${x(pts[0].ms)},${y(pts[0][key])}`;
+    for (let i = 1; i < pts.length; i++) d += `H${x(pts[i].ms)}V${y(pts[i][key])}`;
+    d += `H${x(b)}`;
+    return { d, last: pts[pts.length - 1][key] };
+  };
+  for (const [key, colour, label] of [["week", "--series-2", "7-day"], ["five", "--series-1", "5-hour"]]) {
+    const line = step(key);
+    if (!line) continue;
+    s.append(sv("path", { d: line.d, fill: "none", stroke: `var(${colour})`, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    s.append(sv("circle", { cx: x(b), cy: y(line.last), r: 4, fill: `var(${colour})`, stroke: "var(--surface)", "stroke-width": 2 }));
+    s.append(sv("text", { x: x(b) + 8, y: y(line.last) + 4, class: "ink" }, `${label} ${Math.round(line.last)}%`));
+  }
+  for (const w of wins) {
+    const ms = t(w.resets_at);
+    if (ms < a || ms > b) continue;
+    s.append(sv("line", { x1: x(ms), x2: x(ms), y1: T, y2: H - B, stroke: "var(--axis)", "stroke-width": 1 }));
+    s.append(sv("text", { x: x(ms) + 4, y: T + 10 }, w.underused ? "reset · underused" : "reset"));
+  }
+  for (const lim of p.limits) {
+    const ms = t(lim.ts);
+    if (ms != null) s.append(sv("line", { x1: x(ms), x2: x(ms), y1: T, y2: H - B, stroke: "var(--critical)", "stroke-width": 2 }));
+  }
+  const cross = sv("line", { y1: T, y2: H - B, stroke: "var(--axis)", "stroke-width": 1, visibility: "hidden" });
+  const hit = sv("rect", { x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent" });
+  s.append(cross, hit);
+  hit.addEventListener("pointermove", (ev) => {
+    const box = s.getBoundingClientRect();
+    const ms = a + ((ev.clientX - box.left) / box.width * W - L) / (W - L - R) * (b - a);
+    let row = rows[0];
+    for (const r of rows) if (r.ms <= ms) row = r;
+    cross.setAttribute("x1", x(row.ms)); cross.setAttribute("x2", x(row.ms)); cross.setAttribute("visibility", "visible");
+    showTip(ev, clock(row.ms), [["5-hour", row.five == null ? "–" : Math.round(row.five) + "%", "--series-1"], ["7-day", row.week == null ? "–" : Math.round(row.week) + "%", "--series-2"]]);
+  });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+  card.append(chart(s));
+  const det = el("details");
+  det.append(el("summary", {}, "Windows as a table"));
+  det.append(table(["Resets", "Peak 5-hour", "Closed", "Slots full with work waiting", "Underused"], wins.map((w) =>
+    [new Date(t(w.resets_at)).toLocaleString(), Math.round(w.peak) + "%", w.closed ? "yes" : "no", w.pressure == null ? "unknown" : w.pressure ? "yes" : "no", w.underused ? "yes" : "no"]), [1]));
+  card.append(det);
+  return card;
+}
+
+function compare() {
+  const card = el("section", { class: "card" });
+  card.append(el("h2", {}, "Sessions compared"));
+  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "Tokens / ticket", "Orchestrator share", "Peak 5-hour", "Limit hits"],
+    profiles.map((p) => [p.session.slice(0, 8), new Date(t(p.start)).toLocaleString(), fmtDur(p.metrics.span_s), String(p.slots), pct(p.metrics.occupancy),
+      String(p.metrics.tickets_merged), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
+      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9]));
+  return card;
+}
+
+function render() {
+  const view = $("view");
+  view.replaceChildren();
+  $("empty").hidden = profiles.length > 0;
+  const pick = $("pick");
+  pick.hidden = profiles.length < 2;
+  if (!profiles.length) { $("subtitle").textContent = ""; return; }
+  const p = profiles[Math.min(Number(pick.value) || 0, profiles.length - 1)];
+  const repo = p.repo ? p.repo.split("/").pop() : "repo";
+  $("title").textContent = `Orchestrate profile · ${repo}`;
+  $("subtitle").textContent = `Session ${p.session.slice(0, 8)} · ${new Date(t(p.start)).toLocaleString()} · ${fmtDur(p.metrics.span_s)} · ${p.slots} slots`;
+  const m = p.metrics;
+  const tiles = el("div", { class: "tiles" });
+  tiles.append(
+    tile("Slots occupied", pct(m.occupancy), `building ${pct(m.building_share)}`),
+    tile("Tickets merged", String(m.tickets_merged), m.tokens_per_merged_ticket ? `${fmtTok(m.tokens_per_merged_ticket)} tokens each` : ""),
+    tile("Tokens", fmtTok(m.tokens_total), `orchestrator ${pct(m.orchestrator_share)}`),
+    tile("Peak 5-hour usage", m.five_hour_peak == null ? "–" : Math.round(m.five_hour_peak) + "%", m.five_hour_start == null ? "no samples" : `${Math.round(m.five_hour_start)}% → ${Math.round(m.five_hour_end)}%`),
+    tile("Limit hits", String(m.limit_hits), p.orchestrator.compactions ? `${p.orchestrator.compactions} compaction${p.orchestrator.compactions === 1 ? "" : "s"}` : "no compactions"),
+  );
+  view.append(tiles);
+  if (p.recommendation) view.append(el("div", { class: "advice" }, p.recommendation));
+  view.append(timeline(p), tokens(p), usage(p));
+  if (profiles.length > 1) view.append(compare());
+}
+
+function add(data, name) {
+  if (!data || data.schema !== 1 || !data.metrics) { console.warn("Not an orchestrate profile (schema 1):", name); return; }
+  const i = profiles.findIndex((p) => p.session === data.session);
+  if (i >= 0) profiles[i] = data; else profiles.push(data);
+  profiles.sort((x, y) => (x.start < y.start ? -1 : 1));
+  const pick = $("pick");
+  pick.replaceChildren(...profiles.map((p, j) => el("option", { value: j }, `${p.session.slice(0, 8)} · ${new Date(t(p.start)).toLocaleString()}`)));
+  pick.value = String(profiles.findIndex((p) => p.session === data.session));
+}
+async function load(files) {
+  for (const f of files) {
+    try { add(JSON.parse(await f.text()), f.name); } catch (e) { console.warn("Couldn't read", f.name, e); }
+  }
+  render();
+}
+$("files").addEventListener("change", (ev) => load(ev.target.files));
+$("pick").addEventListener("change", render);
+document.addEventListener("dragover", (ev) => { ev.preventDefault(); document.body.classList.add("drag"); });
+document.addEventListener("dragleave", () => document.body.classList.remove("drag"));
+document.addEventListener("drop", (ev) => { ev.preventDefault(); document.body.classList.remove("drag"); load(ev.dataTransfer.files); });
+try { add(JSON.parse($("profile-data").textContent), "embedded"); } catch (e) { /* no embedded profile */ }
+render();
+</script>
+</body>
+</html>

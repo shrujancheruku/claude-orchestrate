@@ -2,7 +2,7 @@
 name: run
 description: One orchestration pass over the repo's backlog. Review and merge finished PRs, fill free slots with workers, escalate gates.
 disable-model-invocation: true
-argument-hint: "[status | <ticket> | <parent issue>]"
+argument-hint: "[status | <ticket> | <parent issue>] [--profile]"
 ---
 
 You are the **orchestrator**. You hold the order of work and every judgement call; agents do the legwork. The **scout** finds facts, **workers** build tickets, **reviewers** check PRs. You write no feature code, and you hand any search bigger than a single lookup to the scout, so your context holds decisions, not file dumps.
@@ -38,7 +38,7 @@ The **state file**, `.claude/orchestrate-state.json` (gitignored), holds what th
 
 The **held paths** at any moment are the files in open PRs' diffs, the touch maps of building tickets, and the config's exclusive holds. A ticket may not change a path another ticket holds.
 
-Arguments narrow a pass: `status` reconciles and reports without dispatching or merging; a ticket limits the pass to it; a parent issue (one with sub-issues) limits it to its sub-issues.
+Arguments narrow a pass: `status` reconciles and reports without dispatching or merging; a ticket limits the pass to it; a parent issue (one with sub-issues) limits it to its sub-issues. `--profile` adds to any of them: the pass also records itself and saves a profile, as [Profiling](#profiling) says.
 
 ## A pass
 
@@ -46,7 +46,7 @@ Arguments narrow a pass: `status` reconciles and reports without dispatching or 
 2. **Resume paused and stalled tickets**, as [Running out of usage](#running-out-of-usage) says.
 3. **Finish work in review**, ticket by ticket, with the loop below.
 4. **Fill free slots.** Skip this step if a usage limit was hit this pass. For each free slot, take the next takeable ticket that isn't held by a start gate. Check **overlap** before dispatch: the scout's touch map for the ticket, set against the held paths. An overlap outside the config's shared files holds the ticket until the other merges; take the next ticket instead. Assign the ticket to the user first, so another session skips it. Write its brief from [brief.md](brief.md), with the touch map and the held paths, and dispatch `orchestrate:worker` in the background, with the config's worker model. Record it in the state file. Done when every slot is full or no ticket can be taken. If every slot is full, no usage limit was hit, and the pass isn't narrowed, ask the scout for the next takeable ticket's touch map, for the [slot suggestion](#suggesting-a-slot-count).
-5. **Report and yield.** A table: ticket, state, next step, who it waits on. If a usage limit was hit, say so first, with the reset time if the error gave one. Below it, any slot suggestion, then the `ready-for-human` tickets and any parent whose sub-issues have all closed; ask the user whether to close each such parent (never close one yourself). Then end your turn: worker completions wake you. CI is external state, so under `/loop` set the wake-up from how long the repo's CI takes, or as [Running out of usage](#running-out-of-usage) says while a limit holds.
+5. **Report and yield.** A table: ticket, state, next step, who it waits on. If a usage limit was hit, say so first, with the reset time if the error gave one. Below it, any slot suggestion, then the `ready-for-human` tickets and any parent whose sub-issues have all closed; ask the user whether to close each such parent (never close one yourself). With `--profile`, record the pass and put the profile summary last. Then end your turn: worker completions wake you. CI is external state, so under `/loop` set the wake-up from how long the repo's CI takes, or as [Running out of usage](#running-out-of-usage) says while a limit holds.
 
 The backlog is done when nothing in scope is takeable or claimed. Say so, list what's left as `ready-for-human` or `needs-info`, and stop.
 
@@ -93,6 +93,23 @@ On a pass over the whole backlog (not `status`, a ticket or a parent), suggest c
 - **Raise** when every slot is full, no usage limit was hit, and the next takeable ticket overlaps no held path.
 
 Never suggest below 1 or above 5. Give the reason in one line, e.g. "Suggest slots 2 → 1: a usage limit paused 2 tickets this pass." A suggestion above 3 adds: "more slots means more reports and reviews through this session; expect earlier compaction." Change the config's **Slots** line only when the user says yes; until then, keep running the config's count.
+
+## Profiling
+
+With `--profile`, at the end of each pass, before the report:
+
+1. **Record the pass**, one JSON object, so the profile can say why slots sat idle:
+   ```sh
+   python3 -I "${CLAUDE_SKILL_DIR}/../../scripts/profile.py" record --repo . --session ${CLAUDE_SESSION_ID} '<json>'
+   ```
+   Fields: `scope` (`full`, `status`, `#<ticket>` or `parent #<n>`), `slots` (the config's count), `claimed` (ticket number → state), `free` (free slots after step 4), `idle` (why each free slot stayed free: counts under `overlap`, `gate`, `empty` for nothing takeable, `limit`; they sum to `free`), `takeable_waiting` (takeable tickets left undispatched), `limit_hit`, `reset_at` (ISO, or null), `dispatched` and `merged` (ticket numbers), `suggestion` (e.g. `"2 → 3"`, or null).
+2. **Build the profile:**
+   ```sh
+   python3 -I "${CLAUDE_SKILL_DIR}/../../scripts/profile.py" ${CLAUDE_SESSION_ID} --repo .
+   ```
+   It reads this session's transcripts, the pass log and the status-line usage log, saves `.claude/orchestrate-profiles/<date>-<session>.json` with an `.html` viewer beside it, and prints a summary. Put the summary, unchanged, at the end of the report, with the path of the `.html`.
+
+The profile's advice is long-run and advisory: it doesn't change the [slot suggestion](#suggesting-a-slot-count), which stays per pass. Profiling never blocks a pass: if a command fails, say so in one line and carry on.
 
 ## Escalate to the user
 
