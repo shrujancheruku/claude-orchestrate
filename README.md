@@ -45,7 +45,13 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook. Ru
 - Searches and log reads run in Haiku contexts, so the orchestrator's and workers' contexts stay small.
 - Review fixes go back to the worker that wrote the PR, so its context is reused instead of a new agent starting.
 - Briefs share a fixed preamble, so workers share a prompt-cache prefix.
-- Parallel agents multiply token use. Fewer slots cost less; the slot count is your throttle.
+- Parallel agents multiply token use. Fewer slots cost less; the slot count is your throttle. See [Choosing a slot count](#choosing-a-slot-count).
+
+## Choosing a slot count
+
+Setup recommends 2. Each extra slot adds a worker's tokens and its reviews, raises the odds that a usage limit pauses several tickets at once, and adds reports and reviews to your main session, which handles them one at a time and is usually the first thing to saturate. The gain is wall-clock time, and only when the backlog's tickets are independent.
+
+Every full pass suggests a change of one slot, between 1 and 5: lower after a usage limit or when overlaps left a slot idle, higher when every slot is full and the next ticket wouldn't overlap. It changes the config only when you say yes. The reasoning is in [ADR-0001](docs/adr/0001-slot-count.md).
 
 ## The guard hook
 

@@ -15,7 +15,7 @@
 
 ## Slots
 
-- **Slots:** <n, default 2>. How many tickets are in flight at once. Parallel workers multiply token use, so this is the throttle.
+- **Slots:** <n, default 2>. How many tickets are in flight at once. Parallel workers multiply token use, so this is the throttle. `/orchestrate:run` suggests changes of one; it changes this line only when the user says yes.
 - **Exclusive holds:** <e.g. "while #42 is open, nothing else touches `db/`" | none>
 
 Tickets run in parallel only when their touch maps don't overlap outside the shared files.
