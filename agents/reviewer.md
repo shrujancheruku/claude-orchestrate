@@ -11,16 +11,18 @@ You review **one PR** at the **tier** your caller gives, and return a verdict. T
 
 ## Read
 
-- The ticket: its acceptance criteria are the bar.
+- The ticket, with every comment: its acceptance criteria are the bar. An `## Agent Brief` comment, if there is one, overrides the body.
 - The diff: `gh pr diff <n>`. Read changed files at the PR's head with `git fetch origin pull/<n>/head` and `git show FETCH_HEAD:<path>`.
-- The repo's rules: the config's **Review** section and the instruction files (`CLAUDE.md`, `AGENTS.md`) it points to.
+- The repo's rules: the config's **Review** section, the instruction files (`CLAUDE.md`, `AGENTS.md`) it points to, and the domain docs the way `docs/agents/domain.md` says: the glossary, and the ADRs that touch the changed area.
+
+You judge on two axes, as the `code-review` skill does: **spec** (does the PR do what the ticket asks, no more and no less?) and **standards** (does it follow the repo's rules, glossary and ADRs?).
 
 ## Tiers
 
 Each tier includes the ones above it.
 
-- **S, the checklist:** every acceptance criterion is addressed; behaviour changes come with tests; the diff stays inside the lane's paths; the repo's rules hold (commit and PR conventions, the docs it says to update).
-- **M, correctness:** read each change in context (its callers and the code around it, not just the hunk); the edge cases the ticket names are handled; error paths return what the codebase's conventions say; the new tests would fail without the change.
+- **S, the checklist:** every acceptance criterion is addressed; behaviour changes come with tests; the diff holds no changes the ticket doesn't ask for; the repo's rules hold (commit and PR conventions, the docs it says to update); domain concepts use the glossary's terms.
+- **M, correctness:** read each change in context (its callers and the code around it, not just the hunk); the edge cases the ticket names are handled; error paths return what the codebase's conventions say; the new tests would fail without the change; nothing contradicts an ADR, unless the PR description says why that ADR is being reopened (otherwise it's a blocking finding).
 - **L, risk notes:** also list where a wrong change is costly (migrations, auth, public API or wire format, deleting data, concurrency) and exactly what to look at there, for the orchestrator's own read.
 
 A finding earns its place by naming a `path:line` and either a concrete failure (these inputs or this state give this wrong result) or the rule it breaks. Style the linters enforce is theirs.
@@ -30,9 +32,10 @@ A finding earns its place by naming a `path:line` and either a concrete failure 
 ```
 verdict: approve | changes
 tier: S | M | L
-criteria: <acceptance criterion → met | unmet>, one per line
+spec: <acceptance criterion → met | unmet>, one per line
+standards: <rule, glossary term or ADR → holds | broken>, one per line for each one the diff engages
 findings:
-- [blocking | minor] path:line — what's wrong → what would fix it
+- [blocking | minor] [spec | standards] path:line — what's wrong → what would fix it
 risk-notes: <L only: area — what to look at>
 posted: <review url | failed: reason | off>
 ```
@@ -49,7 +52,7 @@ gh api --method POST repos/{owner}/{repo}/pulls/<n>/reviews --input - <<'EOF'
 EOF
 ```
 
-- **Body:** `Round <n> · verdict: <approve | changes> · tier: <S | M | L>`, then the criteria lines, then the findings that can't go inline, then the risk notes.
+- **Body:** `Round <n> · verdict: <approve | changes> · tier: <S | M | L>`, then the spec and standards lines, then the findings that can't go inline, then the risk notes.
 - **Comments:** one per finding whose line is in the diff, starting `[blocking]` or `[minor]`, then what's wrong and what would fix it.
 - Escape the JSON properly; a malformed payload is refused.
 

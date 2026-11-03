@@ -1,6 +1,6 @@
 # orchestrate
 
-A Claude Code plugin that works through a sequenced backlog in parallel. Your main session acts as the **orchestrator**: it decides the order of work, hands each ticket to a **worker** in its own git worktree, pushes searches and mechanical edits down to cheaper agents, reviews each PR at a depth sized to it, and merges by your repo's rule. Anything that is yours to decide waits for you.
+A Claude Code plugin that works through a backlog of GitHub issues in parallel, picking up the tickets that [Matt Pocock's skills](https://github.com/mattpocock/skills) (`to-tickets`, `to-spec`, `triage`) leave `ready-for-agent`. Your main session acts as the **orchestrator**: it decides the order of work, hands each ticket to a **worker** in its own git worktree, pushes searches and mechanical edits down to cheaper agents, reviews each PR at a depth sized to it, and merges by your repo's rule. Anything that is yours to decide waits for you.
 
 ```
 orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gates
@@ -20,21 +20,23 @@ orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gate
 
 From a local clone, use the clone's path in place of `shrujancheruku/claude-orchestrate`. While developing, load it without installing: `claude --plugin-dir /path/to/claude-orchestrate`.
 
-Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook.
+Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook. Run `/setup-matt-pocock-skills` in the repo first: orchestrate reads the tracker and domain docs it writes to `docs/agents/`. Without them, setup falls back to a backlog defined in the config.
 
 ## Use it in a repo
 
-1. **`/orchestrate:setup`** scouts the repo (tracker, commands, layout, conventions, anything that would collide across parallel worktrees) and asks you the decisions in one round: backlog source, lanes, gates, merge authority, models. It writes `.claude/orchestration.md` (the **config**) and a `.worktreeinclude`.
-2. **`/orchestrate:run`** runs one **pass**. It rebuilds state from the tracker, reviews and merges finished PRs, fills free lanes with workers, and reports a table of lanes. Passes are safe to repeat and to start in a fresh session, because the state lives in the tracker, not in the conversation.
+1. **`/orchestrate:setup`** scouts the repo (tracker, commands, layout, conventions, anything that would collide across parallel worktrees) and asks you the decisions in one round: backlog source, slots, gates, merge authority, models, review tiers. It writes `.claude/orchestration.md` (the **config**) and a `.worktreeinclude`.
+2. **`/orchestrate:run`** runs one **pass**. It rebuilds state from the tracker, reviews and merges finished PRs, fills free slots with workers, and reports a table of tickets. Passes are safe to repeat and to start in a fresh session, because the state lives in the tracker, not in the conversation.
    - `/orchestrate:run status` reports without dispatching or merging.
-   - `/orchestrate:run <lane>` or `/orchestrate:run <ticket>` narrows a pass.
+   - `/orchestrate:run <ticket>` narrows a pass to one ticket; `/orchestrate:run <parent issue>` to its sub-issues.
    - `/loop /orchestrate:run` keeps going: worker completions wake the orchestrator, and it schedules its own checks on CI.
 
 ### Concepts
 
-- **Lane:** a set of paths with at most one open PR at a time, so parallel PRs don't conflict. A lane can be **exclusive** (for example, a schema rewrite that nothing else may touch until it merges).
+- **Ticket:** a GitHub issue that is open, `ready-for-agent`, unassigned and unblocked, with no open sub-issues. Tickets are taken in ascending issue number, the order `to-tickets` publishes them in. The tracker operations and label strings come from `docs/agents/`. A ticket a worker can't finish goes back to the tracker as `ready-for-human` or `needs-info`.
+- **Slot:** one ticket in flight. The config sets how many. Two tickets run at once only when their **touch maps** (the files the scout expects each to change) don't overlap outside the shared files; an **exclusive hold** keeps a path to one ticket until it merges.
+- **Domain docs:** workers and reviewers follow the glossary and ADRs that `docs/agents/domain.md` points to. A PR that contradicts an ADR without saying why is a blocking finding.
 - **Gate:** a ticket, label or path that waits for your go-ahead to start or to merge.
-- **Tier:** review depth from the ticket's size. S is a Haiku checklist review; M is a Sonnet correctness review; L is a Sonnet review plus the orchestrator's own read of the risky files. With `Post reviews: yes`, each round also lands on the PR as a comment review: the verdict in the body, findings inline. It's always a comment, because GitHub won't let your account approve its own PR.
+- **Tier:** review depth from the PR's diff and the config's thresholds (a `size:` label on the ticket overrides). S is a Haiku checklist review; M is a Sonnet correctness review; L is a Sonnet review plus the orchestrator's own read of the risky files. With `Post reviews: yes`, each round also lands on the PR as a comment review: the verdict in the body, findings inline. It's always a comment, because GitHub won't let your account approve its own PR.
 - **Brief:** the pointer-only prompt a worker gets (see `skills/run/brief.md`). The ticket stays the spec.
 
 ## Cost
@@ -43,7 +45,7 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook.
 - Searches and log reads run in Haiku contexts, so the orchestrator's and workers' contexts stay small.
 - Review fixes go back to the worker that wrote the PR, so its context is reused instead of a new agent starting.
 - Briefs share a fixed preamble, so workers share a prompt-cache prefix.
-- Parallel agents multiply token use. Fewer lanes cost less; the lane count is your throttle.
+- Parallel agents multiply token use. Fewer slots cost less; the slot count is your throttle.
 
 ## The guard hook
 
