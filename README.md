@@ -59,6 +59,17 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook. Ru
 
 It reads the command text, so it's a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top. Tests: `python3 -m unittest discover tests`.
 
+## Running out of usage
+
+Every agent draws on your plan, so a usage limit tends to stop several workers at once.
+
+- The first usage-limit error in a pass stops all new dispatches. The affected tickets show as **paused**, with the reset time when the error gives one.
+- The next pass after the reset continues each paused worker where it stopped, with its context. A worker it can't reach (another session) is replaced by a new one on the same branch; first the orchestrator commits and pushes any work left in the old worktree as `chore(wip): …`.
+- Workers push after every commit whose checks pass, so little is lost.
+- `.claude/orchestrate-state.json` (gitignored) remembers each ticket's worker and worktree between passes. The tracker stays the source of truth.
+
+For unattended `/loop /orchestrate:run`, turn on **Continue automatically at usage limit** in `/config` (`autoContinueAtUsageLimit`). Without it, a loop whose own turn hits the limit ends after one retry about 20 minutes later; restart it with `/loop /orchestrate:run` and the next pass picks up where things stopped. A fallback model doesn't help: rate-limit errors never trigger one, and the orchestrator never switches models on its own.
+
 ## Limits
 
 - Workers branch from the default branch (Claude Code's worktree default), so a ticket starts only after its dependencies have merged.
