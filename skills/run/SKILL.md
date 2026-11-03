@@ -44,7 +44,7 @@ The backlog is done when every ticket in the sequence is closed. Say so, and sto
    - **S** → model `haiku`.
    - **M** → model `sonnet`.
    - **L**, or a PR that touches a risk path from the config → model `sonnet`, then read its risk notes and those files yourself (the risky parts, not the whole diff).
-   The size comes from the backlog; a ticket with no size is M.
+   The size comes from the backlog; a ticket with no size is M. Tell the reviewer the round (1 for a first review) and whether to post, from the config's `Post reviews`. A `posted: failed` verdict still counts; note the failure in your report.
 4. **Changes requested** → send the findings to the same worker; back to 1 on its report. After three rounds, mark the lane waiting and bring it to the user.
 5. **Approved** → if a merge gate applies, or the config says the orchestrator doesn't merge, mark the lane waiting and ask the user. Otherwise merge with the config's method, after one last check that CI is green and every dependency has merged.
 6. **After the merge:** close the ticket if the host didn't; make the status update the config assigns to the orchestrator; remove the worker's worktree (`git worktree remove`); the lane is free. Done when the next pass would see the lane as free.

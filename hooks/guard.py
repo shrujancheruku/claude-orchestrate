@@ -3,8 +3,10 @@
 Claude Code runs this before every Bash call while the plugin is enabled. It
 acts only when the call comes from one of this plugin's agents (the hook input
 names it in `agent_type`) and refuses the commands that agent's role must
-leave to someone else. It is a guardrail against mistakes, not a sandbox: it
-reads the command text, so a determined command can get past it.
+leave to someone else. The one write it lets a read-only role make is a
+reviewer's comment review on a PR, and only when the repo's config turns
+posting on. It is a guardrail against mistakes, not a sandbox: it reads the
+command text, so a determined command can get past it.
 """
 
 # macOS ships Python 3.9, which needs this for `str | None` annotations.
@@ -13,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from pathlib import Path
 
 PLUGIN = "orchestrate"
 
@@ -45,6 +48,18 @@ REDIRECT = re.compile(r"(?<![0-9&\-=>])>>?(?!>|\s*(?:&|/dev/null))")
 FORCE_PUSH = re.compile(GIT_PREFIX + r"push\b.*(?:\s-f\b|--force|\s\+\S)")
 PUSH_DEFAULT = re.compile(GIT_PREFIX + r"push\b.*\s(?:\S+:)?(?:main|master)\s*$")
 GH_MERGE = re.compile(r"\bgh\s+pr\s+merge\b")
+
+# The one write a reviewer may make: a review posted through the API, its JSON on a heredoc.
+# The first line must be exactly this; the payload is checked separately. The delimiter
+# must be quoted, or the shell would expand `$(...)` inside the payload.
+REVIEW_POST = re.compile(
+    r"^\s*gh\s+api\s+(?:-X|--method)\s+POST\s+repos/[^/\s]+/[^/\s]+/pulls/\d+/reviews\s+"
+    r"--input\s+-\s*<<-?\s*(['\"])(\w+)\1\s*$"
+)
+# The config line that turns posting on, e.g. `- **Post reviews:** yes`. Leaving `<` out of
+# the separator keeps the template's `<yes | no>` placeholder from reading as yes.
+POST_FLAG = re.compile(r"^[-*\s]*Post reviews[:*\s]*(yes|no)\b", re.IGNORECASE | re.MULTILINE)
+CONFIG = Path(".claude") / "orchestration.md"
 
 
 def strip_quotes(cmd: str) -> str:
@@ -94,6 +109,54 @@ def role_of(agent_type: str) -> str | None:
     return None
 
 
+def review_post(command: str) -> str | None:
+    """Check a reviewer's review post. None if the command isn't one; otherwise "" if
+    it's well formed, or what's wrong with it."""
+    lines = command.split("\n")
+    head = REVIEW_POST.match(lines[0])
+    if not head:
+        return None
+    delimiter = head.group(2)
+    try:
+        end = next(i for i, line in enumerate(lines) if i > 0 and line.strip() == delimiter)
+    except StopIteration:
+        return "its heredoc never closes"
+    # Anything after the heredoc would run unchecked.
+    if any(line.strip() for line in lines[end + 1 :]):
+        return "it runs more after the review"
+    try:
+        payload = json.loads("\n".join(lines[1:end]))
+    except json.JSONDecodeError:
+        return "its payload isn't JSON"
+    if not isinstance(payload, dict) or payload.get("event") != "COMMENT":
+        return 'its event isn\'t "COMMENT" (approving or requesting changes stays with the orchestrator)'
+    return ""
+
+
+def posting_enabled(cwd: str) -> bool:
+    """True when the nearest config up from cwd says `Post reviews: yes`."""
+    start = Path(cwd or ".").resolve()
+    for directory in (start, *start.parents):
+        config = directory / CONFIG
+        if config.is_file():
+            flag = POST_FLAG.search(config.read_text(encoding="utf-8", errors="replace"))
+            return bool(flag) and flag.group(1).lower() == "yes"
+    return False
+
+
+def deny(reason: str) -> None:
+    json.dump(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": f"orchestrate guard: {reason}",
+            }
+        },
+        sys.stdout,
+    )
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -103,20 +166,20 @@ def main() -> None:
     command = (data.get("tool_input") or {}).get("command") or ""
     if role is None or not command:
         return
+    if role == "reviewer":
+        problem = review_post(command)
+        if problem == "":
+            if posting_enabled(data.get("cwd") or ""):
+                return
+            deny("the config doesn't say `Post reviews: yes`, so return your verdict without posting it.")
+            return
+        if problem:
+            deny(f"this review post is refused because {problem}. Post exactly as your instructions show.")
+            return
     text = strip_quotes(command)
     for pattern, what in RULES[role]:
         if pattern.search(text):
-            reason = f"orchestrate guard: the {role} role can't run a command that {what}. {NEXT_STEP[role]}"
-            json.dump(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": reason,
-                    }
-                },
-                sys.stdout,
-            )
+            deny(f"the {role} role can't run a command that {what}. {NEXT_STEP[role]}")
             return
 
 

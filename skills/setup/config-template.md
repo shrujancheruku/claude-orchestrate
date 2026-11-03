@@ -59,3 +59,4 @@ At most one open PR per lane.
 - **Instruction files:** <paths the reviewer checks against>
 - **Risk paths** (any PR touching them is reviewed as L): <globs>
 - **Repo-specific checks:** <e.g. "codegen is up to date", "docs updated">
+- **Post reviews:** <yes | no>. When yes, the reviewer posts each round on the PR as a comment review.
