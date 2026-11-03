@@ -390,8 +390,11 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     start = min(starts) if starts else (main.times[0] if main.times else now)
     tickets = build_tickets(agents, main, end)
     assign_slots(tickets)
-    slots = slots or next((p["slots"] for p in reversed(passes) if p.get("slots")), None) or config_slots(repo) \
-        or max([tk["slot"] + 1 for tk in tickets] or [1])
+    peak = max([tk["slot"] + 1 for tk in tickets] or [1])
+    slots = slots or next((p["slots"] for p in reversed(passes) if p.get("slots")), None) or config_slots(repo) or peak
+    # More tickets ran at once than the count allows (an older config, or lanes): the session's own peak is the truth.
+    slots_raised = peak > slots
+    slots = max(slots, peak)
     span = max((end - start).total_seconds(), 1.0)
     occupied = sum(seconds(clip([[tk["start"], tk["end"]]], start, end)) for tk in tickets)
     building = sum(seconds(tk["building"]) for tk in tickets)
@@ -427,6 +430,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         "start": iso(start),
         "end": iso(end),
         "slots": slots,
+        "slots_raised": slots_raised,
         "threshold": threshold,
         "sources": {"pass_log": bool(passes), "usage_tap": bool(usage)},
         "orchestrator": {"model": orch["model"], "tokens": main.tokens, "compactions": main.compactions()},
@@ -506,6 +510,8 @@ def summary(p: dict, saved: Path) -> str:
     ]
     if p["recommendation"]:
         lines.append(f"advice  {p['recommendation']}")
+    if p.get("slots_raised"):
+        lines.append(f"note    up to {p['slots']} tickets ran at once, more than the slot count; occupancy is against {p['slots']}")
     if not p["sources"]["pass_log"]:
         lines.append("note    no pass log for this session: idle reasons and window pressure are unknown")
     lines.append(f"saved   {saved}  (+ .html)")

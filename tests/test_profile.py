@@ -161,6 +161,11 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(p["metrics"]["limit_hits"], 1)
         self.assertEqual(p["recommendation"], "Try slots 2 → 1: usage limits hit.")
 
+    def test_slots_rise_to_the_observed_peak(self):
+        p = self.fx.run(slots=1)
+        self.assertEqual((p["slots"], p["slots_raised"]), (2, True))
+        self.assertLessEqual(p["metrics"]["occupancy"], 1)
+
     def test_pass_log_slots_win_over_config(self):
         self.fx.passes([{"ts": at(5), "slots": 3, "free": 1}])
         self.assertEqual(self.fx.run()["slots"], 3)
