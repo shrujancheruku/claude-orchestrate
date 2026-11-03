@@ -45,8 +45,8 @@ Arguments narrow a pass: `status` reconciles and reports without dispatching or 
 1. **Reconcile.** Read the state file. One scout call, within the pass's scope: each claimed open ticket, its PR, and check states; for each ticket with no PR, its branch's last pushed commit and whether the worktree the state file names holds uncommitted changes or unpushed commits; the first takeable tickets in order, a few more than the free slots; `ready-for-human` tickets; merged PRs whose tickets are still open; parents whose sub-issues are all closed. Done when every claimed ticket has a state.
 2. **Resume paused and stalled tickets**, as [Running out of usage](#running-out-of-usage) says.
 3. **Finish work in review**, ticket by ticket, with the loop below.
-4. **Fill free slots.** Skip this step if a usage limit was hit this pass. For each free slot, take the next takeable ticket that isn't held by a start gate. Check **overlap** before dispatch: the scout's touch map for the ticket, set against the held paths. An overlap outside the config's shared files holds the ticket until the other merges; take the next ticket instead. Assign the ticket to the user first, so another session skips it. Write its brief from [brief.md](brief.md), with the touch map and the held paths, and dispatch `orchestrate:worker` in the background, with the config's worker model. Record it in the state file. Done when every slot is full or no ticket can be taken.
-5. **Report and yield.** A table: ticket, state, next step, who it waits on. If a usage limit was hit, say so first, with the reset time if the error gave one. Below it, the `ready-for-human` tickets and any parent whose sub-issues have all closed; ask the user whether to close each such parent (never close one yourself). Then end your turn: worker completions wake you. CI is external state, so under `/loop` set the wake-up from how long the repo's CI takes, or as [Running out of usage](#running-out-of-usage) says while a limit holds.
+4. **Fill free slots.** Skip this step if a usage limit was hit this pass. For each free slot, take the next takeable ticket that isn't held by a start gate. Check **overlap** before dispatch: the scout's touch map for the ticket, set against the held paths. An overlap outside the config's shared files holds the ticket until the other merges; take the next ticket instead. Assign the ticket to the user first, so another session skips it. Write its brief from [brief.md](brief.md), with the touch map and the held paths, and dispatch `orchestrate:worker` in the background, with the config's worker model. Record it in the state file. Done when every slot is full or no ticket can be taken. If every slot is full, no usage limit was hit, and the pass isn't narrowed, ask the scout for the next takeable ticket's touch map, for the [slot suggestion](#suggesting-a-slot-count).
+5. **Report and yield.** A table: ticket, state, next step, who it waits on. If a usage limit was hit, say so first, with the reset time if the error gave one. Below it, any slot suggestion, then the `ready-for-human` tickets and any parent whose sub-issues have all closed; ask the user whether to close each such parent (never close one yourself). Then end your turn: worker completions wake you. CI is external state, so under `/loop` set the wake-up from how long the repo's CI takes, or as [Running out of usage](#running-out-of-usage) says while a limit holds.
 
 The backlog is done when nothing in scope is takeable or claimed. Say so, list what's left as `ready-for-human` or `needs-info`, and stop.
 
@@ -84,6 +84,15 @@ Agents share the user's plan, so a usage limit usually reaches several workers a
 - **If your own turn hits the limit**, nothing in this skill can run. The README tells the user to turn on Claude Code's `autoContinueAtUsageLimit` for unattended loops, and to restart `/loop /orchestrate:run` if the loop has ended; the next pass recovers paused and stalled tickets from the tracker and the state file.
 
 There is no way to see how much usage is left, so react to failures rather than predict them. The slot count is the throttle.
+
+## Suggesting a slot count
+
+On a pass over the whole backlog (not `status`, a ticket or a parent), suggest changing the config's slot count by one, from what this pass saw ([ADR-0001](../../docs/adr/0001-slot-count.md)):
+
+- **Lower** when a usage limit was hit, or a slot stayed free because every takeable ticket overlapped a held path.
+- **Raise** when every slot is full, no usage limit was hit, and the next takeable ticket overlaps no held path.
+
+Never suggest below 1 or above 5. Give the reason in one line, e.g. "Suggest slots 2 → 1: a usage limit paused 2 tickets this pass." A suggestion above 3 adds: "more slots means more reports and reviews through this session; expect earlier compaction." Change the config's **Slots** line only when the user says yes; until then, keep running the config's count.
 
 ## Escalate to the user
 
