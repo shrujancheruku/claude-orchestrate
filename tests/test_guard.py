@@ -3,16 +3,19 @@
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 GUARD = Path(__file__).resolve().parent.parent / "hooks" / "guard.py"
 
 
-def decide(agent_type, command):
+def decide(agent_type, command, cwd=None):
     payload = {"tool_name": "Bash", "tool_input": {"command": command}}
     if agent_type is not None:
         payload["agent_type"] = agent_type
+    if cwd is not None:
+        payload["cwd"] = str(cwd)
     out = subprocess.run(
         [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True, check=True
     ).stdout
@@ -66,11 +69,57 @@ CASES = [
 ]
 
 
+POST = "gh api --method POST repos/{owner}/{repo}/pulls/12/reviews --input - <<'EOF'\n"
+COMMENT = '{"event": "COMMENT", "body": "Round 1 — verdict: changes", "comments": []}'
+
+REVIEW_CASES = [
+    # (command, expected), run with posting on
+    (POST + COMMENT + "\nEOF", "allow"),
+    (POST.replace("--method", "-X") + COMMENT + "\nEOF\n", "allow"),
+    (POST.replace("'EOF'", '"EOF"') + COMMENT + "\nEOF", "allow"),
+    (POST + '{"event": "COMMENT", "body": "rm -rf; git push > x"}\nEOF', "allow"),
+    (POST + '{"event": "APPROVE", "body": "lgtm"}\nEOF', "deny"),
+    (POST + '{"event": "REQUEST_CHANGES", "body": "x"}\nEOF', "deny"),
+    (POST + '{"body": "no event"}\nEOF', "deny"),
+    (POST + "not json\nEOF", "deny"),
+    (POST + COMMENT, "deny"),  # heredoc never closes
+    (POST + COMMENT + "\nEOF\ngh pr merge 12", "deny"),
+    (POST.replace("'EOF'", "EOF") + COMMENT + "\nEOF", "deny"),  # unquoted: $(...) would expand
+    (POST.replace("pulls/12/reviews", "pulls/12/merge") + COMMENT + "\nEOF", "deny"),
+    ("echo ok && " + POST + COMMENT + "\nEOF", "deny"),
+    ("gh pr review 12 --comment --body x", "deny"),
+    ("gh pr comment 12 --body x", "deny"),
+]
+
+
 class GuardTest(unittest.TestCase):
     def test_cases(self):
         for agent_type, command, expected in CASES:
             with self.subTest(agent=agent_type, command=command):
                 self.assertEqual(decide(agent_type, command), expected)
+
+    def test_review_posts(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = Path(root) / ".claude" / "orchestration.md"
+            config.parent.mkdir()
+            config.write_text("## Review\n\n- **Post reviews:** yes\n")
+            subdir = Path(root) / "src"
+            subdir.mkdir()
+            for command, expected in REVIEW_CASES:
+                with self.subTest(command=command):
+                    self.assertEqual(decide("orchestrate:reviewer", command, subdir), expected)
+            # The same post goes through only for the reviewer.
+            self.assertEqual(decide("orchestrate:scout", POST + COMMENT + "\nEOF", root), "deny")
+
+    def test_posting_off(self):
+        post = POST + COMMENT + "\nEOF"
+        for text in ["- **Post reviews:** no\n", "- **Post reviews:** <yes | no>\n", "## Review\n", None]:
+            with self.subTest(config=text), tempfile.TemporaryDirectory() as root:
+                if text is not None:
+                    config = Path(root) / ".claude" / "orchestration.md"
+                    config.parent.mkdir()
+                    config.write_text(text)
+                self.assertEqual(decide("orchestrate:reviewer", post, root), "deny")
 
 
 if __name__ == "__main__":

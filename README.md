@@ -7,7 +7,7 @@ orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gate
  ├─ worker        Sonnet, own worktree      one ticket → one PR
  │   ├─ scout     Haiku, read-only          searches, callers, CI logs
  │   └─ mechanic  Haiku                     mechanical edits in the worker's worktree
- ├─ reviewer      Haiku (S) / Sonnet (M, L) one PR against its ticket, read-only
+ ├─ reviewer      Haiku (S) / Sonnet (M, L) one PR against its ticket, read-only, posts its review
  └─ scout         Haiku, read-only          tracker, CI and pre-merge checks
 ```
 
@@ -34,7 +34,7 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook.
 
 - **Lane:** a set of paths with at most one open PR at a time, so parallel PRs don't conflict. A lane can be **exclusive** (for example, a schema rewrite that nothing else may touch until it merges).
 - **Gate:** a ticket, label or path that waits for your go-ahead to start or to merge.
-- **Tier:** review depth from the ticket's size. S is a Haiku checklist review; M is a Sonnet correctness review; L is a Sonnet review plus the orchestrator's own read of the risky files.
+- **Tier:** review depth from the ticket's size. S is a Haiku checklist review; M is a Sonnet correctness review; L is a Sonnet review plus the orchestrator's own read of the risky files. With `Post reviews: yes`, each round also lands on the PR as a comment review: the verdict in the body, findings inline. It's always a comment, because GitHub won't let your account approve its own PR.
 - **Brief:** the pointer-only prompt a worker gets (see `skills/run/brief.md`). The ticket stays the spec.
 
 ## Cost
@@ -51,7 +51,7 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook.
 
 | Role | Refused |
 |---|---|
-| scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs |
+| scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. The reviewer may post one comment review on a PR, in the exact shape `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
 | mechanic | git writes (staging and commits are the worker's), `gh` writes |
 | worker | `gh pr merge`, force-pushes, pushes to `main`/`master` |
 
