@@ -4,21 +4,25 @@
 
 ## Backlog
 
+- **Tracker docs:** `docs/agents/issue-tracker.md` (operations, blocking, claiming) and `docs/agents/triage-labels.md` (label strings), from `/setup-matt-pocock-skills`. Takeable tickets are open, `ready-for-agent`, unassigned and unblocked, with no open sub-issues and no `wayfinder:` label, taken in ascending issue number. Claim = assign to the user.
+- **Domain docs:** `docs/agents/domain.md` (the glossary and ADRs workers and reviewers follow).
+
+<!-- Only when docs/agents/ doesn't exist, replace the two lines above with:
+- **Backlog in config:** yes
 - **Sequence:** <where the order lives: a file and section, a milestone, or a label and sort>
-- **Tracker:** <host; how blocking is expressed; claim = assign to the user>
-- **Sizes:** <where each ticket's S/M/L lives>. A ticket with no size is M.
+- **Tracker:** <host; how blocking is expressed; claim = assign to the user; the label that marks a ticket ready>
+-->
 
-## Lanes
+## Slots
 
-| Lane | Paths | Notes |
-|---|---|---|
-| <name> | <globs> | <e.g. "exclusive while X is open: nothing else touches Y"> |
+- **Slots:** <n, default 2>. How many tickets are in flight at once. Parallel workers multiply token use, so this is the throttle.
+- **Exclusive holds:** <e.g. "while #42 is open, nothing else touches `db/`" | none>
 
-At most one open PR per lane.
+Tickets run in parallel only when their touch maps don't overlap outside the shared files.
 
 ## Verify
 
-<Commands every worker runs before opening a PR, per lane if they differ.>
+<Commands every worker runs before opening a PR, per directory if they differ.>
 
 ## Shared files
 
@@ -26,7 +30,7 @@ At most one open PR per lane.
 
 ## PRs and merging
 
-- **Branch:** `<lane>/<number>-<slug>`
+- **Branch:** `<number>-<slug>`
 - **Commits:** <convention>
 - **PR title:** <convention>. **Body:** <closing reference, e.g. "Closes #<n>">
 - **Method:** <squash | merge | rebase>
@@ -58,5 +62,6 @@ At most one open PR per lane.
 
 - **Instruction files:** <paths the reviewer checks against>
 - **Risk paths** (any PR touching them is reviewed as L): <globs>
+- **Tiers:** S is at most <50> changed lines in at most <3> files, none on a risk path; L touches a risk path or changes more than <400> lines; M is everything else. A `size:S|M|L` label on the ticket overrides.
 - **Repo-specific checks:** <e.g. "codegen is up to date", "docs updated">
 - **Post reviews:** <yes | no>. When yes, the reviewer posts each round on the PR as a comment review.
