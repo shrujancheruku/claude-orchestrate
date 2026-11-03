@@ -22,7 +22,7 @@ At most one open PR per lane.
 
 ## Shared files
 
-<Files many PRs touch, and the only change each PR may make in them. Name the status updates the orchestrator owns.>
+<Files many PRs touch, and the only change each PR may make in them. Name the status updates the orchestrator owns. Generated code counts: say how a worker regenerates it after a rebase, so it never merges generated files by hand.>
 
 ## PRs and merging
 
