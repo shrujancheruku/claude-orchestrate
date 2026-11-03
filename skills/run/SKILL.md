@@ -28,9 +28,13 @@ Takeable tickets go in **ascending issue number**: `to-tickets` publishes blocke
 
 Every pass rebuilds its picture from the tracker and the git host, so a pass can be rerun, interrupted, or started in a fresh session. A ticket is **claimed** when it's assigned to the user. The config's **slot** count caps how many claimed tickets are open at once; each free slot can take one ticket. A claimed ticket is in one state:
 
-- **building**: no PR yet. A worker from this session is on it, or it **stalled** (no worker this session knows of: dispatch a new one, and its brief says to continue the existing branch).
+- **building**: no PR yet, and a worker from this session is on it.
+- **paused**: its worker ended on an API or usage-limit error. See [Running out of usage](#running-out-of-usage).
+- **stalled**: no PR yet, and no worker this session knows of. Report its branch's last pushed commit and whether its old worktree still holds uncommitted changes or unpushed commits.
 - **in review**: its PR is open.
 - **waiting**: blocked on the user (a gate, a question, a third review round).
+
+The **state file**, `.claude/orchestrate-state.json` (gitignored), holds what the tracker can't: for each claimed ticket, its worker's agent ID, the session ID, the worktree path and the time of its last report. Write the entry when you dispatch a worker and update it on each report; remove it when the slot frees. It is a cache: when it disagrees with the tracker, the tracker wins. An entry from another session can't be reached with SendMessage, so treat its ticket as stalled.
 
 The **held paths** at any moment are the files in open PRs' diffs, the touch maps of building tickets, and the config's exclusive holds. A ticket may not change a path another ticket holds.
 
@@ -38,21 +42,23 @@ Arguments narrow a pass: `status` reconciles and reports without dispatching or 
 
 ## A pass
 
-1. **Reconcile.** One scout call, within the pass's scope: each claimed open ticket, its PR, and check states; the first takeable tickets in order, a few more than the free slots; `ready-for-human` tickets; merged PRs whose tickets are still open; parents whose sub-issues are all closed. Done when every claimed ticket has a state.
-2. **Finish work in review**, ticket by ticket, with the loop below.
-3. **Fill free slots.** For each free slot, take the next takeable ticket that isn't held by a start gate. Check **overlap** before dispatch: the scout's touch map for the ticket, set against the held paths. An overlap outside the config's shared files holds the ticket until the other merges; take the next ticket instead. Assign the ticket to the user first, so another session skips it. Write its brief from [brief.md](brief.md), with the touch map and the held paths, and dispatch `orchestrate:worker` in the background, with the config's worker model. Done when every slot is full or no ticket can be taken.
-4. **Report and yield.** A table: ticket, state, next step, who it waits on. Below it, the `ready-for-human` tickets and any parent whose sub-issues have all closed; ask the user whether to close each such parent (never close one yourself). Then end your turn: worker completions wake you. CI is external state, so under `/loop` set the wake-up from how long the repo's CI takes.
+1. **Reconcile.** Read the state file. One scout call, within the pass's scope: each claimed open ticket, its PR, and check states; for each ticket with no PR, its branch's last pushed commit and whether the worktree the state file names holds uncommitted changes or unpushed commits; the first takeable tickets in order, a few more than the free slots; `ready-for-human` tickets; merged PRs whose tickets are still open; parents whose sub-issues are all closed. Done when every claimed ticket has a state.
+2. **Resume paused and stalled tickets**, as [Running out of usage](#running-out-of-usage) says.
+3. **Finish work in review**, ticket by ticket, with the loop below.
+4. **Fill free slots.** Skip this step if a usage limit was hit this pass. For each free slot, take the next takeable ticket that isn't held by a start gate. Check **overlap** before dispatch: the scout's touch map for the ticket, set against the held paths. An overlap outside the config's shared files holds the ticket until the other merges; take the next ticket instead. Assign the ticket to the user first, so another session skips it. Write its brief from [brief.md](brief.md), with the touch map and the held paths, and dispatch `orchestrate:worker` in the background, with the config's worker model. Record it in the state file. Done when every slot is full or no ticket can be taken.
+5. **Report and yield.** A table: ticket, state, next step, who it waits on. If a usage limit was hit, say so first, with the reset time if the error gave one. Below it, the `ready-for-human` tickets and any parent whose sub-issues have all closed; ask the user whether to close each such parent (never close one yourself). Then end your turn: worker completions wake you. CI is external state, so under `/loop` set the wake-up from how long the repo's CI takes, or as [Running out of usage](#running-out-of-usage) says while a limit holds.
 
 The backlog is done when nothing in scope is takeable or claimed. Say so, list what's left as `ready-for-human` or `needs-info`, and stop.
 
 ## Worker reports
 
+- A worker that ends on an API or usage-limit error sends no report: its completion names the error. Mark the ticket **paused**, and if it's a usage limit, follow [Running out of usage](#running-out-of-usage).
 - `pr-opened` → the review loop. If the report lists ADR conflicts, read them before the review and bring any you can't settle from the ADR itself to the user.
 - `stopped` → when the config, the ticket or the code settles the question, answer it and continue the same worker with SendMessage, so it keeps its context. When it's the user's decision, hand the ticket back to the tracker:
   - A human-only step → label it `ready-for-human`. An ambiguity the ticket's author has to settle → label it `needs-info`.
   - Remove `ready-for-agent`, so it holds exactly one state role, and unassign it, so the frontier stays truthful.
   - Comment what's needed and the branch the work is on, starting with the line `> *This was generated by AI during triage.*`
-  - Put it to the user. The slot is free.
+  - Put it to the user. The slot is free; remove its state-file entry.
 
 ## The review loop
 
@@ -62,10 +68,22 @@ The backlog is done when nothing in scope is takeable or claimed. Say so, list w
    - **S** → model `haiku`.
    - **M** → model `sonnet`.
    - **L** → model `sonnet`, then read its risk notes and those files yourself (the risky parts, not the whole diff).
-   Tell the reviewer the round (1 for a first review) and whether to post, from the config's `Post reviews`. A `posted: failed` verdict still counts; note the failure in your report.
+   Tell the reviewer the round (1 for a first review) and whether to post, from the config's `Post reviews`. A `posted: failed` verdict still counts; note the failure in your report. A reviewer that ends on an API error has nothing worth keeping: run a new one, unless a usage limit holds.
 4. **Changes requested** → send the findings to the same worker; back to 1 on its report. After three rounds, mark the ticket waiting and bring it to the user.
 5. **Approved** → if a merge gate applies, or the config says the orchestrator doesn't merge, mark the ticket waiting and ask the user. Otherwise merge with the config's method, after one last check that CI is green and every dependency has merged.
-6. **After the merge:** close the ticket if the host didn't; make the status update the config assigns to the orchestrator; remove the worker's worktree (`git worktree remove`); the slot is free. Done when the next pass would see the slot as free.
+6. **After the merge:** close the ticket if the host didn't; make the status update the config assigns to the orchestrator; remove the worker's worktree (`git worktree remove`) and its state-file entry; the slot is free. Done when the next pass would see the slot as free.
+
+## Running out of usage
+
+Agents share the user's plan, so a usage limit usually reaches several workers at once. Claude Code retries transient rate limits and overloads itself; what reaches you is a limit that holds until a reset.
+
+- **On the first usage-limit error in a pass**, dispatch nothing more: no new workers, reviewers or resumes. Mark every affected ticket **paused**, and note the reset time if the error text gives one. Never switch an agent to another model to get around a limit; that's the user's call.
+- **Resume a paused ticket** once the limit has lifted: past the reset time, or, when none is known, by trying one resume, which counts as the pass's first usage-limit error if it fails. Continue the same worker with SendMessage ("you were stopped by a usage limit; check `git status` and continue where you stopped"), so it keeps its context. If SendMessage can't reach it (another session, or the agent is gone), treat the ticket as stalled.
+- **Resume a stalled ticket** with a new worker on the remote branch. First rescue its old worktree, if the state file names one that still holds work: commit everything in it as `chore(wip): <ticket title>`, push the branch, and `git worktree remove` it (unlock it first if a dead agent left it locked). If any of that work touches a path another ticket holds, don't rescue it; bring it to the user. Then dispatch the new worker; its brief says to continue the existing branch.
+- **Under `/loop`, while a limit holds** and you can still run (another model's limit, or an API error rather than your own plan): schedule the next wake-up for the reset time, in hops of at most 60 minutes. Each hop runs a `status` pass and dispatches nothing before the reset.
+- **If your own turn hits the limit**, nothing in this skill can run. The README tells the user to turn on Claude Code's `autoContinueAtUsageLimit` for unattended loops, and to restart `/loop /orchestrate:run` if the loop has ended; the next pass recovers paused and stalled tickets from the tracker and the state file.
+
+There is no way to see how much usage is left, so react to failures rather than predict them. The slot count is the throttle.
 
 ## Escalate to the user
 

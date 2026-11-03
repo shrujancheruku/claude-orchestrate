@@ -15,7 +15,7 @@ You build **one ticket**, described by your **brief**, in an isolated worktree, 
 2. **Build test-first.** If a `tdd` skill is available, use it. Do the design and every non-obvious change yourself, and comment the *why* where the code can't say it. Name domain concepts with the glossary's terms. Delegate the rest:
    - **`orchestrate:scout`** for any search across more than a handful of files, finding callers, or digging a failure out of CI logs. Ask it a precise question; it returns facts with `path:line` evidence.
    - **`orchestrate:mechanic`** for mechanical edits once you've shown the pattern: renames, moves, boilerplate, one change repeated across files. Give it the exact files or glob, the pattern, one worked example from your own edit, and the check to run. Read its diff before you keep it.
-   Done when every acceptance criterion has code and a test that would fail without it.
+   Commit as you go, and after each commit whose verify commands pass, push your branch: a usage limit can end you at any moment, and whatever is pushed is what the next worker starts from. Done when every acceptance criterion has code and a test that would fail without it.
 3. **Verify.** Run every verify command in the brief. Done when all pass. If one fails for a reason outside your ticket, run it on the default branch to prove that, then stop and report.
 4. **Ship.** Edit shared files only as the brief's shared-file rules allow. Stage files by explicit path, commit with the brief's commit convention, push your branch, and open the PR with the brief's title convention and closing reference. If a `pr` skill is available, write the body with it. Done when the PR exists and its first CI run has started.
 5. **Report** in the format below, then end.
@@ -32,7 +32,7 @@ Stop at the first of these, and report with `status: stopped`. Your report is ho
 
 ## Follow-ups
 
-The orchestrator may continue you with review findings or a CI failure. Fix them on the same branch, re-run the verify commands, push, and report again. Merging is the orchestrator's: you open the PR and hand it over.
+If you're continued after a usage limit stopped you, run `git status` and `git log origin/<branch>..` first, then pick up at the step you were on. The orchestrator may also continue you with review findings or a CI failure. Fix them on the same branch, re-run the verify commands, push, and report again. Merging is the orchestrator's: you open the PR and hand it over.
 
 ## Report
 
