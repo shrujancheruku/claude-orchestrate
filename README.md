@@ -7,7 +7,7 @@ orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gate
  ├─ worker        Sonnet, own worktree      one ticket → one PR
  │   ├─ scout     Haiku, read-only          searches, callers, CI logs
  │   └─ mechanic  Haiku                     mechanical edits in the worker's worktree
- ├─ reviewer      Haiku (S) / Sonnet (M, L) one PR against its ticket, read-only, posts its review
+ ├─ reviewer      Haiku (S) / Sonnet (M, L high effort) one PR against its ticket, read-only, posts its review
  └─ scout         Haiku, read-only          tracker, CI and pre-merge checks
 ```
 
@@ -37,7 +37,7 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook. Ru
 - **Slot:** one ticket in flight. The config sets how many. Two tickets run at once only when their **touch maps** (the files the scout expects each to change) don't overlap outside the shared files; an **exclusive hold** keeps a path to one ticket until it merges.
 - **Domain docs:** workers and reviewers follow the glossary and ADRs that `docs/agents/domain.md` points to. A PR that contradicts an ADR without saying why is a blocking finding.
 - **Gate:** a ticket, label or path that waits for your go-ahead to start or to merge.
-- **Tier:** review depth from the PR's diff and the config's thresholds (a `size:` label on the ticket overrides). S is a Haiku checklist review; M is a Sonnet correctness review; L is a Sonnet review plus the orchestrator's own read of the risky files. With `Post reviews: yes`, the reviewer posts each round on the PR itself as a comment review (verdict in the body, findings inline) and hands back only the verdict, counts and the review URL; the worker reads the findings from the PR. With `no`, or when a post fails, the reviewer returns the full findings. It's always a comment, because GitHub won't let your account approve its own PR.
+- **Tier:** review depth from the PR's diff and the config's thresholds (a `size:` label on the ticket overrides). S is a Haiku checklist review; M is a Sonnet correctness review; L is a Sonnet review at high effort whose risk notes go in the posted review for humans; the orchestrator reads no risky files itself. A round-1 `approve` with minors gives the worker the minors to take or leave, and CI alone gates the merge. Later rounds continue the same reviewer, and a push after approval goes back to it only when it touches a risk path or exceeds the S thresholds. With `Post reviews: yes`, the reviewer posts each round on the PR itself as a comment review (verdict in the body, findings inline) and hands back only the verdict, counts and the review URL; the worker reads the findings from the PR. With `no`, or when a post fails, the reviewer returns the full findings. It's always a comment, because GitHub won't let your account approve its own PR.
 - **Brief:** the pointer-only prompt a worker gets (see `skills/run/brief.md`). The ticket stays the spec.
 
 ## Cost
