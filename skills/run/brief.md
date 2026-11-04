@@ -10,7 +10,7 @@ Touch map: <the files the scout expects this ticket to change, each as `path:lin
 Held paths: <files other tickets hold: open PRs' diffs, building tickets' touch maps, exclusive holds | none>. Changing one means stop and report.
 Branch: <number>-<slug>. If it exists on the remote, continue from it.
 Merged dependencies: <ticket → PR, one per line | none>
-Verify: <commands from the config>
+Verify: python3 "<the plugin's absolute scripts/verify path, from the skill's base directory>" <commands from the config>
 Shared files: <the config's shared-file rules>
 Commits: <convention>. Stage files by explicit path.
 PR: title <convention>; body includes "<closing reference>".
