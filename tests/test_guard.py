@@ -114,6 +114,7 @@ CASES = [
         ("orchestrate:reviewer", c, "deny")
         for c in (
             "git push origin HEAD",
+            "/usr/bin/git push origin HEAD",
             "git commit -m x",
             "git branch new-branch",
             "git branch new-branch FETCH_HEAD",

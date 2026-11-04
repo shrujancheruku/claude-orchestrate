@@ -25,7 +25,9 @@ GIT_WRITES = (
     "rebase|reset|restore|revert|rm|stash|switch|tag|worktree\\s+(?:add|remove|move|prune)"
 )
 # Allow git's global options (-C dir, -c key=val, --no-pager) before the subcommand.
-GIT_PREFIX = r"\bgit\s+(?:(?:-[Cc]\s+\S+|--\S+)\s+)*"
+# Not preceded by a word char, `.`, `@`, `:` or `-`, so the end of a remote URL
+# (`o/r.git pull/71/head`) isn't read as a `git pull`.
+GIT_PREFIX = r"(?<![\w.@:-])git\s+(?:(?:-[Cc]\s+\S+|--\S+)\s+)*"
 
 GH_WRITE = re.compile(
     r"\bgh\s+(?:pr|issue|release|repo|label|workflow|run|secret|variable|project)\s+"
