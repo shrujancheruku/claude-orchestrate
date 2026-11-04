@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Run the brief's verify commands and keep their output small.
+
+    verify [--cwd DIR] CMD [CMD ...] [--then CMD [CMD ...]] ...
+
+Each CMD is one shell command. Commands in a group are independent, so all of
+them run. `--then` starts the next group, which depends on the one before: if
+anything in a group fails, later groups are skipped. Prints one line per
+command (pass/fail/skip and duration), and the last ~40 lines of a failure's
+output. Exits 1 if any command failed.
+"""
+
+import sys
+
+import checks
+
+
+def parse(argv):
+    cwd = None
+    stages = [[]]
+    it = iter(argv)
+    for arg in it:
+        if arg == "--then":
+            stages.append([])
+        elif arg == "--cwd":
+            cwd = next(it, None)
+            if cwd is None:
+                sys.exit("verify: --cwd needs a directory")
+        else:
+            stages[-1].append(arg)
+    return cwd, [s for s in stages if s]
+
+
+def main(argv=None):
+    cwd, stages = parse(sys.argv[1:] if argv is None else argv)
+    if not stages:
+        sys.exit("usage: verify [--cwd DIR] CMD [CMD ...] [--then CMD ...]")
+    results = checks.run_stages(stages, cwd)
+    print(checks.format_results(results))
+    return 0 if checks.ok(results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
