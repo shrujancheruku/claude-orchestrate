@@ -332,6 +332,17 @@ class ProfileTest(unittest.TestCase):
         self.fx.passes([{"ts": at(1), "slots": 1, "free": 1}])
         self.assertTrue(self.fx.run()["slots_raised"])
 
+    def test_a_log_holding_only_other_sessions_events_falls_back_to_the_transcript(self):
+        self.fx.events([{"ts": at(30), "session": "other", "kind": "merge", "ref": 50, "outcome": "merged"}])
+        p = self.fx.run()
+        self.assertEqual((p["metrics"]["tickets_merged"], p["metrics"]["merges_unverified"]), (1, 1))
+
+    def test_a_pass_after_the_last_record_adds_no_negative_capacity(self):
+        self.fx.passes([{"ts": at(1), "slots": 2, "free": 1}, {"ts": at(90), "slots": 1, "free": 1}])
+        p = self.fx.run()
+        self.assertEqual([n for _, n in p["slots_timeline"]], [2])
+        self.assertAlmostEqual(p["metrics"]["occupancy"], (29 + 30) * 60 / (2 * 40 * 60))
+
     def test_forced_slots_override_the_pass_log(self):
         self.fx.passes([{"ts": at(1), "slots": 3, "free": 1}, {"ts": at(35), "slots": 2, "free": 1}])
         p = self.fx.run(slots=4)
@@ -557,7 +568,6 @@ class OrchestratorFixture(Fixture):
         ]
         with open(self.main, "a") as f:
             f.writelines(json.dumps(r) + "\n" for r in extra)
-
 
 
 class OrchestratorTest(unittest.TestCase):

@@ -506,7 +506,7 @@ def slot_segments(passes: list, tickets: list, start: datetime, end: datetime, f
     Each pass's own `slots` holds from its timestamp until the next pass's. `forced` (--slots) overrides them all.
     With no count anywhere, `fallback` (the config) applies, then the session's peak concurrency."""
     cuts = [(parse_ts(p.get("ts")), int(p["slots"])) for p in passes if p.get("slots") and parse_ts(p.get("ts"))]
-    cuts.sort(key=lambda c: c[0])
+    cuts = sorted((c for c in cuts if c[0] < end), key=lambda c: c[0])  # a pass logged after the last record has no time to cover
     if forced:
         cuts = [(start, forced)]
     elif not cuts and fallback:
@@ -946,7 +946,7 @@ def orchestrator_metrics(main: Transcript, agents: list, passes: list, merged: i
 
 
 def read_events(repo: Path | None, session: str, start: datetime, end: datetime) -> list | None:
-    """This session's events from events.jsonl, or None when the log doesn't exist (no scripts ran, or an older plugin).
+    """This session's events from events.jsonl, or None when the log doesn't exist or holds none of this session's (no scripts ran, or an older plugin).
 
     An event with no session (a script run where the session ID wasn't in its environment) counts when it falls in the session's span."""
     if not repo or not (repo / PROFILES / EVENTS_LOG).exists():
@@ -958,7 +958,8 @@ def read_events(repo: Path | None, session: str, start: datetime, end: datetime)
         ts = parse_ts(e.get("ts"))
         if e.get("session") == session or (not e.get("session") and ts and start <= ts <= end):
             out.append(e)
-    return out
+    # A log with nothing for this session is the same as no log: an older plugin's session, so the transcript fallback applies.
+    return out or None
 
 
 def count_by_outcome(events: list) -> dict:
