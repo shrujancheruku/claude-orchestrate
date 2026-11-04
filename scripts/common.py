@@ -70,7 +70,11 @@ def events_root(repo) -> Path:
     if not common_dir.is_absolute():
         common_dir = repo / common_dir
     common_dir = common_dir.resolve()
-    return common_dir.parent if common_dir.name == ".git" else repo
+    if common_dir.name == ".git":
+        return common_dir.parent
+    # A submodule or a GIT_DIR checkout: the common dir isn't `.git`, so use this checkout's own toplevel.
+    code, out, _ = run("git", "rev-parse", "--show-toplevel", cwd=repo)
+    return Path(out.strip()) if code == 0 and out.strip() else repo
 
 
 def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = None, **extra) -> dict:
