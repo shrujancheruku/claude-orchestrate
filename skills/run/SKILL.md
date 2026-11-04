@@ -146,7 +146,7 @@ With `--profile`, at the end of each pass, before the report:
    ```sh
    python3 -I "${CLAUDE_SKILL_DIR}/../../scripts/profile.py" ${CLAUDE_SESSION_ID} --repo .
    ```
-   It reads this session's transcripts, the pass log, saves `.claude/orchestrate-profiles/<date>-<session>.json` with an `.html` viewer beside it, and prints a summary. Put the summary, unchanged, at the end of the report, with the path of the `.html`.
+   It reads this session's transcripts, the pass log and saves `.claude/orchestrate-profiles/<date>-<session>.json` with an `.html` viewer beside it, and prints a summary. Put the summary, unchanged, at the end of the report, with the path of the `.html`.
 
 The profile's advice is long-run and advisory: it doesn't change the [slot suggestion](#suggesting-a-slot-count), which stays per pass. Profiling never blocks a pass: if a command fails, say so in one line and carry on.
 
