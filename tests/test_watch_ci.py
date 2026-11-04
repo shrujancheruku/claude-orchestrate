@@ -95,6 +95,12 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(r.stdout.splitlines(), ["PR #1 pass CLEAN 1111111", "PR #2 fail CLEAN 2222222"])
         self.assertIn("could not write event", r.stderr)
 
+    def test_missing_gh_exits_could_not_run_instead_of_waiting(self):
+        r = self.env.run("watch-ci", "--interval", "0", "7", check=False, no_gh=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
