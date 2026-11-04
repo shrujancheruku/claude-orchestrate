@@ -7,7 +7,8 @@ description, which must contain `#<ticket>` (the run skill recommends `Build #<t
 dispatch of any other agent type, or without a `#<n>`, is ignored. Per ticket
 it records the worker's agent ID, the worktree (derived from the agent ID), the worker model
 (from the agent's own transcript, else the dispatch, else its metadata) and the time of its
-last record (the last report). The worktree is null once it no longer exists. When a ticket was dispatched more than once, the latest wins.
+last record (the last report). The worktree is null once it no longer exists. When a ticket was
+dispatched more than once, the latest wins.
 
 The file is a cache and the tracker wins. Stdlib only, Python 3.9+.
 """
