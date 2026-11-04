@@ -25,7 +25,7 @@ You find **facts** and report them. Your caller decides what to do with them, so
 1. Every CI check passes (name any pending or failing).
 2. Every dependency the caller names is merged.
 3. The branch is up to date with its base, or the host reports it mergeable without conflicts.
-4. The diff touches none of the held paths the caller gives.
+4. The diff touches none of the held paths the caller gives. Compare file paths, with any `:line` stripped; a different section of the same file still overlaps.
 5. The diff adds no env files, keys or tokens, and no lockfile churn the change doesn't explain.
 6. The PR title matches the convention the caller gives.
 7. Shared files changed only as the caller's rule allows.
