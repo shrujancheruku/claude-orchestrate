@@ -56,6 +56,23 @@ def section_of(text: str, name: str) -> str | None:
     return None if body is None else "\n".join(body).strip("\n")
 
 
+def events_root(repo) -> Path:
+    """The main checkout that owns the events log for `repo`, which may be a subdirectory or a linked worktree.
+
+    A linked worktree shares the main checkout's common dir, so its parent is the one root every
+    worktree agrees on. Outside a checkout (or with the VCS tool missing) `repo` itself is the root.
+    """
+    repo = Path(repo)
+    code, out, _ = run("git", "rev-parse", "--git-common-dir", cwd=repo)
+    if code != 0 or not out.strip():
+        return repo
+    common_dir = Path(out.strip())
+    if not common_dir.is_absolute():
+        common_dir = repo / common_dir
+    common_dir = common_dir.resolve()
+    return common_dir.parent if common_dir.name == ".git" else repo
+
+
 def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = None, **extra) -> dict:
     """Append one event line to events.jsonl beside the pass log. Write-only: nothing here reads it back.
 
@@ -72,7 +89,7 @@ def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = 
         "outcome": outcome,
     }
     event.update(extra)
-    path = Path(repo) / PROFILES / EVENTS_LOG
+    path = events_root(repo) / PROFILES / EVENTS_LOG
     path.parent.mkdir(parents=True, exist_ok=True)
     # One write of one line: small appends stay whole when scripts run in parallel.
     with open(path, "a", encoding="utf-8") as f:
@@ -122,14 +139,16 @@ def claude_dir() -> Path:
 
 
 def read_jsonl(path):
-    """Yield each JSON line of a file; unreadable lines and a missing file are skipped."""
+    """Yield each JSON-object line of a file; unreadable lines, non-objects and a missing file are skipped."""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 try:
-                    yield json.loads(line)
+                    rec = json.loads(line)
                 except ValueError:
                     continue
+                if isinstance(rec, dict):  # callers call .get; a stray `[]` or `3` would crash them
+                    yield rec
     except FileNotFoundError:
         return
 

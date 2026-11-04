@@ -152,6 +152,24 @@ class ProfileTest(unittest.TestCase):
         idle = self.fx.run()["metrics"]["idle_s"]
         self.assertEqual((idle["overlap"], idle["empty"]), (600, 600))
 
+    def test_stray_jsonl_lines_and_naive_timestamps_do_not_crash_the_profile(self):
+        # `record` merges the caller's JSON over ts/session, so a naive ts lands in the pass log verbatim.
+        naive = at(5).replace("Z", "")
+        self.assertNotIn("+", naive)
+        subprocess.run([sys.executable, str(SCRIPTS / "profile.py"), "record", "--repo", str(self.fx.repo),
+                        "--session", SESSION, json.dumps({"ts": naive, "slots": 2, "free": 0})], check=True)
+        log = self.fx.repo / prof.PROFILES / prof.PASS_LOG
+        with open(log, "a") as f:
+            f.write("[]\n3\n\n\"text\"\nnot json\n")
+        with open(self.fx.usage, "a") as f:
+            f.write("[]\n3\n\n" + json.dumps({"ts": naive, "five_hour": 50}) + "\n")
+        p = self.fx.run()
+        self.assertEqual(len(p["usage"]), 3)  # the naive-ts usage row is read as UTC, inside the session
+        self.assertEqual(p["metrics"]["limit_hits"], 0)
+
+    def test_parse_ts_reads_a_naive_timestamp_as_utc(self):
+        self.assertEqual(prof.parse_ts("2026-11-03T16:00:00"), T0)
+
     def test_usage_windows_and_underuse(self):
         self.fx.passes([{"ts": at(5), "slots": 2, "free": 0, "takeable_waiting": 3}])
         p = self.fx.run()
