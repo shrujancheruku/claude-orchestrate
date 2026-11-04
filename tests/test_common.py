@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -81,6 +82,80 @@ class PrRefTest(unittest.TestCase):
 
     def test_non_number_keeps_its_text(self):
         self.assertEqual(common.pr_ref("#abc"), ("abc", "abc"))
+
+
+class TicketOfTest(unittest.TestCase):
+    def test_first_number_wins(self):
+        self.assertEqual(common.ticket_of("Build #12, follow-up to #9"), 12)
+
+    def test_none_without_a_number(self):
+        self.assertIsNone(common.ticket_of("Build the thing"))
+        self.assertIsNone(common.ticket_of(None))
+
+    def test_zero_is_a_ticket(self):
+        self.assertEqual(common.ticket_of("#0"), 0)
+
+
+class BlocksTest(unittest.TestCase):
+    def test_conversation_turns_only(self):
+        content = [{"type": "text", "text": "hi"}]
+        for kind in ("user", "assistant"):
+            self.assertEqual(common.blocks({"type": kind, "message": {"content": content}}), content)
+        self.assertEqual(common.blocks({"type": "api-request-blob", "message": {"content": content}}), [])
+
+    def test_malformed_content_is_empty(self):
+        self.assertEqual(common.blocks({"type": "user", "message": {"content": "plain string"}}), [])
+        self.assertEqual(common.blocks({"type": "user", "message": "x"}), [])
+        self.assertEqual(common.blocks({"type": "user"}), [])
+
+
+class FindTranscriptTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "proj").mkdir()
+        self.session = self.root / "proj" / "abc.jsonl"
+        self.session.write_text("{}\n")
+
+    def test_a_jsonl_path_is_itself(self):
+        self.assertEqual(common.find_transcript(str(self.session), self.root), self.session)
+
+    def test_a_session_id_is_found_under_projects_dir(self):
+        self.assertEqual(common.find_transcript("abc", self.root), self.session)
+
+    def test_default_dir_is_the_claude_config_projects(self):
+        with unittest.mock.patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(self.root)}):
+            self.assertIsNone(common.find_transcript("abc"))
+        (self.root / "projects" / "p").mkdir(parents=True)
+        (self.root / "projects" / "p" / "abc.jsonl").write_text("{}\n")
+        with unittest.mock.patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(self.root)}):
+            self.assertEqual(common.find_transcript("abc"), self.root / "projects" / "p" / "abc.jsonl")
+
+    def test_unknown_is_none(self):
+        self.assertIsNone(common.find_transcript("nope", self.root))
+        self.assertIsNone(common.find_transcript(str(self.root / "missing.jsonl"), self.root))
+
+
+class SubagentMetasTest(unittest.TestCase):
+    def test_maps_tool_use_id_to_stem_and_meta_skipping_bad_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = Path(d) / "s.jsonl"
+            sub = Path(d) / "s" / "subagents"
+            sub.mkdir(parents=True)
+            (sub / "agent-a1.meta.json").write_text(json.dumps({"toolUseId": "t1", "agentType": "x"}))
+            (sub / "agent-bad.meta.json").write_text("{nope")
+            (sub / "agent-list.meta.json").write_text("[]")
+            self.assertEqual(common.subagent_metas(main), {"t1": ("agent-a1", {"toolUseId": "t1", "agentType": "x"})})
+
+    def test_no_subagents_dir_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(common.subagent_metas(Path(d) / "s.jsonl"), {})
+
+
+class PluginIdTest(unittest.TestCase):
+    def test_worker_is_under_the_plugin_prefix(self):
+        self.assertEqual((common.PLUGIN, common.WORKER), ("orchestrate:", "orchestrate:worker"))
 
 
 class DieTest(unittest.TestCase):

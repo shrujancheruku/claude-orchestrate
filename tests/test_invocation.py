@@ -52,10 +52,12 @@ class Invocation(unittest.TestCase):
                 self.assertNotIn("Traceback", r.stderr)
 
     def test_standalone_scripts_run_isolated_alone(self):
-        # A standalone script imports nothing from scripts/, so it must run from a lone copy.
+        # `-I` leaves the script's directory off sys.path, so a standalone script that imports common
+        # must find it itself; it runs from a copy holding only the script and common.py.
         for name in sorted(STANDALONE):
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
                 shutil.copy(SCRIPTS / name, d)
+                shutil.copy(SCRIPTS / "common.py", d)
                 argv = [sys.executable, "-I", str(Path(d) / name)]
                 if name == "profile.py":
                     argv.append("--help")

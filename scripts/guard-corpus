@@ -180,14 +180,11 @@ def write_config(cwd):
 
 
 def find_session(arg, projects_dir):
-    p = Path(arg).expanduser()
-    if p.is_file():
-        return p
-    found = sorted(Path(projects_dir).expanduser().glob(f"*/{arg}.jsonl"))
+    found = common.find_transcript(arg, projects_dir)
     if not found:
         print(f"guard-corpus: no transcript for session {arg!r} under {projects_dir}", file=sys.stderr)
         sys.exit(2)
-    return found[0]
+    return found
 
 
 def mine(main_transcript):
