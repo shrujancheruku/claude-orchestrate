@@ -18,7 +18,7 @@ orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gate
 
 From a local clone, use the clone's path in place of `shrujancheruku/claude-orchestrate`. While developing, load it without installing: `claude --plugin-dir /path/to/claude-orchestrate`.
 
-Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge-tree --write-tree`; on older git it says so and skips the sweep), `gh` (signed in), and `python3` 3.9 or later for the guard hook. Run `/setup-matt-pocock-skills` in the repo first: orchestrate reads the tracker and domain docs it writes to `docs/agents/`. Without them, setup falls back to a backlog defined in the config.
+Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge-tree --write-tree`; on older git it says so and skips the sweep), `gh` (signed in), and `python3` 3.9 or later (plugin scripts and hooks: Python 3.9+, stdlib only). Run `/setup-matt-pocock-skills` in the repo first: orchestrate reads the tracker and domain docs it writes to `docs/agents/`. Without them, setup falls back to a backlog defined in the config.
 
 ## Use it in a repo
 
@@ -67,7 +67,7 @@ Every role also refuses `scripts/merge` (the orchestrator's merge script, which 
 
 After the cleanup, `scripts/merge` sweeps the other open PRs: each whose branch now conflicts with the default branch is updated and pushed to by the script itself (the orchestrator, not a worker, so the worker rule above doesn't apply). Under squash or merge it merges main into the branch with a plain push; under rebase it rebases and pushes with `--force-with-lease`. Conflicts in the files the config's **Shared files** bullet lists are resolved by replaying the PR's lines onto main (a word-level 3-way merge for a line changed on both sides); a conflicting file matching a glob under **Generated:** (nested bullets of the form `` - `glob`: `command` ``) takes main's side and the command is run in the sweep worktree against the PR's sources, its output committed; anything else, a failing or hanging command, a command that changes a file outside the generated globs, or overlapping words, is handed back: the branch is left untouched, the script prints `HANDBACK PR #n <branch>: <path> (<why>)` lines and exits 4, and the run skill resumes the worker with them. That sweep may rebase under the rebase method, but a worker never does: resumed with a conflict list, it always merges the default branch and pushes without force (`agents/worker.md`, Follow-ups). Each file's outcome (`line-replay`, `word-merge`, `regenerated`, `handed-back`) is logged as a `replay` event. A PR that is merely behind is not touched.
 
-It splits the command into shell words (quotes, escapes, `$(...)`, heredocs, `sh -c`), decides on those, and refuses a command it can't parse. It's a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top. Tests: `python3 -m unittest discover tests`.
+It splits the command into shell words (quotes, escapes, `$(...)`, heredocs, `sh -c`), decides on those, and refuses a command it can't parse. It's a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top.
 
 ## Push and fetch under the sandbox
 
