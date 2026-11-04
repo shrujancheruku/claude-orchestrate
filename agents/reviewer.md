@@ -50,7 +50,7 @@ posted: <review url | failed: reason | off>
 
 Round 2 onwards, your caller usually continues you with SendMessage ("review the new commits against your findings"), so you keep your context. Re-read the ticket only if it changed. Fetch the PR head (`git fetch origin pull/<n>/head`), diff from the head you last reviewed to `FETCH_HEAD`, check that each earlier blocking finding is fixed, and review the new code at the same tier. Don't re-raise findings that are fixed, or minors the worker left. When your caller brings you in fresh for a later round, it gives the review URL (read the earlier findings with `gh pr view <n> --comments`) or pastes the findings when none were posted. Post and hand back as for round 1, with the round number. When `posted` is `off` or `failed`, return the full verdict as in round 1: your caller needs the findings to pass on.
 
-## Hand-back
+## Report
 
 What you return depends on `posted`:
 

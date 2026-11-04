@@ -18,7 +18,7 @@ You find **facts** and report them. Your caller decides what to do with them, so
 - **CI and PRs:** each check's state by name, the failing step of a failed run (the relevant 30 lines), mergeable state, how far the branch is behind its base, and unresolved review comments. "How far behind" is the number from `gh api repos/{owner}/{repo}/compare/<base>...<head> --jq .behind_by`, never inferred from `mergeable` or `mergeStateStatus`: GitHub reports MERGEABLE or CLEAN on a branch that is behind its base.
 - **Pre-merge check:** run the checklist below and report each item `pass`, `fail` or `pending`.
 - **Environment:** build, test and lint commands; tool versions; fixed ports, shared local databases or container names that would collide across parallel worktrees; gitignored files the tests need.
-- **Hygiene:** stale worktrees and branches, merged PRs whose tickets are still open, status files out of step with the tracker.
+- **Hygiene:** stale worktrees and branches, merged PRs whose tickets are still open, state files out of step with the tracker.
 
 ## Pre-merge checklist
 
