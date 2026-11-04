@@ -9,7 +9,8 @@ failed = the names of the failed checks). Exit codes: 0 every check passed; 1 a 
 output to the worker); 2 the gate could not run (bad --cwd, `gh` failed); 3 GitHub still reports the
 PR's mergeability as UNKNOWN after retries, behind_by reads 0, and nothing else failed (run the gate again;
 not the worker's fault); UNKNOWN with behind_by above 0 or unreadable exits 1. A marker is `run: \`cmd\``;
-one that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's worktree, so they see the PR's code); default is the current directory.
+one that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's
+worktree, so they see the PR's code); default is the current directory.
 Stdlib only, Python 3.9+.
 """
 
@@ -90,7 +91,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5):
     elif mergeable != "MERGEABLE":
         problems.append(f"not mergeable ({mergeable})")
     if behind is None:
-        problems.append(f"could not read behind_by: {common.one_line(err)}")
+        problems.append(f"could not read behind_by: {common.one_line(err)}; retry later")
     elif behind:
         problems.append(f"behind {base} by {behind} commit(s); rebase or merge {base}")
     label = f"mergeable with {base} (behind_by {behind if behind is not None else '?'})"
