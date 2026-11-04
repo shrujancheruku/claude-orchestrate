@@ -34,7 +34,7 @@ GH_WRITE = re.compile(
     r"item-add|item-edit|item-delete)\b"
 )
 GH_API_WRITE = re.compile(
-    r"\bgh\s+api\b.*(?:(?:-X|--method)\s*(?:POST|PATCH|PUT|DELETE)\b|\s(?:-f|-F|--field|--raw-field|--input)\b)",
+    r"\bgh\s+api\b.*(?:(?:-X|--method)(?:\s*|=)(?:POST|PATCH|PUT|DELETE)\b|\s(?:-f|-F|--field|--raw-field|--input)\b)",
     re.IGNORECASE,
 )
 FS_WRITE = re.compile(
@@ -102,8 +102,15 @@ POST_FLAG = re.compile(r"^[-*\s]*Post reviews[:*\s]*(yes|no)\b", re.IGNORECASE |
 CONFIG = Path(".claude") / "orchestration.md"
 
 
+GH_WORDS = re.compile(r"\bgh((?:\s+(?:\"[\w-]+\"|'[\w-]+'|[\w-]+)){1,3})")
+
+
 def strip_quotes(cmd: str) -> str:
-    """Blank out quoted text so patterns inside search strings don't match."""
+    """Blank out quoted text so patterns inside search strings don't match.
+
+    First unquote a plain word where a `gh` subcommand goes (gh "pr" merge), which the
+    shell reads as an unquoted one; blanking it would hide the command."""
+    cmd = GH_WORDS.sub(lambda m: "gh" + re.sub(r"[\"']", "", m.group(1)), cmd)
     return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", cmd)
 
 
