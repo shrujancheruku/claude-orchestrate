@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gate <pr> [--cwd DIR] [--base BRANCH] : the mechanical checks that run before any reviewer.
+r"""gate <pr> [--cwd DIR] [--base BRANCH] : the mechanical checks that run before any reviewer.
 
 Checks a PR's mergeability with its base (conflicts, and how far it is behind), its title against
 Conventional Commits, and each command the config's `Repo-specific checks` entry carries (a

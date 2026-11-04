@@ -56,7 +56,7 @@ def shared_patterns(section):
 
 
 def generated_commands(section):
-    """(glob, regenerate command) pairs under the `**Generated:**` item of the Shared files section.
+    r"""(glob, regenerate command) pairs under the `**Generated:**` item of the Shared files section.
 
     Each nested bullet is `- \`<glob>\`: \`<command>\``. `none` or free text after the item gives no pairs.
     """
