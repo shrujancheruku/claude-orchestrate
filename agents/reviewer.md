@@ -36,7 +36,7 @@ spec: <acceptance criterion → met | unmet>, one per line
 standards: <rule, glossary term or ADR → holds | broken>, one per line for each one the diff engages
 findings:
 - [blocking | minor] [spec | standards] path:line — what's wrong → what would fix it
-risk-notes: <L only: area — what to look at>
+risk-notes: <L only: path:line-range — what to look at>
 posted: <review url | failed: reason | off>
 ```
 
