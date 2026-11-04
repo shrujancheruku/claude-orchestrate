@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Reviews one PR against its ticket and the repo's rules at a tier (S checklist, M correctness, L correctness plus risk notes). Read-only apart from posting its review on the PR when told to; returns a verdict with file:line evidence.
+description: Reviews one PR against its ticket and the repo's rules at a tier (S checklist, M correctness, L correctness plus risk notes). Read-only apart from posting its review on the PR when told to; returns a verdict with file:line evidence, or just a short hand-back when it posted.
 model: sonnet
 effort: medium
 tools: Bash, Read, Grep, Glob
@@ -53,6 +53,7 @@ What you return depends on `posted`:
   blocking: <count>
   non-blocking: <count>
   review: <review url>
+  risk-notes: <L only: risky path — what to look at, one line each>
   ```
 - **Not posted** (`posted: off` or `posted: failed: <reason>`): return the full verdict block above, with every finding, so the caller can pass them on and the loop still works.
 

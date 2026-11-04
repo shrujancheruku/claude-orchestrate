@@ -67,7 +67,7 @@ The backlog is done when nothing in scope is takeable or claimed. Say so, list w
 3. **Review** with `orchestrate:reviewer` at the PR's tier and model. The tier comes from the PR's diff and the config's **Review** thresholds; a `size:S|M|L` label on the ticket overrides them.
    - **S** → model `haiku`.
    - **M** → model `sonnet`.
-   - **L** → model `sonnet`, then read its risk notes and those files yourself (the risky parts, not the whole diff).
+   - **L** → model `sonnet`, then read its risk notes (they come in the hand-back) and those files yourself (the risky parts, not the whole diff).
    Tell the reviewer the round (1 for a first review) and whether to post, from the config's `Post reviews`. A posted review comes back as a short hand-back (`verdict`, `round`, blocking and non-blocking counts, the review URL); you never read the findings. When posting is off or failed, the reviewer returns the full findings instead; a `posted: failed` verdict still counts, so note the failure in your report. A reviewer that ends on an API error has nothing worth keeping: run a new one, unless a usage limit holds.
 4. **Changes requested** → with a posted review, send the worker "address review `<url>`" and nothing more: it reads the findings from the PR. Without one, send the full findings. Send it to the same worker either way; back to 1 on its report. After three rounds, mark the ticket waiting and bring it to the user.
 5. **Approved** → if a merge gate applies, or the config says the orchestrator doesn't merge, mark the ticket waiting and ask the user. Otherwise merge with the config's method, after one last check that CI is green and every dependency has merged.
