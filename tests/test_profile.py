@@ -241,6 +241,18 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(t.cost(), {"unpriced": 0.0})
         self.assertEqual(prof.cost_metrics(t, [], 1)["unpriced_models"], ["mystery-1"])
 
+    def test_unpriced_and_approximate_models_each_warn_once_in_the_profile(self):
+        # End to end: both messages reach profile["warnings"], and a model used in
+        # several requests is named once.
+        with open(self.fx.main, "a") as f:
+            for i, (mid, model) in enumerate([("u1", "mystery-1"), ("u2", "mystery-1"), ("a1", "claude-opus-4-9")]):
+                f.write(json.dumps(assistant(30 + i, mid, model, [])) + "\n")
+        warnings = self.fx.run()["warnings"]
+        unpriced = [w for w in warnings if w.startswith("no price for model(s)")]
+        approx = [w for w in warnings if w.startswith("version not in PRICES")]
+        self.assertEqual(unpriced, ["no price for model(s) mystery-1: their cost counts as $0"])
+        self.assertEqual(approx, ["version not in PRICES for claude-opus-4-9: priced at the nearest older version's rates"])
+
     def test_meter_percent_per_merged_ticket_is_unweighted(self):
         meters = self.fx.run()["metrics"]["meters"]
         # Samples inside the session: 20 -> 35 (five-hour), 40 -> 44 (seven-day); one ticket merged.

@@ -369,7 +369,6 @@ function cost(p) {
   const m = p.metrics.meters;
   const meter = (k) => (m[k].per_merged_ticket == null ? "no samples" : m[k].per_merged_ticket.toFixed(1) + " points");
   card.append(el("p", { class: "note" }, `Plan meters per merged ticket (unweighted, from the usage tap): 5-hour ${meter("five_hour")} · 7-day ${meter("seven_day")}.`));
-  if (c.unpriced_models.length) card.append(el("p", { class: "note status-critical" }, "No price for " + c.unpriced_models.join(", ") + ": counted as $0."));
   const det = el("details");
   det.setAttribute("open", "");
   det.append(el("summary", {}, "Per-ticket table"));
