@@ -783,10 +783,27 @@ NEXT_STEP = {
 
 
 def role_of(agent_type: str) -> str | None:
+    """The role of an `orchestrate:<role>` agent, or None for anyone else's agent.
+
+    A role with no rule set (retired, from another version, a typo) is still returned: it is
+    ours, so verdict() holds it to the read-only rules rather than letting it run unguarded."""
     plugin, _, role = agent_type.partition(":")
-    if plugin == PLUGIN and role in RULES:
+    if plugin.strip().lower() == PLUGIN:  # the role part stays exact
         return role
     return None
+
+
+def rules_role(role: str) -> str:
+    """The role whose rules and next-step advice apply: itself, or the read-only scout's when the
+    guard doesn't know the role."""
+    return role if role in RULES else "scout"
+
+
+def role_label(role: str) -> str:
+    """How a refusal names the role."""
+    if role in RULES:
+        return f"the {role} role"
+    return f"the {role or '(unnamed)'} role, which this version of the guard doesn't know and so treats as read-only,"
 
 
 def only_plain_words(cmd: Command) -> bool:
@@ -907,6 +924,7 @@ def deny(reason: str) -> None:
 
 def verdict(role: str, command: str, cwd: str) -> str | None:
     """The reason to deny this command for this role, or None to let it run."""
+    who, role = role_label(role), rules_role(role)
     try:
         parsed = Parsed(parse(command))
     except ParseError as err:
@@ -921,12 +939,12 @@ def verdict(role: str, command: str, cwd: str) -> str | None:
         if problem:
             return f"this review post is refused because {problem}. {SHAPES}"
     if MERGE_SCRIPT.search(command):
-        return (f"the {role} role can't run a command that merges a PR (merging belongs to the orchestrator). "
+        return (f"{who} can't run a command that merges a PR (merging belongs to the orchestrator). "
                 f"{NEXT_STEP[role]}")
     for rule in RULES[role]:
         what = rule(parsed, cwd)
         if what:
-            return f"the {role} role can't run a command that {what}. {NEXT_STEP[role]}"
+            return f"{who} can't run a command that {what}. {NEXT_STEP[role]}"
     return None
 
 
@@ -935,15 +953,21 @@ def main() -> None:
         data = json.load(sys.stdin)
     except json.JSONDecodeError:
         return
-    role = role_of(data.get("agent_type") or "")
-    command = (data.get("tool_input") or {}).get("command") or ""
-    if role is None or not command:
+    if not isinstance(data, dict):
+        return  # valid JSON that isn't an object names no agent, like bad JSON
+    agent_type = data.get("agent_type")
+    tool_input = data.get("tool_input")
+    role = role_of(agent_type if isinstance(agent_type, str) else "")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if role is None or command is None or command == "":
         return
     try:
+        if not isinstance(command, str):
+            raise TypeError("command is not a string")
         reason = verdict(role, command, data.get("cwd") or "")
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
-                  f"Rewrite it more simply. {NEXT_STEP[role]}")
+                  f"Rewrite it more simply. {NEXT_STEP[rules_role(role)]}")
     if reason:
         deny(reason)
 
