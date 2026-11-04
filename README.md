@@ -142,6 +142,18 @@ To trial the orchestrator on a backlog:
 python3 -I ~/.claude/plugins/cache/claude-orchestrate/orchestrate/<version>/scripts/profile.py <session>
 ```
 
+## Development
+
+Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
+
+**How scripts under `scripts/` are found and run.** One rule, checked by `tests/test_invocation.py`:
+
+- **Found:** a skill uses `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`. An agent never relies on `${CLAUDE_PLUGIN_ROOT}` (it may be unset for subagents); the brief hands it the absolute path.
+- **A CLI is an executable without an extension** (`gate`, `merge`, `verify`, ...) with a `#!/usr/bin/env python3` shebang, run by path with no interpreter and no `-I`. It may import siblings (`common`, `checks`, `replay`): running a script by path puts its own directory first on `sys.path`, and `-I` would remove it. The current directory is not added, so a repo's own `common.py` cannot shadow the plugin's, so no repo Python is imported; the commands they run are the config's, by design. CLIs don't use `-I`, so they trust the caller's `PYTHON*` environment.
+- **Hooks follow the same rule.** `hooks/hooks.json` runs `guard.py` as `python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/guard.py"`, which is the standalone case.
+- **A `.py` file is a library or a standalone script.** A library (`common.py`, `checks.py`, `replay.py`) is only imported. A standalone script (`profile.py`, `usage-tap.py`) imports nothing from `scripts/`, because `usage-tap.py` is copied out of the plugin and `profile.py` reads session transcripts, so both run as `python3 -I <path>`.
+- Never work around a failed import with `PYTHONPATH`; fix the script's kind per the rules above.
+
 ## Limits
 
 - Workers branch from the default branch (Claude Code's worktree default), so a ticket starts only after its dependencies have merged.
