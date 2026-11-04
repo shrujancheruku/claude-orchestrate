@@ -289,6 +289,7 @@ class ProfileTest(unittest.TestCase):
         self.assertIn("opus", out)
 
     def test_summary_says_headroom_is_not_measured_without_usage_data(self):
+        self.fx.usage.write_text("")
         out = prof.summary(self.fx.run(), Path("x.json"))
         self.assertIn("headroom not measured", out)
         self.assertNotIn("status", out.lower().split("plan", 1)[1].splitlines()[0])
