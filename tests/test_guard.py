@@ -26,6 +26,19 @@ CASES = [
     # (agent_type, command, expected)
     (None, "git push --force origin main", "allow"),  # main session: never touched
     ("scout", "rm -rf x", "allow"),  # someone else's agent named scout
+    # an orchestrate role the guard has no rules for is held to the read-only rules
+    ("orchestrate:mechanic", "git push --force", "deny"),
+    ("orchestrate:mechanic", "git commit -m x", "deny"),
+    ("orchestrate:mechanic", "gh pr merge 12", "deny"),
+    ("orchestrate:mechanic", "touch x", "deny"),
+    ("orchestrate:", "touch x", "deny"),
+    ("orchestrate:mechanic", "git log", "allow"),
+    ("orchestrate:mechanic", "gh pr view 12", "allow"),
+    ("other-plugin:worker", "git push --force", "allow"),
+    ("", "git push --force", "allow"),
+    (" orchestrate:worker", "git push --force", "deny"),
+    ("ORCHESTRATE:worker", "git push --force", "deny"),
+    ("orchestrate:Worker", "touch x", "deny"),  # role is exact: unknown, so read-only
     ("orchestrate:scout", "git log --oneline -5 && git diff main...HEAD", "allow"),
     ("orchestrate:scout", "git -C ../repo status", "allow"),
     ("orchestrate:scout", "gh pr checks 12 2>&1 | tail -5", "allow"),
@@ -372,6 +385,38 @@ class GuardTest(unittest.TestCase):
         for agent_type, command, expected in CASES:
             with self.subTest(agent=agent_type, command=command):
                 self.assertEqual(decide(agent_type, command), expected)
+
+    def run_guard(self, payload):
+        out = subprocess.run(
+            [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True, check=True
+        ).stdout
+        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
+
+    def test_unknown_role_refusal_names_the_role(self):
+        reason = self.run_guard({"agent_type": "orchestrate:mechanic", "tool_input": {"command": "git commit -m x"}})
+        self.assertIn("mechanic", reason)
+        self.assertIn("doesn't know", reason)
+        self.assertIn("read-only", reason)
+        self.assertIn("changes git state", reason)
+
+    def test_known_role_refusal_is_unchanged(self):
+        reason = self.run_guard({"agent_type": "orchestrate:scout", "tool_input": {"command": "git commit -m x"}})
+        self.assertTrue(reason.startswith("orchestrate guard: the scout role can't run a command that"))
+
+    def test_non_object_input_never_crashes_and_is_allowed(self):
+        for payload in ([1], "x", 3, None, {"agent_type": "orchestrate:scout", "tool_input": "rm x"},
+                        {"agent_type": "orchestrate:scout", "tool_input": [1]},
+                        {"agent_type": ["orchestrate:scout"], "tool_input": {"command": "rm x"}},
+                        {"agent_type": "orchestrate:scout", "tool_input": {}}):
+            with self.subTest(payload=payload):
+                self.assertIsNone(self.run_guard(payload))
+
+    def test_non_string_command_from_our_agent_is_denied(self):
+        for command in (["rm", "x"], 5, {"a": 1}):
+            with self.subTest(command=command):
+                reason = self.run_guard({"agent_type": "orchestrate:scout", "tool_input": {"command": command}})
+                self.assertIn("couldn't parse or check", reason)
+        self.assertIsNone(self.run_guard({"agent_type": "other:x", "tool_input": {"command": 5}}))
 
     def test_reviewer_worktree_inside_main_repo_from_a_linked_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
