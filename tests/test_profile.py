@@ -839,7 +839,7 @@ class TierTest(unittest.TestCase):
         self.assertEqual((v["verdict"], v["blocking"]), ("changes", 1))
 
     def test_a_malformed_payload_does_not_fall_through_to_an_inline_comment(self):
-        message = ('```json\n{"event":"COMMENT","body":"Round 1 \\u00b7 verdict: approve \\u00b7 tier: L\\n\\nfindings:\\n- [minor] a.ts:1 x","comments":'
+        message = ('```json\n{"event":"COMMENT","body":"Round 1 · verdict: approve · tier: L\\n\\nfindings:\\n- [minor] a.ts:1 x","comments":'
                    '[{"path":"a.ts","line":1,"body":"[minor] x"}] oops')
         v = self.handback(message)["prs"][0]["verdicts"][0]
         self.assertEqual((v["verdict"], v["round"]), ("approve", 1))
