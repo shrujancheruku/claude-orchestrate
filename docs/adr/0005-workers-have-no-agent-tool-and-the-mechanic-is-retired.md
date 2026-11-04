@@ -2,11 +2,9 @@
 
 ## Context
 
-A worker builds one ticket end to end. It used to delegate: searches to the scout and mechanical edits (renames, moves, a pattern repeated across files) to a cheaper `mechanic` agent, then read the mechanic's diff before keeping it.
+A worker builds one ticket end to end. It used to delegate: searches to the scout and mechanical edits (renames, moves, a pattern repeated across files) to a cheaper `mechanic` agent, then read the mechanic's diff before keeping it (the worker definition before #101).
 
-- **Delegation adds turns.** Each subagent starts cold, gets a brief the worker writes, and returns a result the worker must read and check, so the design and the verification stayed with the worker either way.
-- **Workers get cheaper through fewer, smaller turns** than through delegation: independent calls in one turn, chained verify steps, `grep -n` then line-range reads, bounded output.
-- **A prompt rule is weaker than a missing tool.**
+- **Workers get cheaper through fewer, smaller turns rather than delegation** (issue #43): independent calls in one turn, chained verify steps, `grep -n` then line-range reads, bounded output.
 
 ## Decision
 
@@ -18,7 +16,7 @@ A worker builds one ticket end to end. It used to delegate: searches to the scou
 
 ## Consequences
 
-- A large mechanical change is slower, since the worker makes each edit itself; a ticket that large should be split.
+- A large mechanical change is made by the worker's own edits (inferred).
 - Configs with a mechanic Models row should drop it. The change shipped as a breaking one.
-- Rejected: keeping the mechanic for large renames (its brief and diff still cost the worker turns); leaving `Agent` on and asking workers not to use it (a prompt rule a worker can forget).
-- Reopen when trial data shows workers spending more on mechanical edits than delegation cost.
+- Rejected: keeping the mechanic, which #43 retired; leaving `Agent` on and asking workers not to use it (inferred: a prompt rule a worker can forget).
+- Reopen when trial data shows workers spending more on mechanical edits than delegation cost (inferred).

@@ -10,9 +10,9 @@
 
 ## Decision
 
-- **The guard has one lexer of its own** (`parse` in `hooks/guard.py`). It splits a command into simple commands and words, with quotes, escapes, line continuations, `$(...)`, backticks, heredocs and `sh -c` resolved. Every `gh` and `git` rule decides on those words, never on the command text.
-- **Anything it can't read is refused.** A command that doesn't parse (`ParseError`) is denied with a message telling the agent to rewrite it. Any other exception while checking is caught in `main` and denied the same way. An expansion whose value the guard can't know is kept as an unknown word, not treated as harmless.
-- **Input that is not a call the guard governs returns without a verdict:** JSON that isn't an object, no plugin agent named, or no command.
+- **The guard has one lexer of its own** (`parse` in `hooks/guard.py`). It splits a command into simple commands and words, with quotes, escapes, line continuations, `$(...)`, backticks, heredocs and `sh -c` resolved. Every `gh` and `git` rule decides on those words, not on the command text. The one exception is the check for `scripts/merge` (`MERGE_SCRIPT`), a regex on the raw command, because a quoted script path is what a word check would miss.
+- **A command it can't parse or check is refused.** A command that doesn't parse (`ParseError`) is denied with a message telling the agent to rewrite it. Any other exception while checking is caught in `main` and denied the same way. An expansion whose value the guard can't know is kept as an unknown word, not treated as harmless.
+- **Input that is not a call the guard governs returns without a verdict:** stdin that is invalid JSON or JSON that isn't an object, no plugin agent named, or no command.
 - **A role the guard doesn't know is read-only,** the same as a scout.
 - **It is a guardrail against mistakes, not a sandbox.** Aliases, `eval`, scripts written to disk and then run, and computed strings can still get past it. The user's permission mode and sandbox apply on top.
 - **Its decisions are pinned by tests:** `tests/test_guard.py` and the regression corpus (`tests/fixtures/guard-corpus.jsonl`, run by `tests/test_guard_corpus.py`), so a change that flips a decision shows in the PR diff.
@@ -22,5 +22,5 @@
 - A rare legitimate command the lexer can't read is refused and the agent rewrites it. A false refusal costs a turn; a false allow costs the role boundary.
 - New shell syntax in agent commands needs a lexer change and a corpus line, not a regex tweak.
 - The lexer is code the plugin owns and tests, and it is a large part of the guard.
-- Rejected: matching on the command string (misses quoting and expansion, refuses harmless text); `shlex` alone (no `$(...)`, heredocs or `sh -c`); failing open on a parse error (a crash would let the command run unchecked); a third-party shell parser (a dependency on every install for a guardrail).
-- Reopen when the guard is relied on as a sandbox, or Claude Code hands hooks an already-parsed command.
+- Rejected: matching on the command string (misses quoting and expansion, refuses harmless text; inferred); `shlex` alone (no `$(...)`, heredocs or `sh -c`); failing open on a parse error (a crash would let the command run unchecked); a third-party shell parser (a dependency on every install for a guardrail; inferred).
+- Reopen when the guard is relied on as a sandbox, or Claude Code hands hooks an already-parsed command (inferred).
