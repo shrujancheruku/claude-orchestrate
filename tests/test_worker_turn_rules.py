@@ -69,6 +69,24 @@ class WorkerTurnRules(unittest.TestCase):
         for p in files:
             self.assertNotRegex(p.read_text(errors="ignore"), r"(?i)\bmechanic\b", str(p))
 
+    def test_one_rule_merge_never_force(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        # The old contradiction: step 4 forbade merging with no exception.
+        self.assertNotIn("Never merge `origin/main` into your branch yourself", s)
+        step4 = s[s.index("4. **Ship.**"):s.index("5. **Report**")]
+        self.assertIn("conflict-list", step4)
+        # Every sentence naming rebase or force is a prohibition or describes
+        # the orchestrator's sweep, never an instruction to the worker.
+        for sentence in re.split(r"(?<=[.:])\s", s):
+            if re.search(r"(?i)rebase|force", sentence):
+                self.assertRegex(sentence, r"(?i)\bnever\b|without force|sweep|orchestrator",
+                                 sentence)
+        fu = s[s.index("## Follow-ups"):s.index("## Report")]
+        self.assertIn("merge", fu)
+        self.assertIn("never force", fu)
+        run = (ROOT / "skills/run/SKILL.md").read_text()
+        self.assertIn("outside a conflict list", run)
+
 
 if __name__ == "__main__":
     unittest.main()
