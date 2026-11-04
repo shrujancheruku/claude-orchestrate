@@ -96,16 +96,23 @@ class ScriptEnv:
         log = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
-    def run(self, script, *args, check=True):
+    def _tmp_empty(self):
+        empty = Path(self._tmp.name) / "empty-bin"
+        empty.mkdir(exist_ok=True)
+        return empty
+
+    def run(self, script, *args, check=True, no_gh=False):
         """Run a CLI (absolute path, or a name under scripts/) in the repo with the fake gh first on PATH."""
         path = Path(script)
         if not path.is_absolute():
             path = SCRIPTS / script
         # No -I: it drops a script's own directory from sys.path and would break `import common`.
         # No PYTHONPATH either: scripts run here exactly as they do for real.
+        # no_gh: a PATH that holds no `gh` at all (not even a real one), to test a missing tool.
+        search_path = str(self._tmp_empty()) if no_gh else f"{self.bin}{os.pathsep}{os.environ['PATH']}"
         env = dict(
             os.environ,
-            PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            PATH=search_path,
             FAKE_GH_STATE=str(self.gh_state),
         )
         return subprocess.run(

@@ -47,6 +47,18 @@ class WorkerTurnRules(unittest.TestCase):
             self.assertNotRegex(p.read_text(errors="ignore"),
                                 r"worktree remove\b[^`\n]*(--force|\s-f\b)", str(p))
 
+    def test_orient_checks_already_done_before_branching(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        orient = s[s.index("1. **Orient.**"):s.index("2. **Build")]
+        check = orient.index("compare each acceptance criterion with `origin/<default branch>`")
+        self.assertLess(orient.index("git fetch origin"), check)
+        self.assertLess(check, orient.index("If the brief's branch exists on the remote"))
+        self.assertIn("`status: stopped`", orient)
+        self.assertIn("`branch: none`", orient)
+        self.assertIn("no full diff", orient)
+        self.assertIn("names the commit or file that shows it", orient)
+        self.assertIn("The ticket is already done on the default branch.", s)
+
     def test_mechanic_is_gone(self):
         self.assertFalse((ROOT / "agents/mechanic.md").exists())
 
@@ -56,6 +68,24 @@ class WorkerTurnRules(unittest.TestCase):
             files += [p for p in (ROOT / d).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
         for p in files:
             self.assertNotRegex(p.read_text(errors="ignore"), r"(?i)\bmechanic\b", str(p))
+
+    def test_one_rule_merge_never_force(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        # The old contradiction: step 4 forbade merging with no exception.
+        self.assertNotIn("Never merge `origin/main` into your branch yourself", s)
+        step4 = s[s.index("4. **Ship.**"):s.index("5. **Report**")]
+        self.assertIn("conflict-list", step4)
+        # Every sentence naming rebase or force is a prohibition or describes
+        # the orchestrator's sweep, never an instruction to the worker.
+        for sentence in re.split(r"(?<=[.:])\s", s):
+            if re.search(r"(?i)rebase|force", sentence):
+                self.assertRegex(sentence, r"(?i)\bnever\b|without force|sweep|orchestrator",
+                                 sentence)
+        fu = s[s.index("## Follow-ups"):s.index("## Report")]
+        self.assertIn("merge", fu)
+        self.assertIn("never force", fu)
+        run = (ROOT / "skills/run/SKILL.md").read_text()
+        self.assertIn("outside a conflict list", run)
 
 
 if __name__ == "__main__":

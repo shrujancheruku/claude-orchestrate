@@ -17,6 +17,8 @@ heredoc bodies and long quoted text are replaced by TEXT, BODY, REDACTED or zero
 only adds new lines and never changes a label, including a hand-corrected one. A new line's
 `expected` is a snapshot of what hooks/guard.py decides now; review it, and relabel by hand
 only with a ticket for the guard (see tests/test_guard_corpus.py, "gap").
+
+Exit codes: 0 done; 2 could not run (no transcript for a SESSION).
 """
 
 import argparse
@@ -178,7 +180,8 @@ def find_session(arg, projects_dir):
         return p
     found = sorted(Path(projects_dir).expanduser().glob(f"*/{arg}.jsonl"))
     if not found:
-        sys.exit(f"guard-corpus: no transcript for session {arg!r} under {projects_dir}")
+        print(f"guard-corpus: no transcript for session {arg!r} under {projects_dir}", file=sys.stderr)
+        sys.exit(2)
     return found[0]
 
 

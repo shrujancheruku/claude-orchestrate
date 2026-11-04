@@ -14,7 +14,7 @@ A non-SSH origin changes nothing. The file is local, so `.claude/settings.local.
 added to .gitignore when `git check-ignore` doesn't already ignore it.
 Docs: https://code.claude.com/docs/en/sandboxing
 
-Exit 0 done (or nothing to do), 1 refused. Stdlib only, Python 3.9+.
+Exit 0 done (or nothing to do), 1 refused, 2 bad usage. Stdlib only, Python 3.9+.
 """
 
 import json
@@ -74,7 +74,8 @@ def main(argv):
     repo = Path(".")
     if argv:
         if argv[0] != "--repo" or len(argv) != 2:
-            sys.exit("usage: sandbox-git [--repo PATH]")
+            print("usage: sandbox-git [--repo PATH]", file=sys.stderr)
+            sys.exit(2)
         repo = Path(argv[1])
     r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo, capture_output=True, text=True)
     host = ssh_host(r.stdout.strip()) if r.returncode == 0 else None

@@ -10,7 +10,8 @@ it records the worker's agent ID, the worktree (derived from the agent ID), the 
 last record (the last report). The worktree is null once it no longer exists. When a ticket was
 dispatched more than once, the latest wins.
 
-The file is a cache and the tracker wins. Stdlib only, Python 3.9+.
+The file is a cache and the tracker wins. Exit codes: 0 rebuilt; 2 could not run (no session id,
+no transcript). Stdlib only, Python 3.9+.
 """
 
 import argparse
@@ -34,7 +35,7 @@ def find_transcript(arg: str) -> Path:
         return p
     hits = sorted((common.claude_dir() / "projects").glob(f"*/{arg}.jsonl"))
     if not hits:
-        sys.exit(f"rebuild-state: no transcript for session {arg} under {common.claude_dir() / 'projects'}")
+        common.die(f"rebuild-state: no transcript for session {arg} under {common.claude_dir() / 'projects'}")
     return hits[0]
 
 
@@ -114,7 +115,7 @@ def main(argv=None) -> int:
     ap.add_argument("--repo", default=".", help="repo root; the state file is written under it")
     args = ap.parse_args(argv)
     if not args.session:
-        sys.exit("rebuild-state: no session id (pass one or set CLAUDE_SESSION_ID)")
+        common.die("rebuild-state: no session id (pass one or set CLAUDE_SESSION_ID)")
     repo = Path(args.repo).resolve()
     state = rebuild(find_transcript(args.session), repo)
     out = repo / STATE

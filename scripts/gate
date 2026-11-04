@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""gate <pr> [--cwd DIR] [--base BRANCH] : the mechanical checks that run before any reviewer.
+r"""gate <pr> [--cwd DIR] [--base BRANCH] : the mechanical checks that run before any reviewer.
 
 Checks a PR's mergeability with its base (conflicts, and how far it is behind), its title against
 Conventional Commits, and each command the config's `Repo-specific checks` entry carries (a
 `run: \`cmd\``-marked span). Prints one line per check, with the last ~40 lines of a failure's output, in
 the same format as `verify`. Appends one `gate` event (ref = the PR number, outcome pass|fail,
 failed = the names of the failed checks). Exit codes: 0 every check passed; 1 a check failed (send the
-output to the worker); 2 the gate could not run (bad --cwd, `gh` failed); 3 GitHub still reports the
+output to the worker); 2 the gate could not run (bad --cwd, `gh` missing or failed, unreadable `gh` output); 3 GitHub still reports the
 PR's mergeability as UNKNOWN after retries, behind_by reads 0, and nothing else failed (run the gate again;
 not the worker's fault); UNKNOWN with behind_by above 0 or unreadable exits 1. A marker is `run: \`cmd\``;
 one that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's
-worktree, so they see the PR's code); default is the current directory.
+worktree, so they see the PR's code); default is the current directory. Each runs for at most
+--timeout seconds (default 1800); one that outlives it is killed and fails with "timed out after Ns".
 Stdlib only, Python 3.9+.
 """
 
 import argparse
 import json
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -30,8 +30,7 @@ TITLE_RE = re.compile(
 
 
 def gh(*args):
-    p = subprocess.run(["gh", *args], capture_output=True, text=True)
-    return p.returncode, p.stdout, p.stderr
+    return common.run("gh", *args)
 
 
 def check(name, ok, why=""):
@@ -69,7 +68,12 @@ def pr_checks(pr, base_override, retries=4, delay=2.5):
         code, out, err = gh("pr", "view", pr, "--json", "title,mergeable,baseRefName,headRefName")
         if code != 0:
             return None, f"gh pr view failed: {common.one_line(err)}"
-        view = json.loads(out)
+        try:
+            view = json.loads(out)
+        except ValueError:
+            return None, "gh pr view returned malformed JSON"
+        if not isinstance(view, dict):
+            return None, "gh pr view returned malformed JSON"
         if view.get("mergeable", "UNKNOWN") != "UNKNOWN" or attempt == retries:
             break
         time.sleep(delay)
@@ -104,13 +108,17 @@ def main(argv=None) -> int:
     ap.add_argument("pr", help="PR number")
     ap.add_argument("--cwd", default=".", help="directory holding the PR's code and the config")
     ap.add_argument("--base", help="base branch (default: the PR's)")
+    ap.add_argument("--timeout", type=float, default=checks.DEFAULT_TIMEOUT,
+                    help="seconds a repo-specific command may run before it is killed (default: %(default)g)")
     ap.add_argument("--retry-delay", type=float, default=2.5, help="seconds between mergeability retries")
     args = ap.parse_args(argv)
+    if args.timeout <= 0:
+        print("gate: --timeout must be above 0", file=sys.stderr)
+        return 2
     if not Path(args.cwd).is_dir():
         print(f"gate: --cwd {args.cwd} does not exist", file=sys.stderr)
         return 2
-    pr = args.pr.lstrip("#")
-    ref = int(pr) if pr.isdigit() else pr
+    pr, ref = common.pr_ref(args.pr)
 
     results, extra = pr_checks(pr, args.base, delay=args.retry_delay)
     if results is None:
@@ -118,7 +126,7 @@ def main(argv=None) -> int:
         return 2
     behind, unknown = extra
     commands, malformed = repo_commands(args.cwd)
-    results += checks.run_stages([commands], args.cwd)
+    results += checks.run_stages([commands], args.cwd, args.timeout)
     if malformed:
         results.append(check("repo-specific checks: malformed run: marker", False,
                              f"{malformed} `run:` marker(s) without a single `backticked` command"))
