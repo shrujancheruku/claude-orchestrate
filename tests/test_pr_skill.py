@@ -14,7 +14,7 @@ class PrSkill(unittest.TestCase):
         s = read("agents/worker.md")
         for needle in ("skill whose name ends in `:pr`", "mattpocock-skills:pr", "Skill tool",
                        "Before `gh pr create`", "with no such skill listed, write a plain body",
-                       "closing reference"):
+                       "closing reference", "with no attribution lines"):
             self.assertIn(needle, s)
 
     def test_brief_carries_pr_skill_line(self):
@@ -24,7 +24,7 @@ class PrSkill(unittest.TestCase):
 
     def test_setup_reports_missing_pr_skill(self):
         s = read("skills/setup/SKILL.md")
-        self.assertIn("If no skill whose name ends in `:pr` is listed, say so in the report", s)
+        self.assertIn("If no skill whose name ends in `:pr` is listed, tell the user worker PR bodies will be plain", s)
         self.assertIn("setup does not fail", s)
 
 
