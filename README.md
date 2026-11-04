@@ -71,6 +71,10 @@ After the cleanup, `scripts/merge` sweeps the other open PRs: each whose branch 
 
 It reads the command text, so it's a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top. Tests: `python3 -m unittest discover tests`.
 
+## Push and fetch under the sandbox
+
+The sandbox hides the ssh-agent socket, so over an SSH remote `git push` and `git fetch` fail with `Permission denied (publickey)`. `/orchestrate:setup` offers to add the socket (`$SSH_AUTH_SOCK`) and `github.com` to the repo's `.claude/settings.json` under `sandbox.network`; nothing under `~/.claude` is touched. Without that, a worker pushes over HTTPS through `gh`'s credential helper, inline (`git -c credential.helper='!gh auth git-credential' push https://github.com/<owner>/<repo>.git <branch>`), with no remote or config change. A worker never turns the sandbox off to push.
+
 ## Running out of usage
 
 Every agent draws on your plan, so a usage limit tends to stop several workers at once.

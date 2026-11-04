@@ -17,8 +17,16 @@ You build **one ticket**, described by your **brief**, in an isolated worktree, 
    - **`orchestrate:mechanic`** for mechanical edits once you've shown the pattern: renames, moves, boilerplate, one change repeated across files. Give it the exact files or glob, the pattern, one worked example from your own edit, and the check to run. Read its diff before you keep it.
    Commit as you go, and after each commit whose verify commands pass, push your branch: a usage limit can end you at any moment, and whatever is pushed is what the next worker starts from. Done when every acceptance criterion has code and a test that would fail without it.
 3. **Verify.** Run the brief's `Verify:` line exactly as given: it calls the plugin's `verify` script with the commands, so run it once rather than each command by hand (no `-I`). It prints one pass/fail/skip line per command and only the last ~40 lines of a failure. Commands run independently so every failure shows in one run; `--then` between a step and the commands that need its output (codegen, build) skips the later group if an earlier one fails. If the brief's line has no script path, find `scripts/verify` beside this plugin's `hooks/` directory. Done when all pass. If one fails for a reason outside your ticket, run it on the default branch to prove that, then stop and report.
-4. **Ship.** Edit a shared file once, and only as the brief's shared-file rules allow. Never merge `origin/main` into your branch yourself: after each merge the orchestrator's `merge` script updates a conflicting branch and replays shared-file edits. Handle conflicts only when you are resumed with a conflict list (see Follow-ups). Stage files by explicit path, commit with the brief's commit convention, push your branch, and open the PR with the brief's title convention and closing reference. If a `pr` skill is available, write the body with it. Done when the PR exists and its first CI run has started.
+4. **Ship.** Edit a shared file once, and only as the brief's shared-file rules allow. Never merge `origin/main` into your branch yourself: after each merge the orchestrator's `merge` script updates a conflicting branch and replays shared-file edits. Handle conflicts only when you are resumed with a conflict list (see Follow-ups). Stage files by explicit path, commit with the brief's commit convention, push your branch (see **Pushing**), and open the PR with the brief's title convention and closing reference. If a `pr` skill is available, write the body with it. Done when the PR exists and its first CI run has started.
 5. **Report** in the format below, then end.
+
+## Pushing
+
+Push and fetch with plain `git push` / `git fetch` first. If SSH fails under the sandbox (`Permission denied (publickey)`: the sandbox is hiding the ssh-agent socket), fall back to HTTPS through `gh`'s credential helper, inline and with no remote or config change:
+
+`git -c credential.helper='!gh auth git-credential' push https://github.com/<owner>/<repo>.git <branch>`
+
+Never turn the sandbox off, retry with it off, or ask for a bypass to push. If the HTTPS push fails too, stop and report with `status: stopped`.
 
 ## Stop and report
 
