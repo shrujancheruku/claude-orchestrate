@@ -86,8 +86,15 @@ class ScriptEnv:
         path = Path(script)
         if not path.is_absolute():
             path = SCRIPTS / script
-        env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", FAKE_GH_STATE=str(self.gh_state))
+        # No -I: it drops a script's own directory from sys.path and would break `import common`.
+        # PYTHONPATH adds scripts/ so fixture CLIs outside it can do a plain `import common` too.
+        env = dict(
+            os.environ,
+            PYTHONPATH=str(SCRIPTS),
+            PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            FAKE_GH_STATE=str(self.gh_state),
+        )
         return subprocess.run(
-            [sys.executable, "-I", str(path), *map(str, args)],
+            [sys.executable, str(path), *map(str, args)],
             cwd=self.repo, env=env, capture_output=True, text=True, check=check,
         )
