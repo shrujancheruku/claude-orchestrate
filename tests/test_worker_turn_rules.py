@@ -69,6 +69,17 @@ class WorkerTurnRules(unittest.TestCase):
         for p in files:
             self.assertNotRegex(p.read_text(errors="ignore"), r"(?i)\bmechanic\b", str(p))
 
+    def test_one_rule_merge_never_force(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        step4 = s[s.index("4. **Ship.**"):s.index("5. **Report**")]
+        self.assertIn("except in the conflict-list follow-up", step4)
+        fu = s[s.index("## Follow-ups"):s.index("## Report")]
+        self.assertIn("merge `origin/<default branch>`", fu)
+        self.assertIn("always merge, never force", fu)
+        self.assertIn("you never rebase and never force-push", fu)
+        run = (ROOT / "skills/run/SKILL.md").read_text()
+        self.assertIn("Never ask a worker to merge main outside a conflict list", run)
+
 
 if __name__ == "__main__":
     unittest.main()
