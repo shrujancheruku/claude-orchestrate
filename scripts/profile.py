@@ -27,6 +27,7 @@ SCHEMA = 2
 PLUGIN = "orchestrate:"
 PROFILES = Path(".claude") / "orchestrate-profiles"
 PASS_LOG = "passes.jsonl"
+EVENTS_LOG = "events.jsonl"  # the plugin scripts append here (common.append_event), beside the pass log
 VIEWER = Path(__file__).resolve().parent.parent / "viewer" / "profile.html"
 # Activity in an agent's transcript further apart than this is two segments:
 # a worker waiting on review between them isn't building.
@@ -243,6 +244,37 @@ class Transcript:
     def compactions(self) -> int:
         return sum(1 for r in self.records if r.get("type") == "system" and r.get("subtype") == "compact_boundary")
 
+    def compaction_details(self) -> list:
+        """Each compaction: when, what triggered it (auto|manual) and the context size it compacted (`preTokens`).
+
+        Trigger and size are None when the harness didn't record them."""
+        out = []
+        for r in self.records:
+            if r.get("type") == "system" and r.get("subtype") == "compact_boundary":
+                meta = r.get("compactMetadata") or r.get("compact_metadata") or {}
+                out.append({"ts": iso(parse_ts(r.get("timestamp"))), "trigger": meta.get("trigger"), "pre_tokens": meta.get("preTokens")})
+        return out
+
+    def turns(self) -> list:
+        """One entry per API request (a response logged once per content block is one turn), in order:
+        its time, model, usage, tool calls and text."""
+        out, by_id = [], {}
+        for r in self.records:
+            msg = r.get("message")
+            if r.get("type") != "assistant" or not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+                continue
+            key = msg.get("id") or id(r)
+            turn = by_id.get(key)
+            if turn is None:
+                turn = by_id[key] = {"ts": parse_ts(r.get("timestamp")), "model": msg.get("model"), "usage": msg["usage"], "tools": [], "text": ""}
+                out.append(turn)
+            for b in blocks(r):
+                if b.get("type") == "tool_use":
+                    turn["tools"].append((b.get("name") or "", b.get("input") or {}))
+                elif b.get("type") == "text":
+                    turn["text"] += b.get("text") or ""
+        return out
+
 
 def find_transcript(arg: str) -> Path:
     p = Path(arg).expanduser()
@@ -413,8 +445,9 @@ def build_tickets(agents: list, main: Transcript, end: datetime) -> list:
             "cost": cost,
             # Worker models in dispatch order: Haiku then Sonnet is an escalation.
             "worker_models": [worker_model_name(w["worker_model"]) for w in tk["workers"]],
-            # Filled once events.jsonl is read (a later ticket).
+            # Filled from events.jsonl in profile(); None when there is no events log.
             "gate_runs": None,
+            "gate_failed": None,
             "pr": tk["pr"],
             "outcome": outcome,
             "start": start,
@@ -650,6 +683,177 @@ def depth2_agents(main: Transcript, agents: list) -> list:
     return out
 
 
+# What an orchestrator turn was spent on. Keyed by the tool and, for Bash, the plugin script it runs;
+# the regexes below are only the fallback for hand-run commands. `review_posting` also holds the
+# script gate, which runs just before a reviewer and is part of getting a PR reviewed.
+JOBS = ["ci_wait", "review_posting", "state_file", "merge_cleanup", "dispatch", "send_message", "tracker",
+        "end_of_wake", "no_tool_call", "other"]
+JOB_TOOLS = {"Monitor": "ci_wait", "Agent": "dispatch", "SendMessage": "send_message"}
+JOB_SCRIPTS = {"watch-ci": "ci_wait", "gate": "review_posting", "rebuild-state": "state_file", "merge": "merge_cleanup"}
+SCRIPT_CALL = re.compile(r"(?:^|[\s/\"'])scripts/(watch-ci|gate|rebuild-state|merge|verify)(?![\w.-])")
+JOB_REGEXES = [
+    ("merge_cleanup", re.compile(r"\bgh\s+pr\s+merge\b|\bgit\s+worktree\s+(?:remove|prune)\b|\bgit\s+branch\s+-[dD]\b|\bgit\s+push\s+\S+\s+(?:--delete|:)")),
+    ("ci_wait", re.compile(r"\bsleep\s+\d|\bgh\s+pr\s+checks\b|\bgh\s+run\s+(?:watch|view|list)\b")),
+    ("review_posting", re.compile(r"\bgh\s+pr\s+(?:review|diff)\b|\bgh\s+pr\s+comment\b|\bgh\s+api\s+\S*pulls/\d+/(?:reviews|comments)")),
+    ("state_file", re.compile(r"orchestrate-state\.json")),
+    ("tracker", re.compile(r"\bgh\s+(?:issue|label|pr\s+(?:view|list)|api)\b")),
+]
+
+
+def classify_call(name: str, inp: dict):
+    """The job one tool call belongs to, or None when it is not one of the named jobs."""
+    if name in JOB_TOOLS:
+        return JOB_TOOLS[name]
+    if name in ("Read", "Write", "Edit", "NotebookEdit") and str(inp.get("file_path") or "").endswith("orchestrate-state.json"):
+        return "state_file"
+    if name == "Bash":
+        cmd = str(inp.get("command") or "")
+        m = SCRIPT_CALL.search(cmd)
+        if m and m.group(1) in JOB_SCRIPTS:
+            return JOB_SCRIPTS[m.group(1)]
+        for job, rx in JOB_REGEXES:
+            if rx.search(cmd):
+                return job
+    return None
+
+
+def classify_turn(turn: dict) -> str:
+    """One job per turn: the first tool call that is a named job, else `other`; a turn with no call is
+    end-of-wake text when it says anything and `no_tool_call` when it doesn't."""
+    if not turn["tools"]:
+        return "end_of_wake" if turn["text"].strip() else "no_tool_call"
+    return next((j for j in (classify_call(n, i) for n, i in turn["tools"]) if j), "other")
+
+
+def user_text(record) -> str:
+    content = (record.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def handback_tokens(main: Transcript, agents: list) -> dict:
+    """What each role's hand-backs put into the orchestrator's context, estimated at 4 characters a token:
+    the Agent call's result plus any completion notice that names the call by its `tool-use-id`."""
+    role_of = {a["tool_use_id"]: a["role"] for a in agents}
+    seen, chars = {}, {}
+
+    def add(use_id, text):
+        role = role_of[use_id]
+        seen.setdefault(role, set()).add(use_id)
+        chars[role] = chars.get(role, 0) + len(text)
+
+    for use_id, text in main.tool_results().items():
+        if use_id in role_of:
+            add(use_id, text)
+    for r in main.records:
+        if r.get("type") == "user":
+            text = user_text(r)
+            for use_id in re.findall(r"<tool-use-id>([^<]+)</tool-use-id>", text):
+                if use_id in role_of:
+                    add(use_id, text)
+    return {role: {"agents": len(ids), "tokens": chars[role] // 4} for role, ids in sorted(seen.items())}
+
+
+def idle_wakes(passes: list, agents: list, merge_times) -> dict:
+    """Passes that dispatched, reviewed and merged nothing. A pass covers the time since the one before it."""
+    acted = [a["dispatched"] for a in agents if a["role"] in ("worker", "reviewer") and a["dispatched"]] + list(merge_times)
+    rows = sorted((parse_ts(p.get("ts")), i) for i, p in enumerate(passes) if parse_ts(p.get("ts")))
+    idle, prev = 0, None
+    for ts, i in rows:
+        p = passes[i]
+        if not (p.get("dispatched") or p.get("merged") or any((prev is None or prev < t <= ts) for t in acted if t)):
+            idle += 1
+        prev = ts
+    return {"passes": len(rows), "idle": idle}
+
+
+def orchestrator_metrics(main: Transcript, agents: list, passes: list, merged: int) -> dict:
+    """The orchestrator's turns by job, and the context they ran in."""
+    turns = []
+    for t in main.turns():
+        usage = t["usage"]
+        turns.append({
+            "ts": iso(t["ts"]), "job": classify_turn(t),
+            "context": sum(usage.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")),
+            "usd": request_cost(t["model"], usage) or 0.0,
+        })
+    per = (lambda x: x / merged) if merged else (lambda x: None)
+    by_job = {}
+    for job in JOBS:
+        mine = [t for t in turns if t["job"] == job]
+        usd = sum(t["usd"] for t in mine)
+        by_job[job] = {"turns": len(mine), "usd": usd, "turns_per_merged_ticket": per(len(mine)), "usd_per_merged_ticket": per(usd)}
+    compactions = main.compaction_details()
+    autos = [c["pre_tokens"] for c in compactions if c["trigger"] == "auto" and c["pre_tokens"]]
+    own_text = sum(len(b.get("text") or "") for r in main.records if r.get("type") == "assistant" for b in blocks(r) if b.get("type") == "text")
+    results = main.tool_results()
+    bash_out = sum(len(results.get(use.get("id"), "")) for _, use in main.tool_uses("Bash"))
+    return {
+        "jobs": {"by_job": by_job, "turns": len(turns), "usd": sum(t["usd"] for t in turns)},
+        "context": {
+            "turns": [{"ts": t["ts"], "context": t["context"], "job": t["job"]} for t in turns],
+            "compactions": compactions,
+            # Auto compactions fire near the window the session really had, whatever the setting says.
+            "effective_window": statistics.median(autos) if autos else None,
+            "handback_tokens": handback_tokens(main, agents),
+            "own_text_tokens": own_text // 4,
+            "bash_output_tokens": bash_out // 4,
+            "estimate": "chars / 4",
+            "idle_wakes": idle_wakes(passes, agents, ticket_endings(main)[0].values()),
+        },
+    }
+
+
+def read_events(repo: Path | None, session: str, start: datetime, end: datetime) -> list | None:
+    """This session's events from events.jsonl, or None when the log doesn't exist (no scripts ran, or an older plugin).
+
+    An event with no session (a script run where the session ID wasn't in its environment) counts when it falls in the session's span."""
+    if not repo or not (repo / PROFILES / EVENTS_LOG).exists():
+        return None
+    out = []
+    for e in read_jsonl(repo / PROFILES / EVENTS_LOG):
+        if not isinstance(e, dict):
+            continue
+        ts = parse_ts(e.get("ts"))
+        if e.get("session") == session or (not e.get("session") and ts and start <= ts <= end):
+            out.append(e)
+    return out
+
+
+def count_by_outcome(events: list) -> dict:
+    out = {}
+    for e in events:
+        out[str(e.get("outcome"))] = out.get(str(e.get("outcome")), 0) + 1
+    return out
+
+
+def event_metrics(events: list | None, review: dict) -> dict:
+    """Script facts: gate runs (pass|fail|unknown), CI runs, merges and the shared-file replay hand-back rate."""
+    if events is None:
+        return {"available": False}
+    of = lambda kind: [e for e in events if e.get("kind") == kind]
+    gate, replay = of("gate"), of("replay")
+    gate_out = count_by_outcome(gate)
+    failed_checks = {}
+    for e in gate:
+        for name in e.get("failed") or []:
+            failed_checks[name] = failed_checks.get(name, 0) + 1
+    handed = sum(1 for e in replay if e.get("outcome") == "handed-back")
+    return {
+        "available": True,
+        # A gate failure goes back to the worker without a review round: counted here, never in `review`.
+        "gate": {"runs": len(gate), "pass": gate_out.get("pass", 0), "fail": gate_out.get("fail", 0), "unknown": gate_out.get("unknown", 0),
+                 "failed_checks": failed_checks, "review_rounds": review["rounds_total"]},
+        "ci": {"runs": len(of("ci")), "by_outcome": count_by_outcome(of("ci"))},
+        "merges": len(of("merge")),
+        "replay": {"events": len(replay), "by_outcome": count_by_outcome(replay), "handed_back": handed,
+                   "handback_rate": handed / len(replay) if replay else None},
+    }
+
+
 def windows(usage: list, passes: list, threshold: float, now: datetime) -> list:
     """Each 5-hour window the samples saw: its peak, and whether it reset with room left under pressure."""
     by_reset = {}
@@ -730,6 +934,12 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     limits = limit_events(main, agents, passes)
     review = review_metrics(agents, tickets, set(ticket_endings(main)[0]))
     depth2 = depth2_agents(main, agents)
+    events = read_events(repo, session, start, end)
+    if events is not None:
+        gates = [e for e in events if e.get("kind") == "gate"]
+        for tk in tickets:
+            mine = [e for e in gates if tk["pr"] and str(e.get("ref")) == str(tk["pr"])]
+            tk["gate_runs"], tk["gate_failed"] = len(mine), sum(1 for e in mine if e.get("outcome") == "fail")
     idle_total = max(slots * span - occupied, 0.0)
     idle = idle_reasons(passes, end)
     idle["unknown"] = max(idle_total - sum(idle.values()), 0.0)
@@ -796,7 +1006,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
                 "ticket": tk["ticket"], "pr": tk["pr"], "outcome": tk["outcome"], "slot": tk["slot"],
                 "start": iso(tk["start"]), "end": iso(tk["end"]), "building": interval(tk["building"]),
                 "tokens": tk["tokens"], "cost": tk["cost"], "worker_models": tk["worker_models"],
-                "gate_runs": tk["gate_runs"],
+                "gate_runs": tk["gate_runs"], "gate_failed": tk["gate_failed"],
             }
             for tk in tickets
         ],
@@ -827,6 +1037,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "worker_models": worker_metrics(agents, tickets, review),
             "escalations": escalations(tickets),
             "depth2": depth2,
+            **orchestrator_metrics(main, agents, passes, len(merged)),
+            "events": event_metrics(events, review),
         },
         "recommendation": recommend(slots, occupancy, wins, limits),
     }
