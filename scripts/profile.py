@@ -76,6 +76,9 @@ def read_jsonl(path: Path):
 
 
 def blocks(record) -> list:
+    # Other record types (api-request-blob) echo earlier turns' blocks; only conversation turns count.
+    if record.get("type") not in ("user", "assistant"):
+        return []
     msg = record.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
     return content if isinstance(content, list) else []

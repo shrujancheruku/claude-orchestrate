@@ -63,6 +63,8 @@ class Fixture:
             assistant(20, "m4", opus, [tool_use("u3", "Agent", subagent_type="orchestrate:reviewer", description="Review PR #50 round 1")]),
             assistant(30, "m5", opus, [tool_use("u4", "Bash", command="gh pr merge 50 --squash")]),
             assistant(31, "m6", opus, [tool_use("u5", "Bash", command="gh issue edit 11 --add-label needs-info --remove-assignee @me")]),
+            # The harness echoes request bodies, tool calls included, without a timestamp.
+            {"type": "api-request-blob", "message": {"content": [tool_use("u3", "Agent", subagent_type="orchestrate:reviewer", description="Review PR #50 round 1")]}},
             {"type": "system", "subtype": "compact_boundary", "timestamp": at(35)},
             {"type": "user", "timestamp": at(41)},
         ])
