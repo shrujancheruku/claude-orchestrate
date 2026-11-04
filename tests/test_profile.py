@@ -2,6 +2,8 @@
 
 import json
 import os
+import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -273,6 +275,173 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(len(out.splitlines()), 5)
         self.assertIn("per merged ticket (1 merged)", out)
         self.assertIn("opus", out)
+
+
+def verdict_text(verdict, minors=0, blocking=0):
+    """A reviewer's full verdict block, as returned when it didn't post."""
+    findings = "\n".join(["- [blocking] [spec] a.py:1 - x -> y"] * blocking + ["- [minor] [standards] a.py:2 - x -> y"] * minors)
+    return f"verdict: {verdict}\ntier: M\nspec: a -> met\nfindings:\n{findings}\nposted: off"
+
+
+class QualityFixture:
+    """Four tickets: #20 escalates Haiku to Sonnet and its reviewer is continued; #21 is a Haiku ticket approved
+    with two minors and merged without a second round; #22 gets a fresh reviewer for round 2 and its worker
+    spawns an agent (depth 2); #23 is a Sonnet ticket approved in round 1."""
+
+    def __init__(self, root: Path):
+        self.main = root / "projects" / "-repo" / f"{SESSION}.jsonl"
+        sub = self.main.with_suffix("") / "subagents"
+        opus, sonnet, haiku = "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"
+        dispatch = [("u20h", "worker", "Build #20 a"), ("u20s", "worker", "Build #20 a again"), ("u21", "worker", "Build #21 b"),
+                    ("u22", "worker", "Build #22 c"), ("u23", "worker", "Build #23 d"),
+                    ("r20", "reviewer", "Review PR 60"), ("r21", "reviewer", "Review PR 61 round 1"),
+                    ("r22a", "reviewer", "Review PR 62"), ("r22b", "reviewer", "Review PR 62 round 2"), ("r23", "reviewer", "Review PR 63")]
+        records = [{"type": "user", "timestamp": at(0), "cwd": str(root), "message": {"content": "run"}}]
+        for i, (use_id, role, desc) in enumerate(dispatch):
+            records.append(assistant(1 + i, f"m{i}", opus, [tool_use(use_id, "Agent", subagent_type=f"orchestrate:{role}", description=desc)]))
+        for n, pr in ((20, 60), (21, 61), (22, 62), (23, 63)):
+            records.append(assistant(30 + n, f"mg{n}", opus, [tool_use(f"g{n}", "Bash", command=f"gh pr merge {pr} --squash")]))
+        write_jsonl(self.main, records)
+
+        def worker(name, use_id, model, pr=None, extra=(), contexts=(1000,), out_chars=400):
+            usage = lambda c: {"input_tokens": c, "output_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+            recs = [assistant(2 + k, f"{name}-{k}", model, [], usage(c)) for k, c in enumerate(contexts)]
+            recs.append(tool_result(2, f"{name}-t", "x" * out_chars))
+            if pr:
+                recs += [assistant(3, f"{name}-pr", model, [tool_use(f"{name}-b", "Bash", command="gh pr create --fill")], usage(500)),
+                         tool_result(3, f"{name}-b", f"https://github.com/o/r/pull/{pr}")]  # 30 characters
+            write_jsonl(sub / f"agent-{name}.jsonl", recs + list(extra))
+            (sub / f"agent-{name}.meta.json").write_text(json.dumps({"agentType": "orchestrate:worker", "toolUseId": use_id, "model": model}))
+
+        worker("w20h", "u20h", haiku, 60, contexts=(1000, 3000, 2000), out_chars=4000)
+        worker("w20s", "u20s", sonnet, contexts=(5000,))
+        worker("w21", "u21", haiku, 61, contexts=(100_000, 200_000), out_chars=800)
+        spawn = [assistant(9, "w22-spawn", sonnet, [tool_use("d1", "Agent", subagent_type="orchestrate:scout", description="find callers")])]
+        worker("w22", "u22", sonnet, 62, extra=spawn)
+        write_jsonl(sub / "agent-d1x.jsonl", [assistant(10, "d1-a", haiku, [])])
+        (sub / "agent-d1x.meta.json").write_text(json.dumps({"agentType": "orchestrate:scout", "toolUseId": "d1"}))
+        worker("w23", "u23", sonnet, 63)
+
+        def reviewer(name, use_id, texts):
+            write_jsonl(sub / f"agent-{name}.jsonl", [assistant(20 + k, f"{name}-{k}", sonnet, [{"type": "text", "text": t}]) for k, t in enumerate(texts)])
+            (sub / f"agent-{name}.meta.json").write_text(json.dumps({"agentType": "orchestrate:reviewer", "toolUseId": use_id}))
+
+        reviewer("r20", "r20", [verdict_text("changes", blocking=1), verdict_text("approve")])  # one agent, two verdicts: continued
+        reviewer("r21", "r21", ["verdict: approve\nround: 1\nblocking: 0\nnon-blocking: 2\nreview: https://github.com/o/r/pull/61#r"])
+        reviewer("r22a", "r22a", [verdict_text("changes", blocking=2)])
+        reviewer("r22b", "r22b", [verdict_text("approve", minors=1)])  # fresh: dispatched for round 2
+        reviewer("r23", "r23", [verdict_text("approve")])
+
+    def run(self):
+        return prof.profile(self.main, None, 4, 50.0, T0 + timedelta(minutes=300))
+
+
+class QualityTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = QualityFixture(Path(self.tmp.name))
+        self.p = self.fx.run()
+        self.m = self.p["metrics"]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_rounds_per_pr_and_round_1_outcomes(self):
+        r = self.m["review"]
+        self.assertEqual({x["pr"]: x["rounds"] for x in r["prs"]}, {60: 2, 61: 1, 62: 2, 63: 1})
+        self.assertEqual((r["reviewed_prs"], r["rounds_total"], r["rounds_per_pr"]), (4, 6, 1.5))
+        self.assertEqual((r["round1_approvals"], r["round1_changes"], r["round1_changes_rate"]), (2, 2, 0.5))
+
+    def test_continued_and_fresh_reviewer_rounds(self):
+        r = self.m["review"]
+        self.assertEqual((r["continued_rounds"], r["fresh_rounds"]), (1, 1))  # #60 continued, #62 fresh
+
+    def test_approved_with_minors_merged_without_round_2(self):
+        r = self.m["review"]
+        self.assertEqual(r["minors_merged_no_round2"], 1)  # #61 only: #62's minors came after a round 1 of changes
+        self.assertTrue({x["pr"]: x for x in r["prs"]}[61]["minors_merged_no_round2"])
+
+    def test_escalation_counts_haiku_then_sonnet(self):
+        self.assertEqual(self.m["escalations"], {"count": 1, "tickets": [20]})
+        self.assertEqual({t["ticket"]: t["worker_models"] for t in self.p["tickets"]}[20], ["haiku", "sonnet"])
+
+    def test_alias_metadata_names_the_worker_model_but_not_the_model_rollup(self):
+        # Real metadata holds the dispatch alias; the transcript holds the full id. One model, one row.
+        sub = self.fx.main.with_suffix("") / "subagents"
+        for meta in sub.glob("agent-w*.meta.json"):
+            data = json.loads(meta.read_text())
+            data["model"] = "haiku" if "haiku" in data["model"] else "sonnet"
+            meta.write_text(json.dumps(data))
+        p = self.fx.run()
+        self.assertEqual(set(p["metrics"]["tokens_by_model"]) - {"claude-opus-5-5"}, {"claude-haiku-4-5", "claude-sonnet-5-5"})
+        agents = {a["id"]: a for a in p["agents"]}
+        self.assertEqual(agents["w23"]["model"], "claude-sonnet-5-5")
+        self.assertEqual(set(p["metrics"]["worker_models"]), {"haiku", "sonnet"})
+        self.assertEqual(p["metrics"]["escalations"]["tickets"], [20])
+
+    def test_dispatched_round_prefers_the_tier_round_and_repeats_follow_the_highest(self):
+        self.assertEqual(prof.dispatched_round("Review PR 5. Tier M, round 2. Check against your round 1 findings"), 2)
+        self.assertEqual(prof.dispatched_round("against your round 1 findings, round 2"), 2)
+        self.assertEqual(prof.dispatched_round("Review PR 5"), 1)
+        sub = self.fx.main.with_suffix("") / "subagents"
+        agent = lambda name: {"role": "reviewer", "id": name, "pr": 9, "ticket": None, "round": 1,
+                              "transcript": prof.Transcript(sub / f"agent-{name}.jsonl")}
+        r = prof.review_metrics([agent("r22a"), agent("r22b")], [], set())  # both briefs parse to round 1
+        self.assertEqual([v["round"] for v in r["prs"][0]["verdicts"]], [1, 2])
+
+    def test_usage_rounds_and_round_1_approvals_split_by_worker_model(self):
+        wm = self.m["worker_models"]
+        self.assertEqual((wm["haiku"]["workers"], wm["sonnet"]["workers"]), (2, 3))
+        # A ticket is credited to the model that finished it: #20 to Sonnet, #21 to Haiku.
+        self.assertEqual((wm["haiku"]["tickets"], wm["sonnet"]["tickets"]), (1, 3))
+        # Rounds go to the finishing model; round 1 to the model that started the ticket (#60 began on Haiku).
+        self.assertEqual((wm["haiku"]["rounds"], wm["haiku"]["round1_approvals"], wm["haiku"]["round1_changes"]), (1, 1, 1))
+        self.assertEqual((wm["sonnet"]["rounds"], wm["sonnet"]["round1_approvals"], wm["sonnet"]["round1_changes"]), (5, 1, 1))
+        self.assertGreater(wm["haiku"]["cost"], 0)
+        self.assertEqual(wm["haiku"]["tokens"], (6000 + 30 + 500 + 10) + (300_000 + 20 + 500 + 10))
+
+    def test_requests_context_and_tool_output_per_worker_split_by_model(self):
+        h = self.m["worker_models"]["haiku"]
+        self.assertEqual((h["requests"], h["requests_median"]), (4 + 3, 3.5))  # each worker: its requests plus the one that opened the PR
+        self.assertEqual(h["context_median"], statistics.median([1000, 3000, 2000, 500, 100_000, 200_000, 500]))
+        self.assertEqual(h["context_p90"], 200_000)
+        # Tool output is estimated at 4 characters per token, the PR URL's 30 characters included.
+        self.assertEqual(h["tool_output_tokens"], (4030 // 4) + (830 // 4))
+        w21 = {a["id"]: a for a in self.p["agents"]}["w21"]
+        self.assertEqual((w21["requests"], w21["context_median"], w21["tool_output_tokens"]), (3, 100_000, 830 // 4))
+
+    def test_depth_2_agent_joined_by_tool_use_id_is_a_defect(self):
+        (d,) = self.m["depth2"]
+        self.assertEqual((d["parent"], d["ticket"], d["tool_use_id"], d["agent"], d["subagent_type"]),
+                         ("w22", 22, "d1", "d1x", "orchestrate:scout"))
+        self.assertGreater(d["tokens"], 0)
+        self.assertTrue(any("depth 2" in w for w in self.p["warnings"]))
+
+    def test_viewer_survives_a_profile_without_the_new_metrics(self):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        old = json.loads(json.dumps(self.p))
+        for k in ("review", "worker_models", "escalations", "depth2"):
+            del old["metrics"][k]
+        path = Path(self.tmp.name) / "old.json"
+        path.write_text(json.dumps(old))
+        run = lambda f: subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(f)],
+                                       capture_output=True, text=True)
+        out = run(path)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("predates review metrics", out.stdout)
+        # Reviews present but no depth-2 key: that section is skipped, not reported as clean.
+        del self.p["metrics"]["depth2"]
+        path.write_text(json.dumps(self.p))
+        out = run(path)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("Depth-2", out.stdout)
+
+    def test_clean_session_has_no_depth_2_escalations_or_reviews(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = Fixture(Path(d)).run()["metrics"]
+        self.assertEqual((m["depth2"], m["escalations"]["count"], m["review"]["reviewed_prs"]), ([], 0, 0))
+        self.assertIsNone(m["review"]["round1_changes_rate"])
 
 
 class CommandTest(unittest.TestCase):
