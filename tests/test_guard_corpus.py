@@ -10,6 +10,11 @@ to still be wrong there, so the fix shows up here as a failure that says to dele
 A guard change that flips a decision therefore shows as a failure here, and the fix is a
 reviewed edit to the corpus line in the same PR.
 
+Lines whose long quoted text became `TEXT` (a `bash -c "..."`, `python3 -c "..."` or `gh api "..."`
+call) and heredoc bodies (`BODY`) are shape checks, not the original command: the quoted text is gone.
+Lines with `"source": "hand"` are written by hand, not mined: they pin refusals no real session
+exercised (a worker pushing to main, a scout writing), so over-allowing shows up too.
+
 Run: python3 -m unittest discover tests
 """
 
@@ -31,7 +36,10 @@ EXTRACT = ROOT / "scripts" / "guard-corpus"
 
 # Independent of the extract script's own scrubbing, so a hole in one is caught by the other.
 LEAKS = re.compile(
-    r"/Users/|/home/(?!user\b)|shrujan|[\w.+-]+@(?!example\.com)[\w-]+\.\w+"
+    r"/Users/|/home/(?!user\b)|-(?:Users|home)-(?!owner\b)|[\w.+-]+@(?!example\.com)[\w-]+\.\w+"
+    r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-(?!000000000000)[0-9a-f]{12}\b"
+    r"|/private/tmp/claude-(?!0/)\d+|/var/folders/(?!xx/yy/T/)|\btoolu_(?!REDACTED)\w+"
+    r"|\bagent-(?!x\b)[0-9a-f]{16,}|\ba[0-9a-f]{16}\b|\.ssh/(?!KEY)|SSH_AUTH_SOCK=(?!SOCK)"
     r"|\bgh[pousr]_\w{20,}|github_pat_|\bsk-[\w-]{16,}|\bxox[a-z]-|AKIA[0-9A-Z]{16}|eyJ[\w-]{10,}\.[\w-]{10,}\."
     r"|(?i:bearer\s+(?!REDACTED)\S{8,})|\b(?!0{40}\b)[0-9a-f]{40}\b"
 )
@@ -88,7 +96,7 @@ class GuardCorpus(unittest.TestCase):
         self.assertGreater(len(self.rows), 400)
         for n, row in enumerate(self.rows, 1):
             with self.subTest(line=n):
-                self.assertLessEqual(set(row), {"role", "command", "expected", "gap"})
+                self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source"})
                 self.assertTrue(row["role"].startswith("orchestrate:"), row["role"])
                 self.assertTrue(row["command"].strip())
                 self.assertIn(row["expected"], ("allow", "deny"))
@@ -109,6 +117,12 @@ class GuardCorpus(unittest.TestCase):
                     )
                 else:
                     self.assertEqual(actual, row["expected"], f"guard says {actual}, corpus says {row['expected']}")
+
+    def test_hand_written_lines_pin_over_allowing(self):
+        hand = [r for r in self.rows if r.get("source") == "hand"]
+        self.assertGreaterEqual(len(hand), 10)
+        for role in ("orchestrate:worker", "orchestrate:scout"):
+            self.assertTrue([r for r in hand if r["role"] == role and r["expected"] == "deny"], role)
 
     def test_corpus_covers_the_decisions_that_matter(self):
         kinds = Counter((r["role"], r["expected"]) for r in self.rows)
@@ -196,6 +210,19 @@ class Extract(unittest.TestCase):
         self.assertEqual([(r["command"], r["expected"], r.get("gap")) for r in self.lines()],
                          [("git log", "deny", "#1"), ("git status", "allow", None)])
         self.assertIn("added 0", self.run_extract())
+
+    def test_scrubs_any_user_and_session_ids(self):
+        self.add_agent("a1", "orchestrate:worker", [
+            "ls /Users/zed/code/app/src /home/zed/.ssh/id_rsa; ls /Users/zed/.claude/projects/-Users-zed-code-app/"
+            "0bf4b900-c7ac-4ffb-8471-ba67f2222465.jsonl",
+            "gh api repos/zedcorp/app/issues/1; cat /private/tmp/claude-501/x /var/folders/ab/cd1234/T/tmpq/y",
+            'echo toolu_01AbCdEf agent-message from="a0c3937be0592f311" $SSH_AUTH_SOCK=1; SSH_AUTH_SOCK=/tmp/s/agent.1 ssh',
+        ], cwd="/Users/zed/code/app")
+        self.run_extract()
+        text = "\n".join(r["command"] for r in self.lines())
+        for gone in ("zed", "0bf4b900", "claude-501", "ab/cd1234", "toolu_01", "a0c3937", "id_rsa", "/tmp/s/agent"):
+            self.assertNotIn(gone, text)
+        self.assertEqual(LEAKS.findall(text), [])
 
     def test_dry_run_writes_nothing(self):
         self.add_agent("a1", "orchestrate:scout", ["git log"])

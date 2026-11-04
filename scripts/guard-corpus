@@ -42,7 +42,15 @@ LONG_RUN = re.compile(r"(?<![\w/.-])(?=[A-Za-z0-9+_-]*\d)(?=[A-Za-z0-9+_-]*[A-Za
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 HOME = re.compile(r"(?:/Users|/home)/[^/\s'\"]+")
 HEREDOC = re.compile(r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*\n)(.*?)(\n[ \t]*\3[ \t]*(?:\n|$))", re.DOTALL)
-OWNER = re.compile(r"\bshrujan\w*", re.IGNORECASE)
+# The account in a repo path or flag (repos/<acct>/..., github.com/<acct>/..., --repo <acct>/...).
+OWNER = re.compile(r"(repos/|github\.com/|(?:--repo|-R)[ =])(?!owner/|\{)[\w.-]+/")
+MANGLED_HOME = re.compile(r"-(?:Users|home)-(?!owner\b)[^-/\s]+")  # a project dir name: /Users/x/y -> -Users-x-y
+UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+TMP_DIR = re.compile(r"/private/tmp/claude-\d+/|/var/folders/[^/\s]+/[^/\s]+/T/(?:tmp[\w.]*/?)?")
+TOOL_USE_ID = re.compile(r"\btoolu_\w+")
+AGENT_ID = re.compile(r"\b(?:agent-)?a[0-9a-f]{16}\b|(?<=agent-)[0-9a-f]{16,}\b")
+SSH_KEY = re.compile(r"\.ssh/[^\s'\"]+")
+SSH_SOCK = re.compile(r"(SSH_AUTH_SOCK=)[^\s'\"]+")
 
 
 def _blank_json(value, key=None):
@@ -101,6 +109,13 @@ def normalise(command, repo_roots=()):
     for root in sorted(set(repo_roots), key=len, reverse=True):
         command = command.replace(root, "/repo")
     command = re.sub(r"/repo/\.claude/worktrees/[\w-]+", "/repo/.claude/worktrees/agent-x", command)
+    command = UUID.sub("00000000-0000-0000-0000-000000000000", command)
+    command = TMP_DIR.sub(lambda m: "/private/tmp/claude-0/" if m.group().startswith("/private") else "/var/folders/xx/yy/T/", command)
+    command = TOOL_USE_ID.sub("toolu_REDACTED", command)
+    command = AGENT_ID.sub("agent-x", command)
+    command = SSH_KEY.sub(".ssh/KEY", command)
+    command = SSH_SOCK.sub(r"\1SOCK", command)
+    command = MANGLED_HOME.sub("-Users-owner", command)
     command = HEREDOC.sub(_heredoc, command)
     command = shorten_quoted(command)
     command = TOKENS.sub("REDACTED", command)
@@ -108,7 +123,7 @@ def normalise(command, repo_roots=()):
     command = LONG_RUN.sub("REDACTED", command)
     command = EMAIL.sub("user@example.com", command)
     command = HOME.sub("/home/user", command)
-    return OWNER.sub("owner", command)
+    return OWNER.sub(r"\1owner/", command)
 
 
 def repo_root(cwd):
