@@ -47,9 +47,6 @@ class Invocation(unittest.TestCase):
                 # The path form skills use: skills/<skill>/../../scripts/<name>.
                 path = ROOT / "skills" / "run" / ".." / ".." / "scripts" / name
                 args = ["--cwd", str(ROOT), "true"] if name == "verify" else ["--help"]
-                if name == "sandbox-git":  # no --help; a repo without an SSH remote is a no-op
-                    args = ["--repo", tmp]
-                    subprocess.run(["git", "init", "-q", tmp], check=True)
                 r = run([str(path), *args], cwd=tempfile.gettempdir(), env=env)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertNotIn("Traceback", r.stderr)

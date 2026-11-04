@@ -14,9 +14,10 @@ A non-SSH origin changes nothing. The file is local, so `.claude/settings.local.
 added to .gitignore when `git check-ignore` doesn't already ignore it.
 Docs: https://code.claude.com/docs/en/sandboxing
 
-Exit 0 done (or nothing to do), 1 refused, 2 bad usage. Stdlib only, Python 3.9+.
+Exit 0 done (or nothing to do), 1 refused, 2 could not run (bad usage, no repo or origin, unreadable file). Stdlib only, Python 3.9+.
 """
 
+import argparse
 import json
 import os
 import re
@@ -25,6 +26,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import common
 
 COMMANDS = ["git fetch *", "git pull *", "git push *"]
 SETTINGS = ".claude/settings.local.json"
@@ -50,7 +53,7 @@ def write_atomic(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         # mkstemp makes 0600; keep an existing file's mode, else a normal 0644.
         os.chmod(tmp, stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644)
@@ -71,14 +74,14 @@ def refuse(why):
 
 
 def main(argv):
-    repo = Path(".")
-    if argv:
-        if argv[0] != "--repo" or len(argv) != 2:
-            print("usage: sandbox-git [--repo PATH]", file=sys.stderr)
-            sys.exit(2)
-        repo = Path(argv[1])
-    r = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo, capture_output=True, text=True)
-    host = ssh_host(r.stdout.strip()) if r.returncode == 0 else None
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--repo", default=".", help="the repo (default: current directory)")
+    repo = Path(ap.parse_args(argv).repo)
+    r = common.run("git", "remote", "get-url", "origin", cwd=repo)
+    if r.returncode != 0:
+        # Not "nothing to change": a wrong --repo or a missing origin must not pass quietly.
+        common.die(f"sandbox-git: cannot read origin of {repo}: {common.one_line(r.stderr) or 'git failed'}")
+    host = ssh_host(r.stdout.strip())
     if not host:
         print("origin is not an SSH remote: nothing to change")
         return 0
@@ -87,7 +90,9 @@ def main(argv):
     data = {}
     if path.exists():
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as e:
+            common.die(f"sandbox-git: cannot read {path}: {e.strerror or e}")
         except ValueError:
             return refuse("is not valid JSON")
         if not isinstance(data, dict):
@@ -110,7 +115,10 @@ def main(argv):
     ignored = subprocess.run(["git", "check-ignore", "-q", SETTINGS], cwd=repo).returncode == 0
     if not ignored:
         ignore = repo / ".gitignore"
-        old = ignore.read_text() if ignore.exists() else ""
+        try:
+            old = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+        except OSError as e:
+            common.die(f"sandbox-git: cannot read {ignore}: {e.strerror or e}")
         if old and not old.endswith("\n"):
             old += "\n"
         write_atomic(ignore, old + SETTINGS + "\n")

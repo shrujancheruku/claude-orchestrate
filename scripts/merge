@@ -218,6 +218,11 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
     if default is None:
         say("sweep skipped: the default branch is unknown")
         return False
+    version = replay.git_version(cwd)  # once per run; unreadable means try anyway
+    if version is not None and version < replay.MERGE_TREE_GIT:
+        say("sweep skipped: it needs git >= %d.%d (git merge-tree --write-tree); this is git %d.%d"
+            % (replay.MERGE_TREE_GIT + version))
+        return False
     section = common.config_section(cwd, "Shared files")
     patterns, generated = replay.shared_patterns(section), replay.generated_commands(section)
     p = run("gh", "pr", "list", "--state", "open", "--base", default, "--json",

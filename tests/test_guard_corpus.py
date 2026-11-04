@@ -26,6 +26,7 @@ import re
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from collections import Counter
 from pathlib import Path
 
@@ -231,6 +232,41 @@ class Extract(unittest.TestCase):
             out = extract.normalise("ls /Users/jane-doe.x/code /x/-Users-jane-doe-x-code-app/y")
         self.assertEqual(out, "ls /home/user/code /x/-Users-owner-code-app/y")
         self.assertEqual(LEAKS.findall(out), [])
+
+    def test_blank_corpus_lines_are_skipped(self):
+        self.add_agent("a1", "orchestrate:scout", ["git log"])
+        row = json.dumps({"role": "orchestrate:scout", "command": "git status", "expected": "allow"})
+        self.out.write_text(f"\n{row}\n   \n")
+        self.assertIn("added 1", self.run_extract())
+        self.assertEqual([r["command"] for r in self.lines()], ["git status", "git log"])
+
+    def test_a_garbled_corpus_line_is_named_by_number(self):
+        import subprocess
+        self.add_agent("a1", "orchestrate:scout", ["git log"])
+        self.out.write_text('\n{"role": "x", "command": "y", "expected": "allow"}\n{oops\n')
+        r = subprocess.run([str(EXTRACT), "sess", "--projects-dir", str(self.projects), "--out", str(self.out)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("line 3", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_a_crashing_guard_is_reported_with_its_command_and_stderr(self):
+        bad = self.dir / "bad-guard.py"
+        bad.write_text("import sys; sys.stderr.write('boom'); sys.exit(3)\n")
+        extract = load_extract()
+        extract.GUARD = bad
+        with self.assertRaises(SystemExit) as cm, unittest.mock.patch("sys.stderr", io.StringIO()) as err:
+            extract.decide("orchestrate:scout", "git log", str(self.dir))
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("boom", err.getvalue())
+        self.assertIn("git log", err.getvalue())
+
+    def test_non_dict_content_blocks_are_ignored(self):
+        extract = load_extract()
+        t = self.dir / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "cwd": "/x", "message": {"content": [
+            "text", 3, None, {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}}) + "\n")
+        self.assertEqual(list(extract.bash_commands(t)), [("ls", "/x")])
 
     def test_dry_run_writes_nothing(self):
         self.add_agent("a1", "orchestrate:scout", ["git log"])
