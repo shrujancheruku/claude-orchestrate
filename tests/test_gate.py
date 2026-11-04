@@ -26,8 +26,8 @@ class GateTest(unittest.TestCase):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f"## Review\n\n- **Repo-specific checks:** {line}\n- **Post reviews:** no\n")
 
-    def gate(self):
-        return self.env.run("gate", "7", check=False)
+    def gate(self, *extra):
+        return self.env.run("gate", "7", "--retry-delay", "0", *extra, check=False)
 
     def event(self):
         (e,) = self.env.events()
@@ -92,6 +92,88 @@ class GateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(len(r.stdout.splitlines()), 2)  # title + mergeable only
         self.assertNotIn("README.md", r.stdout)
+
+    def test_missing_cwd_exits_2_before_any_check(self):
+        self.prime()
+        r = self.gate("--cwd", str(self.env.repo / "gone"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--cwd", r.stderr)
+        self.assertIn("does not exist", r.stderr)
+        self.assertEqual(self.env.gh_calls(), [])
+        self.assertEqual(self.env.events(), [])
+
+    def test_cwd_is_where_repo_commands_and_config_live(self):
+        self.prime()
+        other = self.env.repo / "wt"
+        (other / ".claude").mkdir(parents=True)
+        (other / ".claude" / "orchestration.md").write_text("## Review\n\n- **Repo-specific checks:** where (run: `pwd`)\n")
+        r = self.gate("--cwd", str(other))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("pwd", r.stdout)
+        self.assertEqual(len(r.stdout.splitlines()), 3)
+
+    def test_several_markers_in_one_item_all_run(self):
+        self.prime()
+        self.config("a (run: `echo one > one.txt`) and b (run: `echo two > two.txt`)")
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue((self.env.repo / "one.txt").exists() and (self.env.repo / "two.txt").exists())
+
+    def test_dry_run_is_not_a_marker(self):
+        self.prime()
+        self.config("dry-run: `touch nope.txt`")
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertFalse((self.env.repo / "nope.txt").exists())
+
+    def test_malformed_markers_fail(self):
+        for item in ("run: ``echo x``", "run:", "run: `` nothing"):
+            with self.subTest(item=item):
+                self.prime()
+                self.config(item)
+                r = self.gate()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("malformed run: marker", r.stdout)
+
+    def test_only_the_repo_specific_checks_label_counts(self):
+        self.prime()
+        p = self.env.repo / ".claude" / "orchestration.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("## Review\n\n- Tiers: see Repo-specific checks (run: `touch nope.txt`)\n- **Repo-specific checks:** none\n")
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertFalse((self.env.repo / "nope.txt").exists())
+
+    def test_scoped_and_breaking_titles_pass(self):
+        for title in ("feat(gate)!: drop x", "fix!: y", "chore(deps-dev): bump"):
+            with self.subTest(title=title):
+                self.prime(title=title)
+                self.assertEqual(self.gate().returncode, 0)
+
+    def test_bad_titles_fail(self):
+        for title in ("feat: ", "feat(): x", "Feat: x", "feat x"):
+            with self.subTest(title=title):
+                self.prime(title=title)
+                self.assertEqual(self.gate().returncode, 1)
+
+    def test_unknown_mergeability_retries_then_exits_3(self):
+        self.prime(mergeable="UNKNOWN")
+        r = self.gate()
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("run the gate again", r.stdout)
+        views = [c for c in self.env.gh_calls() if c[:2] == ["pr", "view"]]
+        self.assertGreater(len(views), 1)
+        self.assertEqual(self.env.events()[-1]["outcome"], "unknown")
+
+    def test_unknown_with_another_failure_is_a_failure(self):
+        self.prime(title="bad title", mergeable="UNKNOWN")
+        self.assertEqual(self.gate().returncode, 1)
+
+    def test_gh_failure_exits_2(self):
+        self.env.set_gh([{"args": ["pr", "view"], "stderr": "boom", "exit": 1}])
+        r = self.gate()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("boom", r.stderr)
 
     def test_no_config_runs_builtin_checks_only(self):
         self.prime()
