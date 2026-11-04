@@ -39,7 +39,7 @@ class Invocation(unittest.TestCase):
                 self.assertEqual((SCRIPTS / name).read_text().splitlines()[0], "#!/usr/bin/env python3")
 
     def test_clis_run_by_path_like_a_skill(self):
-        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         for name in CLIS:
@@ -67,7 +67,7 @@ class Invocation(unittest.TestCase):
 
     def test_docs_follow_the_convention(self):
         # Every doc line that runs a script uses `python3 -I` for a standalone .py script and no interpreter otherwise.
-        call = re.compile(r"(python3\s+(?:-I\s+)?)?[\"']?([^\s`\"']*/)?scripts/([\w.-]+)")
+        call = re.compile(r"(python3\s+(?:-I\s+)?)?[\"']?([^\s`\"']*/)?scripts/([\w-]+(?:\.py)?)")
         docs = [*ROOT.glob("skills/*/*.md"), *ROOT.glob("agents/*.md"), ROOT / "README.md"]
         seen = set()
         for doc in docs:
@@ -75,7 +75,7 @@ class Invocation(unittest.TestCase):
                 for m in call.finditer(line):
                     name = m.group(3)
                     # A bare `scripts/x` is a mention; a path ahead of it (`${CLAUDE_SKILL_DIR}/../../`) is a call.
-                    if name not in set(CLIS) | STANDALONE or not m.group(2):
+                    if name not in set(CLIS) | STANDALONE or not (m.group(2) or m.group(1)):
                         continue
                     if line[:m.start()].rstrip(" `").endswith("copy"):
                         continue  # copying a script, not running it
