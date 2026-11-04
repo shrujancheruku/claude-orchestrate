@@ -1,12 +1,13 @@
 """Smoke tests: trivial CLIs built on scripts/common.py, driven through the harness."""
 
 import os
+import shutil
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, git  # noqa: E402
+from harness import SCRIPTS, ScriptEnv, git # noqa: E402
 
 TRIVIAL_CLI = '''
 import subprocess, sys
@@ -35,7 +36,12 @@ class HarnessSmoke(unittest.TestCase):
         self.addCleanup(self.env.close)
 
     def cli(self, name, source):
-        path = self.env.repo.parent / name
+        # A temp scripts/ dir holding a copy of common.py beside the fixture CLI, so the
+        # CLI's plain `import common` only works if the script's own directory is on sys.path.
+        d = self.env.repo.parent / "scripts"
+        d.mkdir(exist_ok=True)
+        shutil.copy(SCRIPTS / "common.py", d / "common.py")
+        path = d / name
         path.write_text(source)
         return path
 

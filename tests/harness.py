@@ -87,10 +87,9 @@ class ScriptEnv:
         if not path.is_absolute():
             path = SCRIPTS / script
         # No -I: it drops a script's own directory from sys.path and would break `import common`.
-        # PYTHONPATH adds scripts/ so fixture CLIs outside it can do a plain `import common` too.
+        # No PYTHONPATH either: scripts run here exactly as they do for real.
         env = dict(
             os.environ,
-            PYTHONPATH=str(SCRIPTS),
             PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             FAKE_GH_STATE=str(self.gh_state),
         )
