@@ -109,6 +109,12 @@ def normalise(command, repo_roots=()):
     for root in sorted(set(repo_roots), key=len, reverse=True):
         command = command.replace(root, "/repo")
     command = re.sub(r"/repo/\.claude/worktrees/[\w-]+", "/repo/.claude/worktrees/agent-x", command)
+    # The extracting user's own home first, read at run time: the generic patterns below can't tell where
+    # a dashed or dotted name ends in the mangled form (-Users-jane-doe-code). Another user's dashed name
+    # in a transcript can still be only half scrubbed.
+    home = str(Path.home())
+    if len(home) > len("/home/x"):
+        command = command.replace(re.sub(r"[/.]", "-", home), "-Users-owner").replace(home, "/home/user")
     command = UUID.sub("00000000-0000-0000-0000-000000000000", command)
     command = TMP_DIR.sub(lambda m: "/private/tmp/claude-0/" if m.group().startswith("/private") else "/var/folders/xx/yy/T/", command)
     command = TOOL_USE_ID.sub("toolu_REDACTED", command)

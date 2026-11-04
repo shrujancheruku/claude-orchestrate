@@ -214,15 +214,23 @@ class Extract(unittest.TestCase):
     def test_scrubs_any_user_and_session_ids(self):
         self.add_agent("a1", "orchestrate:worker", [
             "ls /Users/zed/code/app/src /home/zed/.ssh/id_rsa; ls /Users/zed/.claude/projects/-Users-zed-code-app/"
-            "0bf4b900-c7ac-4ffb-8471-ba67f2222465.jsonl",
+            "11111111-2222-4333-8444-555555555555.jsonl",
             "gh api repos/zedcorp/app/issues/1; cat /private/tmp/claude-501/x /var/folders/ab/cd1234/T/tmpq/y",
-            'echo toolu_01AbCdEf agent-message from="a0c3937be0592f311" $SSH_AUTH_SOCK=1; SSH_AUTH_SOCK=/tmp/s/agent.1 ssh',
+            'echo toolu_01AbCdEf agent-message from="a1234567890abcdef" $SSH_AUTH_SOCK=1; SSH_AUTH_SOCK=/tmp/s/agent.1 ssh',
         ], cwd="/Users/zed/code/app")
         self.run_extract()
         text = "\n".join(r["command"] for r in self.lines())
-        for gone in ("zed", "0bf4b900", "claude-501", "ab/cd1234", "toolu_01", "a0c3937", "id_rsa", "/tmp/s/agent"):
+        for gone in ("zed", "11111111", "claude-501", "ab/cd1234", "toolu_01", "a123456", "id_rsa", "/tmp/s/agent"):
             self.assertNotIn(gone, text)
         self.assertEqual(LEAKS.findall(text), [])
+
+    def test_scrubs_the_running_users_dashed_and_dotted_home(self):
+        from unittest import mock
+        extract = load_extract()
+        with mock.patch.object(Path, "home", return_value=Path("/Users/jane-doe.x")):
+            out = extract.normalise("ls /Users/jane-doe.x/code /x/-Users-jane-doe-x-code-app/y")
+        self.assertEqual(out, "ls /home/user/code /x/-Users-owner-code-app/y")
+        self.assertEqual(LEAKS.findall(out), [])
 
     def test_dry_run_writes_nothing(self):
         self.add_agent("a1", "orchestrate:scout", ["git log"])
