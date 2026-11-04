@@ -392,11 +392,11 @@ class SweepTest(unittest.TestCase):
         real = mod.replay.update_branch
         calls = []
 
-        def boom(repo, base, branch, method, patterns):
+        def boom(repo, base, branch, method, patterns, generated=()):
             calls.append(branch)
             if branch == "pr-a":
                 raise RuntimeError("disk on fire")
-            return real(repo, base, branch, method, patterns)
+            return real(repo, base, branch, method, patterns, generated)
 
         env = {"PATH": f"{self.env.bin}{os.pathsep}{os.environ['PATH']}", "FAKE_GH_STATE": str(self.env.gh_state)}
         with unittest.mock.patch.dict(os.environ, env), unittest.mock.patch.object(mod.replay, "update_branch", boom), \
@@ -407,6 +407,51 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(calls, ["pr-a", "pr-b"])  # went on to the next PR
         self.assertIn("HANDBACK PR #8 pr-a: (sweep) (RuntimeError: disk on fire)", printed)
         self.assertIn("- main item\n- other", self.remote("pr-b", "CHANGELOG.md"))
+
+    def generated_scenario(self, command):
+        """pr-a and main both rebuild gen.txt (upper-case src.txt) after editing different lines of src.txt."""
+        (self.env.repo / ".claude" / "orchestration.md").write_text(
+            CONFIG.replace("- **Generated:** none", f"- **Generated:**\n  - `gen*.txt`: `{command}`"))
+        self.env.commit("gen.txt", "ONE TWO\n", "chore: gen")
+        git(self.env.repo, "push", "origin", "main")
+        self.base = git(self.env.repo, "rev-parse", "HEAD")
+        self.git_log.write_text("")
+        self.pr_branch("pr-a", {"src.txt": "one\ntwo\nthree\n", "gen.txt": "ONE TWO THREE\n"})
+        self.land({"src.txt": "zero\none\ntwo\n", "gen.txt": "ZERO ONE TWO\n"})
+
+    def test_conflicting_generated_file_is_regenerated_and_committed(self):
+        self.generated_scenario("tr a-z A-Z < src.txt | paste -sd' ' - > gen.txt")
+        p = self.sweep()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.remote("pr-a", "gen.txt"), "ZERO ONE TWO THREE\n")
+        self.assertEqual(self.replays(), [("gen.txt", "regenerated")])
+        self.assertEqual(self.pushes(), ["push origin HEAD:refs/heads/pr-a"])
+
+    def test_regenerated_file_under_rebase(self):
+        self.generated_scenario("tr a-z A-Z < src.txt | paste -sd' ' - > gen.txt")
+        p = self.sweep("rebase")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.remote("pr-a", "gen.txt"), "ZERO ONE TWO THREE\n")
+        self.assertEqual(self.replays(), [("gen.txt", "regenerated")])
+
+    def test_failing_regenerate_command_is_handed_back_with_the_conflict(self):
+        self.generated_scenario("echo no good >&2; exit 3")
+        before = git(self.env.repo, "rev-parse", "origin/pr-a")
+        p = self.sweep()
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertIn("HANDBACK PR #8 pr-a: gen.txt (regenerate command failed: echo no good >&2; exit 3 (no good))",
+                      p.stdout)
+        git(self.env.repo, "fetch", "origin")
+        self.assertEqual(git(self.env.repo, "rev-parse", "origin/pr-a"), before)
+        self.assertEqual(self.pushes(), [])
+        self.assertEqual(self.replays(), [("gen.txt", "handed-back")])
+
+    def test_generated_commands_parse(self):
+        import replay
+        sec = "- **Shared files:**\n  - `A.md`: x\n- **Generated:**\n  - `gen/**`: `make gen`\n  - `b.txt`: `sh b.sh`\n"
+        self.assertEqual(replay.generated_commands(sec), [("gen/**", "make gen"), ("b.txt", "sh b.sh")])
+        self.assertEqual(replay.shared_patterns(sec), ["A.md"])
+        self.assertEqual(replay.generated_commands("- **Generated:** none\n"), [])
 
     def test_branch_that_is_only_behind_is_left_alone(self):
         self.pr_branch("pr-a", {"src.txt": "one\ntwo\nthree\n"})

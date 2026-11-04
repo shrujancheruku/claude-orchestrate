@@ -218,7 +218,8 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
     if default is None:
         say("sweep skipped: the default branch is unknown")
         return False
-    patterns = replay.shared_patterns(common.config_section(cwd, "Shared files"))
+    section = common.config_section(cwd, "Shared files")
+    patterns, generated = replay.shared_patterns(section), replay.generated_commands(section)
     p = run("gh", "pr", "list", "--state", "open", "--base", default, "--json",
             "number,headRefName,isCrossRepository", cwd=cwd)
     try:
@@ -242,7 +243,7 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
         if not state:
             continue
         try:
-            status, conflicts, events = replay.update_branch(cwd, default, b, method, patterns)
+            status, conflicts, events = replay.update_branch(cwd, default, b, method, patterns, generated)
         except Exception as e:  # the PR is already merged: one branch's failure must not lose the exit code
             status, conflicts, events = "handed-back", [("(sweep)", f"{type(e).__name__}: {common.one_line(e)}")], []
         for path, outcome in events:

@@ -7,7 +7,9 @@ collide, a human resolving it adds nothing, so the script does it:
   sides inserting at the same spot keep both, main's lines first.
 * word merge: a line changed on both sides goes through `git merge-file` with one word per line. It is
   accepted only when git reports no conflict, i.e. the two sides' changes are disjoint.
-* anything else is handed back, and so is a conflict in a file that is not shared.
+* a conflicting generated file takes main's side, then the glob's regenerate command runs in the
+  worktree; a failing command hands the file back.
+* anything else is handed back, and so is a conflict in a file that is neither shared nor generated.
 * afterwards the result's diff against main must contain only lines the PR added or changed.
 
 The sweep runs after a merge: every other open PR whose branch now conflicts with the default branch
@@ -31,6 +33,7 @@ from pathlib import Path
 import common
 
 LINE_REPLAY, WORD_MERGE, HANDED_BACK = "line-replay", "word-merge", "handed-back"
+REGENERATED = "regenerated"  # a generated file rebuilt by its glob's command (profile.py counts this name)
 MAX_REBASE_STEPS = 200
 
 
@@ -48,6 +51,22 @@ def shared_patterns(section):
         if inside and m:
             patterns.append(m.group(1))
     return patterns
+
+
+def generated_commands(section):
+    """(glob, regenerate command) pairs under the `**Generated:**` item of the Shared files section.
+
+    Each nested bullet is `- \`<glob>\`: \`<command>\``. `none` or free text after the item gives no pairs.
+    """
+    pairs, inside = [], False
+    for line in (section or "").splitlines():
+        if line.strip() and not line.startswith((" ", "\t")):
+            inside = bool(re.match(r"-\s+\*\*Generated:?\*\*", line))
+            continue
+        m = re.match(r"\s+[-*]\s+`([^`]+)`\s*:\s*`([^`]+)`", line)
+        if inside and m:
+            pairs.append((m.group(1), m.group(2)))
+    return pairs
 
 
 def is_shared(path, patterns):
@@ -158,19 +177,40 @@ def _stage(cwd, n, path):
         return None
 
 
-def resolve_conflicts(wt, patterns, pr_stage):
+def resolve_conflicts(wt, patterns, pr_stage, generated=()):
     """Resolve the shared files conflicted in wt. Returns (resolved paths, conflicts, events).
 
     pr_stage is the index stage holding the PR's side: 2 during a merge (the branch is "ours"), 3
     during a rebase (the PR's commit is "theirs"). Nothing is staged when any conflict is left.
+    generated is a list of (glob, command): a conflicting file matching a glob gets main's side and
+    then the command runs in wt. Its value in `resolved` is None (already on disk).
     """
     out = git(wt, "diff", "--name-only", "--diff-filter=U", "-z").stdout
     files = [f for f in out.split("\0") if f]
     main_stage = 5 - pr_stage
     resolved, conflicts, events = {}, [], []
+    ran = {}  # command -> error text or None; a command shared by several globs runs once
     for path in files:
         if not is_shared(path, patterns):
-            conflicts.append((path, "not a shared file"))
+            cmd = next((c for g, c in generated if fnmatch.fnmatchcase(path, g)), None)
+            if cmd is None:
+                conflicts.append((path, "not a shared file"))
+                continue
+            main = _stage(wt, main_stage, path)
+            if main is None:
+                events.append((path, HANDED_BACK))
+                conflicts.append((path, "deleted or not text on one side"))
+                continue
+            Path(wt, path).write_text(main, encoding="utf-8")  # main's side, then rebuild it from the sources
+            if cmd not in ran:
+                r = subprocess.run(cmd, cwd=wt, shell=True, capture_output=True, text=True)
+                ran[cmd] = None if r.returncode == 0 else common.one_line(r.stderr or r.stdout) or f"exit {r.returncode}"
+            if ran[cmd] is not None:
+                events.append((path, HANDED_BACK))
+                conflicts.append((path, f"regenerate command failed: {cmd} ({ran[cmd]})"))
+            else:
+                events.append((path, REGENERATED))
+                resolved[path] = None
             continue
         base, main, pr = _stage(wt, 1, path), _stage(wt, main_stage, path), _stage(wt, pr_stage, path)
         if main is None or pr is None:  # deleted or binary on one side
@@ -188,12 +228,13 @@ def resolve_conflicts(wt, patterns, pr_stage):
 
 def _finish(wt, resolved):
     for path, text in resolved.items():
-        Path(wt, path).write_text(text, encoding="utf-8")
+        if text is not None:
+            Path(wt, path).write_text(text, encoding="utf-8")
     if resolved:
         git(wt, "add", "--", *resolved)
 
 
-def update_branch(repo, base, branch, method, patterns):
+def update_branch(repo, base, branch, method, patterns, generated=()):
     """Bring origin/<branch> up to date with origin/<base> in a throwaway worktree and push it.
 
     Returns (status, conflicts, events): status "updated" or "handed-back"; conflicts is a list of
@@ -211,7 +252,7 @@ def update_branch(repo, base, branch, method, patterns):
             for _ in range(MAX_REBASE_STEPS):
                 if p.returncode == 0:
                     break
-                resolved, conflicts, ev = resolve_conflicts(wt, patterns, pr_stage=3)
+                resolved, conflicts, ev = resolve_conflicts(wt, patterns, pr_stage=3, generated=generated)
                 events += ev
                 if conflicts or not resolved:
                     git(wt, "rebase", "--abort")
@@ -225,7 +266,7 @@ def update_branch(repo, base, branch, method, patterns):
         else:
             p = git(wt, "merge", "--no-edit", f"origin/{base}")
             if p.returncode != 0:
-                resolved, conflicts, events = resolve_conflicts(wt, patterns, pr_stage=2)
+                resolved, conflicts, events = resolve_conflicts(wt, patterns, pr_stage=2, generated=generated)
                 if conflicts or not resolved:
                     git(wt, "merge", "--abort")
                     return "handed-back", conflicts or [("(merge)", p.stderr.strip()[-200:])], _final(events)
