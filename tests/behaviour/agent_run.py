@@ -20,7 +20,17 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 STUB_PR = PLUGIN_ROOT / "tests" / "fixtures" / "stub-pr"
 BRIEFS = PLUGIN_ROOT / "tests" / "fixtures" / "briefs"
 
-RUNS = int(os.environ.get("ORCH_BEHAVIOUR_RUNS", "3"))  # lower it to iterate on one case
+def _runs():
+    """ORCH_BEHAVIOUR_RUNS (1..3) lowers the runs per case while iterating; read only when the tier is on."""
+    if os.environ.get("ORCH_BEHAVIOUR") != "1":
+        return 3
+    try:
+        return max(1, min(3, int(os.environ.get("ORCH_BEHAVIOUR_RUNS", "3"))))
+    except ValueError:
+        return 3
+
+
+RUNS = _runs()
 MAX_BUDGET_USD = 1
 MAX_TURNS = 40
 TIMEOUT_S = 900
@@ -227,8 +237,9 @@ def run_case(name, build, check, runs=RUNS):
                     check(run)
                     passes += 1
                 except AssertionError as e:
-                    failures.append("run %d: %s\n  report: %s\n  last tool calls: %s" % (
-                        i + 1, e, run.final_report[:1500], [(n, str(inp)[:200]) for n, inp in run.tool_calls()[-5:]]))
+                    unmatched = env.gh_unmatched()
+                    failures.append("run %d: %s\n  gh calls with no canned response: %s\n  report: %s\n  last tool calls: %s" % (
+                        i + 1, e, unmatched, run.final_report[:1500], [(n, str(inp)[:200]) for n, inp in run.tool_calls()[-5:]]))
             finally:
                 env.close()
     finally:

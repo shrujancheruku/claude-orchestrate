@@ -29,6 +29,8 @@ for r in json.load(open(state))["responses"]:
         sys.stdout.write(r.get("stdout", ""))
         sys.stderr.write(r.get("stderr", ""))
         sys.exit(r.get("exit", 0))
+with open(state + ".unmatched", "a") as f:
+    f.write(json.dumps(args) + "\\n")
 sys.stderr.write("fake gh: no canned response for %r\\n" % (args,))
 sys.exit(1)
 '''
@@ -79,6 +81,11 @@ class ScriptEnv:
     def gh_calls(self):
         calls = Path(str(self.gh_state) + ".calls")
         return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+
+    def gh_unmatched(self):
+        """Argument lists of gh calls no canned response matched (the fake exited 1 on them)."""
+        f = Path(str(self.gh_state) + ".unmatched")
+        return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
 
     def gh_stdin(self):
         """[{"args": [...], "stdin": "..."}] for each gh call that read stdin (`-` among its args)."""

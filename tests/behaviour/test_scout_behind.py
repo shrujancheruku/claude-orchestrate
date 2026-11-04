@@ -18,7 +18,7 @@ PR = {
     "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "",
     "statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}],
 }
-COMPARE = "repos/example/demo/compare/main...5-feature"
+COMPARES = ["repos/example/demo/compare/main...5-feature", "repos/{owner}/{repo}/compare/main...5-feature"]
 
 
 def build():
@@ -31,8 +31,11 @@ def build():
     git(env.repo, "push", "origin", "main")
     pr = dict(PR, headRefOid=git(env.repo, "rev-parse", "5-feature"))
     env.set_gh([
-        {"args": ["api", COMPARE, "--jq", ".behind_by"], "stdout": "1\n"},
-        {"args": ["api", COMPARE], "stdout": json.dumps({"ahead_by": 1, "behind_by": 1, "status": "diverged"})},
+        *[{"args": ["api", c, "--jq", ".behind_by"], "stdout": "1\n"} for c in COMPARES],
+        *[{"args": ["api", c], "stdout": json.dumps({"ahead_by": 1, "behind_by": 1, "status": "diverged"})} for c in COMPARES],
+        # Unresolved review comments (pre-merge check reads them): none.
+        {"args": ["api", "repos/{owner}/{repo}/pulls/5/comments"], "stdout": "0\n"},
+        {"args": ["api", "repos/example/demo/pulls/5/comments"], "stdout": "0\n"},
         {"args": ["pr", "view"], "stdout": json.dumps(pr)},
         {"args": ["pr", "checks"], "stdout": "test\tpass\t1m\thttps://example.test/run/1\n"},
         {"args": ["pr", "diff"], "stdout": "feature.txt\n"},
@@ -43,12 +46,14 @@ def build():
 
 
 def check(run):
+    assert any(c[:1] == ["api"] and "compare/main...5-feature" in " ".join(c) for c in run.gh_calls()), \
+        "never made the compare call: %r" % run.gh_calls()
+    assert not run.env.gh_unmatched(), "gh calls with no canned response: %r" % run.env.gh_unmatched()
     report = run.final_report
-    line = re.search(r"(?m)^\W*3\W.*$", report)
-    assert line, "no item 3 in the report: %r" % report[:500]
-    text = line.group(0).lower()
-    assert "pass" not in text and "up to date" not in text, "item 3 calls the branch up to date: %r" % line.group(0)
-    assert re.search(r"fail|pending|behind", text), "item 3 neither fails nor says behind: %r" % line.group(0)
+    line = re.search(r"(?m)^\W*3\W+(pass|fail|pending)\b.*$", report)
+    assert line, "no item 3 verdict in the report: %r" % report[:500]
+    assert line.group(1) == "fail", "item 3 is not fail: %r" % line.group(0)
+    assert re.search(r"behind_by\W*1\b", line.group(0)), "item 3 lacks behind_by 1: %r" % line.group(0)
 
 
 @unittest.skipUnless(agent_run.ENABLED, "behavioural tier: set ORCH_BEHAVIOUR=1 (costs money)")

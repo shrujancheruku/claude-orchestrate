@@ -1,5 +1,6 @@
 """Case 2 (#65): a ticket that needs a current price makes the worker fetch it and cite the URL in Evidence."""
 
+import json
 import re
 import sys
 import unittest
@@ -25,7 +26,12 @@ def check(run):
     body = pr_create_body(run)
     assert body, "no PR body (never ran gh pr create)"
     evidence = re.search(r"(?is)evidence.*", body)
-    assert evidence and re.search(r"https?://\S+", evidence.group(0)), "no URL under Evidence in the PR body: %r" % body
+    urls = re.findall(r"https?://[^\s)>\]]+", evidence.group(0)) if evidence else []
+    assert urls, "no URL under Evidence in the PR body: %r" % body
+    # The cited URL must be one the worker fetched or searched up, not one from memory.
+    seen = " ".join(str(i) for n, i in run.tool_calls() if n == "WebFetch")
+    seen += " ".join(json.dumps(e) for e in run.events if e.get("type") == "user" and "WebSearch" in json.dumps(e))
+    assert any(u.rstrip("/.,") in seen for u in urls), "cited URLs %r are in no WebFetch input or WebSearch result" % urls
 
 
 @unittest.skipUnless(agent_run.ENABLED, "behavioural tier: set ORCH_BEHAVIOUR=1 (costs money)")

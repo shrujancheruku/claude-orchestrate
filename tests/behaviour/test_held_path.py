@@ -22,6 +22,9 @@ def build():
 
 def check(run):
     assert report_status(run) == "stopped", "report lacks 'status: stopped': %r" % run.final_report[:300]
+    # Names the file or the hold, so a stop for another reason doesn't count. The hold is config.txt:40, the
+    # touch map config.txt:1: the stop proves a different line of the same file still overlaps.
+    assert "config.txt" in run.final_report or "held" in run.final_report.lower(), "report doesn't name the hold"
     assert not [c for c in run.gh_calls() if c[:2] == ["pr", "create"]], "opened a PR"
     repo = Path(run.env.repo)
     touched = git(repo, "log", "--all", "--format=%h %s", "^" + run.env.base, "--", HELD)

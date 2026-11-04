@@ -49,6 +49,8 @@ def pr_create_body(run):
         if args[:2] != ["pr", "create"]:
             continue
         for i, a in enumerate(args):
+            if a.startswith("--body="):
+                return a[len("--body="):]
             if a in ("--body", "-b") and i + 1 < len(args):
                 return args[i + 1]
             if a in ("--body-file", "-F") and i + 1 < len(args):

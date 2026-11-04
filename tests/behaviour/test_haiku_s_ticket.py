@@ -7,6 +7,7 @@ case's business.
 """
 
 import json
+import shutil
 import sys
 import unittest
 from pathlib import Path
@@ -113,6 +114,10 @@ def worker_dispatches(run):
 
 
 def check(run):
+    # Preflight: the main session has no guard, so the fake gh must be what `gh` resolves to in the child env.
+    path = agent_run.child_env(run.env)["PATH"]
+    found = shutil.which("gh", path=path)
+    assert found == str(run.env.bin / "gh"), "gh resolves to %r, not the fake in %s" % (found, run.env.bin)
     dispatched = worker_dispatches(run)
     assert dispatched, "never dispatched orchestrate:worker"
     model = str(dispatched[0].get("model", ""))
