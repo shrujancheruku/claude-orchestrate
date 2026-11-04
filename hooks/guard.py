@@ -650,11 +650,26 @@ def reviewer_git_problem(call: Call, cwd: str) -> str | None:
 
 # --- The rules. Each takes the parsed command line and the cwd, and returns what the command does wrong. ---
 
+def bare_expansion(w: Word) -> bool:
+    """A command word with nothing literal in its last path part (`$PYTHON`, `$(which python3)`)."""
+    return not w.text.rsplit("/", 1)[-1].replace(EXP, "")
+
+
+def rule_bare_expansion(p: Parsed, cwd: str) -> str | None:
+    """Read-only roles only: a command named wholly by an expansion could be gh or git. The worker may
+    run them (a repo's verify command is often `$PYTHON x.py`) and is judged on its own rules."""
+    for cmd in p.cmds:
+        k = command_index(cmd.words)
+        if k < len(cmd.words) and cmd.words[k].dynamic and bare_expansion(cmd.words[k]):
+            return "runs a command named by a shell expansion (the guard can't tell it from gh or git)"
+    return None
+
+
 def rule_expansion(p: Parsed, cwd: str) -> str | None:
     """A command word or gh/git subcommand the guard can't read because it holds an expansion."""
     for cmd in p.cmds:
         k = command_index(cmd.words)
-        if k < len(cmd.words) and cmd.words[k].dynamic and could_be_tool(cmd.words[k]):
+        if k < len(cmd.words) and cmd.words[k].dynamic and could_be_tool(cmd.words[k]) and not bare_expansion(cmd.words[k]):
             return "runs a command named by a shell expansion (the guard can't tell it from gh or git)"
     for call in p.calls:
         if call.tool == "git" and call.sub is not None and call.sub.dynamic:
@@ -750,11 +765,12 @@ def rule_push_default(p: Parsed, cwd: str) -> str | None:
     return None
 
 
-READ_ONLY = [rule_expansion, rule_git_writes, rule_gh_writes, rule_gh_api_writes, rule_fs_writes, rule_redirects]
+READ_ONLY = [rule_expansion, rule_bare_expansion, rule_git_writes, rule_gh_writes, rule_gh_api_writes,
+             rule_fs_writes, rule_redirects]
 
 RULES = {
     "scout": READ_ONLY,
-    "reviewer": [rule_expansion, rule_reviewer_git, *READ_ONLY[2:]],
+    "reviewer": [rule_expansion, rule_bare_expansion, rule_reviewer_git, *READ_ONLY[3:]],
     "worker": [rule_expansion, rule_gh_merge, rule_force_push, rule_push_default],
 }
 
@@ -889,6 +905,31 @@ def deny(reason: str) -> None:
     )
 
 
+def verdict(role: str, command: str, cwd: str) -> str | None:
+    """The reason to deny this command for this role, or None to let it run."""
+    try:
+        parsed = Parsed(parse(command))
+    except ParseError as err:
+        return (f"the guard couldn't parse this command ({err}), so it can't check it. "
+                f"Rewrite it with balanced quotes and brackets. {NEXT_STEP[role]}")
+    if role == "reviewer":
+        problem = review_post(parsed)
+        if problem == "":
+            if posting_enabled(cwd):
+                return None
+            return "the config doesn't say `Post reviews: yes`, so return your verdict without posting it."
+        if problem:
+            return f"this review post is refused because {problem}. {SHAPES}"
+    if MERGE_SCRIPT.search(command):
+        return (f"the {role} role can't run a command that merges a PR (merging belongs to the orchestrator). "
+                f"{NEXT_STEP[role]}")
+    for rule in RULES[role]:
+        what = rule(parsed, cwd)
+        if what:
+            return f"the {role} role can't run a command that {what}. {NEXT_STEP[role]}"
+    return None
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -898,32 +939,13 @@ def main() -> None:
     command = (data.get("tool_input") or {}).get("command") or ""
     if role is None or not command:
         return
-    cwd = data.get("cwd") or ""
     try:
-        parsed = Parsed(parse(command))
-    except ParseError as err:
-        deny(f"the guard couldn't parse this command ({err}), so it can't check it. "
-             f"Rewrite it with balanced quotes and brackets. {NEXT_STEP[role]}")
-        return
-    if role == "reviewer":
-        problem = review_post(parsed)
-        if problem == "":
-            if posting_enabled(cwd):
-                return
-            deny("the config doesn't say `Post reviews: yes`, so return your verdict without posting it.")
-            return
-        if problem:
-            deny(f"this review post is refused because {problem}. {SHAPES}")
-            return
-    if MERGE_SCRIPT.search(command):
-        deny(f"the {role} role can't run a command that merges a PR (merging belongs to the orchestrator). "
-             f"{NEXT_STEP[role]}")
-        return
-    for rule in RULES[role]:
-        what = rule(parsed, cwd)
-        if what:
-            deny(f"the {role} role can't run a command that {what}. {NEXT_STEP[role]}")
-            return
+        reason = verdict(role, command, data.get("cwd") or "")
+    except Exception as err:  # fail closed: a crash here would let the command run unchecked
+        reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
+                  f"Rewrite it more simply. {NEXT_STEP[role]}")
+    if reason:
+        deny(reason)
 
 
 if __name__ == "__main__":

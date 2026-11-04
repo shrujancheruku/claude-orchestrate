@@ -294,7 +294,13 @@ CASES += [
     )
 ]
 # The guard can't tokenise these, so a guarded role is refused rather than waved through.
-UNPARSEABLE = ["echo 'x", 'echo "x', "echo $(date", "echo `date", "echo ${x", "git log >"]
+UNPARSEABLE = ["echo 'x", 'echo "x', "echo $(date", "echo `date", "echo ${x", "git log >",
+               "$(" * 3000 + "ls", "`" * 5 + "ls"]
+# A command named wholly by an expansion: refused for the read-only roles, fine for the worker.
+CASES += [("orchestrate:" + role, c, "deny") for role in ("scout", "reviewer")
+          for c in ("$PYTHON x.py", '"$SCRIPT" a', "$(which python3) x.py")]
+CASES += [("orchestrate:worker", c, "allow") for c in ("$PYTHON x.py", '"$SCRIPT" a', "$(which python3) x.py")]
+CASES += [("orchestrate:worker", c, "deny") for c in ("$(echo g)it push -f", "g$x push -f", "${X}h pr merge 12")]
 
 
 POST = "gh api --method POST repos/{owner}/{repo}/pulls/12/reviews --input - <<'EOF'\n"
@@ -418,6 +424,25 @@ class GuardTest(unittest.TestCase):
                     ).stdout
                     reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
                     self.assertIn("couldn't parse", reason)
+
+    def test_a_crash_inside_a_rule_denies(self):
+        import importlib.util
+        import io
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("guard_crash", GUARD)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+
+        def boom(parsed, cwd):
+            raise RuntimeError("boom")
+
+        for role in ("scout", "reviewer", "worker"):
+            payload = {"tool_input": {"command": "ls"}, "agent_type": "orchestrate:" + role}
+            out = io.StringIO()
+            with mock.patch.dict(guard.RULES, {role: [boom]}), mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                    mock.patch("sys.stdout", out):
+                guard.main()
+            self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "deny", role)
 
     def test_no_second_quote_blanking_helper(self):
         text = GUARD.read_text()
