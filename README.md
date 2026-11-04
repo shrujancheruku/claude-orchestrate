@@ -153,6 +153,14 @@ Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 - **A `.py` file is a library or a standalone script.** A library (`common.py`, `checks.py`, `replay.py`) is only imported. A standalone script (`profile.py`) imports nothing from `scripts/` because it reads session transcripts, so it runs as `python3 -I <path>`.
 - Never work around a failed import with `PYTHONPATH`; fix the script's kind per the rules above.
 
+**Guard regression corpus.** `tests/fixtures/guard-corpus.jsonl` holds every distinct Bash call the plugin's subagents made in real sessions, one `{role, command, expected}` line each, and `tests/test_guard_corpus.py` runs `hooks/guard.py` over all of them, so a guard change that flips a decision shows up in the PR diff of the corpus. To add sessions (rerunnable, no duplicates, existing labels untouched), run the CLI from the repo root:
+
+```
+scripts/guard-corpus <session id or transcript path> [...] [--projects-dir ~/.claude/projects] [--dry-run]
+```
+
+It reads `<session>.jsonl` and `<session>/subagents/*.jsonl` and writes nothing under `~/.claude`. Commands are normalised before they are stored: home and repo paths, emails, token-shaped strings, heredoc bodies and long quoted text are replaced, and no tool output is kept. A line whose quoted text became `TEXT` (a `bash -c "..."`, `python3 -c "..."` or `gh api "..."` call) is a shape check, not the original command. Lines marked `"source": "hand"` are written by hand to pin refusals no session exercised. A new line's `expected` is a snapshot of the guard's decision (run in a directory whose config turns review posting on); read the new lines, especially the write-shaped ones (`git push`, PR merge, create or review, `gh api` with a method or `-f`/`-F`, `gh issue` edit, close or comment). If the guard is wrong, set the right `expected` and add `"gap": "#<ticket>"` for a ticket against the guard; the test then requires the guard to still be wrong there until the fix removes the `gap`.
+
 ## Limits
 
 - Workers branch from the default branch (Claude Code's worktree default), so a ticket starts only after its dependencies have merged.
