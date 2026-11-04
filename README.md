@@ -71,6 +71,10 @@ After the cleanup, `scripts/merge` sweeps the other open PRs: each whose branch 
 
 It reads the command text, so it's a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top. Tests: `python3 -m unittest discover tests`.
 
+## Push and fetch under the sandbox
+
+On macOS, `git fetch`, `pull` and `push` over an SSH remote fail inside the sandbox even when the host is allowed, because plain ssh ignores the sandbox proxy ([docs](https://code.claude.com/docs/en/sandboxing)); agents see `Permission denied (publickey)`. On Linux and WSL2, git's SSH is tunnelled through the sandbox proxy once the host is in `sandbox.network.allowedDomains`, so that alone is enough. For an SSH remote, `/orchestrate:setup` offers, with your yes, to run `scripts/sandbox-git`, which adds `git fetch *`, `git pull *` and `git push *` to `sandbox.excludedCommands` and the remote's host to `sandbox.network.allowedDomains` in `.claude/settings.local.json` (gitignored; leave it uncommitted; nothing under `~/.claude` is touched). Those three git commands then run **unsandboxed** and can reach any host. `excludedCommands` matches the command text, so a command run from inside a script or wrapper isn't matched, and workers push with plain `git push` ([docs](https://code.claude.com/docs/en/sandboxing)). Without that, a worker pushes over HTTPS through `gh`'s credential helper for one call (`git -c credential.helper='!gh auth git-credential' push https://github.com/<owner>/<repo>.git <branch>`), which needs github.com reachable from the sandbox. A worker never turns the sandbox off to push.
+
 ## Running out of usage
 
 Every agent draws on your plan, so a usage limit tends to stop several workers at once.
