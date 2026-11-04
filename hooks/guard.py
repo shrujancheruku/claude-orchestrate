@@ -52,8 +52,17 @@ GH_MERGE = re.compile(r"\bgh\s+pr\s+merge\b")
 # or `(`, optionally behind python3 and in quotes (the script path is usually a quoted
 # "${CLAUDE_SKILL_DIR}/../../scripts/merge"). Checked on the raw command, because strip_quotes
 # would blank that quoted path; anchoring at command position keeps `grep scripts/merge` allowed.
+# Wrappers that still run it: VAR=1 assignments, env/nohup/time/exec/command/timeout <n>, an
+# interpreter (bash, sh, zsh, python3 [-I]) with its flags, and `sh -c '...'`. A bare `./merge`
+# counts after `cd <...>scripts &&`. A renamed or copied script is out of scope (a guardrail).
+_WRAP = (r"(?:(?:\w+=\S*|(?:\S*/)?(?:env|nohup|time|exec|command|timeout|bash|sh|zsh|python3?)"
+         r"(?:\s+-[-\w=]+)*(?:\s+\d+[smhd]?)?)\s+)*")
+_END = r"[\"']?(?=[\s\"';&|)]|$)"
 MERGE_SCRIPT = re.compile(
-    r"(?:^|[;&|(])\s*(?:python3?\s+)?[\"']?[^\s\"']*\bscripts/merge[\"']?(?=\s|$|[;&|)])"
+    r"(?:^|[;&|(]|\s-c\s+[\"'])\s*(?:"
+    + _WRAP + r"[\"']?[^\s\"']*\bscripts/merge" + _END
+    + r"|cd\s+[^\s;&|]*scripts/?[\"']?\s*&&\s*" + _WRAP + r"[\"']?\./merge" + _END
+    + r")"
 )
 
 # The writes a reviewer may make: a comment review posted through the API (its JSON on a
