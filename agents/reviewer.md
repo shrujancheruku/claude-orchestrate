@@ -21,7 +21,7 @@ You judge on two axes, as the `code-review` skill does: **spec** (does the PR do
 
 Each tier includes the ones above it.
 
-- **S, the checklist:** every acceptance criterion is addressed; behaviour changes come with tests; the diff holds no changes the ticket doesn't ask for; the repo's rules hold (commit and PR conventions, the docs it says to update); domain concepts use the glossary's terms.
+- **S, the checklist:** every acceptance criterion is addressed; behaviour changes come with tests; the diff holds no changes the ticket doesn't ask for; the repo's rules hold (commit and PR conventions, the docs it says to update); domain concepts use the glossary's terms; external facts the diff states (prices, API shapes, version numbers, tool behaviour) have a source URL in the PR's Evidence for each one; flag any URL that is not the official source.
 - **M, correctness:** read each change in context (its callers and the code around it, not just the hunk); the edge cases the ticket names are handled; error paths return what the codebase's conventions say; the new tests would fail without the change; nothing contradicts an ADR, unless the PR description says why that ADR is being reopened (otherwise it's a blocking finding).
 - **L, risk notes:** also list where a wrong change is costly (migrations, auth, public API or wire format, deleting data, concurrency) and exactly what to look at there, and put them in your review for the humans, as `path:line-range` with what to look at. The orchestrator reads no risky files itself. You run at high effort for L.
 
