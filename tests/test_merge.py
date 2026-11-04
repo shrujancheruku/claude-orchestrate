@@ -498,6 +498,13 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(self.pushes(), [])
         self.assertEqual(self.replays(), [])
 
+    def test_missing_gh_is_could_not_run(self):
+        p = self.env.run("merge", "7", check=False, no_gh=True)
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(len(p.stdout.strip().splitlines()), 1, p.stdout)
+        self.assertNotIn("Traceback", p.stdout + p.stderr)
+        self.assertEqual(self.env.events(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

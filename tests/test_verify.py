@@ -60,6 +60,24 @@ class VerifyTest(unittest.TestCase):
     def test_no_commands_is_an_error(self):
         self.assertNotEqual(self.verify().returncode, 0)
 
+    def test_missing_cwd_is_could_not_run(self):
+        r = self.verify("--cwd", str(self.env.repo / "nope"), "true")
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+
+    def test_no_commands_exits_2(self):
+        self.assertEqual(self.verify().returncode, 2)
+
+    def test_bad_timeout_exits_2(self):
+        self.assertEqual(self.verify("--timeout", "soon", "true").returncode, 2)
+
+    def test_hung_command_is_killed_and_fails(self):
+        r = self.verify("--timeout", "0.5", "sleep 30", "echo ran-second > ran.txt")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("timed out after 0.5s", r.stdout)
+        self.assertTrue((self.env.repo / "ran.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

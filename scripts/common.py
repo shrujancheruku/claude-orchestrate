@@ -9,8 +9,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
+
+EXIT_OK, EXIT_VERDICT, EXIT_COULD_NOT_RUN = 0, 1, 2
+NOT_FOUND = 127  # the shell's "command not found"; what run() reports for a missing binary
 
 CONFIG = Path(".claude") / "orchestration.md"
 # The events log sits beside the pass log (passes.jsonl) the profiler already reads.
@@ -72,6 +78,45 @@ def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = 
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, separators=(",", ":")) + "\n")
     return event
+
+
+class Run(NamedTuple):
+    """What run() returns: unpacks as (code, stdout, stderr); `returncode` is an alias of `code`."""
+    code: int
+    stdout: str
+    stderr: str
+
+    @property
+    def returncode(self) -> int:
+        return self.code
+
+
+def run(*cmd, cwd=None, timeout=None) -> Run:
+    """Run a command (no shell) and return (code, stdout, stderr), never raising for a missing tool.
+
+    A binary that is missing or not executable (OSError) is code 127 with the reason in stderr, so a
+    caller treats "gh is not installed" like any failed call instead of crashing. A timeout is 124.
+    """
+    try:
+        p = subprocess.run([str(c) for c in cmd], cwd=cwd, capture_output=True, text=True,
+                           errors="replace", timeout=timeout)
+    except OSError as e:
+        return Run(NOT_FOUND, "", f"{cmd[0]}: {e.strerror or e}")
+    except subprocess.TimeoutExpired:
+        return Run(124, "", f"{cmd[0]}: timed out after {timeout:g}s")
+    return Run(p.returncode, p.stdout, p.stderr)
+
+
+def pr_ref(s) -> tuple:
+    """(pr, ref) from a PR argument: `#12` and `12` both give ("12", 12); a non-number keeps its text as ref."""
+    pr = str(s).lstrip("#")
+    return pr, int(pr) if pr.isdigit() else pr
+
+
+def die(message: str) -> None:
+    """Exit with "could not run" (2): message on stderr, no traceback."""
+    print(message, file=sys.stderr)
+    sys.exit(EXIT_COULD_NOT_RUN)
 
 
 def claude_dir() -> Path:

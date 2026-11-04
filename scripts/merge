@@ -18,7 +18,7 @@ A conflict the script can't resolve (a file that isn't shared, or overlapping wo
 branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
 Exit codes: 0 merged and cleaned up; 4 the same, but a swept branch was handed back (resume its worker
 with the printed conflict list); 1 the merge was refused, or the PR was closed unmerged;
-2 the script could not run (`gh` cannot read the PR); 3 still not MERGED at the timeout (run it
+2 the script could not run (`gh` is missing or cannot read the PR); 3 still not MERGED at the timeout (run it
 again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
 Stdlib only, Python 3.9+.
@@ -27,7 +27,6 @@ Stdlib only, Python 3.9+.
 import argparse
 import json
 import re
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -43,18 +42,17 @@ TRANSIENT = re.compile(r"\b5\d\d\b|bad gateway|service unavailable|gateway time-
                        r"connection (?:reset|refused)|try again", re.I)
 
 
-def run(*cmd, cwd=None):
-    return subprocess.run(list(cmd), capture_output=True, text=True, cwd=cwd)
+run = common.run  # (code, stdout, stderr); a missing gh or git is code 127, not a traceback
 
 
 def view(pr, cwd):
     p = run("gh", "pr", "view", pr, "--json", "state,headRefName,headRefOid,isCrossRepository,closingIssuesReferences", cwd=cwd)
     if p.returncode != 0:
-        return None
+        return None, common.one_line(p.stderr or p.stdout)
     try:
-        return json.loads(p.stdout)
+        return json.loads(p.stdout), ""
     except ValueError:
-        return None
+        return None, "gh returned malformed JSON"
 
 
 def default_branch(cwd):
@@ -109,13 +107,12 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=float, default=300, help="seconds to wait for MERGED")
     ap.add_argument("--interval", type=float, default=5, help="seconds between state checks")
     args = ap.parse_args(argv)
-    pr = args.pr.lstrip("#")
+    pr, ref = common.pr_ref(args.pr)
     cwd = args.cwd
-    ref = int(pr) if pr.isdigit() else pr
 
-    v = view(pr, cwd)
+    v, why = view(pr, cwd)
     if v is None:
-        say(f"merge: could not read PR #{pr} with gh")
+        say(f"merge: could not read PR #{pr} with gh: {why}")
         return 2
     branch = v.get("headRefName") or ""
     state = v.get("state")
@@ -139,7 +136,7 @@ def main(argv=None) -> int:
                 say(f"merge command failed transiently ({err}); re-checking")
             else:
                 refused, attempt = err, False  # a real refusal, unless the state says it landed anyway
-        nv = view(pr, cwd)
+        nv, _ = view(pr, cwd)
         if nv:
             v, state = nv, nv.get("state")
         if state == "MERGED":

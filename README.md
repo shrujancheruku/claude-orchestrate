@@ -147,6 +147,14 @@ Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 
 **Behavioural tier (opt-in).** `ORCH_BEHAVIOUR=1 python3 -m unittest discover tests/behaviour` runs real headless `claude -p` agents against a temp repo with a fake `gh`, 3 runs per case (3/3 pass, 2/3 flaky, less fail), and prints a table with cost. Each run is capped at $1 and 40 turns, so a case costs at most $3; it is skipped without the variable, and CI never sets it.
 
+**Exit codes of the scripts under `scripts/`.** One convention, so a broken environment never reads as a verdict:
+
+- `0` ok.
+- `1` a verdict: a check failed, or the action was refused (a worker is sent the output).
+- `2` could not run: a missing tool (`gh`, `git`), bad input or a missing directory, or output the script could not read. Nothing about the code under test was decided; fix the environment and run it again.
+
+A script may add its own codes above 2 for a specific state (`gate` 3 and `merge` 3/4 are documented in their docstrings). `common.run` reports a missing binary as code 127 instead of raising, and `gate`, `merge`, `watch-ci` and `verify` turn that into 2. `profile.py` (a standalone script) still exits 1 for unreadable input. Commands run by `verify` and `gate` get `--timeout` seconds (default 1800); one that outlives it is killed with its process group and fails with "timed out after Ns".
+
 **How scripts under `scripts/` are found and run.** One rule, checked by `tests/test_invocation.py`:
 
 - **Found:** a skill uses `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`. An agent never relies on `${CLAUDE_PLUGIN_ROOT}` (it may be unset for subagents); the brief hands it the absolute path.

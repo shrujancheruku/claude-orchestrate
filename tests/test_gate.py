@@ -234,6 +234,33 @@ class GateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(len(r.stdout.splitlines()), 2)
 
+    def test_missing_gh_is_could_not_run(self):
+        r = self.env.run("gate", "7", "--retry-delay", "0", check=False, no_gh=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("gh", r.stderr)
+        self.assertEqual(self.env.events(), [])
+
+    def test_malformed_gh_json_is_could_not_run(self):
+        self.env.set_gh([{"args": ["pr", "view"], "stdout": "<html>not json"}])
+        r = self.gate()
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("malformed", r.stderr)
+
+    def test_json_of_the_wrong_shape_is_could_not_run(self):
+        self.env.set_gh([{"args": ["pr", "view"], "stdout": "[1, 2]"}])
+        self.assertEqual(self.gate().returncode, 2)
+
+    def test_hung_repo_check_is_killed_and_fails(self):
+        self.prime()
+        self.config("slow (run: `sleep 30`)")
+        r = self.gate("--timeout", "0.5")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("timed out after 0.5s", r.stdout)
+        self.assertEqual(self.event()["outcome"], "fail")
+
 
 if __name__ == "__main__":
     unittest.main()
