@@ -1,4 +1,4 @@
-"""Tests for scripts/profile.py and scripts/usage-tap.py on fixture transcripts. Run: python3 -m unittest discover tests"""
+"""Tests for scripts/profile.py on fixture transcripts. Run: python3 -m unittest discover tests"""
 
 import json
 import os
@@ -45,6 +45,9 @@ def tool_result(minutes, use_id, text):
 def write_jsonl(path, records):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(r) + "\n" for r in records))
+
+
+MERGED_50 = {"ts": at(30), "session": SESSION, "kind": "merge", "ref": 50, "outcome": "merged"}
 
 
 class Fixture:
@@ -94,6 +97,9 @@ class Fixture:
 
     def passes(self, rows):
         write_jsonl(self.repo / prof.PROFILES / prof.PASS_LOG, [{"session": SESSION, **r} for r in rows])
+
+    def events(self, rows):
+        write_jsonl(self.repo / prof.PROFILES / prof.EVENTS_LOG, rows)
 
     def run(self, now_minutes=120, **kw):
         os.environ["ORCHESTRATE_USAGE_LOG"] = str(self.usage)
@@ -281,12 +287,81 @@ class ProfileTest(unittest.TestCase):
         for key in ("occupancy", "building_share", "review_share", "idle_s", "windows"):
             self.assertIn(key, p["metrics"])
 
+    def test_merges_count_from_merge_events_not_from_gh_pr_merge_text(self):
+        ev = lambda outcome, ref, minute=30: {"ts": at(minute), "session": SESSION, "kind": "merge", "ref": ref, "outcome": outcome}
+        self.fx.events([ev("timeout", 50)])  # the transcript has `gh pr merge 50`, but the script saw no merge
+        p = self.fx.run()
+        self.assertEqual(p["metrics"]["tickets_merged"], 0)
+        self.fx.events([ev("closed", 50)])
+        self.assertEqual(self.fx.run()["metrics"]["tickets_merged"], 0)
+        self.fx.events([ev("merged", 50, 33)])
+        p = self.fx.run()
+        t10 = next(t for t in p["tickets"] if t["ticket"] == 10)
+        self.assertEqual((t10["outcome"], t10["end"], t10["merge_unverified"]), ("merged", at(33), False))
+        self.assertEqual(p["metrics"]["merges_unverified"], 0)
+
+    def test_without_events_both_merge_commands_count_but_are_unverified(self):
+        for cmd in ("gh pr merge 50 --squash", '"${CLAUDE_PLUGIN_ROOT}/scripts/merge" 50 --method squash', "~/p/scripts/merge 50 --worktree w"):
+            records = [json.loads(l) for l in self.fx.main.read_text().splitlines()]
+            for r in records:
+                for b in (r.get("message") or {}).get("content", []) if isinstance((r.get("message") or {}).get("content"), list) else []:
+                    if b.get("id") == "u4":
+                        b["input"]["command"] = cmd
+            write_jsonl(self.fx.main, records)
+            p = self.fx.run()
+            self.assertEqual(p["metrics"]["tickets_merged"], 1, cmd)
+            self.assertEqual(p["metrics"]["merges_unverified"], 1, cmd)
+            self.assertIn("unverified", prof.summary(p, Path("x.json")))
+
+    def test_events_log_without_a_merge_ignores_gh_pr_merge_text(self):
+        self.fx.events([{"ts": at(5), "session": SESSION, "kind": "gate", "ref": 50, "outcome": "pass"}])
+        self.assertEqual(self.fx.run()["metrics"]["tickets_merged"], 0)
+
+    def test_slots_follow_each_pass_and_the_raise_note_uses_the_count_in_force(self):
+        # Two tickets run 1-30 and 1-31 (two at once); the count drops 3 -> 1 only after both ended.
+        self.fx.passes([{"ts": at(1), "slots": 3, "free": 1}, {"ts": at(35), "slots": 1, "free": 1}])
+        self.fx.events([MERGED_50])
+        p = self.fx.run()
+        self.assertFalse(p["slots_raised"])
+        self.assertEqual(p["slots"], 1)
+        self.assertEqual([n for _, n in p["slots_timeline"]], [3, 1])
+        capacity = 3 * 34 * 60 + 1 * 6 * 60  # 1 -> 35 on 3 slots, 35 -> 41 on 1
+        self.assertAlmostEqual(p["metrics"]["occupancy"], (29 + 30) * 60 / capacity)
+        self.assertIn("3→1 slots", prof.summary(p, Path("x.json")))
+        # The same two tickets under a count of 1 in force the whole time do raise.
+        self.fx.passes([{"ts": at(1), "slots": 1, "free": 1}])
+        self.assertTrue(self.fx.run()["slots_raised"])
+
+    def test_a_log_holding_only_other_sessions_events_falls_back_to_the_transcript(self):
+        self.fx.events([{"ts": at(30), "session": "other", "kind": "merge", "ref": 50, "outcome": "merged"}])
+        p = self.fx.run()
+        self.assertEqual((p["metrics"]["tickets_merged"], p["metrics"]["merges_unverified"]), (1, 1))
+
+    def test_a_pass_after_the_last_record_adds_no_negative_capacity(self):
+        self.fx.passes([{"ts": at(1), "slots": 2, "free": 1}, {"ts": at(90), "slots": 1, "free": 1}])
+        p = self.fx.run()
+        self.assertEqual([n for _, n in p["slots_timeline"]], [2])
+        self.assertAlmostEqual(p["metrics"]["occupancy"], (29 + 30) * 60 / (2 * 40 * 60))
+
+    def test_forced_slots_override_the_pass_log(self):
+        self.fx.passes([{"ts": at(1), "slots": 3, "free": 1}, {"ts": at(35), "slots": 2, "free": 1}])
+        p = self.fx.run(slots=4)
+        self.assertEqual(p["slots"], 4)
+        self.assertEqual(len(p["slots_timeline"]), 1)
+
     def test_summary_is_about_five_lines(self):
         self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
+        self.fx.events([MERGED_50])
         out = prof.summary(self.fx.run(), Path("x.json"))
         self.assertEqual(len(out.splitlines()), 5)
         self.assertIn("per merged ticket (1 merged)", out)
         self.assertIn("opus", out)
+
+    def test_summary_says_headroom_is_not_measured_without_usage_data(self):
+        self.fx.usage.write_text("")
+        out = prof.summary(self.fx.run(), Path("x.json"))
+        self.assertIn("headroom not measured", out)
+        self.assertNotIn("status", out.lower().split("plan", 1)[1].splitlines()[0])
 
 
 def verdict_text(verdict, minors=0, blocking=0):
@@ -494,9 +569,6 @@ class OrchestratorFixture(Fixture):
         with open(self.main, "a") as f:
             f.writelines(json.dumps(r) + "\n" for r in extra)
 
-    def events(self, rows):
-        write_jsonl(self.repo / prof.PROFILES / prof.EVENTS_LOG, rows)
-
 
 class OrchestratorTest(unittest.TestCase):
     def setUp(self):
@@ -624,6 +696,7 @@ class OrchestratorTest(unittest.TestCase):
 
     def test_summary_stays_five_lines(self):
         self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
+        self.fx.events([MERGED_50])
         self.assertEqual(len(prof.summary(self.fx.run(), Path("x.json")).splitlines()), 5)
 
 
@@ -669,20 +742,6 @@ class CommandTest(unittest.TestCase):
         out = self.root / "x.html"
         prof.write_html({"description": "</script><b>"}, out)
         self.assertNotIn("</script><b>", out.read_text())
-
-    def test_tap_logs_changes_only_and_stays_silent(self):
-        payload = {"rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": 1793750400},
-                                   "seven_day": {"used_percentage": 40, "resets_at": 1794000000}}}
-        for pct in (12, 12, 13):
-            payload["rate_limits"]["five_hour"]["used_percentage"] = pct
-            self.assertEqual(self.script("usage-tap.py", stdin=json.dumps(payload)).stdout, "")
-        rows = [json.loads(line) for line in (self.root / "u.jsonl").read_text().splitlines()]
-        self.assertEqual([r["five_hour"] for r in rows], [12, 13])
-
-    def test_tap_ignores_sessions_without_limits_and_bad_input(self):
-        self.script("usage-tap.py", stdin=json.dumps({"model": {}}))
-        self.script("usage-tap.py", stdin="not json")
-        self.assertFalse((self.root / "u.jsonl").exists())
 
 
 class CompareTest(unittest.TestCase):
