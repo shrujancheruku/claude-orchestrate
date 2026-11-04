@@ -104,6 +104,10 @@ CASES = [
             "git branch -vv",
             "git branch -r --contains FETCH_HEAD",
             "git branch --show-current",
+            "git -C /repo fetch origin pull/71/head",
+            'grep -rn "git branch new" docs',
+            "gh pr diff 103 | grep 'git fetch origin x:y'",
+            "git log --grep='git branch x' FETCH_HEAD",
             "git fetch https://x/y.git pull/71/head",
             "git worktree list",
             "git worktree add --detach /tmp/scratch/pr-71 FETCH_HEAD",
@@ -253,6 +257,23 @@ class GuardTest(unittest.TestCase):
             for target, expected in ((main / "sub", "deny"), (linked / "sub", "deny"), (Path(tmp).resolve() / "scratch", "allow")):
                 with self.subTest(target=target):
                     self.assertEqual(decide("orchestrate:reviewer", add.format(target), cwd=linked), expected)
+
+    def test_reviewer_worktree_add_fails_closed_on_an_unreadable_git_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp).resolve() / "broken"
+            broken.mkdir()
+            (broken / ".git").write_text("not a gitdir line\n")
+            command = f"git worktree add --detach {Path(tmp).resolve()}/scratch FETCH_HEAD"
+            self.assertEqual(decide("orchestrate:reviewer", command, cwd=broken), "deny")
+            missing = Path(tmp).resolve() / "missing"
+            missing.mkdir()
+            (missing / ".git").write_text(f"gitdir: {tmp}/nowhere\n")
+            self.assertEqual(decide("orchestrate:reviewer", command, cwd=missing), "deny")
+            nocommon = Path(tmp).resolve() / "nocommon"
+            (nocommon / "x").mkdir(parents=True)
+            (Path(tmp) / "g" / "worktrees" / "w").mkdir(parents=True)
+            (nocommon / ".git").write_text(f"gitdir: {tmp}/g/worktrees/w\n")
+            self.assertEqual(decide("orchestrate:reviewer", command, cwd=nocommon), "deny")
 
     def test_reviewer_writes_list_is_git_writes_minus_branch(self):
         import importlib.util

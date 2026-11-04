@@ -130,6 +130,8 @@ REVIEWER_GIT_WRITES = (
 )
 # Global options that point git at another repo, config or hooks.
 UNSAFE_GIT_OPTION = re.compile(r"\s(?:-[cC]|--(?:git-dir|work-tree|exec-path|namespace|config-env))\b")
+# `-C <dir>` is fine before a fetch: it only picks which repo's FETCH_HEAD is written.
+UNSAFE_FETCH_OPTION = re.compile(r"\s(?:-c|--(?:git-dir|work-tree|exec-path|namespace|config-env))\b")
 GIT_CALL = re.compile(r"(" + GIT_PREFIX + r")(branch|fetch|worktree)\b([^;&|\n)]*)")
 BRANCH_LIST = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "-l", "--show-current"}
 BRANCH_REF_ARG = {"--contains", "--merged", "--no-merged", "--points-at"}
@@ -145,16 +147,21 @@ def repo_roots(cwd: str) -> list[Path]:
         if dot_git.is_dir():
             return [directory]
         if dot_git.is_file():
-            roots = [directory]
+            # Fail closed: "/" is a parent of every absolute path, so an unreadable `.git` file
+            # makes every reviewer worktree add look like it is inside the repo.
+            closed = [Path("/")]
             try:
                 gitdir = (directory / dot_git.read_text().split("gitdir:", 1)[1].strip().splitlines()[0]).resolve()
-                common = gitdir
+                if not gitdir.is_dir():
+                    return closed
                 if (gitdir / "commondir").is_file():
                     common = (gitdir / (gitdir / "commondir").read_text().strip()).resolve()
-                roots.append(common.parent)
+                    return [directory, common.parent]
+                if gitdir.parent.name == "worktrees":
+                    return closed  # a linked worktree whose main repo can't be found
+                return [directory]  # a submodule: its own checkout
             except (OSError, IndexError):
-                pass
-            return roots
+                return closed
     return [start]
 
 
@@ -173,19 +180,24 @@ def branch_lists_only(args: list[str]) -> bool:
     return True
 
 
-def reviewer_git(text: str, cwd: str) -> str | None:
+def reviewer_git(command: str, cwd: str) -> str | None:
     """What a reviewer's `git branch`, `git fetch` or `git worktree` call does wrong, or None.
 
     Listing branches, fetching into FETCH_HEAD and adding a detached scratch worktree outside
-    the repo are the reads a reviewer needs; everything else those verbs do changes state."""
-    for m in GIT_CALL.finditer(text):
-        prefix, verb, rest = m.groups()
-        args = rest.split()
+    the repo are the reads a reviewer needs; everything else those verbs do changes state.
+
+    Calls are found in a copy of the command with quoted text blanked to the same length, so
+    quoted search text isn't taken for a call; their arguments are read from the raw command at
+    the same offsets, so a quoted refspec (`'pull/1/head:main'`) is still seen."""
+    blanked = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", lambda q: "'" + "_" * (len(q.group()) - 2) + "'", command)
+    for m in GIT_CALL.finditer(blanked):
+        prefix, verb = m.group(1), m.group(2)
+        args = command[m.start(3):m.end(3)].split()
         if verb == "branch":
             if not branch_lists_only(args):
                 return "creates, deletes or renames a branch (only listing is allowed)"
         elif verb == "fetch":
-            if UNSAFE_GIT_OPTION.search(prefix):
+            if UNSAFE_FETCH_OPTION.search(prefix):
                 return "points fetch at another repo or config through a global git option"
             # `fetch origin x:y` writes a local ref. A URL remote has colons of its own.
             for arg in args:
@@ -331,7 +343,7 @@ def main() -> None:
     text = strip_quotes(command)
     if role == "reviewer":
         # Also on the raw command: strip_quotes blanks a quoted refspec like 'pull/1/head:main'.
-        what = reviewer_git(text, data.get("cwd") or "") or reviewer_git(command, data.get("cwd") or "")
+        what = reviewer_git(command, data.get("cwd") or "")
         if what:
             deny(f"the reviewer role can't run a command that {what}. {NEXT_STEP[role]}")
             return
