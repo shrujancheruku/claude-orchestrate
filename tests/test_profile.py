@@ -833,6 +833,11 @@ class TierTest(unittest.TestCase):
         self.assertEqual([(v["round"], v["verdict"], v["blocking"], v["minor"]) for v in pr["verdicts"]], [(1, "approve", 0, 2)])
         self.assertEqual((review["unparsed_reviewers"], review["round1_outright"]), (0, 0))
 
+    def test_posted_json_after_prose_is_still_read(self):
+        message = 'Posted. Here is what I sent: {"event":"COMMENT","body":"Round 2 \\u00b7 verdict: changes \\u00b7 tier: L\\n\\nfindings:\\n- [blocking] a.ts:1 \\u2014 x","comments":[]}'
+        v = self.handback(message)["prs"][0]["verdicts"][0]
+        self.assertEqual((v["verdict"], v["blocking"]), ("changes", 1))
+
     def test_a_posted_review_with_no_findings_is_an_outright_approval(self):
         review = self.handback(json.dumps({"event": "COMMENT", "body": "Round 1 \u00b7 verdict: approve \u00b7 tier: S\n\nfindings: none", "comments": []}))
         self.assertEqual(review["round1_outright"], 1)

@@ -547,13 +547,15 @@ FINDING = re.compile(r"^\s*(?:[-*]|\d+\.)\s*\[(blocking|minor)\]", re.I | re.M)
 
 def review_body(text: str) -> str:
     """A posted review is handed back as the JSON that was posted; what counts is its body."""
-    if text.lstrip().startswith("{"):
+    # The JSON may follow some prose: take the first "{" that starts an object with a string `body`.
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\{", text):
         try:
-            body = json.loads(text).get("body")
-        except (ValueError, AttributeError):
-            return text
-        if isinstance(body, str):
-            return body
+            obj, _ = decoder.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("body"), str):
+            return obj["body"]
     return text
 
 
