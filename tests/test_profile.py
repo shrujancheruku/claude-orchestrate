@@ -469,7 +469,12 @@ class OrchestratorFixture(Fixture):
             assistant(47, "a14", opus, [tool_use("m14", "Write", file_path=str(self.repo / ".claude" / "orchestrate-state.json"), content="{}")]),
             tool_result(46, "m13", "o" * 80),
             tool_result(46, "u3", "r" * 400),
-            {"type": "user", "timestamp": at(47), "message": {"content": "<tool-use-id>u1</tool-use-id>" + "w" * 771}},
+            # Real shape: the report arrives as a message from the agent's ID; a continued agent sends more than one.
+            {"type": "user", "timestamp": at(47), "message": {"content": 'Another Claude session sent a message:\n<agent-message from="aaa">\n' + "w" * 770 + "\n</agent-message>"}},
+            {"type": "user", "timestamp": at(48), "message": {"content": '<agent-message from="aaa">' + "w" * 400}},
+            # The completion notice has only a stub, and an unknown agent is not ours: neither counts.
+            {"type": "user", "timestamp": at(47), "message": {"content": "<task-notification><tool-use-id>u1</tool-use-id><result>delivered as a message</result></task-notification>"}},
+            {"type": "user", "timestamp": at(47), "message": {"content": '<agent-message from="zzz">' + "w" * 4000}},
             {"type": "system", "subtype": "compact_boundary", "timestamp": at(44), "compactMetadata": {"trigger": "auto", "preTokens": 150_000}},
             {"type": "system", "subtype": "compact_boundary", "timestamp": at(46), "compactMetadata": {"trigger": "manual", "preTokens": 90_000}},
             {"type": "system", "subtype": "compact_boundary", "timestamp": at(48), "compactMetadata": {"trigger": "auto", "preTokens": 170_000}},
@@ -527,7 +532,7 @@ class OrchestratorTest(unittest.TestCase):
 
     def test_handback_own_text_and_bash_output_tokens_are_char_estimates(self):
         c = self.fx.run()["metrics"]["context"]
-        self.assertEqual(c["handback_tokens"], {"reviewer": {"agents": 1, "tokens": 100}, "worker": {"agents": 1, "tokens": 200}})
+        self.assertEqual(c["handback_tokens"], {"reviewer": {"messages": 1, "tokens": 100}, "worker": {"messages": 2, "tokens": (788 + 400) // 4}})
         self.assertEqual((c["own_text_tokens"], c["bash_output_tokens"]), (10, 20))
         self.assertEqual(c["estimate"], "chars / 4")
 
@@ -551,7 +556,7 @@ class OrchestratorTest(unittest.TestCase):
             ev("gate", "pass", 50, session="other"),
             ev("gate", "pass", 50, session=None),  # no session, inside the span: counts
             ev("ci", "fail", 50), ev("ci", "pass", 50),
-            ev("merge", "merged", 50),
+            ev("merge", "merged", 50), ev("merge", "timeout", 51), ev("merge", "closed", 52),
             ev("replay", "line-replay", 50), ev("replay", "word-merge", 50),
             ev("replay", "regenerated", 50), ev("replay", "handed-back", 50),
         ])
@@ -564,7 +569,7 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(e["gate"]["review_rounds"], 0)
         self.assertEqual(p["metrics"]["review"]["rounds_total"], 0)
         self.assertEqual((e["ci"]["runs"], e["ci"]["by_outcome"]), (2, {"fail": 1, "pass": 1}))
-        self.assertEqual(e["merges"], 1)
+        self.assertEqual((e["merges"], e["merges_by_outcome"]), (1, {"merged": 1, "timeout": 1, "closed": 1}))
         self.assertEqual((e["replay"]["events"], e["replay"]["handed_back"], e["replay"]["handback_rate"]), (4, 1, 0.25))
         tickets = {t["ticket"]: t for t in p["tickets"]}
         self.assertEqual((tickets[10]["gate_runs"], tickets[10]["gate_failed"]), (4, 1))  # PR 50

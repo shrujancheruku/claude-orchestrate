@@ -457,8 +457,8 @@ function orchestrator(p) {
     card.append(el("p", { class: "sub" }, "No orchestrator turns with timestamps."));
   }
   const hb = Object.entries(c.handback_tokens || {});
-  card.append(table(["What entered the orchestrator's context", "Calls", "Tokens (estimate)"], [
-    ...hb.map(([role, v]) => [`${role} hand-backs`, String(v.agents), fmtTok(v.tokens)]),
+  card.append(table(["What entered the orchestrator's context", "Reports", "Tokens (estimate)"], [
+    ...hb.map(([role, v]) => [`${role} hand-backs`, String(v.messages), fmtTok(v.tokens)]),
     ["Orchestrator's own text", "–", fmtTok(c.own_text_tokens)],
     ["Bash output", "–", fmtTok(c.bash_output_tokens)],
   ], [1, 2]));
@@ -475,7 +475,7 @@ function orchestrator(p) {
   et.append(
     tile("Gate runs", String(g.runs), `${g.fail} failed · ${g.unknown} unknown · kept apart from ${g.review_rounds} review round${g.review_rounds === 1 ? "" : "s"}`),
     tile("CI runs", String(e.ci.runs), Object.entries(e.ci.by_outcome).map(([k, v]) => `${v} ${k}`).join(" · ") || "none"),
-    tile("Merges", String(e.merges), "merge events"),
+    tile("Merges", String(e.merges), Object.entries(e.merges_by_outcome || {}).map(([k, v]) => `${v} ${k}`).join(" · ") || "none"),
     tile("Shared-file hand-back rate", r.handback_rate == null ? "–" : pct(r.handback_rate), r.events ? `${r.handed_back} of ${r.events} replay events` : "no replay events"),
   );
   card.append(et);

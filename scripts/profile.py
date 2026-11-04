@@ -20,6 +20,7 @@ import os
 import re
 import statistics
 import sys
+from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -734,37 +735,49 @@ def user_text(record) -> str:
     return ""
 
 
-def handback_tokens(main: Transcript, agents: list) -> dict:
-    """What each role's hand-backs put into the orchestrator's context, estimated at 4 characters a token:
-    the Agent call's result plus any completion notice that names the call by its `tool-use-id`."""
-    role_of = {a["tool_use_id"]: a["role"] for a in agents}
-    seen, chars = {}, {}
+AGENT_MESSAGE = re.compile(r'<agent-message from="(\w+)">')
 
-    def add(use_id, text):
-        role = role_of[use_id]
-        seen.setdefault(role, set()).add(use_id)
-        chars[role] = chars.get(role, 0) + len(text)
+
+def handback_tokens(main: Transcript, agents: list) -> dict:
+    """What each role's reports put into the orchestrator's context, estimated at 4 characters a token.
+
+    A background agent's report arrives as a user message holding `<agent-message from="<agentId>">`;
+    every such message counts once (a continued agent sends several). The completion notice that names
+    the call by `tool-use-id` carries only a stub, so it is not counted. A foreground agent's report is
+    the Agent call's own result."""
+    role_of_id = {a["id"]: a["role"] for a in agents if a["id"]}
+    role_of_use = {a["tool_use_id"]: a["role"] for a in agents}
+    out = {}
+
+    def add(role, text):
+        e = out.setdefault(role, {"messages": 0, "chars": 0})
+        e["messages"] += 1
+        e["chars"] += len(text)
 
     for use_id, text in main.tool_results().items():
-        if use_id in role_of:
-            add(use_id, text)
+        if use_id in role_of_use:
+            add(role_of_use[use_id], text)
     for r in main.records:
-        if r.get("type") == "user":
-            text = user_text(r)
-            for use_id in re.findall(r"<tool-use-id>([^<]+)</tool-use-id>", text):
-                if use_id in role_of:
-                    add(use_id, text)
-    return {role: {"agents": len(ids), "tokens": chars[role] // 4} for role, ids in sorted(seen.items())}
+        if r.get("type") != "user":
+            continue
+        text = user_text(r)
+        tags = list(AGENT_MESSAGE.finditer(text))
+        for i, m in enumerate(tags):
+            if m.group(1) in role_of_id:
+                add(role_of_id[m.group(1)], text[m.end(): tags[i + 1].start() if i + 1 < len(tags) else len(text)])
+    return {role: {"messages": e["messages"], "tokens": e["chars"] // 4} for role, e in sorted(out.items())}
 
 
 def idle_wakes(passes: list, agents: list, merge_times) -> dict:
     """Passes that dispatched, reviewed and merged nothing. A pass covers the time since the one before it."""
-    acted = [a["dispatched"] for a in agents if a["role"] in ("worker", "reviewer") and a["dispatched"]] + list(merge_times)
+    acted = sorted(t for t in [a["dispatched"] for a in agents if a["role"] in ("worker", "reviewer")] + list(merge_times) if t)
     rows = sorted((parse_ts(p.get("ts")), i) for i, p in enumerate(passes) if parse_ts(p.get("ts")))
     idle, prev = 0, None
     for ts, i in rows:
         p = passes[i]
-        if not (p.get("dispatched") or p.get("merged") or any((prev is None or prev < t <= ts) for t in acted if t)):
+        # Anything acted on in (prev, ts].
+        did = bisect_right(acted, ts) - (bisect_right(acted, prev) if prev else 0) > 0
+        if not (p.get("dispatched") or p.get("merged") or did):
             idle += 1
         prev = ts
     return {"passes": len(rows), "idle": idle}
@@ -841,6 +854,8 @@ def event_metrics(events: list | None, review: dict) -> dict:
     for e in gate:
         for name in e.get("failed") or []:
             failed_checks[name] = failed_checks.get(name, 0) + 1
+    # The replay outcomes (line-replay, word-merge, regenerated, handed-back) are the ticket's names: nothing
+    # writes `replay` events yet (the replay script is #33), so until then the rate reads "–".
     handed = sum(1 for e in replay if e.get("outcome") == "handed-back")
     return {
         "available": True,
@@ -848,7 +863,9 @@ def event_metrics(events: list | None, review: dict) -> dict:
         "gate": {"runs": len(gate), "pass": gate_out.get("pass", 0), "fail": gate_out.get("fail", 0), "unknown": gate_out.get("unknown", 0),
                  "failed_checks": failed_checks, "review_rounds": review["rounds_total"]},
         "ci": {"runs": len(of("ci")), "by_outcome": count_by_outcome(of("ci"))},
-        "merges": len(of("merge")),
+        # scripts/merge writes merged|timeout|closed; only `merged` is a merge.
+        "merges": count_by_outcome(of("merge")).get("merged", 0),
+        "merges_by_outcome": count_by_outcome(of("merge")),
         "replay": {"events": len(replay), "by_outcome": count_by_outcome(replay), "handed_back": handed,
                    "handback_rate": handed / len(replay) if replay else None},
     }
