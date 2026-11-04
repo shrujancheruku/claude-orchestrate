@@ -112,6 +112,9 @@ def main(argv=None) -> int:
                     help="seconds a repo-specific command may run before it is killed (default: %(default)g)")
     ap.add_argument("--retry-delay", type=float, default=2.5, help="seconds between mergeability retries")
     args = ap.parse_args(argv)
+    if args.timeout <= 0:
+        print("gate: --timeout must be above 0", file=sys.stderr)
+        return 2
     if not Path(args.cwd).is_dir():
         print(f"gate: --cwd {args.cwd} does not exist", file=sys.stderr)
         return 2

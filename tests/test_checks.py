@@ -33,8 +33,13 @@ class RunShellTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             pidfile = os.path.join(d, "pid")
             # A background child that holds the pipes open: only a group kill ends the run promptly.
-            r = checks.run_shell(f"sleep 30 & echo $! > {pidfile}; wait", timeout=0.5)
+            # The timeout is generous enough that a slow runner has written the pid first.
+            r = checks.run_shell(f"sleep 30 & echo $! > {pidfile}; wait", timeout=2)
             self.assertTrue(r.timed_out)
+            for _ in range(50):  # bounded wait for the pidfile, ~5s
+                if Path(pidfile).exists() and Path(pidfile).read_text().strip():
+                    break
+                time.sleep(0.1)
             pid = int(Path(pidfile).read_text())
             for _ in range(50):
                 try:
@@ -44,6 +49,14 @@ class RunShellTest(unittest.TestCase):
                 time.sleep(0.1)
             else:
                 self.fail("the child outlived the killed group")
+
+    def test_a_grandchild_that_left_the_session_cannot_hang_the_run(self):
+        # os.setsid() puts the child beyond the group kill; it keeps the stdout pipe open for 30s.
+        child = "import os, time; os.setsid(); time.sleep(30)"
+        start = time.monotonic()
+        r = checks.run_shell(f"{sys.executable} -c '{child}' & echo started; wait", timeout=0.5)
+        self.assertTrue(r.timed_out)
+        self.assertLess(time.monotonic() - start, 20)
 
     def test_stdin_is_closed(self):
         self.assertEqual(checks.run_shell("cat", timeout=5).code, 0)

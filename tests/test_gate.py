@@ -253,6 +253,10 @@ class GateTest(unittest.TestCase):
         self.env.set_gh([{"args": ["pr", "view"], "stdout": "[1, 2]"}])
         self.assertEqual(self.gate().returncode, 2)
 
+    def test_non_positive_timeout_is_could_not_run(self):
+        self.prime()
+        self.assertEqual(self.gate("--timeout", "0").returncode, 2)
+
     def test_hung_repo_check_is_killed_and_fails(self):
         self.prime()
         self.config("slow (run: `sleep 30`)")

@@ -126,6 +126,9 @@ def main(argv=None) -> int:
             guard = ["--match-head-commit", head_oid] if head_oid else []
             p = run("gh", "pr", "merge", pr, f"--{args.method}", *guard, cwd=cwd)
             err = common.one_line(p.stderr or p.stdout)
+            if p.returncode == common.NOT_FOUND:  # gh vanished mid-run: not a refusal
+                say(f"merge: could not run gh: {err}")
+                return 2
             if p.returncode == 0:
                 say(f"merge command accepted for PR #{pr}")
                 attempt = False

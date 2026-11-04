@@ -58,7 +58,23 @@ def run_shell(command: str, cwd=None, timeout=None, merge_stderr=False) -> Shell
             os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             pass
-        stdout, stderr = proc.communicate()  # reap it; keep what it printed before the kill
+        try:
+            stdout, stderr = proc.communicate(timeout=5)  # reap it; keep what it printed before the kill
+        except subprocess.TimeoutExpired as e:
+            # A grandchild that left the session (setsid, a daemon) still holds the pipes: give up on them.
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            stdout, stderr = e.stdout, e.stderr
+            stdout = stdout.decode("utf-8", "replace") if isinstance(stdout, bytes) else stdout
+            stderr = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr
         return ShellRun(None, stdout or "", stderr or "", True)
     return ShellRun(proc.returncode, stdout or "", stderr or "")
 

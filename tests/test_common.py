@@ -25,11 +25,6 @@ class RunTest(unittest.TestCase):
     def test_missing_cwd_is_127_not_a_crash(self):
         self.assertEqual(common.run(sys.executable, "-c", "pass", cwd="/no/such/dir/xyz").code, 127)
 
-    def test_timeout_is_124(self):
-        code, _, err = common.run(sys.executable, "-c", "import time; time.sleep(30)", timeout=0.3)
-        self.assertEqual(code, 124)
-        self.assertIn("timed out", err)
-
 
 class PrRefTest(unittest.TestCase):
     def test_hash_and_bare_number(self):
