@@ -402,20 +402,37 @@ def pr_opened(t: Transcript | None) -> int | None:
     return None
 
 
-def ticket_endings(main: Transcript) -> tuple:
-    """When the orchestrator merged each PR, and when it handed each ticket back."""
-    merged, handed_back = {}, {}
+# `gh pr merge <n>`, or the plugin's merge script (any path to scripts/merge, quoted or not) invoked with <n>.
+MERGE_CMD = re.compile(r"\bgh\s+pr\s+merge\s+(\d+)|scripts/merge[\"']?\s+(\d+)")
+
+
+def ticket_endings(main: Transcript, events: list | None = None) -> tuple:
+    """When each PR merged, when each ticket was handed back, and which merges are unverified.
+
+    With an events log, only a `merge` event with outcome `merged` counts: scripts/merge writes it after
+    re-checking that the PR is MERGED. Without one (an older plugin), the transcript's merge commands stand in,
+    errored calls included, and those merges are unverified."""
+    merged, handed_back, unverified = {}, {}, set()
+    if events is not None:
+        for e in events:
+            ts = parse_ts(e.get("ts"))
+            if e.get("kind") == "merge" and e.get("outcome") == "merged" and ts and str(e.get("ref", "")).isdigit():
+                merged.setdefault(int(e["ref"]), ts)
     for ts, use in main.tool_uses("Bash"):
         cmd = (use.get("input") or {}).get("command", "")
-        for m in re.finditer(r"\bgh\s+pr\s+merge\s+(\d+)", cmd):
-            merged.setdefault(int(m.group(1)), ts)
+        if events is None:
+            for m in MERGE_CMD.finditer(cmd):
+                pr = int(m.group(1) or m.group(2))
+                if pr not in merged:
+                    merged[pr] = ts
+                    unverified.add(pr)
         for m in re.finditer(r"\bgh\s+issue\s+edit\s+(\d+)[^&;|]*--remove-assignee", cmd):
             handed_back.setdefault(int(m.group(1)), ts)
-    return merged, handed_back
+    return merged, handed_back, unverified
 
 
-def build_tickets(agents: list, main: Transcript, end: datetime) -> list:
-    merged, handed_back = ticket_endings(main)
+def build_tickets(agents: list, main: Transcript, end: datetime, events: list | None = None) -> list:
+    merged, handed_back, unverified = ticket_endings(main, events)
     tickets = {}
     for a in agents:
         if a["role"] != "worker":
@@ -461,6 +478,7 @@ def build_tickets(agents: list, main: Transcript, end: datetime) -> list:
             "gate_failed": None,
             "pr": tk["pr"],
             "outcome": outcome,
+            "merge_unverified": outcome == "merged" and tk["pr"] in unverified,
             "start": start,
             "end": ended,
             "building": building,
@@ -480,6 +498,40 @@ def assign_slots(tickets: list) -> None:
         else:
             tk["slot"] = len(free_at)
             free_at.append(tk["end"])
+
+
+def slot_segments(passes: list, tickets: list, start: datetime, end: datetime, forced: int | None, fallback: int | None) -> tuple:
+    """Slot capacity over time as [(from, to, slots)], and whether tickets ever ran at once beyond the slots in force.
+
+    Each pass's own `slots` holds from its timestamp until the next pass's. `forced` (--slots) overrides them all.
+    With no count anywhere, `fallback` (the config) applies, then the session's peak concurrency."""
+    cuts = [(parse_ts(p.get("ts")), int(p["slots"])) for p in passes if p.get("slots") and parse_ts(p.get("ts"))]
+    cuts.sort(key=lambda c: c[0])
+    if forced:
+        cuts = [(start, forced)]
+    elif not cuts and fallback:
+        cuts = [(start, fallback)]
+    elif cuts:
+        cuts[0] = (min(cuts[0][0], start), cuts[0][1])  # the first pass's count holds before it too
+    bounds = [(c[0], cuts[i + 1][0] if i + 1 < len(cuts) else end, c[1]) for i, c in enumerate(cuts)]
+    if not bounds:
+        bounds = [(start, end, None)]
+    out, raised = [], False
+    for a, b, n in bounds:
+        edges = []
+        for tk in tickets:
+            for s0, s1 in clip([[tk["start"], tk["end"]]], a, b):
+                edges += [(s0, 1), (s1, -1)]
+        now = conc = 0
+        for _, d in sorted(edges, key=lambda e: (e[0], e[1])):  # an end sorts before a start at the same instant
+            now += d
+            conc = max(conc, now)
+        if n is None:
+            n = max(conc, 1)
+        elif conc > n:
+            raised, n = True, conc
+        out.append((a, b, n))
+    return out, raised
 
 
 def read_passes(repo: Path | None, session: str) -> list:
@@ -856,7 +908,7 @@ def idle_wakes(passes: list, agents: list, merge_times) -> dict:
     return {"passes": len(rows), "idle": idle}
 
 
-def orchestrator_metrics(main: Transcript, agents: list, passes: list, merged: int) -> dict:
+def orchestrator_metrics(main: Transcript, agents: list, passes: list, merged: int, events: list | None = None) -> dict:
     """The orchestrator's turns by job, and the context they ran in."""
     turns = []
     for t in main.turns():
@@ -888,7 +940,7 @@ def orchestrator_metrics(main: Transcript, agents: list, passes: list, merged: i
             "own_text_tokens": own_text // 4,
             "bash_output_tokens": bash_out // 4,
             "estimate": "chars / 4",
-            "idle_wakes": idle_wakes(passes, agents, ticket_endings(main)[0].values()),
+            "idle_wakes": idle_wakes(passes, agents, ticket_endings(main, events)[0].values()),
         },
     }
 
@@ -1009,31 +1061,31 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     starts = [a["dispatched"] for a in agents if a["dispatched"]] + [parse_ts(p.get("ts")) for p in passes]
     starts = [s for s in starts if s]
     start = min(starts) if starts else (main.times[0] if main.times else now)
-    tickets = build_tickets(agents, main, end)
+    events = read_events(repo, session, start, end)
+    tickets = build_tickets(agents, main, end, events)
     assign_slots(tickets)
-    peak = max([tk["slot"] + 1 for tk in tickets] or [1])
-    slots = slots or next((p["slots"] for p in reversed(passes) if p.get("slots")), None) or config_slots(repo) or peak
-    # More tickets ran at once than the count allows (an older config, or lanes): the session's own peak is the truth.
-    slots_raised = peak > slots
-    slots = max(slots, peak)
+    # Each pass's own slot count holds until the next pass. More tickets at once than the count in force
+    # (an older config, or lanes) means the session's own concurrency is the truth for that stretch.
+    segments, slots_raised = slot_segments(passes, tickets, start, end, slots, config_slots(repo))
+    slots = segments[-1][2]
     span = max((end - start).total_seconds(), 1.0)
+    capacity = sum(n * (b - a).total_seconds() for a, b, n in segments) or span
     occupied = sum(seconds(clip([[tk["start"], tk["end"]]], start, end)) for tk in tickets)
     building = sum(seconds(tk["building"]) for tk in tickets)
     usage = read_usage(start, end)
     wins = windows(usage, passes, threshold, now)
     limits = limit_events(main, agents, passes)
-    review = review_metrics(agents, tickets, set(ticket_endings(main)[0]))
+    review = review_metrics(agents, tickets, set(ticket_endings(main, events)[0]))
     depth2 = depth2_agents(main, agents)
     pr_tier = {p["ticket"]: p["tier"] for p in review["prs"] if p["tier"]}
     for tk in tickets:
         tk["tier"] = pr_tier.get(tk["ticket"])
-    events = read_events(repo, session, start, end)
     if events is not None:
         gates = [e for e in events if e.get("kind") == "gate"]
         for tk in tickets:
             mine = [e for e in gates if tk["pr"] and str(e.get("ref")) == str(tk["pr"])]
             tk["gate_runs"], tk["gate_failed"] = len(mine), sum(1 for e in mine if e.get("outcome") == "fail")
-    idle_total = max(slots * span - occupied, 0.0)
+    idle_total = max(capacity - occupied, 0.0)
     idle = idle_reasons(passes, end)
     idle["unknown"] = max(idle_total - sum(idle.values()), 0.0)
 
@@ -1048,7 +1100,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     reads = sum(t["cache_read"] for t in by_role.values())
     fresh = sum(t["input"] + t["cache_write"] for t in by_role.values())
     merged = [tk for tk in tickets if tk["outcome"] == "merged"]
-    occupancy = occupied / (slots * span)
+    occupancy = occupied / capacity
     five = [float(u["five_hour"]) for u in usage if u.get("five_hour") is not None]
     cost = cost_metrics(main, agents, len(merged))
     # Agents can write after the orchestrator's last record (or the session is still running).
@@ -1081,6 +1133,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         "warnings": warnings,
         "slots": slots,
         "slots_raised": slots_raised,
+        # Slot count over time: [from, slots] per stretch; `slots` above is the last one.
+        "slots_timeline": [[iso(a), n] for a, _, n in segments],
         "threshold": threshold,
         "sources": {"pass_log": bool(passes), "usage_tap": bool(usage)},
         "orchestrator": {"model": orch["model"], "tokens": main.tokens, "compactions": main.compactions()},
@@ -1096,7 +1150,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         ],
         "tickets": [
             {
-                "ticket": tk["ticket"], "pr": tk["pr"], "tier": tk["tier"], "outcome": tk["outcome"], "slot": tk["slot"],
+                "ticket": tk["ticket"], "pr": tk["pr"], "tier": tk["tier"], "outcome": tk["outcome"], "merge_unverified": tk["merge_unverified"], "slot": tk["slot"],
                 "start": iso(tk["start"]), "end": iso(tk["end"]), "building": interval(tk["building"]),
                 "tokens": tk["tokens"], "cost": tk["cost"], "worker_models": tk["worker_models"],
                 "gate_runs": tk["gate_runs"], "gate_failed": tk["gate_failed"],
@@ -1109,8 +1163,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         "metrics": {
             "span_s": span,
             "occupancy": occupancy,
-            "building_share": building / (slots * span),
-            "review_share": max(occupied - building, 0.0) / (slots * span),
+            "building_share": building / capacity,
+            "review_share": max(occupied - building, 0.0) / capacity,
             "idle_s": idle,
             "tokens_total": total,
             "tokens_by_role": by_role,
@@ -1118,6 +1172,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "orchestrator_share": sum(main.tokens.values()) / total if total else 0.0,
             "cache_hit_ratio": reads / (reads + fresh) if reads + fresh else 0.0,
             "tickets_merged": len(merged),
+            "merges_unverified": sum(1 for tk in merged if tk["merge_unverified"]),
             "tokens_per_merged_ticket": sum(tk["tokens"] for tk in merged) / len(merged) if merged else None,
             "five_hour_start": five[0] if five else None,
             "five_hour_end": five[-1] if five else None,
@@ -1131,7 +1186,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "worker_models": worker_metrics(agents, tickets, review),
             "escalations": escalations(tickets),
             "depth2": depth2,
-            **orchestrator_metrics(main, agents, passes, len(merged)),
+            **orchestrator_metrics(main, agents, passes, len(merged), events),
             "events": event_metrics(events, review),
         },
         "recommendation": recommend(slots, occupancy, wins, limits),
@@ -1173,7 +1228,7 @@ def summary(p: dict, saved: Path) -> str:
         orch = c["per_merged_ticket_by_role"].get("orchestrator")
         spend += f" · orchestrator {fmt_usd(orch)}"
     lines = [
-        f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {p['slots']} slots",
+        f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {slots_label(p)}",
         f"proxy $ {spend}",
         f"slots   occupied {m['occupancy']:.0%}  (building {m['building_share']:.0%}, review/merge {m['review_share']:.0%})  idle: {idle}",
         f"plan    {plan}",
@@ -1183,11 +1238,22 @@ def summary(p: dict, saved: Path) -> str:
     if p["recommendation"]:
         lines.append(f"advice  {p['recommendation']}")
     if p.get("slots_raised"):
-        lines.append(f"note    up to {p['slots']} tickets ran at once, more than the slot count; occupancy is against {p['slots']}")
+        lines.append("note    more tickets ran at once than the slot count in force; occupancy is against the higher count")
+    if p["metrics"].get("merges_unverified"):
+        lines.append(f"note    {p['metrics']['merges_unverified']} merged ticket(s) unverified: no events log, counted from merge commands in the transcript")
     if not p["sources"]["pass_log"]:
         lines.append("note    no pass log for this session: idle reasons and window pressure are unknown")
     lines.append(f"saved   {saved}  (+ .html)")
     return "\n".join(lines)
+
+
+def slots_label(p: dict) -> str:
+    """`2 slots`, or `3→2 slots` when the count changed during the session."""
+    counts = []
+    for _, n in p.get("slots_timeline") or [(None, p["slots"])]:
+        if not counts or counts[-1] != n:
+            counts.append(n)
+    return "→".join(str(n) for n in counts) + " slots"
 
 
 def write_html(data: dict, path: Path) -> None:
