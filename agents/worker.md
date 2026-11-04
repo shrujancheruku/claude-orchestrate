@@ -22,7 +22,7 @@ You build **one ticket**, described by your **brief**, in an isolated worktree, 
 
 ## Pushing
 
-Push and fetch with plain `git push` / `git fetch` first, with no `cd … &&` prefix or wrapper: the sandbox's `excludedCommands` match on the command text, so a command run from inside a script or wrapper isn't matched ([docs](https://code.claude.com/docs/en/sandboxing)). If SSH fails under the sandbox (`Permission denied (publickey)`: the sandbox is hiding the ssh-agent socket), fall back to HTTPS through `gh`'s credential helper, inline and with no remote or config change (it needs github.com reachable from the sandbox):
+Push and fetch with plain `git push` / `git fetch` first, not through a script or wrapper: the sandbox's `excludedCommands` match on the command text, so a command run from inside a script or wrapper isn't matched ([docs](https://code.claude.com/docs/en/sandboxing)). If SSH fails under the sandbox (`Permission denied (publickey)`: on macOS, ssh under the sandbox can't reach the host or the agent; the fix is the `excludedCommands` that `/orchestrate:setup` offers, or this fallback), fall back to HTTPS through `gh`'s credential helper, inline and with no remote or config change (it needs github.com reachable from the sandbox):
 
 `git -c credential.helper='!gh auth git-credential' push https://github.com/<owner>/<repo>.git <branch>`
 

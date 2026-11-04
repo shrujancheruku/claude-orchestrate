@@ -1,6 +1,7 @@
 """CLI tests for scripts/sandbox-git."""
 
 import json
+import stat
 import sys
 import unittest
 from pathlib import Path
@@ -118,6 +119,21 @@ class SandboxGitTest(unittest.TestCase):
         (self.env.repo / ".gitignore").write_text("dist")
         self.run_script()
         self.assertEqual((self.env.repo / ".gitignore").read_text().splitlines(), ["dist", ".claude/settings.local.json"])
+
+    def test_refuses_non_object_network(self):
+        self.assert_refused('{"sandbox": {"network": []}}')
+
+    def test_refuses_non_list_allowed_domains(self):
+        self.assert_refused('{"sandbox": {"network": {"allowedDomains": "github.com"}}}')
+
+    def test_existing_gitignore_keeps_its_mode(self):
+        self.ssh()
+        ignore = self.env.repo / ".gitignore"
+        ignore.write_text("dist\n")
+        ignore.chmod(0o644)
+        self.run_script()
+        self.assertEqual(stat.S_IMODE(ignore.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o644)
 
     def test_non_ssh_remote_changes_nothing(self):
         self.ssh("https://github.com/o/r.git")

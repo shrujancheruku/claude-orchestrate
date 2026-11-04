@@ -11,7 +11,7 @@ this merges into <repo>/.claude/settings.local.json:
 Lists are unioned without duplicates and every other key is kept. The file is created when
 missing, and refused (exit 1, untouched) when it isn't a JSON object of the expected shape.
 A non-SSH origin changes nothing. The file is local, so `.claude/settings.local.json` is
-added to .gitignore if no line already names it.
+added to .gitignore when `git check-ignore` doesn't already ignore it.
 Docs: https://code.claude.com/docs/en/sandboxing
 
 Exit 0 done (or nothing to do), 1 refused. Stdlib only, Python 3.9+.
@@ -20,6 +20,7 @@ Exit 0 done (or nothing to do), 1 refused. Stdlib only, Python 3.9+.
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,8 @@ def write_atomic(path, text):
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
+        # mkstemp makes 0600; keep an existing file's mode, else a normal 0644.
+        os.chmod(tmp, stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644)
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
