@@ -446,6 +446,26 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(self.pushes(), [])
         self.assertEqual(self.replays(), [("gen.txt", "handed-back")])
 
+    def test_files_the_command_also_writes_are_staged_when_generated(self):
+        self.generated_scenario("tr a-z A-Z < src.txt | paste -sd' ' - > gen.txt; echo x > gen2.txt")
+        p = self.sweep("rebase")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.remote("pr-a", "gen2.txt"), "x\n")
+
+    def test_command_changing_a_file_outside_the_globs_is_handed_back(self):
+        self.generated_scenario("tr a-z A-Z < src.txt | paste -sd' ' - > gen.txt; echo x > other.txt")
+        p = self.sweep()
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertIn("regenerate command failed", p.stdout)
+        self.assertIn("changed other.txt, outside the generated globs", p.stdout)
+        self.assertEqual(self.pushes(), [])
+
+    def test_regenerate_command_that_hangs_is_handed_back(self):
+        import replay
+        self.addCleanup(setattr, replay, "REGENERATE_TIMEOUT", replay.REGENERATE_TIMEOUT)
+        replay.REGENERATE_TIMEOUT = 0.2
+        self.assertIn("timed out", replay._regenerate(str(self.env.repo), "sleep 5", [], {}))
+
     def test_generated_commands_parse(self):
         import replay
         sec = "- **Shared files:**\n  - `A.md`: x\n- **Generated:**\n  - `gen/**`: `make gen`\n  - `b.txt`: `sh b.sh`\n"

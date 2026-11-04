@@ -35,6 +35,7 @@ import common
 LINE_REPLAY, WORD_MERGE, HANDED_BACK = "line-replay", "word-merge", "handed-back"
 REGENERATED = "regenerated"  # a generated file rebuilt by its glob's command (profile.py counts this name)
 MAX_REBASE_STEPS = 200
+REGENERATE_TIMEOUT = 300  # seconds a regenerate command may run before it is handed back
 
 
 def shared_patterns(section):
@@ -177,6 +178,32 @@ def _stage(cwd, n, path):
         return None
 
 
+def _regenerate(wt, cmd, generated, resolved):
+    """Run a regenerate command in wt. Returns None on success, else why it failed.
+
+    Files it wrote (unstaged changes; the merge's own changes are already staged) that match a generated
+    glob join `resolved` to be staged; a change anywhere else fails the command.
+    """
+    try:
+        r = subprocess.run(cmd, cwd=wt, shell=True, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           timeout=REGENERATE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"timed out after {REGENERATE_TIMEOUT}s"
+    if r.returncode != 0:
+        return common.one_line(r.stderr or r.stdout) or f"exit {r.returncode}"
+    out = git(wt, "status", "--porcelain", "-z", "-uall").stdout
+    extra, stray = [], []
+    for entry in out.split("\0"):
+        xy, path = entry[:2], entry[3:]
+        if not path or xy in ("DD", "AU", "UD", "UA", "DU", "AA", "UU") or xy[1] == " ":
+            continue
+        (extra if any(fnmatch.fnmatchcase(path, g) for g, _ in generated) else stray).append(path)
+    if stray:
+        return f"changed {', '.join(stray)}, outside the generated globs"
+    resolved.update({path: None for path in extra})
+    return None
+
+
 def resolve_conflicts(wt, patterns, pr_stage, generated=()):
     """Resolve the shared files conflicted in wt. Returns (resolved paths, conflicts, events).
 
@@ -203,8 +230,7 @@ def resolve_conflicts(wt, patterns, pr_stage, generated=()):
                 continue
             Path(wt, path).write_text(main, encoding="utf-8")  # main's side, then rebuild it from the sources
             if cmd not in ran:
-                r = subprocess.run(cmd, cwd=wt, shell=True, capture_output=True, text=True)
-                ran[cmd] = None if r.returncode == 0 else common.one_line(r.stderr or r.stdout) or f"exit {r.returncode}"
+                ran[cmd] = _regenerate(wt, cmd, generated, resolved)
             if ran[cmd] is not None:
                 events.append((path, HANDED_BACK))
                 conflicts.append((path, f"regenerate command failed: {cmd} ({ran[cmd]})"))
