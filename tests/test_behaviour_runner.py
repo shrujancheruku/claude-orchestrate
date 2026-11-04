@@ -1,0 +1,54 @@
+"""Deterministic (CI, free): the behavioural harness's parsing, verdicts and command line. Spawns no agent."""
+
+import json
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "behaviour"))
+import agent_run  # noqa: E402
+
+STREAM = "\n".join(json.dumps(e) for e in [
+    {"type": "system", "subtype": "init"},
+    {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "hi"},
+        {"type": "tool_use", "name": "Bash", "input": {"command": "gh issue view 1"}},
+    ]}},
+    {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "x"}}]}},
+    {"type": "result", "result": "status: stopped", "total_cost_usd": 0.05, "permission_denials": []},
+]) + "\nnot json\n"
+
+
+class Runner(unittest.TestCase):
+    def test_parse_and_helpers(self):
+        run = agent_run.Run(agent_run.parse_events(STREAM))
+        self.assertEqual([n for n, _ in run.tool_calls()], ["Bash", "Read"])
+        self.assertEqual(run.bash_commands(), ["gh issue view 1"])
+        self.assertEqual(run.final_report, "status: stopped")
+        self.assertAlmostEqual(run.cost, 0.05)
+        self.assertTrue(run.usable())
+        self.assertFalse(agent_run.Run([]).usable())
+
+    def test_verdict(self):
+        self.assertEqual([agent_run.verdict(n, 3) for n in (3, 2, 1, 0)], ["pass", "flaky", "fail", "fail"])
+
+    def test_command_caps_and_stub(self):
+        cmd = agent_run.command("worker", "brief")
+        self.assertEqual(cmd[cmd.index("--max-budget-usd") + 1], "1")
+        self.assertEqual(cmd[cmd.index("--max-turns") + 1], "40")
+        self.assertEqual(cmd.count("--plugin-dir"), 2)
+        self.assertEqual(agent_run.command("worker", "brief", with_stub_pr=False).count("--plugin-dir"), 1)
+
+    def test_table(self):
+        out = agent_run.format_table([("a", "pass", 3, 3, 0.1), ("b", "flaky", 2, 3, 0.2)])
+        self.assertIn("flaky", out)
+        self.assertIn("$0.30", out)
+
+    def test_ci_never_enables_the_tier(self):
+        wf = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+        for f in wf.glob("*.yml"):
+            self.assertNotIn("ORCH_BEHAVIOUR", f.read_text())
+
+
+if __name__ == "__main__":
+    unittest.main()

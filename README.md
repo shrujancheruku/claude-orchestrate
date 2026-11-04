@@ -144,6 +144,8 @@ python3 -I ~/.claude/plugins/cache/claude-orchestrate/orchestrate/<version>/scri
 
 Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 
+**Behavioural tier (opt-in).** `ORCH_BEHAVIOUR=1 python3 -m unittest discover tests/behaviour` runs real headless `claude -p` agents against a temp repo with a fake `gh`, 3 runs per case (3/3 pass, 2/3 flaky, less fail), and prints a table with cost. Each run is capped at $1 and 40 turns, so a case costs at most $3; it is skipped without the variable, and CI never sets it.
+
 **How scripts under `scripts/` are found and run.** One rule, checked by `tests/test_invocation.py`:
 
 - **Found:** a skill uses `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`. An agent never relies on `${CLAUDE_PLUGIN_ROOT}` (it may be unset for subagents); the brief hands it the absolute path.
