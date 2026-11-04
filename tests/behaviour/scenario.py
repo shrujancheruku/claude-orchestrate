@@ -70,10 +70,15 @@ def report_status(run):
     return m.group(1).strip("`*").lower() if m else None
 
 
-def run_and_report(test, name, build, check):
-    """Run a case over agent_run.RUNS runs; print failing runs; fail the test on a `fail` verdict."""
+def run_and_report(test, name, build, check, fail_on_fail=True):
+    """Run a case over agent_run.RUNS runs; print failing runs; return the verdict.
+
+    A `fail` verdict fails the test unless fail_on_fail is False (a known failure the caller judges itself).
+    A run that can't produce a result raises RuntimeError out of here.
+    """
     v, passes, cost, failures = agent_run.run_case(name, build, check)
     if failures:
         print("\n%s: %s, failing runs:\n%s" % (name, v, "\n".join(failures)))
-    if v == "fail":
+    if v == "fail" and fail_on_fail:
         test.fail("%d/%d passed\n%s" % (passes, agent_run.RUNS, "\n".join(failures)))
+    return v

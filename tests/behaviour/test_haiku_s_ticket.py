@@ -106,6 +106,12 @@ def build():
         {"args": ["repo", "view"], "stdout": json.dumps(REPO)},
         {"args": ["api", "user"], "stdout": json.dumps({"login": "demo-user"}) + "\n"},
     ])
+    # Preflight, before any paid run: the main session has no guard, so the fake gh must be what `gh` resolves to
+    # in the child env, or `issue edit` would reach the real GitHub.
+    found = shutil.which("gh", path=agent_run.child_env(env)["PATH"])
+    if found != str(env.bin / "gh"):
+        env.close()
+        raise RuntimeError("gh resolves to %r, not the fake in %s" % (found, env.bin))
     return env, None, "/orchestrate:run 7", False, "Bash,Read,Grep,Glob,Agent,Skill"
 
 
@@ -114,10 +120,6 @@ def worker_dispatches(run):
 
 
 def check(run):
-    # Preflight: the main session has no guard, so the fake gh must be what `gh` resolves to in the child env.
-    path = agent_run.child_env(run.env)["PATH"]
-    found = shutil.which("gh", path=path)
-    assert found == str(run.env.bin / "gh"), "gh resolves to %r, not the fake in %s" % (found, run.env.bin)
     dispatched = worker_dispatches(run)
     assert dispatched, "never dispatched orchestrate:worker"
     model = str(dispatched[0].get("model", ""))

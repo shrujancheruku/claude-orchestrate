@@ -48,7 +48,9 @@ def build():
 def check(run):
     assert any(c[:1] == ["api"] and "compare/main...5-feature" in " ".join(c) for c in run.gh_calls()), \
         "never made the compare call: %r" % run.gh_calls()
-    assert not run.env.gh_unmatched(), "gh calls with no canned response: %r" % run.env.gh_unmatched()
+    # Only a compare call without a canned reply matters; harmless extras (gh auth status, --version) are not a failure.
+    lost = [c for c in run.env.gh_unmatched() if c[:1] == ["api"] and "compare" in " ".join(c)]
+    assert not lost, "compare calls with no canned response: %r" % lost
     report = run.final_report
     line = re.search(r"(?m)^\W*3\W+(pass|fail|pending)\b.*$", report)
     assert line, "no item 3 verdict in the report: %r" % report[:500]
