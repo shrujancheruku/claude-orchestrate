@@ -136,7 +136,11 @@ def role_of(agent_type: str) -> str | None:
 def review_post(command: str) -> str | None:
     """Check a reviewer's review post. None if the command isn't aimed at one; otherwise
     "" if it's well formed, or what's wrong with it."""
-    if not REVIEW_AIMED.search(command):
+    # Reads of earlier reviews (a GET) and quoted text that only mentions these commands
+    # don't count as aimed at a post.
+    unquoted = strip_quotes(command)
+    aimed = REVIEW_AIMED.search(unquoted)
+    if not aimed or (aimed.group(0).startswith("gh api") and not GH_API_WRITE.search(unquoted)):
         return None
     if PR_REVIEW_INLINE.match(command):
         return ""

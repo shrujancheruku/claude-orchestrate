@@ -107,6 +107,16 @@ REVIEW_CASES = [
     ("gh pr review 12 --approve --body x", "deny"),
     ("gh pr review 12 --request-changes --body x", "deny"),
     ("gh pr review 12 --approve", "deny"),
+    ("gh pr review 12 -a", "deny"),
+    ("gh pr review 12 -r --body 'x'", "deny"),
+    ("gh pr review 12 --comment --body 'x' --approve", "deny"),
+    ("gh pr review 12 --comment -F - <<'EOF'\nbody\nEOF", "allow"),
+    ("gh pr review 12 --comment --body-file=- <<'EOF'\nbody\nEOF", "allow"),
+    ('cd "$HOME/x" && ' + POST + COMMENT + "\nEOF", "deny"),
+    ("cd /tmp/x && " + POST + '{"event": "APPROVE", "body": "x"}\nEOF', "deny"),
+    ("gh api repos/o/r/pulls/12/reviews", "allow"),  # a GET
+    ("gh api repos/o/r/pulls/12/reviews/5/comments --jq '.[].body'", "allow"),
+    ('git log --grep="gh pr review"', "allow"),
     ("gh pr review 12 --comment --approve --body x", "deny"),
     ("gh pr comment 12 --body x", "deny"),
 ]
@@ -144,6 +154,16 @@ class GuardTest(unittest.TestCase):
                 reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
                 self.assertIn("pulls/<n>/reviews", reason)
                 self.assertIn("--comment --body-file -", reason)
+
+    def test_other_api_write_keeps_generic_message(self):
+        payload = {
+            "tool_input": {"command": "gh api --method POST repos/o/r/issues/1/comments -f body=x"},
+            "agent_type": "orchestrate:reviewer",
+        }
+        out = subprocess.run(
+            [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True
+        ).stdout
+        self.assertIn("writes through the GitHub API", json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_posting_off(self):
         for post in [POST + COMMENT + "\nEOF", "gh pr review 12 --comment --body 'x'"]:
