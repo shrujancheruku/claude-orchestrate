@@ -118,6 +118,78 @@ def git_write(subcommands: str) -> re.Pattern:
     return re.compile(GIT_PREFIX + r"(?:" + subcommands + r")\b")
 
 
+# The reviewer reads a PR head with git, so `branch` (listing) and `worktree add --detach`
+# (a scratch checkout) are judged by reviewer_git below instead of being refused outright.
+# update-ref and symbolic-ref move refs without any of the other verbs.
+REVIEWER_GIT_WRITES = (
+    GIT_WRITES.replace("branch|", "").replace("|worktree\\s+(?:add|remove|move|prune)", "")
+    + "|update-ref|symbolic-ref|worktree\\s+(?:remove|move|prune|lock|unlock|repair)"
+)
+GIT_CALL = re.compile(r"(" + GIT_PREFIX + r")(branch|fetch|worktree)\b([^;&|\n)]*)")
+BRANCH_LIST = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "-l", "--show-current"}
+BRANCH_REF_ARG = {"--contains", "--merged", "--no-merged", "--points-at"}
+WORKTREE_FLAGS = {"--detach", "-q", "--quiet", "--no-checkout"}
+
+
+def repo_root(cwd: str) -> Path:
+    start = Path(cwd or ".").resolve()
+    for directory in (start, *start.parents):
+        if (directory / ".git").exists():
+            return directory
+    return start
+
+
+def branch_lists_only(args: list[str]) -> bool:
+    """True for `git branch` arguments that only list: listing flags, a ref after
+    --contains and the like, and name patterns only after --list."""
+    patterns_ok = "--list" in args or "-l" in args
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg in BRANCH_REF_ARG:
+            skip = True
+        elif arg not in BRANCH_LIST and (arg.startswith("-") or not patterns_ok):
+            return False
+    return True
+
+
+def reviewer_git(text: str, cwd: str) -> str | None:
+    """What a reviewer's `git branch`, `git fetch` or `git worktree` call does wrong, or None.
+
+    Listing branches, fetching into FETCH_HEAD and adding a detached scratch worktree outside
+    the repo are the reads a reviewer needs; everything else those verbs do changes state."""
+    for m in GIT_CALL.finditer(text):
+        prefix, verb, rest = m.groups()
+        args = rest.split()
+        if verb == "branch":
+            if not branch_lists_only(args):
+                return "creates, deletes or renames a branch (only listing is allowed)"
+        elif verb == "fetch":
+            # `fetch origin x:y` writes a local ref. A URL remote has colons of its own.
+            for arg in args:
+                if ":" in arg and not re.match(r"^(?:\w+://|[\w.-]+@[\w.-]+:)", arg):
+                    return "fetches into a named local ref (fetch only into FETCH_HEAD)"
+        elif args[:1] == ["add"]:
+            flags = [a for a in args[1:] if a.startswith("-")]
+            names = [a for a in args[1:] if not a.startswith("-")]
+            if "--detach" not in flags or any(f not in WORKTREE_FLAGS for f in flags):
+                return "adds a worktree that isn't a plain `--detach` one"
+            if "-C" in prefix or not 1 <= len(names) <= 2:
+                return ("adds a worktree in a form that can't be checked "
+                        "(use `git worktree add --detach <dir> <ref>` without `-C`)")
+            target = names[0]
+            if not (target.startswith("/") or target.startswith("~/")) or re.search(r"[$`\\]|^''$", target):
+                return "adds a worktree at a path that isn't a plain absolute path"
+            path = Path(target).expanduser().resolve()
+            root = repo_root(cwd)
+            if path == root or root in path.parents:
+                return "adds a worktree inside the repo (use a scratch dir outside it)"
+        elif args[:1] != ["list"]:
+            return "changes worktrees"
+    return None
+
+
 READ_ONLY = [
     (git_write(GIT_WRITES), "changes git state"),
     (GH_WRITE, "writes to the git host"),
@@ -128,7 +200,7 @@ READ_ONLY = [
 
 RULES = {
     "scout": READ_ONLY,
-    "reviewer": READ_ONLY,
+    "reviewer": [(git_write(REVIEWER_GIT_WRITES), "changes git state"), *READ_ONLY[1:]],
     "worker": [
         (GH_MERGE, "merges a PR (merging belongs to the orchestrator)"),
         (FORCE_PUSH, "force-pushes"),
@@ -138,7 +210,8 @@ RULES = {
 
 NEXT_STEP = {
     "scout": "Report what you found and let your caller act on it.",
-    "reviewer": "Read code with `gh pr diff` or `git show <ref>:<path>` and put the change in your findings.",
+    "reviewer": "Read code with `gh pr diff`, `git show <ref>:<path>` or a scratch checkout "
+                "(`git worktree add --detach <absolute dir outside the repo> FETCH_HEAD`) and put the change in your findings.",
     "worker": "Push your own branch normally and report the PR; the orchestrator merges.",
 }
 
@@ -234,6 +307,11 @@ def main() -> None:
              f"{NEXT_STEP[role]}")
         return
     text = strip_quotes(command)
+    if role == "reviewer":
+        what = reviewer_git(text, data.get("cwd") or "")
+        if what:
+            deny(f"the reviewer role can't run a command that {what}. {NEXT_STEP[role]}")
+            return
     for pattern, what in RULES[role]:
         if pattern.search(text):
             deny(f"the {role} role can't run a command that {what}. {NEXT_STEP[role]}")
