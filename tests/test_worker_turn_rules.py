@@ -25,6 +25,12 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("status: pr-opened | stopped", report)
         self.assertNotIn("changed:", report)
 
+    def test_held_path_rule_compares_by_file(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        stop = s[s.index("## Stop and report"):]
+        self.assertIn("Compare file paths, with any `:line` stripped; "
+                      "a different section of the same file still overlaps.", stop)
+
     def test_mechanic_is_gone(self):
         self.assertFalse((ROOT / "agents/mechanic.md").exists())
 

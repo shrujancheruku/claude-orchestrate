@@ -38,7 +38,7 @@ Never turn the sandbox off, retry with it off, or ask for a bypass to push. If t
 ## Stop and report
 
 Stop at the first of these, and report with `status: stopped`. Your report is how the orchestrator decides; working around the problem hides it.
-- The ticket needs a change to a held path from the brief. Files outside your touch map that nothing holds are yours to change.
+- The ticket needs a change to a held path from the brief. Files outside your touch map that nothing holds are yours to change. Compare file paths, with any `:line` stripped; a different section of the same file still overlaps.
 - The ticket is ambiguous in a way that changes the design.
 - The ticket can't be met without contradicting an ADR. A smaller conflict goes in your report's `adr-conflicts`; never override an ADR silently.
 - You reach a **human-only step** from the brief, or anything destructive or outward-facing the brief doesn't cover (shared environments, accounts, secrets, history rewrites).
