@@ -47,6 +47,15 @@ class WorkerTurnRules(unittest.TestCase):
             self.assertNotRegex(p.read_text(errors="ignore"),
                                 r"worktree remove\b[^`\n]*(--force|\s-f\b)", str(p))
 
+    def test_orient_checks_already_done_before_branching(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        orient = s[s.index("1. **Orient.**"):s.index("2. **Build")]
+        check = orient.index("compare each acceptance criterion with `origin/<default branch>`")
+        self.assertLess(check, orient.index("create it from the remote default branch"))
+        self.assertIn("no full diff", orient)
+        self.assertIn("names the commit or file that shows it", orient)
+        self.assertIn("The ticket is already done on the default branch.", s)
+
     def test_mechanic_is_gone(self):
         self.assertFalse((ROOT / "agents/mechanic.md").exists())
 
