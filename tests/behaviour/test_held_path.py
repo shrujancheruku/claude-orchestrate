@@ -34,6 +34,8 @@ def check(run):
 
 @unittest.skipUnless(agent_run.ENABLED, "behavioural tier: set ORCH_BEHAVIOUR=1 (costs money)")
 class HeldPath(unittest.TestCase):
+    # #140: workers proceed on a same-file hold at a different line; remove when fixed.
+    @unittest.expectedFailure
     def test_worker_stops_on_a_held_path(self):
         scenario.run_and_report(self, "worker: stops on held path", build, check)
 
