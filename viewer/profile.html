@@ -375,9 +375,112 @@ function cost(p) {
   det.append(el("summary", {}, "Per-ticket table"));
   det.append(table(["Ticket", "PR", "Outcome", "Worker models", "Worker", "Reviewers", "Other", "Total", "Gate runs"], p.tickets.map((tk) => [
     "#" + tk.ticket, tk.pr ? "#" + tk.pr : "–", tk.outcome, (tk.worker_models || []).join(" → ") || "–",
-    usd(tk.cost.worker), usd(tk.cost.reviewer), usd(tk.cost.other), usd(tk.cost.total), tk.gate_runs == null ? "–" : String(tk.gate_runs),
+    usd(tk.cost.worker), usd(tk.cost.reviewer), usd(tk.cost.other), usd(tk.cost.total), tk.gate_runs == null ? "–" : tk.gate_failed ? `${tk.gate_runs} (${tk.gate_failed} failed)` : String(tk.gate_runs),
   ]), [4, 5, 6, 7, 8]));
   card.append(det);
+  return card;
+}
+
+// Orchestrator: its turns by job, its context per turn with compactions, and the plugin scripts' events.
+const JOB_LABELS = { ci_wait: "CI waits", review_posting: "Review posting (incl. gate)", state_file: "State file", merge_cleanup: "Merge and cleanup", dispatch: "Dispatch",
+  send_message: "SendMessage", tracker: "Tracker", end_of_wake: "End-of-wake text", no_tool_call: "No tool call", other: "Other" };
+function orchestrator(p) {
+  const m = p.metrics, j = m.jobs, c = m.context;
+  const card = el("section", { class: "card" });
+  card.append(el("h2", {}, "Orchestrator turns by job"));
+  // Schema-2 profiles written before these metrics lack them.
+  if (!j || !c) {
+    card.append(el("p", { class: "sub" }, "This profile predates orchestrator metrics; regenerate it with scripts/profile.py."));
+    return card;
+  }
+  const merged = m.tickets_merged;
+  const per = (job, key, perKey) => (merged ? job[perKey] : job[key]);
+  card.append(el("p", { class: "sub" }, `${j.turns} turns, ${usd(j.usd)} proxy in all. ` + (merged ? `Bars are turns per merged ticket (${merged} merged).` : "No tickets merged, so bars are turns in all.")));
+  const entries = Object.entries(j.by_job || {}).filter(([, v]) => v.turns);
+  if (entries.length) {
+    const max = Math.max(...entries.map(([, v]) => per(v, "turns", "turns_per_merged_ticket")), 0.0001);
+    const W = 1000, L = 190, R = 150, ROW = 28, BAR = 16;
+    const s = sv("svg", { viewBox: `0 0 ${W} ${entries.length * ROW + 4}`, role: "img", "aria-label": "Orchestrator turns by job" });
+    s.append(sv("line", { x1: L, x2: L, y1: 0, y2: entries.length * ROW + 4, stroke: "var(--axis)", "stroke-width": 1 }));
+    entries.forEach(([k, v], i) => {
+      const n = per(v, "turns", "turns_per_merged_ticket"), w = (n / max) * (W - L - R), y = i * ROW + (ROW - BAR) / 2;
+      s.append(sv("text", { x: 0, y: y + BAR / 2 + 4, class: "ink" }, JOB_LABELS[k] || k));
+      const g = sv("g");
+      g.append(sv("rect", { x: L, y, width: Math.max(w, 2), height: BAR, rx: 3, fill: "var(--series-1)" }));
+      g.append(sv("rect", { x: L, y: y - 5, width: Math.max(w, 24), height: BAR + 10, fill: "transparent" }));
+      s.append(sv("text", { x: L + w + 6, y: y + BAR / 2 + 4, class: "ink" }, `${n.toFixed(1)} · ${usd(per(v, "usd", "usd_per_merged_ticket"))}`));
+      hover(g, JOB_LABELS[k] || k, [["turns", String(v.turns)], ["proxy $", usd(v.usd)], ["turns per merged ticket", v.turns_per_merged_ticket == null ? "–" : v.turns_per_merged_ticket.toFixed(1)]]);
+      s.append(g);
+    });
+    card.append(chart(s));
+  }
+
+  card.append(el("h2", { style: "margin-top:12px" }, "Context per turn"));
+  const turns = (c.turns || []).filter((x) => t(x.ts) != null);
+  const comps = c.compactions || [];
+  const idle = c.idle_wakes;
+  const tiles = el("div", { class: "tiles" });
+  tiles.append(
+    tile("Effective window", c.effective_window == null ? "–" : fmtTok(c.effective_window), c.effective_window == null ? "no auto compaction" : "median preTokens of auto compactions"),
+    tile("Compactions", String(comps.length), comps.map((x) => `${x.trigger || "?"} ${x.pre_tokens == null ? "?" : fmtTok(x.pre_tokens)}`).join(" · ") || "none"),
+    tile("Idle wakes", idle ? String(idle.idle) : "–", idle ? `of ${idle.passes} pass${idle.passes === 1 ? "" : "es"}: dispatched, reviewed and merged nothing` : "no pass log"),
+  );
+  card.append(tiles);
+  if (turns.length) {
+    card.append(legend([["Context size", "--series-1"], ["Auto compaction", "--critical"], ["Manual or unknown", "--muted"]]));
+    const a = Math.min(...turns.map((x) => t(x.ts))), b = Math.max(...turns.map((x) => t(x.ts)), a + 1);
+    const top = Math.max(...turns.map((x) => x.context), ...comps.map((x) => x.pre_tokens || 0), 1);
+    const W = 1000, L = 56, R = 16, H = 220, T = 10, B = 26;
+    const x = (ms) => L + ((ms - a) / Math.max(b - a, 1)) * (W - L - R);
+    const y = (v) => T + (1 - v / top) * (H - T - B);
+    const s = sv("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Context size per orchestrator turn" });
+    for (const f of [0, 0.5, 1]) {
+      s.append(sv("line", { x1: L, x2: W - R, y1: y(top * f), y2: y(top * f), stroke: f === 0 ? "var(--axis)" : "var(--grid)", "stroke-width": 1 }));
+      s.append(sv("text", { x: L - 6, y: y(top * f) + 4, "text-anchor": "end" }, fmtTok(top * f)));
+    }
+    for (const v of timeTicks(a, b, 8)) s.append(sv("text", { x: x(v), y: H - 6, "text-anchor": "middle" }, clock(v)));
+    let d = "";
+    turns.forEach((r, i) => { d += `${i ? "L" : "M"}${x(t(r.ts))},${y(r.context)}`; });
+    s.append(sv("path", { d, fill: "none", stroke: "var(--series-1)", "stroke-width": 1.5, "stroke-linejoin": "round" }));
+    for (const k of comps) {
+      const ms = t(k.ts);
+      if (ms == null) continue;
+      const colour = k.trigger === "auto" ? "--critical" : "--muted";
+      const g = sv("g");
+      g.append(sv("line", { x1: x(ms), x2: x(ms), y1: T, y2: H - B, stroke: `var(${colour})`, "stroke-width": 2 }));
+      g.append(sv("rect", { x: x(ms) - 6, y: T, width: 12, height: H - T - B, fill: "transparent" }));
+      hover(g, "Compaction · " + clock(ms), [["trigger", k.trigger || "unknown"], ["preTokens", k.pre_tokens == null ? "not recorded" : fmtTok(k.pre_tokens)]]);
+      s.append(g);
+    }
+    card.append(chart(s));
+  } else {
+    card.append(el("p", { class: "sub" }, "No orchestrator turns with timestamps."));
+  }
+  const hb = Object.entries(c.handback_tokens || {});
+  card.append(table(["What entered the orchestrator's context", "Reports", "Tokens (estimate)"], [
+    ...hb.map(([role, v]) => [`${role} hand-backs`, String(v.messages), fmtTok(v.tokens)]),
+    ["Orchestrator's own text", "–", fmtTok(c.own_text_tokens)],
+    ["Bash output", "–", fmtTok(c.bash_output_tokens)],
+  ], [1, 2]));
+  card.append(el("p", { class: "note" }, `Estimates: characters ÷ 4 (${c.estimate || "chars / 4"}); the transcript holds text, not token counts.`));
+
+  card.append(el("h2", { style: "margin-top:12px" }, "Script events"));
+  const e = m.events;
+  if (!e || !e.available) {
+    card.append(el("p", { class: "sub" }, "No events log for this session (events.jsonl): the scripts that write it did not run, or the plugin predates it."));
+    return card;
+  }
+  const g = e.gate, r = e.replay;
+  const et = el("div", { class: "tiles" });
+  et.append(
+    tile("Gate runs", String(g.runs), `${g.fail} failed · ${g.unknown} unknown · kept apart from ${g.review_rounds} review round${g.review_rounds === 1 ? "" : "s"}`),
+    tile("CI runs", String(e.ci.runs), Object.entries(e.ci.by_outcome).map(([k, v]) => `${v} ${k}`).join(" · ") || "none"),
+    tile("Merges", String(e.merges), Object.entries(e.merges_by_outcome || {}).map(([k, v]) => `${v} ${k}`).join(" · ") || "none"),
+    tile("Shared-file hand-back rate", r.handback_rate == null ? "–" : pct(r.handback_rate), r.events ? `${r.handed_back} of ${r.events} replay events` : "no replay events"),
+  );
+  card.append(et);
+  const failed = Object.entries(g.failed_checks || {});
+  if (failed.length) card.append(table(["Failed gate check", "Times"], failed.map(([k, v]) => [k, String(v)]), [1]));
   return card;
 }
 
@@ -540,7 +643,7 @@ function render() {
   view.append(tiles);
   if (p.recommendation) view.append(el("div", { class: "advice" }, p.recommendation));
   if (p.warnings && p.warnings.length) for (const w of p.warnings) view.append(el("div", { class: "advice status-critical" }, w));
-  view.append(cost(p), quality(p), timeline(p), tokens(p), usage(p));
+  view.append(cost(p), orchestrator(p), quality(p), timeline(p), tokens(p), usage(p));
   if (profiles.length > 1) view.append(compare());
 }
 

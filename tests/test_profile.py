@@ -444,6 +444,177 @@ class QualityTest(unittest.TestCase):
         self.assertIsNone(m["review"]["round1_changes_rate"])
 
 
+class OrchestratorFixture(Fixture):
+    """The base session plus one orchestrator turn for each job, compactions, hand-backs and an events log."""
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        opus = "claude-opus-5-5"
+        big = {"input_tokens": 0, "output_tokens": 100, "cache_read_input_tokens": 99_000, "cache_creation_input_tokens": 1_000}
+        bash = lambda i, cmd: [tool_use(i, "Bash", command=cmd)]
+        extra = [
+            assistant(42, "a1", opus, [tool_use("m1", "Monitor", command="anything")], big),
+            assistant(42, "a2", opus, bash("m2", '"${CLAUDE_SKILL_DIR}/../../scripts/watch-ci" 50')),
+            assistant(43, "a3", opus, bash("m3", "python3 ~/.claude/plugins/orchestrate/scripts/gate 50")),
+            assistant(43, "a4", opus, bash("m4", "gh pr diff 50")),  # regex fallback
+            assistant(43, "a5", opus, bash("m5", "scripts/rebuild-state sess --repo .")),
+            assistant(44, "a6", opus, bash("m6", "scripts/merge 50 10")),
+            assistant(44, "a7", opus, bash("m7", "git worktree remove ../w")),  # regex fallback
+            assistant(45, "a8", opus, [tool_use("m8", "Agent", subagent_type="orchestrate:scout", description="where is X")]),
+            assistant(45, "a9", opus, [tool_use("m9", "SendMessage", to="w1", message="fix")]),
+            assistant(45, "a10", opus, bash("m10", "gh issue list --label ready-for-agent")),
+            assistant(46, "a11", opus, [{"type": "text", "text": "x" * 40}]),
+            assistant(46, "a12", opus, [{"type": "thinking", "thinking": "..."}]),
+            assistant(46, "a13", opus, bash("m13", "ls")),
+            assistant(47, "a14", opus, [tool_use("m14", "Write", file_path=str(self.repo / ".claude" / "orchestrate-state.json"), content="{}")]),
+            tool_result(46, "m13", "o" * 80),
+            tool_result(46, "u3", "r" * 400),
+            # Real shape: the report arrives as a message from the agent's ID; a continued agent sends more than one.
+            {"type": "user", "timestamp": at(47), "message": {"content": 'Another Claude session sent a message:\n<agent-message from="aaa">\n' + "w" * 770 + "\n</agent-message>"}},
+            {"type": "user", "timestamp": at(48), "message": {"content": '<agent-message from="aaa">' + "w" * 400}},
+            # The completion notice has only a stub, and an unknown agent is not ours: neither counts.
+            {"type": "user", "timestamp": at(47), "message": {"content": "<task-notification><tool-use-id>u1</tool-use-id><result>delivered as a message</result></task-notification>"}},
+            {"type": "user", "timestamp": at(47), "message": {"content": '<agent-message from="zzz">' + "w" * 4000}},
+            {"type": "system", "subtype": "compact_boundary", "timestamp": at(44), "compactMetadata": {"trigger": "auto", "preTokens": 150_000}},
+            {"type": "system", "subtype": "compact_boundary", "timestamp": at(46), "compactMetadata": {"trigger": "manual", "preTokens": 90_000}},
+            {"type": "system", "subtype": "compact_boundary", "timestamp": at(48), "compactMetadata": {"trigger": "auto", "preTokens": 170_000}},
+        ]
+        with open(self.main, "a") as f:
+            f.writelines(json.dumps(r) + "\n" for r in extra)
+
+    def events(self, rows):
+        write_jsonl(self.repo / prof.PROFILES / prof.EVENTS_LOG, rows)
+
+
+class OrchestratorTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = OrchestratorFixture(Path(self.tmp.name))
+
+    def tearDown(self):
+        os.environ.pop("ORCHESTRATE_USAGE_LOG", None)
+        self.tmp.cleanup()
+
+    def test_turns_by_job_keyed_by_tool_and_plugin_script(self):
+        jobs = self.fx.run()["metrics"]["jobs"]["by_job"]
+        turns = {k: v["turns"] for k, v in jobs.items()}
+        # Base session: three worker dispatches and a reviewer (dispatch), `gh pr merge`, `gh issue edit`.
+        self.assertEqual(turns, {
+            "ci_wait": 2, "review_posting": 2, "state_file": 2, "merge_cleanup": 3, "dispatch": 5, "send_message": 1,
+            "tracker": 2, "end_of_wake": 1, "no_tool_call": 1, "other": 1})
+
+    def test_jobs_report_turns_and_proxy_usd_per_merged_ticket(self):
+        m = self.fx.run()["metrics"]
+        job = m["jobs"]["by_job"]["dispatch"]
+        self.assertEqual(m["tickets_merged"], 1)
+        self.assertEqual(job["turns_per_merged_ticket"], 5)
+        # Each default turn is 10 input, 100 output, 1000 cache read and 50 cache write tokens at Opus 5.5 rates.
+        one = (10 * 4 + 100 * 20 + 1000 * 0.20 + 50 * 5) / 1e6
+        self.assertAlmostEqual(job["usd_per_merged_ticket"], 5 * one)
+        # The 100k-context Monitor turn costs more than a default one.
+        self.assertGreater(m["jobs"]["by_job"]["ci_wait"]["usd"], 2 * one)
+        self.assertAlmostEqual(sum(j["usd"] for j in m["jobs"]["by_job"].values()), m["jobs"]["usd"])
+        self.assertEqual(sum(j["turns"] for j in m["jobs"]["by_job"].values()), m["jobs"]["turns"])
+
+    def test_context_per_turn_with_compactions_and_the_effective_window(self):
+        c = self.fx.run()["metrics"]["context"]
+        self.assertEqual(c["turns"][7]["context"], 1060)  # a default turn: 10 + 1000 + 50
+        self.assertEqual(max(t["context"] for t in c["turns"]), 100_000)
+        self.assertEqual([x["trigger"] for x in c["compactions"]], [None, "auto", "manual", "auto"])
+        self.assertEqual([x["pre_tokens"] for x in c["compactions"]], [None, 150_000, 90_000, 170_000])
+        # Only auto compactions count, and one with no recorded size is skipped.
+        self.assertEqual(c["effective_window"], 160_000)
+
+    def test_no_auto_compaction_means_no_effective_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = Fixture(Path(d)).run()["metrics"]["context"]
+        self.assertIsNone(c["effective_window"])
+
+    def test_handback_own_text_and_bash_output_tokens_are_char_estimates(self):
+        c = self.fx.run()["metrics"]["context"]
+        self.assertEqual(c["handback_tokens"], {"reviewer": {"messages": 1, "tokens": 100}, "worker": {"messages": 2, "tokens": (788 + 400) // 4}})
+        self.assertEqual((c["own_text_tokens"], c["bash_output_tokens"]), (10, 20))
+        self.assertEqual(c["estimate"], "chars / 4")
+
+    def test_idle_wakes_are_passes_that_did_nothing(self):
+        self.fx.passes([
+            {"ts": at(5), "dispatched": [10, 11]},
+            {"ts": at(21)},   # dispatched a reviewer at 20
+            {"ts": at(32)},   # merged PR 50 at 30
+            {"ts": at(40)},   # nothing since 32
+            {"ts": at(50), "dispatched": [], "merged": []},
+        ])
+        self.assertEqual(self.fx.run()["metrics"]["context"]["idle_wakes"], {"passes": 5, "idle": 2})
+
+    def test_gate_failures_ci_merges_and_handback_rate_from_events(self):
+        ev = lambda kind, outcome, ref=None, session=SESSION, **kw: {"ts": at(10), "session": session, "kind": kind, "ref": ref, "outcome": outcome, **kw}
+        self.fx.events([
+            ev("gate", "fail", 50, failed=["title follows Conventional Commits"]),
+            ev("gate", "unknown", 50, failed=[], behind_by=None),
+            ev("gate", "pass", 50),
+            ev("gate", "fail", 99, failed=["verify"]),
+            ev("gate", "pass", 50, session="other"),
+            ev("gate", "pass", 50, session=None),  # no session, inside the span: counts
+            ev("ci", "fail", 50), ev("ci", "pass", 50),
+            ev("merge", "merged", 50), ev("merge", "timeout", 51), ev("merge", "closed", 52),
+            ev("replay", "line-replay", 50), ev("replay", "word-merge", 50),
+            ev("replay", "regenerated", 50), ev("replay", "handed-back", 50),
+        ])
+        p = self.fx.run()
+        e = p["metrics"]["events"]
+        self.assertTrue(e["available"])
+        # Gate failures are their own count: the review round count is untouched.
+        self.assertEqual((e["gate"]["runs"], e["gate"]["pass"], e["gate"]["fail"], e["gate"]["unknown"]), (5, 2, 2, 1))
+        self.assertEqual(e["gate"]["failed_checks"], {"title follows Conventional Commits": 1, "verify": 1})
+        self.assertEqual(e["gate"]["review_rounds"], 0)
+        self.assertEqual(p["metrics"]["review"]["rounds_total"], 0)
+        self.assertEqual((e["ci"]["runs"], e["ci"]["by_outcome"]), (2, {"fail": 1, "pass": 1}))
+        self.assertEqual((e["merges"], e["merges_by_outcome"]), (1, {"merged": 1, "timeout": 1, "closed": 1}))
+        self.assertEqual((e["replay"]["events"], e["replay"]["handed_back"], e["replay"]["handback_rate"]), (4, 1, 0.25))
+        tickets = {t["ticket"]: t for t in p["tickets"]}
+        self.assertEqual((tickets[10]["gate_runs"], tickets[10]["gate_failed"]), (4, 1))  # PR 50
+        self.assertEqual((tickets[11]["gate_runs"], tickets[11]["gate_failed"]), (0, 0))
+
+    def test_no_events_log_is_reported_not_zero(self):
+        p = self.fx.run()
+        self.assertEqual(p["metrics"]["events"], {"available": False})
+        self.assertTrue(all(t["gate_runs"] is None for t in p["tickets"]))
+
+    def test_viewer_draws_the_orchestrator_card_and_survives_old_profiles(self):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        self.fx.events([{"ts": at(10), "session": SESSION, "kind": "replay", "ref": 50, "outcome": "handed-back"}])
+        p = self.fx.run()
+        path = Path(self.tmp.name) / "p.json"
+        run = lambda: subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(path), "orchestrator"],
+                                     capture_output=True, text=True)
+        path.write_text(json.dumps(p))
+        out = run()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        for want in ("Orchestrator turns by job", "Context per turn", "160k", "Shared-file hand-back rate", "100%"):
+            self.assertIn(want, out.stdout)
+        old = json.loads(json.dumps(p))
+        for k in ("jobs", "context", "events"):
+            del old["metrics"][k]
+        path.write_text(json.dumps(old))
+        out = run()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("predates", out.stdout)
+        # Events missing alone, or no compactions, must not crash either.
+        partial = json.loads(json.dumps(p))
+        partial["metrics"]["events"] = {"available": False}
+        partial["metrics"]["context"]["compactions"] = []
+        partial["metrics"]["context"]["effective_window"] = None
+        path.write_text(json.dumps(partial))
+        out = run()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("No events log", out.stdout)
+
+    def test_summary_stays_five_lines(self):
+        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
+        self.assertEqual(len(prof.summary(self.fx.run(), Path("x.json")).splitlines()), 5)
+
+
 class CommandTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
