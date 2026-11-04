@@ -137,7 +137,7 @@ def main(argv=None) -> int:
     undecided = unknown and behind == 0 and len(failed) == 1
     outcome = "unknown" if undecided else "fail" if failed else "pass"
     # The event lands in the orchestrator's repo, beside the pass log.
-    common.append_event(".", "gate", outcome, ref=ref, failed=failed, behind_by=behind)
+    common.append_event(args.cwd, "gate", outcome, ref=ref, failed=failed, behind_by=behind)
     return 3 if undecided else 1 if failed else 0
 
 
