@@ -79,7 +79,7 @@ Dispatch the same `orchestrate:worker` with that `model` override. If the config
 
 **Escalation.** A haiku worker escalates once, to a new `sonnet` worker on the same branch and PR. Steps:
 1. Rebuild the state file if this wake hasn't already, and read the ticket's worker model from it, never from memory, so this works after a compaction. Escalate only when the recorded model contains `haiku` (it is a full model ID); a sonnet worker is never escalated again. A missing model counts as not haiku: no escalation, and say so in the report.
-2. Hand over cleanly. The haiku worker must have ended or been told to stop, and its work must be pushed: run the scout's no-PR check on its worktree for unpushed or uncommitted work. If any is found, have the worker push it first, or rescue it as the stalled-ticket rule says, so the new worktree can check out the branch and nothing is lost when the old worktree is removed.
+2. Hand over cleanly. The haiku worker must have ended or been told to stop, and its work must be pushed: check the old worktree for uncommitted changes or unpushed commits (as the scout does for no-PR tickets). If any is found, have the worker push it first, or rescue it as the stalled-ticket rule says, so the new worktree can check out the branch and nothing is lost when the old worktree is removed.
 3. Dispatch the new worker (description `Build #<ticket>`; its brief says to continue the existing branch). Review findings go through the brief's **Review findings** line ("address review `<url>`"); Notes carries a CI failure or the `stopped` report.
 
 Escalate on any of:
@@ -87,7 +87,7 @@ Escalate on any of:
 - a second CI failure on the PR;
 - "changes" again in review round 2.
 
-A usage-limit or API error never escalates (see [Running out of usage](#running-out-of-usage)). An escalation counts against the three-round cap: the escalated worker's first report is the next round, and the cap doesn't reset. Stops that are the user's decision are handed back as under [Worker reports](#worker-reports), whatever the worker's model.
+A usage-limit or API error never escalates (see [Running out of usage](#running-out-of-usage)). An escalation counts against the three-round cap: the escalated worker's first report counts as a round only when the trigger was a review, and the cap doesn't reset. Stops that are the user's decision are handed back as under [Worker reports](#worker-reports), whatever the worker's model.
 
 ## The review loop
 
