@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = 1
+SCHEMA = 2
 PLUGIN = "orchestrate:"
 PROFILES = Path(".claude") / "orchestrate-profiles"
 PASS_LOG = "passes.jsonl"
@@ -36,6 +36,26 @@ TOKEN_KEYS = {
     "cache_read_input_tokens": "cache_read",
     "cache_creation_input_tokens": "cache_write",
 }
+# Proxy prices: USD per million tokens at API list, per model family and token type.
+# Source: Anthropic's public API pricing page. Update the date with the numbers.
+# `long` is the rate for a request whose context (input + cache read + cache write
+# tokens) passes `long_over`; Opus has no long-context tier. Haiku's over-100K
+# rate is an assumption (double the input-side rates), so check it on the next update.
+PRICES_AS_OF = "2026-11-04"
+PRICES_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing"
+PRICES = {
+    "opus": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75},
+    "sonnet": {
+        "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75,
+        "long_over": 200_000,
+        "long": {"input": 6.0, "output": 22.5, "cache_read": 0.6, "cache_write": 7.5},
+    },
+    "haiku": {
+        "input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25,
+        "long_over": 100_000,
+        "long": {"input": 2.0, "output": 5.0, "cache_read": 0.2, "cache_write": 2.5},
+    },
+}
 LIMIT_TEXT = re.compile(r"usage limit|rate limit|limit reached|resets? (?:at|in)", re.I)
 
 
@@ -45,6 +65,23 @@ def claude_dir() -> Path:
 
 def usage_log() -> Path:
     return Path(os.environ.get("ORCHESTRATE_USAGE_LOG") or claude_dir() / "orchestrate" / "usage.jsonl")
+
+
+def model_family(model) -> str | None:
+    name = (model or "").lower()
+    return next((f for f in PRICES if f in name), None)
+
+
+def request_cost(model, usage: dict) -> float | None:
+    """Proxy USD for one API request, or None for a model with no price."""
+    family = model_family(model)
+    if not family:
+        return None
+    price = PRICES[family]
+    tokens = {name: usage.get(key) or 0 for key, name in TOKEN_KEYS.items()}
+    if price.get("long_over") and tokens["input"] + tokens["cache_read"] + tokens["cache_write"] > price["long_over"]:
+        price = price["long"]
+    return sum(tokens[k] * price[k] for k in tokens) / 1e6
 
 
 def parse_ts(value) -> datetime | None:
@@ -100,6 +137,7 @@ class Transcript:
         self.path = path
         self.records = list(read_jsonl(path))
         usage = {}
+        self.requests = {}  # message id -> (model, usage), each API request once
         self.models = []
         self.times = []
         for r in self.records:
@@ -110,6 +148,7 @@ class Transcript:
             if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
                 # A response is logged once per content block, each with the same usage.
                 usage[msg.get("id") or id(r)] = msg["usage"]
+                self.requests[msg.get("id") or id(r)] = (msg.get("model"), msg["usage"])
                 if msg.get("model") and msg["model"] not in self.models:
                     self.models.append(msg["model"])
         self.times.sort()
@@ -117,6 +156,15 @@ class Transcript:
         for u in usage.values():
             for k, v in TOKEN_KEYS.items():
                 self.tokens[v] += u.get(k) or 0
+
+    def cost(self) -> dict:
+        """Proxy USD by model family; requests from a model with no price count under `unpriced`."""
+        out = {}
+        for model, u in self.requests.values():
+            c = request_cost(model, u)
+            key = model_family(model) if c is not None else "unpriced"
+            out[key] = out.get(key, 0.0) + (c or 0.0)
+        return out
 
     def segments(self) -> list:
         out = []
@@ -225,6 +273,8 @@ def collect_agents(main: Transcript) -> list:
             "dispatched": ts,
             "segments": t.segments() if t else [],
             "tokens": t.tokens if t else {v: 0 for v in TOKEN_KEYS.values()},
+            "cost": t.cost() if t else {},
+            "last_record": t.times[-1] if t and t.times else None,
             "transcript": t,
         })
     return agents
@@ -286,8 +336,18 @@ def build_tickets(agents: list, main: Transcript, end: datetime) -> list:
             ended, outcome = end, "open"
         building = clip(merge_intervals([seg for w in tk["workers"] for seg in w["segments"]]), start, ended)
         tokens = sum(sum(a["tokens"].values()) for a in agents if a.get("ticket") == n)
+        mine = [a for a in agents if a.get("ticket") == n]
+        cost = {"worker": 0.0, "reviewer": 0.0, "other": 0.0}
+        for a in mine:
+            cost[a["role"] if a["role"] in cost else "other"] += sum(a["cost"].values())
+        cost["total"] = sum(cost.values())
         out.append({
             "ticket": n,
+            "cost": cost,
+            # Worker models in dispatch order: Haiku then Sonnet is an escalation.
+            "worker_models": [model_family(w["model"]) or w["model"] for w in tk["workers"]],
+            # Filled once events.jsonl is read (a later ticket).
+            "gate_runs": None,
             "pr": tk["pr"],
             "outcome": outcome,
             "start": start,
@@ -324,6 +384,42 @@ def read_usage(start: datetime, end: datetime) -> list:
         if ts and start <= ts <= end:
             out.append(u)
     return out
+
+
+def meter_use(usage: list, key: str) -> float | None:
+    """Percentage points a meter climbed over the samples; a reset (a drop) adds nothing."""
+    vals = [float(u[key]) for u in usage if u.get(key) is not None]
+    if not vals:
+        return None
+    return sum(max(b - a, 0.0) for a, b in zip(vals, vals[1:]))
+
+
+def cost_metrics(orch: Transcript, agents: list, merged: int) -> dict:
+    """Proxy $ for the whole session: the orchestrator and every agent, split by role and model."""
+    by_role, by_model, by_role_model = {}, {}, {}
+    for role, cost in [("orchestrator", orch.cost())] + [(a["role"], a["cost"]) for a in agents]:
+        for model, usd in cost.items():
+            by_role[role] = by_role.get(role, 0.0) + usd
+            by_model[model] = by_model.get(model, 0.0) + usd
+            rm = by_role_model.setdefault(role, {})
+            rm[model] = rm.get(model, 0.0) + usd
+    total = sum(by_role.values())
+    per = (lambda x: x / merged) if merged else (lambda x: None)
+    return {
+        "prices_as_of": PRICES_AS_OF,
+        "prices_source": PRICES_SOURCE,
+        "total": total,
+        "per_merged_ticket": per(total),
+        "by_role": by_role,
+        "by_model": by_model,
+        "by_role_model": by_role_model,
+        "per_merged_ticket_by_role": {k: per(v) for k, v in by_role.items()},
+        "per_merged_ticket_by_model": {k: per(v) for k, v in by_model.items()},
+        # Models with no entry in PRICES: their requests cost $0 here, so say so.
+        "unpriced_models": sorted({
+            m for t in [orch] + [a["transcript"] for a in agents if a["transcript"]]
+            for m, _ in t.requests.values() if m and not model_family(m)}),
+    }
 
 
 def windows(usage: list, passes: list, threshold: float, now: datetime) -> list:
@@ -421,6 +517,18 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     merged = [tk for tk in tickets if tk["outcome"] == "merged"]
     occupancy = occupied / (slots * span)
     five = [float(u["five_hour"]) for u in usage if u.get("five_hour") is not None]
+    cost = cost_metrics(main, agents, len(merged))
+    # Agents can write after the orchestrator's last record (or the session is still running).
+    last = max([end] + [a["last_record"] for a in agents if a["last_record"]])
+    warnings = []
+    if last > end:
+        warnings.append(f"the last transcript record ({iso(last)}) is later than the profile's end ({iso(end)}): this profile is partial")
+    if cost["unpriced_models"]:
+        warnings.append("no price for model(s) " + ", ".join(cost["unpriced_models"]) + ": their cost counts as $0")
+    meters = {}
+    for key in ("five_hour", "seven_day"):
+        used = meter_use(usage, key)
+        meters[key] = {"used": used, "per_merged_ticket": used / len(merged) if used is not None and merged else None}
 
     def interval(xs):
         return [[iso(s), iso(e)] for s, e in xs]
@@ -432,6 +540,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         "generated_at": iso(now),
         "start": iso(start),
         "end": iso(end),
+        "last_record": iso(last),
+        "warnings": warnings,
         "slots": slots,
         "slots_raised": slots_raised,
         "threshold": threshold,
@@ -441,7 +551,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             {
                 "id": a["id"], "role": a["role"], "model": a["model"], "description": a["description"],
                 "ticket": a.get("ticket"), "pr": a.get("pr"), "dispatched": iso(a["dispatched"]),
-                "segments": interval(a["segments"]), "tokens": a["tokens"],
+                "segments": interval(a["segments"]), "tokens": a["tokens"], "cost": a["cost"],
             }
             for a in agents
         ],
@@ -449,7 +559,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             {
                 "ticket": tk["ticket"], "pr": tk["pr"], "outcome": tk["outcome"], "slot": tk["slot"],
                 "start": iso(tk["start"]), "end": iso(tk["end"]), "building": interval(tk["building"]),
-                "tokens": tk["tokens"],
+                "tokens": tk["tokens"], "cost": tk["cost"], "worker_models": tk["worker_models"],
+                "gate_runs": tk["gate_runs"],
             }
             for tk in tickets
         ],
@@ -474,6 +585,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "five_hour_peak": max(five) if five else None,
             "windows": wins,
             "limit_hits": len(limits),
+            "cost": cost,
+            "meters": meters,
         },
         "recommendation": recommend(slots, occupancy, wins, limits),
     }
@@ -487,30 +600,40 @@ def fmt_dur(s: float) -> str:
     return f"{s / 3600:.1f}h" if s >= 3600 else f"{s / 60:.0f}m"
 
 
+def fmt_usd(x) -> str:
+    return "–" if x is None else f"${x:.2f}"
+
+
 def summary(p: dict, saved: Path) -> str:
+    """About five lines: header, $ per merged ticket, slots, plan, saved. Notes and warnings add lines only when they apply."""
     m = p["metrics"]
-    roles = m["tokens_by_role"]
-    role_parts = []
-    for role in ("orchestrator", "worker", "reviewer", "scout", "mechanic"):
-        if role in roles:
-            n = sum(roles[role].values())
-            label = role + ("s" if role != "orchestrator" else "")
-            pct = f" ({m['orchestrator_share']:.0%})" if role == "orchestrator" else ""
-            role_parts.append(f"{label} {fmt_tokens(n)}{pct}")
+    c = m["cost"]
     idle = ", ".join(f"{k} {fmt_dur(v)}" for k, v in sorted(m["idle_s"].items()) if v >= 60) or "none"
     if m["five_hour_start"] is None:
         plan = "no usage samples (status-line tap not wired in)"
     else:
         plan = f"5h window {m['five_hour_start']:.0f}% → {m['five_hour_end']:.0f}%, peak {m['five_hour_peak']:.0f}%"
+        used = m["meters"]["five_hour"]["per_merged_ticket"]
+        week = m["meters"]["seven_day"]["per_merged_ticket"]
+        if used is not None:
+            plan += f", {used:.1f} pts per merged ticket" + (f" (7d {week:.1f})" if week is not None else "")
     plan += f" · {m['limit_hits']} limit hit{'s' if m['limit_hits'] != 1 else ''}"
+    by_model = " · ".join(
+        f"{k} {fmt_usd(v)}" for k, v in sorted(c["per_merged_ticket_by_model"].items(), key=lambda kv: -(kv[1] or 0)) if v)
+    if c["per_merged_ticket"] is None:
+        spend = f"no tickets merged; {fmt_usd(c['total'])} proxy in all"
+    else:
+        spend = f"{fmt_usd(c['per_merged_ticket'])} per merged ticket ({m['tickets_merged']} merged): {by_model}"
+        orch = c["per_merged_ticket_by_role"].get("orchestrator")
+        spend += f" · orchestrator {fmt_usd(orch)}"
     lines = [
-        f"Profile · session {p['session'][:8]} · {fmt_dur(m['span_s'])} · {p['slots']} slots",
+        f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {p['slots']} slots",
+        f"proxy $ {spend}",
         f"slots   occupied {m['occupancy']:.0%}  (building {m['building_share']:.0%}, review/merge {m['review_share']:.0%})  idle: {idle}",
-        f"tokens  {' · '.join(role_parts)} · cache hits {m['cache_hit_ratio']:.0%}",
-        f"tickets {m['tickets_merged']} merged" + (
-            f", {fmt_tokens(m['tokens_per_merged_ticket'])} each" if m["tokens_per_merged_ticket"] else ""),
         f"plan    {plan}",
     ]
+    for w in p["warnings"]:
+        lines.append(f"WARNING {w}")
     if p["recommendation"]:
         lines.append(f"advice  {p['recommendation']}")
     if p.get("slots_raised"):

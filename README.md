@@ -82,21 +82,23 @@ For unattended `/loop /orchestrate:run`, turn on **Continue automatically at usa
 `/orchestrate:run --profile` (or `/loop /orchestrate:run --profile`) runs normal passes, and at the end of each one records the pass and saves a profile of the session so far:
 
 ```
-Profile · session 346d1ea2 · 21m · 2 slots
+Profile · session 346d1ea2 · 2026-11-03T16:01Z → 2026-11-03T16:22Z (21m) · 2 slots
+proxy $ $3.09 per merged ticket (2 merged): opus $1.52 · sonnet $1.35 · haiku $0.22 · orchestrator $1.52
 slots   occupied 59%  (building 37%, review/merge 22%)  idle: overlap 5m, empty 7m
-tokens  orchestrator 4.8M (33%) · workers 8.3M · reviewers 1.0M · scouts 433k · cache hits 96%
-tickets 2 merged, 4.8M each
-plan    5h window 22% → 51%, peak 51% · 0 limit hits
+plan    5h window 22% → 51%, peak 51%, 14.5 pts per merged ticket (7d 2.0) · 0 limit hits
 saved   .claude/orchestrate-profiles/2026-11-03-346d1ea2.json  (+ .html)
 ```
 
 - **Slot efficiency:** how much of the session's slot time held a ticket, split into building and review or waiting to merge, and why idle slots were idle (overlap, gate, nothing takeable, usage limit).
+- **Proxy $ per merged ticket:** the whole session's cost (the orchestrator and every agent, priced per request at API list, by model and token type) divided by tickets merged, split by model and by role, with a per-ticket table of worker, reviewer and other cost. The prices are a dated constant at the top of `scripts/profile.py`; they are a proxy for plan usage, not your bill.
 - **Usage efficiency:** tokens by role and model (input, output, cache read, cache write), tokens per merged ticket, the orchestrator's share, cache hits.
-- **Headroom:** your plan's 5-hour and 7-day usage over the session; 5-hour windows that reset under 50% (`--threshold`) while every slot was full and tickets waited; usage-limit hits. A profile recommends one more or one fewer slot when the history supports it; the per-pass [slot suggestion](#choosing-a-slot-count) is separate.
+- **Headroom:** your plan's 5-hour and 7-day usage over the session; 5-hour windows that reset under 50% (`--threshold`) while every slot was full and tickets waited; usage-limit hits; with the usage tap, the 5-hour and 7-day points used per merged ticket (unweighted). A profile recommends one more or one fewer slot when the history supports it; the per-pass [slot suggestion](#choosing-a-slot-count) is separate.
 
-Profiles live in `.claude/orchestrate-profiles/` (gitignore it). Open the `.html` beside each one, a copy of `viewer/profile.html` with the profile embedded: a slot timeline, tokens by role, plan usage over time, and tables behind each. Drop several profile JSON files on any copy to compare sessions.
+Profiles live in `.claude/orchestrate-profiles/` (gitignore it). Open the `.html` beside each one, a copy of `viewer/profile.html` with the profile embedded: proxy $ per merged ticket, a slot timeline, tokens by role, plan usage over time, and tables behind each. Drop several profile JSON files on any copy to compare sessions.
 
 **Plan usage needs the status-line tap.** Claude Code shows plan usage only to the status line, so `/orchestrate:setup` offers to pipe yours through `scripts/usage-tap.py`, which logs changes to `~/.claude/orchestrate/usage.jsonl` and prints nothing. By hand: copy it to `~/.claude/orchestrate/usage-tap.py` and add `echo "$input" | python3 -I ~/.claude/orchestrate/usage-tap.py` to your status-line script. Only subscribers get usage figures.
+
+A profile prints the span it covers and warns when a transcript has records later than its end, which means it is partial (a session still running). The JSON is `schema` 2; the viewer reads only that.
 
 Any past session can be profiled after the fact, without `--profile`, by its ID or transcript path:
 
