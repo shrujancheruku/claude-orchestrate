@@ -219,6 +219,18 @@ class ProfileTest(unittest.TestCase):
         self.assertAlmostEqual(over, (60_000 * 0.50 + 60_000 * 0.05) / 1e6)
         self.assertIsNone(prof.request_cost("some-other-model", {"input_tokens": 1}))
 
+    def test_unlisted_newer_version_is_flagged_and_zero_usage_is_skipped(self):
+        self.assertTrue(prof.is_exact_version("claude-opus-4-8-20260101"))
+        self.assertTrue(prof.is_exact_version("claude-opus-4"))
+        self.assertFalse(prof.is_exact_version("claude-opus-4-9"))
+        self.assertEqual(prof.price_key("claude-3-5-haiku-20241022"), "claude-3-5-haiku")
+        self.assertEqual(prof.model_family("claude-3-5-haiku-20241022"), "haiku")
+        path = Path(self.tmp.name) / "newer.jsonl"
+        zero = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        write_jsonl(path, [assistant(1, "n1", "claude-opus-4-9", []), assistant(2, "z1", "<synthetic>", [], zero)])
+        c = prof.cost_metrics(prof.Transcript(path), [], 1)
+        self.assertEqual((c["approximate_models"], c["unpriced_models"]), (["claude-opus-4-9"], []))
+
     def test_unknown_models_are_flagged_not_priced(self):
         self.assertEqual(self.fx.run()["warnings"], [])
         path = Path(self.tmp.name) / "mystery.jsonl"
@@ -295,6 +307,11 @@ class CommandTest(unittest.TestCase):
         html = saved.with_suffix(".html").read_text()
         self.assertIn('"session": "sess-1"', html)
         self.assertNotIn('type="application/json">null<', html)
+
+    def test_viewer_shows_a_banner_for_rejected_files(self):
+        html = prof.VIEWER.read_text()
+        self.assertIn("regenerate it with scripts/profile.py", html)
+        self.assertNotIn("console.warn", html)
 
     def test_html_escapes_script_close(self):
         out = self.root / "x.html"

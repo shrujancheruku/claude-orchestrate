@@ -76,7 +76,7 @@ PRICES = {
         "long": _rates(0.50, 2.50, 0.05),
     },
     "claude-haiku-4-5": _rates(1, 5, 0.10),
-    "claude-haiku-3-5": _rates(0.80, 4, 0.08),
+    "claude-3-5-haiku": _rates(0.80, 4, 0.08),
 }
 LIMIT_TEXT = re.compile(r"usage limit|rate limit|limit reached|resets? (?:at|in)", re.I)
 
@@ -97,7 +97,13 @@ def price_key(model) -> str | None:
 def model_family(model) -> str | None:
     """opus, sonnet, haiku, fable or mythos for a priced model; None when it has no price."""
     key = price_key(model)
-    return key.split("-")[1] if key else None
+    return re.search(r"opus|sonnet|haiku|fable|mythos", key).group(0) if key else None
+
+
+def is_exact_version(model) -> bool:
+    """False when the id names a newer version than its price key ("claude-opus-4-9" matched "claude-opus-4")."""
+    key = price_key(model)
+    return bool(key) and not re.match(r"-\d{1,2}(?!\d)", (model or "").lower().split(key, 1)[1])
 
 
 def request_cost(model, usage: dict) -> float | None:
@@ -444,9 +450,14 @@ def cost_metrics(orch: Transcript, agents: list, merged: int) -> dict:
         "per_merged_ticket_by_role": {k: per(v) for k, v in by_role.items()},
         "per_merged_ticket_by_model": {k: per(v) for k, v in by_model.items()},
         # Models with no entry in PRICES: their requests cost $0 here, so say so.
+        # Requests with no usage at all (the harness's <synthetic> messages) cost nothing and don't count.
         "unpriced_models": sorted({
             m for t in [orch] + [a["transcript"] for a in agents if a["transcript"]]
-            for m, _ in t.requests.values() if m and not model_family(m)}),
+            for m, u in t.requests.values() if m and not model_family(m) and any(u.get(k) for k in TOKEN_KEYS)}),
+        # Models priced at an older sibling's rate because their own version isn't listed.
+        "approximate_models": sorted({
+            m for t in [orch] + [a["transcript"] for a in agents if a["transcript"]]
+            for m, _ in t.requests.values() if m and model_family(m) and not is_exact_version(m)}),
     }
 
 
@@ -553,6 +564,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         warnings.append(f"the last transcript record ({iso(last)}) is later than the profile's end ({iso(end)}): this profile is partial")
     if cost["unpriced_models"]:
         warnings.append("no price for model(s) " + ", ".join(cost["unpriced_models"]) + ": their cost counts as $0")
+    if cost["approximate_models"]:
+        warnings.append("version not in PRICES for " + ", ".join(cost["approximate_models"]) + ": priced at the nearest older version's rates")
     meters = {}
     for key in ("five_hour", "seven_day"):
         used = meter_use(usage, key)

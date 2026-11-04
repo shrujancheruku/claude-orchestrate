@@ -122,6 +122,7 @@ body.drag .empty, body.drag main { outline: 2px solid var(--series-1); outline-o
 <script>
 "use strict";
 const profiles = [];
+const rejected = []; // files the viewer refused, shown as a banner
 const $ = (id) => document.getElementById(id);
 const SVG = "http://www.w3.org/2000/svg";
 const ROLES = ["orchestrator", "worker", "reviewer", "scout", "mechanic"];
@@ -464,6 +465,7 @@ function compare() {
 function render() {
   const view = $("view");
   view.replaceChildren();
+  for (const msg of rejected) view.append(el("div", { class: "advice status-critical" }, msg));
   $("empty").hidden = profiles.length > 0;
   const pick = $("pick");
   pick.hidden = profiles.length < 2;
@@ -490,7 +492,11 @@ function render() {
 }
 
 function add(data, name) {
-  if (!data || data.schema !== 2 || !data.metrics) { console.warn("Not an orchestrate profile (schema 2):", name); return; }
+  if (!data || data.schema !== 2 || !data.metrics) {
+    const why = data && data.schema != null && data.schema !== 2 ? `is schema ${data.schema}; regenerate it with scripts/profile.py` : "is not an orchestrate profile";
+    rejected.push(`${name} ${why}`);
+    return;
+  }
   const i = profiles.findIndex((p) => p.session === data.session);
   if (i >= 0) profiles[i] = data; else profiles.push(data);
   profiles.sort((x, y) => (x.start < y.start ? -1 : 1));
@@ -499,8 +505,9 @@ function add(data, name) {
   pick.value = String(profiles.findIndex((p) => p.session === data.session));
 }
 async function load(files) {
+  rejected.length = 0;
   for (const f of files) {
-    try { add(JSON.parse(await f.text()), f.name); } catch (e) { console.warn("Couldn't read", f.name, e); }
+    try { add(JSON.parse(await f.text()), f.name); } catch (e) { rejected.push(`${f.name} is not valid JSON`); }
   }
   render();
 }
@@ -509,7 +516,7 @@ $("pick").addEventListener("change", render);
 document.addEventListener("dragover", (ev) => { ev.preventDefault(); document.body.classList.add("drag"); });
 document.addEventListener("dragleave", () => document.body.classList.remove("drag"));
 document.addEventListener("drop", (ev) => { ev.preventDefault(); document.body.classList.remove("drag"); load(ev.dataTransfer.files); });
-try { add(JSON.parse($("profile-data").textContent), "embedded"); } catch (e) { /* no embedded profile */ }
+try { const emb = JSON.parse($("profile-data").textContent); if (emb) add(emb, "embedded"); } catch (e) { /* no embedded profile */ }
 render();
 </script>
 </body>
