@@ -63,5 +63,5 @@ Tickets run in parallel only when their touch maps don't overlap outside the sha
 - **Instruction files:** <paths the reviewer checks against>
 - **Risk paths** (any PR touching them is reviewed as L): <globs>
 - **Tiers:** S is at most <50> changed lines in at most <3> files, none on a risk path; L touches a risk path or changes more than <400> lines; M is everything else. A `size:S|M|L` label on the ticket overrides.
-- **Repo-specific checks:** <e.g. "codegen is up to date", "docs updated">
+- **Repo-specific checks:** <what the reviewer judges, e.g. "docs updated">. An entry may carry a command in backticks, e.g. "codegen is up to date (`make codegen && git diff --exit-code`)"; the script gate runs each such command before any reviewer, so mechanical failures cost no review round.
 - **Post reviews:** <yes | no>. When yes, the reviewer posts each round on the PR itself.

@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""gate <pr> [--cwd DIR] [--base BRANCH] : the mechanical checks that run before any reviewer.
+
+Checks a PR's mergeability with its base (conflicts, and how far it is behind), its title against
+Conventional Commits, and each command the config's `Repo-specific checks` entry carries (a
+`backticked` span). Prints one line per check, with the last ~40 lines of a failure's output, in
+the same format as `verify`. Appends one `gate` event (ref = the PR number, outcome pass|fail,
+failed = the names of the failed checks). Exits 1 on any failure. Run the repo-specific commands
+in --cwd (the worker's worktree, so they see the PR's code); default is the current directory.
+Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+
+import checks
+import common
+
+TITLE_RE = re.compile(
+    r"^(feat|fix|docs|refactor|test|chore|build|ci|perf|style|revert)(\([^()\s][^()]*\))?!?: \S")
+
+
+def gh(*args):
+    p = subprocess.run(["gh", *args], capture_output=True, text=True)
+    return p.returncode, p.stdout, p.stderr
+
+
+def check(name, ok, why=""):
+    return checks.Result(name, "pass" if ok else "fail", 0.0, None if ok else 1, why)
+
+
+def repo_commands(cwd) -> list:
+    """Backticked spans in the `Repo-specific checks` item of the config's Review section."""
+    review = common.config_section(cwd, "Review")
+    if not review:
+        return []
+    found, inside = [], False
+    for line in review.splitlines():
+        if re.match(r"\s*-\s", line) and not line.startswith((" ", "\t")):
+            inside = "repo-specific checks" in line.lower()
+        elif inside and not line.startswith((" ", "\t")):
+            inside = False
+        if inside:
+            found.extend(s.strip() for s in re.findall(r"`([^`]+)`", line) if s.strip())
+    return found
+
+
+def pr_checks(pr, base_override):
+    """The built-in checks: title convention, then mergeability (conflicts and behind_by)."""
+    code, out, err = gh("pr", "view", pr, "--json", "title,mergeable,baseRefName,headRefName")
+    if code != 0:
+        return None, f"gh pr view failed: {common.one_line(err)}"
+    view = json.loads(out)
+    results = [check("title follows Conventional Commits", bool(TITLE_RE.match(view.get("title", ""))),
+                     f"title: {view.get('title')!r}\nexpected: type(scope): description")]
+    base = base_override or view.get("baseRefName") or "main"
+    mergeable = view.get("mergeable", "UNKNOWN")
+    behind = None
+    code, out, err = gh("api", f"repos/{{owner}}/{{repo}}/compare/{base}...{view.get('headRefName')}", "--jq", ".behind_by")
+    if code == 0 and out.strip().isdigit():
+        behind = int(out.strip())
+    problems = []
+    if mergeable == "CONFLICTING":
+        problems.append(f"conflicts with {base}")
+    elif mergeable != "MERGEABLE":
+        problems.append(f"GitHub has not computed mergeability ({mergeable}); run the gate again")
+    if behind is None:
+        problems.append(f"could not read behind_by: {common.one_line(err)}")
+    elif behind:
+        problems.append(f"behind {base} by {behind} commit(s); rebase or merge {base}")
+    label = f"mergeable with {base} (behind_by {behind if behind is not None else '?'})"
+    results.append(check(label, not problems, "\n".join(problems)))
+    return results, behind
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("pr", help="PR number")
+    ap.add_argument("--cwd", default=".", help="directory holding the PR's code and the config")
+    ap.add_argument("--base", help="base branch (default: the PR's)")
+    args = ap.parse_args(argv)
+    pr = args.pr.lstrip("#")
+    ref = int(pr) if pr.isdigit() else pr
+
+    results, behind = pr_checks(pr, args.base)
+    if results is None:
+        print(f"gate: {behind}", file=sys.stderr)
+        return 2
+    results += checks.run_stages([repo_commands(args.cwd)], args.cwd)
+    print(checks.format_results(results))
+    failed = [r.command for r in results if r.status == "fail"]
+    # The event lands in the orchestrator's repo, beside the pass log.
+    common.append_event(".", "gate", "fail" if failed else "pass", ref=ref, failed=failed, behind_by=behind)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
