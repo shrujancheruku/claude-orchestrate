@@ -31,6 +31,22 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("Compare file paths, with any `:line` stripped; "
                       "a different section of the same file still overlaps.", stop)
 
+    def test_worker_leaves_no_background_commands(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        self.assertIn("in the foreground, and let it finish before you push or report", s)
+        self.assertIn("no command you started is still running in the background", s)
+
+    def test_run_skill_handles_locked_worktree_without_force(self):
+        s = (ROOT / "skills/run/SKILL.md").read_text()
+        self.assertIn("git worktree unlock <dir>", s)
+        self.assertIn("git worktree remove <dir>", s)
+        files = [ROOT / "README.md"]
+        for d in ("agents", "skills", "docs/agents"):
+            files += [p for p in (ROOT / d).rglob("*.md")]
+        for p in files:
+            self.assertNotRegex(p.read_text(errors="ignore"),
+                                r"worktree remove\b[^`\n]*(--force|\s-f\b)", str(p))
+
     def test_mechanic_is_gone(self):
         self.assertFalse((ROOT / "agents/mechanic.md").exists())
 

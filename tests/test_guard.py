@@ -191,6 +191,117 @@ CASES = [
     ("orchestrate:worker", "git push origin HEAD:main", "deny"),
 ]
 
+# Both read-only roles must refuse every one of these (#83, #84, #85, #104, #105).
+HIDDEN_WRITES = [
+    "gh api repos/o/r/issues \\\n  -f title=x",
+    "gh api repos/o/r/issues \\\n --method POST",
+    "gh api repos/o/r/issues \\\n-X POST",
+    "gh pr \\\n merge 12",
+    "gh pr \\\n review 12 --approve",
+    'gh api repos/o/r/issues -X "POST"',
+    "gh api repos/o/r/issues -X 'POST'",
+    'gh api repos/o/r/issues --method "POST"',
+    'gh api repos/o/r/issues --method="POST"',
+    'gh api repos/o/r/issues -X"POST"',
+    "gh api repos/o/r/issues -ftitle=x",
+    "gh api repos/o/r/issues -Ftitle=x",
+    "gh api repos/o/r/issues -iXPOST",
+    "gh api repos/o/r/issues --raw-field title=x",
+    "gh api repos/o/r/issues --input body.json",
+    '"gh" pr merge 12',
+    'gh p"r" merge 12',
+    "gh pr m\\erge 12",
+    "gh \\pr merge 12",
+    'gh pr"merge" 12',
+    "gh $(echo pr) merge 12",
+    "gh pr -R o/r merge 12",
+    "gh --repo o/r pr merge 12",
+    "git --git-dir /x push",
+    "git --work-tree /x commit -m x",
+    "git --git-dir /x --work-tree /y push",
+    "git --namespace x push",
+    "git --exec-path /x push",
+    "git --super-prefix x push",
+    "git --git-dir /x branch new",
+    "git -C /x -c a=b push",
+    "echo \\'; git push; echo \\'",
+    "echo \\'; git branch new; echo \\'",
+    'echo \\"; git branch new; echo \\" x"',
+    "$x pr merge 12",
+    "gh $x merge 12",
+    "gh pr $verb 12",
+    "git $sub origin x",
+    "${GH} pr merge 12",
+    "`echo gh` pr merge 12",
+    "env git push",
+    "xargs git push",
+    "echo 'unbalanced",
+]
+CASES += [("orchestrate:" + role, c, "deny") for role in ("scout", "reviewer") for c in HIDDEN_WRITES]
+# The worker may do everything but merge, so only the merge forms are refused for it.
+CASES += [
+    ("orchestrate:worker", c, "deny")
+    for c in (
+        "gh pr \\\n merge 12",
+        '"gh" pr merge 12',
+        'gh p"r" merge 12',
+        "gh pr m\\erge 12",
+        "gh \\pr merge 12",
+        'gh pr"merge" 12',
+        "gh $(echo pr) merge 12",
+        "gh pr -R o/r merge 12",
+        "git --git-dir /x push -f",
+        "git --git-dir /x push origin main",
+        "git -c a=b push --force",
+    )
+]
+# Reads that stay allowed for both read-only roles.
+CASES += [
+    ("orchestrate:" + role, c, "allow")
+    for role in ("scout", "reviewer")
+    for c in (
+        "gh api repos/o/r/issues \\\n  --jq '.[].title'",
+        "gh api repos/o/r/issues \\\n  -H 'Accept: x' \\\n  --paginate",
+        "gh api -XGET repos/o/r/issues",
+        'gh api --method "GET" repos/o/r/issues',
+        "gh api --method=get repos/o/r/issues",
+        "gh api repos/o/r/pulls/5/reviews --jq '.[-1].html_url'",
+        'gh search issues "gh pr merge"',
+        "gh pr view 12 --json title # gh pr merge",
+        "grep -n 'git push' hooks/guard.py",
+        'grep -n "POST" hooks/guard.py',
+        "git -C /repo log --oneline",
+        "git --no-pager diff",
+        "git -c color.ui=never log -1",
+        "git log --grep=\"git push\" && git log --author='a b'",
+        "echo \\'; git log; echo \\'",
+        "gh pr view $N --json title",
+        "gh api repos/o/r/issues/$N --jq .title",
+        "git log $(git merge-base HEAD origin/main)..HEAD",
+        'git diff "$BASE"...HEAD',
+        "FOO=$(date) git log -1",
+        "gh pr checks 12 2>&1 | tail -5",
+    )
+]
+# Ordinary worker commands stay allowed.
+CASES += [
+    ("orchestrate:worker", c, "allow")
+    for c in (
+        "git commit -m \"$(cat <<'EOF'\nfix: it's done\nEOF\n)\"",
+        'gh pr create --title x --body "$(cat body.md)"',
+        'git push -u origin "$BRANCH"',
+        "gh pr view 12 --json state | jq .state",
+    )
+]
+# The guard can't tokenise these, so a guarded role is refused rather than waved through.
+UNPARSEABLE = ["echo 'x", 'echo "x', "echo $(date", "echo `date", "echo ${x", "git log >",
+               "$(" * 3000 + "ls", "`" * 5 + "ls"]
+# A command named wholly by an expansion: refused for the read-only roles, fine for the worker.
+CASES += [("orchestrate:" + role, c, "deny") for role in ("scout", "reviewer")
+          for c in ("$PYTHON x.py", '"$SCRIPT" a', "$(which python3) x.py")]
+CASES += [("orchestrate:worker", c, "allow") for c in ("$PYTHON x.py", '"$SCRIPT" a', "$(which python3) x.py")]
+CASES += [("orchestrate:worker", c, "deny") for c in ("$(echo g)it push -f", "g$x push -f", "${X}h pr merge 12")]
+
 
 POST = "gh api --method POST repos/{owner}/{repo}/pulls/12/reviews --input - <<'EOF'\n"
 COMMENT = '{"event": "COMMENT", "body": "Round 1 — verdict: changes", "comments": []}'
@@ -242,6 +353,17 @@ REVIEW_CASES = [
     ('git log --grep="gh pr review"', "allow"),
     ("gh pr review 12 --comment --approve --body x", "deny"),
     ("gh pr comment 12 --body x", "deny"),
+    ("gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF", "allow"),
+    ("gh api --method POST repos/o/r/pulls/12/reviews --input - <<'EOF'\n" + COMMENT + "\nEOF", "allow"),
+    ("gh api --method POST repos/o/r/pulls/12/reviews -f event=APPROVE", "deny"),
+    ("gh api --method POST repos/o/r/pulls/12/reviews --input - -f event=APPROVE <<'EOF'\n" + COMMENT + "\nEOF", "deny"),
+    ("gh api -X PUT repos/o/r/pulls/12/reviews --input - <<'EOF'\n" + COMMENT + "\nEOF", "deny"),
+    ("gh api --method POST repos/o/r/pulls/12/reviews --input - <<'EOF' > out\n" + COMMENT + "\nEOF", "deny"),
+    ("gh api --method POST repos/o/r/pulls/12/reviews --input - <<'EOF' && rm x\n" + COMMENT + "\nEOF", "deny"),
+    ("gh api --method POST repos/o/r/pulls/$N/reviews --input - <<'EOF'\n" + COMMENT + "\nEOF", "deny"),
+    ("gh api repos/o/r/pulls/12/reviews --jq '.[-1].html_url' && gh pr merge 12", "deny"),
+    ('gh pr review 12 --comment --body "$(rm x)"', "deny"),
+    ("gh pr review 12 --comment --body 'x' \\\n  --approve", "deny"),
 ]
 
 
@@ -286,11 +408,46 @@ class GuardTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("guard", GUARD)
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
-        self.assertIn("branch", guard.GIT_WRITES.split("|"))
-        self.assertNotIn("branch", guard.REVIEWER_GIT_WRITES.split("|"))
+        self.assertIn("branch", guard.GIT_WRITES)
+        self.assertNotIn("branch", guard.REVIEWER_GIT_WRITES)
         for verb in guard.GIT_WRITE_VERBS:
             if verb != "branch":
-                self.assertIn(verb, guard.REVIEWER_GIT_WRITES.split("|"))
+                self.assertIn(verb, guard.REVIEWER_GIT_WRITES)
+
+    def test_unparseable_commands_are_refused_with_a_reason(self):
+        for role in ("scout", "reviewer", "worker"):
+            for command in UNPARSEABLE:
+                with self.subTest(role=role, command=command):
+                    payload = {"tool_input": {"command": command}, "agent_type": "orchestrate:" + role}
+                    out = subprocess.run(
+                        [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True
+                    ).stdout
+                    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+                    self.assertIn("couldn't parse", reason)
+
+    def test_a_crash_inside_a_rule_denies(self):
+        import importlib.util
+        import io
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("guard_crash", GUARD)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+
+        def boom(parsed, cwd):
+            raise RuntimeError("boom")
+
+        for role in ("scout", "reviewer", "worker"):
+            payload = {"tool_input": {"command": "ls"}, "agent_type": "orchestrate:" + role}
+            out = io.StringIO()
+            with mock.patch.dict(guard.RULES, {role: [boom]}), mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+                    mock.patch("sys.stdout", out):
+                guard.main()
+            self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "deny", role)
+
+    def test_no_second_quote_blanking_helper(self):
+        text = GUARD.read_text()
+        for gone in ("strip_quotes", "GH_WORDS", "GIT_PREFIX", "GH_API_WRITE"):
+            self.assertNotIn(gone, text)
 
     def test_review_posts(self):
         with tempfile.TemporaryDirectory() as root:
