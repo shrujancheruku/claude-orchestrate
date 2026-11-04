@@ -51,7 +51,10 @@ class WorkerTurnRules(unittest.TestCase):
         s = (ROOT / "agents/worker.md").read_text()
         orient = s[s.index("1. **Orient.**"):s.index("2. **Build")]
         check = orient.index("compare each acceptance criterion with `origin/<default branch>`")
-        self.assertLess(check, orient.index("create it from the remote default branch"))
+        self.assertLess(orient.index("git fetch origin"), check)
+        self.assertLess(check, orient.index("If the brief's branch exists on the remote"))
+        self.assertIn("`status: stopped`", orient)
+        self.assertIn("`branch: none`", orient)
         self.assertIn("no full diff", orient)
         self.assertIn("names the commit or file that shows it", orient)
         self.assertIn("The ticket is already done on the default branch.", s)
