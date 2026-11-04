@@ -1,0 +1,93 @@
+"""Run every script under scripts/ exactly as its caller does (see README, Development).
+
+CLIs (extensionless) run by path with no -I, reached through the skills' `${CLAUDE_SKILL_DIR}/../../scripts/`
+form, so a broken sibling import or a lost exec bit fails here. Standalone .py scripts run with `python3 -I`.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS = ROOT / "scripts"
+CLIS = sorted(p.name for p in SCRIPTS.iterdir() if p.suffix == "" and p.is_file())
+LIBRARIES = {"common", "checks", "replay"}
+STANDALONE = {"profile.py", "usage-tap.py"}
+
+
+def run(argv, **kw):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=60, **kw)
+
+
+class Invocation(unittest.TestCase):
+    def test_every_file_has_a_declared_kind(self):
+        self.assertEqual(
+            sorted(p.name for p in SCRIPTS.glob("*.py")),
+            sorted({n + ".py" for n in LIBRARIES} | STANDALONE),
+            "new .py file: declare it a library or a standalone script here and in the README",
+        )
+
+    def test_clis_are_executable_with_shebang(self):
+        for name in CLIS:
+            with self.subTest(name):
+                self.assertTrue(os.access(SCRIPTS / name, os.X_OK))
+                self.assertEqual((SCRIPTS / name).read_text().splitlines()[0], "#!/usr/bin/env python3")
+
+    def test_clis_run_by_path_like_a_skill(self):
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for name in CLIS:
+            with self.subTest(name):
+                # The path form skills use: skills/<skill>/../../scripts/<name>.
+                path = ROOT / "skills" / "run" / ".." / ".." / "scripts" / name
+                args = ["--cwd", str(ROOT), "true"] if name == "verify" else ["--help"]
+                if name == "sandbox-git":  # no --help; a repo without an SSH remote is a no-op
+                    args = ["--repo", tmp]
+                    subprocess.run(["git", "init", "-q", tmp], check=True)
+                r = run([str(path), *args], cwd=tempfile.gettempdir(), env=env)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
+
+    def test_standalone_scripts_run_isolated_alone(self):
+        # usage-tap.py is copied out of the plugin, so run each from a lone copy.
+        for name in sorted(STANDALONE):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                shutil.copy(SCRIPTS / name, d)
+                argv = [sys.executable, "-I", str(Path(d) / name)]
+                if name == "profile.py":
+                    argv.append("--help")
+                r = run(argv, input="", cwd=tempfile.gettempdir())
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_docs_follow_the_convention(self):
+        # Every doc line that runs a script uses `python3 -I` for a standalone .py script and no interpreter otherwise.
+        call = re.compile(r"(python3\s+(?:-I\s+)?)?[\"']?([^\s`\"']*/)?scripts/([\w.-]+)")
+        docs = [*ROOT.glob("skills/*/*.md"), *ROOT.glob("agents/*.md"), ROOT / "README.md"]
+        seen = set()
+        for doc in docs:
+            for n, line in enumerate(doc.read_text().splitlines(), 1):
+                for m in call.finditer(line):
+                    name = m.group(3)
+                    # A bare `scripts/x` is a mention; a path ahead of it (`${CLAUDE_SKILL_DIR}/../../`) is a call.
+                    if name not in set(CLIS) | STANDALONE or not m.group(2):
+                        continue
+                    if line[:m.start()].rstrip(" `").endswith("copy"):
+                        continue  # copying a script, not running it
+                    seen.add(name)
+                    with self.subTest(f"{doc.name}:{n} {name}"):
+                        prefix = m.group(1) or ""
+                        if name in STANDALONE:
+                            self.assertIn("-I", prefix, line.strip())
+                        else:
+                            self.assertEqual(prefix, "", line.strip())
+        self.assertTrue({"gate", "merge", "rebuild-state", "watch-ci", "profile.py"} <= seen)
+
+
+if __name__ == "__main__":
+    unittest.main()
