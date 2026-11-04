@@ -24,3 +24,16 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python3 -m unittest discover tests
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Pinned so a new Claude Code release can't change validation under us; bump deliberately.
+      - run: npm install -g @anthropic-ai/claude-code@2.1.311
+      # Exits non-zero on errors only. Warnings (the expected root CLAUDE.md one, the
+      # directory-icon one) print to the log without failing; no --strict, no API key.
+      - run: claude plugin validate .
