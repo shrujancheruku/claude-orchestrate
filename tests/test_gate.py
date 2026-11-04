@@ -1,6 +1,8 @@
 """CLI tests for scripts/gate, driven through the harness with a fake gh."""
 
 import json
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -67,6 +69,28 @@ class GateTest(unittest.TestCase):
         self.assertEqual((e["outcome"], e["failed"], e["behind_by"]), ("pass", [], 0))
         # the compare call used the PR's base and head
         self.assertIn("repos/{owner}/{repo}/compare/main...br", self.env.gh_calls()[1])
+
+    def run_from(self, cwd):
+        env = dict(os.environ, PATH=f"{self.env.bin}{os.pathsep}{os.environ['PATH']}", FAKE_GH_STATE=str(self.env.gh_state))
+        script = Path(__file__).resolve().parent.parent / "scripts" / "gate"
+        return subprocess.run([sys.executable, str(script), "7", "--retry-delay", "0"], cwd=cwd, env=env,
+                              capture_output=True, text=True)
+
+    def test_event_from_a_subdirectory_lands_in_the_checkout_log(self):
+        self.prime()
+        sub = self.env.repo / "pkg" / "deep"
+        sub.mkdir(parents=True)
+        self.assertEqual(self.run_from(sub).returncode, 0)
+        self.event()
+        self.assertFalse((sub / ".claude").exists())
+
+    def test_event_from_a_worktree_lands_in_the_main_checkout_log(self):
+        self.prime()
+        wt = self.env.repo / ".claude" / "worktrees" / "w1"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "w1", str(wt)], cwd=self.env.repo, check=True)
+        self.assertEqual(self.run_from(wt).returncode, 0)
+        self.event()
+        self.assertFalse((wt / ".claude" / "orchestrate-profiles").exists())
 
     def test_title_convention_failure(self):
         self.prime(title="Add the thing")
