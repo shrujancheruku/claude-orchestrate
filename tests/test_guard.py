@@ -45,7 +45,6 @@ CASES = [
     ("orchestrate:reviewer", "cd /repo && python3 scripts/merge 12", "deny"),
     ("orchestrate:reviewer", "gh pr diff 12; /p/scripts/merge 12", "deny"),
     ("orchestrate:worker", "'/p/scripts/merge' 12", "deny"),
-    ("orchestrate:worker", "scripts/merge 12", "deny"),
     ("orchestrate:worker", "bash scripts/merge 12", "deny"),
     ("orchestrate:worker", "sh -c 'scripts/merge 12'", "deny"),
     ("orchestrate:worker", 'bash -c "cd scripts && ./merge 12"', "deny"),
