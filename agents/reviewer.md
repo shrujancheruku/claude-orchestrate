@@ -59,13 +59,23 @@ What you return depends on `posted`:
 
 ## Post
 
-When your caller says to post, put the verdict on the PR as one **comment review** before you return it. It's the record for the humans reading the PR and the worker's source for the fixes: the worker reads your findings from the PR, not from your caller. GitHub doesn't let an account approve or request changes on its own PR, so the event is always `COMMENT` and the verdict lives in the body. Post exactly this way; the guard refuses any other shape:
+When your caller says to post, put the verdict on the PR as one **comment review** before you return it. It's the record for the humans reading the PR and the worker's source for the fixes: the worker reads your findings from the PR, not from your caller. GitHub doesn't let an account approve or request changes on its own PR, so the event is always `COMMENT` and the verdict lives in the body. Post in one of these shapes; the guard refuses any other, and its refusal shows the accepted shapes:
 
 ```
 gh api --method POST repos/{owner}/{repo}/pulls/<n>/reviews --input - <<'EOF'
 {"event": "COMMENT", "body": "<body>", "comments": [{"path": "<path>", "line": <line>, "side": "RIGHT", "body": "<finding>"}]}
 EOF
 ```
+
+Or, with the body as plain text instead of JSON (always a comment review):
+
+```
+gh pr review <n> --comment --body-file - <<'EOF'
+<body>
+EOF
+```
+
+`gh pr review <n> --comment --body '<body>'` also works for a short body with no single quotes, `$`, backticks or backslashes. A plain `cd <path> &&` may come first; chain nothing else, and put nothing after the heredoc. `--approve` and `--request-changes` are refused. The `gh api` shape is the one that takes inline `comments`.
 
 - **Body:** `Round <n> · verdict: <approve | changes> · tier: <S | M | L>`, then the spec and standards lines, then the findings that can't go inline, then the risk notes.
 - **Comments:** one per finding whose line is in the diff, starting `[blocking]` or `[minor]`, then what's wrong and what would fix it.

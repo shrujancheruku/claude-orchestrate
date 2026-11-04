@@ -49,12 +49,36 @@ FORCE_PUSH = re.compile(GIT_PREFIX + r"push\b.*(?:\s-f\b|--force|\s\+\S)")
 PUSH_DEFAULT = re.compile(GIT_PREFIX + r"push\b.*\s(?:\S+:)?(?:main|master)\s*$")
 GH_MERGE = re.compile(r"\bgh\s+pr\s+merge\b")
 
-# The one write a reviewer may make: a review posted through the API, its JSON on a heredoc.
-# The first line must be exactly this; the payload is checked separately. The delimiter
-# must be quoted, or the shell would expand `$(...)` inside the payload.
+# The writes a reviewer may make: a comment review posted through the API (its JSON on a
+# heredoc) or through `gh pr review --comment`. The first line must be exactly one of these
+# shapes; the payload is checked separately. A heredoc delimiter must be quoted, or the shell
+# would expand `$(...)` inside the body, and an inline body must be free of `$`, backticks and
+# backslashes for the same reason.
+# An optional leading `cd <path> &&` is allowed, a plain cd and nothing chained after it.
+CD_PREFIX = r"^\s*(?:cd\s+(?:'[^']*'|\"[^\"$`\\]*\"|[^\s;&|<>$`()\\'\"]+)\s*&&\s*)?"
+HEREDOC = r"<<-?\s*(['\"])(\w+)\1\s*$"
 REVIEW_POST = re.compile(
-    r"^\s*gh\s+api\s+(?:-X|--method)\s+POST\s+repos/[^/\s]+/[^/\s]+/pulls/\d+/reviews\s+"
-    r"--input\s+-\s*<<-?\s*(['\"])(\w+)\1\s*$"
+    CD_PREFIX + r"gh\s+api\s+(?:-X|--method)\s+POST\s+repos/[^/\s]+/[^/\s]+/pulls/\d+/reviews\s+"
+    r"--input\s+-\s*" + HEREDOC
+)
+_BODY = r"(?:-b|--body)(?:\s+|=)(?:'[^']*'|\"[^\"$`\\]*\")"
+_BODY_FILE = r"(?:--body-file|-F)(?:\s+|=)-"
+PR_REVIEW_INLINE = re.compile(
+    CD_PREFIX + r"gh\s+pr\s+review\s+\d+\s+(?:--comment\s+" + _BODY + r"|" + _BODY + r"\s+--comment)\s*$",
+    re.DOTALL,
+)
+PR_REVIEW_HEREDOC = re.compile(
+    CD_PREFIX + r"gh\s+pr\s+review\s+\d+\s+(?:--comment\s+" + _BODY_FILE + r"|" + _BODY_FILE
+    + r"\s+--comment)\s*" + HEREDOC
+)
+# A command aimed at a review post, whether or not it has the right shape.
+REVIEW_AIMED = re.compile(r"\bgh\s+api\b.*pulls/\d+/reviews|\bgh\s+pr\s+review\b", re.DOTALL)
+SHAPES = (
+    "Post exactly one of these (an optional leading `cd <path> &&` is fine, nothing else chained, nothing after the heredoc):\n"
+    "gh api --method POST repos/{owner}/{repo}/pulls/<n>/reviews --input - <<'EOF'\n"
+    '{"event": "COMMENT", "body": "<body>", "comments": []}\nEOF\n'
+    "gh pr review <n> --comment --body-file - <<'EOF'\n<body>\nEOF\n"
+    "gh pr review <n> --comment --body '<body, no single quotes>'"
 )
 # The config line that turns posting on, e.g. `- **Post reviews:** yes`. Leaving `<` out of
 # the separator keeps the template's `<yes | no>` placeholder from reading as yes.
@@ -110,12 +134,22 @@ def role_of(agent_type: str) -> str | None:
 
 
 def review_post(command: str) -> str | None:
-    """Check a reviewer's review post. None if the command isn't one; otherwise "" if
-    it's well formed, or what's wrong with it."""
-    lines = command.split("\n")
-    head = REVIEW_POST.match(lines[0])
-    if not head:
+    """Check a reviewer's review post. None if the command isn't aimed at one; otherwise
+    "" if it's well formed, or what's wrong with it."""
+    # Reads of earlier reviews (a GET) and quoted text that only mentions these commands
+    # don't count as aimed at a post.
+    unquoted = strip_quotes(command)
+    aimed = REVIEW_AIMED.search(unquoted)
+    if not aimed or (aimed.group(0).startswith("gh api") and not GH_API_WRITE.search(unquoted)):
         return None
+    if PR_REVIEW_INLINE.match(command):
+        return ""
+    lines = command.split("\n")
+    api = REVIEW_POST.match(lines[0])
+    pr = PR_REVIEW_HEREDOC.match(lines[0])
+    head = api or pr
+    if not head:
+        return "it isn't in the accepted shape"
     delimiter = head.group(2)
     try:
         end = next(i for i, line in enumerate(lines) if i > 0 and line.strip() == delimiter)
@@ -124,6 +158,8 @@ def review_post(command: str) -> str | None:
     # Anything after the heredoc would run unchecked.
     if any(line.strip() for line in lines[end + 1 :]):
         return "it runs more after the review"
+    if pr:
+        return ""
     try:
         payload = json.loads("\n".join(lines[1:end]))
     except json.JSONDecodeError:
@@ -174,7 +210,7 @@ def main() -> None:
             deny("the config doesn't say `Post reviews: yes`, so return your verdict without posting it.")
             return
         if problem:
-            deny(f"this review post is refused because {problem}. Post exactly as your instructions show.")
+            deny(f"this review post is refused because {problem}. {SHAPES}")
             return
     text = strip_quotes(command)
     for pattern, what in RULES[role]:
