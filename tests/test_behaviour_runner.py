@@ -44,11 +44,19 @@ class Runner(unittest.TestCase):
         env = ScriptEnv()
         self.addCleanup(env.close)
         dirty = {k: "x" for k in agent_run.SCRUBBED_ENV}
-        dirty.update(GIT_CONFIG_KEY_0="credential.helper", PATH="/usr/bin", HOME="/h")
+        dirty.update(GIT_CONFIG_KEY_0="credential.helper", GH_FUTURE_SETTING="x", GITHUB_FUTURE="x", PATH="/usr/bin", HOME="/h")
         out = agent_run.child_env(env, dirty)
-        for k in agent_run.SCRUBBED_ENV + ("GIT_CONFIG_KEY_0",):
-            if k != "GIT_CONFIG_GLOBAL":
+        allowed = {"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GH_CONFIG_DIR", "GIT_SSH_COMMAND"}
+        for k in out:
+            if k.startswith(("GH_", "GITHUB_", "GIT_CONFIG_")):
+                self.assertIn(k, allowed)
+        for k in agent_run.SCRUBBED_ENV:
+            if k not in allowed:
                 self.assertNotIn(k, out)
+        self.assertTrue(Path(out["GH_CONFIG_DIR"]).is_dir())
+        self.assertEqual(list(Path(out["GH_CONFIG_DIR"]).iterdir()), [])
+        self.assertEqual(out["GIT_SSH_COMMAND"], "false")
+        self.assertEqual(out["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(Path(out["GIT_CONFIG_GLOBAL"]).read_text(), "")
         self.assertTrue(out["PATH"].startswith(str(env.bin)))
 

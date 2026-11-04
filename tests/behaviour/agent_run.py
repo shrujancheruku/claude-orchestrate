@@ -31,7 +31,7 @@ ENABLED = os.environ.get("ORCH_BEHAVIOUR") == "1"
 # What a worker needs from the plugin. Copied out of the checkout so the agent never sees its path.
 PLUGIN_PARTS = ("agents", "skills", "hooks", "scripts", ".claude-plugin")
 
-# Credentials and config the agent could use to reach the real GitHub or remote.
+# A denylist of credentials and config the agent could use to reach the real GitHub or remote (see child_env).
 SCRUBBED_ENV = (
     "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR",
     "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK", "GIT_CONFIG_GLOBAL",
@@ -59,20 +59,33 @@ def child_env(env, base=None):
     """The agent's environment: the fake gh first on PATH, no credentials, no user git config.
 
     HOME stays real: a temp HOME was tried, and headless `claude -p` then reports "Not logged in".
-    Nothing under ~/.claude is copied or touched; the credentials and git config above are neutralised.
+    Nothing under ~/.claude is copied or touched.
+
+    This is a denylist, not a sandbox. It removes every GH_*, GITHUB_* and GIT_CONFIG_* variable and the
+    other git/ssh credential variables in SCRUBBED_ENV; points GH_CONFIG_DIR and GIT_CONFIG_GLOBAL at empty
+    temp locations (so even /usr/bin/gh by full path finds no login and git has no credential helper); and
+    makes any ssh transport fail (GIT_SSH_COMMAND=false). What the real HOME still exposes: other tools'
+    credentials (cloud CLIs, npm, anything under ~/.ssh read by a program other than git-over-ssh) and
+    ~/.claude, which Claude Code needs to log in.
     """
     base = dict(os.environ if base is None else base)
     for k in SCRUBBED_ENV:
         base.pop(k, None)
-    for k in [k for k in base if k.startswith("GIT_CONFIG_")]:
+    for k in [k for k in base if k.startswith(("GIT_CONFIG_", "GH_", "GITHUB_"))]:
         base.pop(k)
-    empty = Path(env.repo).parent / "empty-gitconfig"
+    tmp = Path(env.repo).parent
+    empty = tmp / "empty-gitconfig"
     empty.write_text("")
+    gh_config = tmp / "empty-gh-config"
+    gh_config.mkdir(exist_ok=True)
     base.update(
         PATH=f"{env.bin}{os.pathsep}{base.get('PATH', '')}",
         FAKE_GH_STATE=str(env.gh_state),
         GIT_CONFIG_GLOBAL=str(empty),
         GIT_CONFIG_NOSYSTEM="1",
+        GH_CONFIG_DIR=str(gh_config),
+        GIT_SSH_COMMAND="false",
+        GIT_TERMINAL_PROMPT="0",
         CLAUDE_CODE_DISABLE_AUTO_MEMORY="1",
         ENABLE_CLAUDEAI_MCP_SERVERS="false",
     )
