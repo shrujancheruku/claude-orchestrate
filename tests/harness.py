@@ -21,6 +21,9 @@ state = os.environ["FAKE_GH_STATE"]
 args = sys.argv[1:]
 with open(state + ".calls", "a") as f:
     f.write(json.dumps(args) + "\\n")
+if "-" in args:  # a body or payload on stdin (`--body-file -`, `--input -`): keep it, tests assert on it
+    with open(state + ".stdin", "a") as f:
+        f.write(json.dumps({"args": args, "stdin": sys.stdin.read()}) + "\\n")
 for r in json.load(open(state))["responses"]:
     if args[: len(r["args"])] == r["args"]:
         sys.stdout.write(r.get("stdout", ""))
@@ -76,6 +79,11 @@ class ScriptEnv:
     def gh_calls(self):
         calls = Path(str(self.gh_state) + ".calls")
         return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+
+    def gh_stdin(self):
+        """[{"args": [...], "stdin": "..."}] for each gh call that read stdin (`-` among its args)."""
+        f = Path(str(self.gh_state) + ".stdin")
+        return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
 
     def events(self):
         log = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
