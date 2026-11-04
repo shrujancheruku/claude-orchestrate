@@ -87,7 +87,27 @@ REVIEW_CASES = [
     (POST.replace("'EOF'", "EOF") + COMMENT + "\nEOF", "deny"),  # unquoted: $(...) would expand
     (POST.replace("pulls/12/reviews", "pulls/12/merge") + COMMENT + "\nEOF", "deny"),
     ("echo ok && " + POST + COMMENT + "\nEOF", "deny"),
-    ("gh pr review 12 --comment --body x", "deny"),
+    ("cd /tmp/x && " + POST + COMMENT + "\nEOF", "allow"),
+    ("cd '/tmp/my dir' && " + POST + COMMENT + "\nEOF", "allow"),
+    ("cd /tmp/x && echo hi && " + POST + COMMENT + "\nEOF", "deny"),  # no chaining after cd
+    ("cd /tmp/x; " + POST + COMMENT + "\nEOF", "deny"),
+    ("cd $(rm -rf x) && " + POST + COMMENT + "\nEOF", "deny"),
+    (POST.replace("{owner}/{repo}", "shrujancheruku/claude-orchestrate") + COMMENT + "\nEOF", "allow"),
+    ("gh pr review 12 --comment --body 'x'", "allow"),
+    ("gh pr review 12 --comment -b 'LGTM $(x)'", "allow"),
+    ("gh pr review 12 --body 'x' --comment", "allow"),
+    ('gh pr review 12 --comment --body "x"', "allow"),
+    ('gh pr review 12 --comment --body "$(rm x)"', "deny"),
+    ("gh pr review 12 --comment --body 'x'; rm x", "deny"),
+    ("gh pr review 12 --comment --body 'x' && gh pr merge 12", "deny"),
+    ("gh pr review 12 --comment --body-file - <<'EOF'\nbody $(x)\nEOF", "allow"),
+    ("cd /tmp/x && gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF\n", "allow"),
+    ("gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF\nrm x", "deny"),
+    ("gh pr review 12 --comment --body-file - <<EOF\nbody\nEOF", "deny"),
+    ("gh pr review 12 --approve --body x", "deny"),
+    ("gh pr review 12 --request-changes --body x", "deny"),
+    ("gh pr review 12 --approve", "deny"),
+    ("gh pr review 12 --comment --approve --body x", "deny"),
     ("gh pr comment 12 --body x", "deny"),
 ]
 
@@ -111,8 +131,25 @@ class GuardTest(unittest.TestCase):
             # The same post goes through only for the reviewer.
             self.assertEqual(decide("orchestrate:scout", POST + COMMENT + "\nEOF", root), "deny")
 
+    def test_near_miss_names_the_shape(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = Path(root) / ".claude" / "orchestration.md"
+            config.parent.mkdir()
+            config.write_text("- **Post reviews:** yes\n")
+            for command in ["echo ok && " + POST + COMMENT + "\nEOF", "gh pr review 12 --approve"]:
+                payload = {"tool_input": {"command": command}, "agent_type": "orchestrate:reviewer", "cwd": root}
+                out = subprocess.run(
+                    [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True
+                ).stdout
+                reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+                self.assertIn("pulls/<n>/reviews", reason)
+                self.assertIn("--comment --body-file -", reason)
+
     def test_posting_off(self):
-        post = POST + COMMENT + "\nEOF"
+        for post in [POST + COMMENT + "\nEOF", "gh pr review 12 --comment --body 'x'"]:
+            self.check_off(post)
+
+    def check_off(self, post):
         for text in ["- **Post reviews:** no\n", "- **Post reviews:** <yes | no>\n", "## Review\n", None]:
             with self.subTest(config=text), tempfile.TemporaryDirectory() as root:
                 if text is not None:
