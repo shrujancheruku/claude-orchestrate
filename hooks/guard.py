@@ -48,6 +48,13 @@ REDIRECT = re.compile(r"(?<![0-9&\-=>])>>?(?!>|\s*(?:&|/dev/null))")
 FORCE_PUSH = re.compile(GIT_PREFIX + r"push\b.*(?:\s-f\b|--force|\s\+\S)")
 PUSH_DEFAULT = re.compile(GIT_PREFIX + r"push\b.*\s(?:\S+:)?(?:main|master)\s*$")
 GH_MERGE = re.compile(r"\bgh\s+pr\s+merge\b")
+# The plugin's merge script, run as a command: at the start of the command or after `;`, `&`, `|`
+# or `(`, optionally behind python3 and in quotes (the script path is usually a quoted
+# "${CLAUDE_SKILL_DIR}/../../scripts/merge"). Checked on the raw command, because strip_quotes
+# would blank that quoted path; anchoring at command position keeps `grep scripts/merge` allowed.
+MERGE_SCRIPT = re.compile(
+    r"(?:^|[;&|(])\s*(?:python3?\s+)?[\"']?[^\s\"']*\bscripts/merge[\"']?(?=\s|$|[;&|)])"
+)
 
 # The writes a reviewer may make: a comment review posted through the API (its JSON on a
 # heredoc) or through `gh pr review --comment`. The first line must be exactly one of these
@@ -212,6 +219,10 @@ def main() -> None:
         if problem:
             deny(f"this review post is refused because {problem}. {SHAPES}")
             return
+    if MERGE_SCRIPT.search(command):
+        deny(f"the {role} role can't run a command that merges a PR (merging belongs to the orchestrator). "
+             f"{NEXT_STEP[role]}")
+        return
     text = strip_quotes(command)
     for pattern, what in RULES[role]:
         if pattern.search(text):

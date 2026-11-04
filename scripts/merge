@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""merge <pr> [--method squash|merge|rebase] [--ticket N]... [--worktree DIR] : merge a PR, then clean up.
+
+`gh pr merge`'s exit is unreliable (a 502 can hide a merge that landed; a retry can answer "merge
+already in progress"; the branch can survive), so the PR's state is the only truth. The script runs
+the merge, then re-checks the PR until it is MERGED or --timeout runs out. Only once MERGED does it:
+delete the remote branch if it is still there, close the PR's linked tickets (plus any --ticket)
+that the host left open, remove --worktree (a "not a working tree" answer is fine: the harness may
+have removed it), and append one `merge` event (ref = the PR number, outcome merged|timeout|closed,
+plus branch, branch_deleted, tickets). Prints one line per step.
+Exit codes: 0 merged and cleaned up; 1 the merge was refused, or the PR was closed unmerged;
+2 the script could not run (`gh` cannot read the PR); 3 still not MERGED at the timeout (run it
+again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
+"already in progress") only means wait and re-check; the merge command is run again on a 5xx.
+Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import time
+
+import common
+
+IN_PROGRESS = re.compile(r"already in progress|in progress", re.I)
+TRANSIENT = re.compile(r"\b5\d\d\b|bad gateway|service unavailable|gateway time-?out|timed? ?out|"
+                       r"connection (?:reset|refused)|try again", re.I)
+
+
+def run(*cmd, cwd=None):
+    return subprocess.run(list(cmd), capture_output=True, text=True, cwd=cwd)
+
+
+def view(pr, cwd):
+    p = run("gh", "pr", "view", pr, "--json", "state,headRefName,closingIssuesReferences", cwd=cwd)
+    if p.returncode != 0:
+        return None
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        return None
+
+
+def remote_has(branch, cwd):
+    return run("git", "ls-remote", "--exit-code", "--heads", "origin", branch, cwd=cwd).returncode == 0
+
+
+def say(msg):
+    print(msg, flush=True)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("pr", help="PR number")
+    ap.add_argument("--method", default="squash", choices=["squash", "merge", "rebase"])
+    ap.add_argument("--ticket", action="append", default=[], help="also close this ticket (repeatable)")
+    ap.add_argument("--worktree", help="the worker's worktree to remove after the merge")
+    ap.add_argument("--cwd", default=".", help="the repo (default: current directory)")
+    ap.add_argument("--timeout", type=float, default=300, help="seconds to wait for MERGED")
+    ap.add_argument("--interval", type=float, default=5, help="seconds between state checks")
+    args = ap.parse_args(argv)
+    pr = args.pr.lstrip("#")
+    cwd = args.cwd
+    ref = int(pr) if pr.isdigit() else pr
+
+    v = view(pr, cwd)
+    if v is None:
+        say(f"merge: could not read PR #{pr} with gh")
+        return 2
+    branch = v.get("headRefName") or ""
+    state = v.get("state")
+    deadline = time.monotonic() + args.timeout
+    attempt = state == "OPEN"  # run the merge command only while the PR is open
+    refused = None
+    while True:
+        if attempt:
+            p = run("gh", "pr", "merge", pr, f"--{args.method}", cwd=cwd)
+            err = common.one_line(p.stderr or p.stdout)
+            if p.returncode == 0:
+                say(f"merge command accepted for PR #{pr}")
+                attempt = False
+            elif IN_PROGRESS.search(err):
+                say(f"merge already in progress for PR #{pr}; waiting")
+                attempt = False
+            elif TRANSIENT.search(err):
+                say(f"merge command failed transiently ({err}); re-checking")
+            else:
+                refused, attempt = err, False  # a real refusal, unless the state says it landed anyway
+        nv = view(pr, cwd)
+        if nv:
+            v, state = nv, nv.get("state")
+        if state == "MERGED":
+            break
+        if state == "CLOSED":
+            say(f"PR #{pr} closed without merging")
+            common.append_event(cwd, "merge", "closed", ref=ref, branch=branch)
+            return 1
+        if refused:
+            say(f"merge refused for PR #{pr}: {refused}")
+            return 1
+        if time.monotonic() >= deadline:
+            say(f"PR #{pr} not MERGED after {args.timeout:g}s (state {state}); run merge again later")
+            common.append_event(cwd, "merge", "timeout", ref=ref, branch=branch)
+            return 3
+        time.sleep(args.interval)
+
+    say(f"PR #{pr} MERGED")
+
+    deleted = False
+    if branch and remote_has(branch, cwd):
+        d = run("git", "push", "origin", "--delete", branch, cwd=cwd)
+        deleted = d.returncode == 0 or not remote_has(branch, cwd)
+        say(f"remote branch {branch} " + ("deleted" if deleted else f"NOT deleted: {common.one_line(d.stderr)}"))
+    else:
+        deleted = True
+        say(f"remote branch {branch or '?'} already gone")
+
+    tickets = []
+    for t in [str(r.get("number")) for r in v.get("closingIssuesReferences") or []] + args.ticket:
+        t = t.lstrip("#")
+        if t and t not in tickets:
+            tickets.append(t)
+    for t in tickets:
+        p = run("gh", "issue", "view", t, "--json", "state", cwd=cwd)
+        try:
+            is_open = json.loads(p.stdout).get("state") == "OPEN"
+        except ValueError:
+            is_open = False
+        if p.returncode != 0:
+            say(f"ticket #{t}: could not read ({common.one_line(p.stderr)})")
+        elif not is_open:
+            say(f"ticket #{t} already closed")
+        else:
+            c = run("gh", "issue", "close", t, cwd=cwd)
+            say(f"ticket #{t} " + ("closed" if c.returncode == 0 else f"NOT closed: {common.one_line(c.stderr)}"))
+
+    if args.worktree:
+        w = run("git", "worktree", "remove", args.worktree, cwd=cwd)
+        err = common.one_line(w.stderr)
+        if w.returncode == 0:
+            say(f"worktree {args.worktree} removed")
+        elif "not a working tree" in err:
+            say(f"worktree {args.worktree} already removed")
+        else:
+            say(f"worktree {args.worktree} NOT removed: {err}")
+
+    common.append_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
+                        tickets=[int(t) for t in tickets if t.isdigit()])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
