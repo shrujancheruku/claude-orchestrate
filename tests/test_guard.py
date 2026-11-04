@@ -229,6 +229,38 @@ CASES = [
     ("orchestrate:reviewer", "git submodule update", "deny"),
     ("orchestrate:reviewer", "git reflog delete HEAD@{0}", "deny"),
     ("orchestrate:reviewer", "git reflog show", "allow"),
+    ("orchestrate:worker", "git push --all origin", "deny"),
+    ("orchestrate:worker", "git push --mirror", "deny"),
+    ("orchestrate:worker", "git push origin --all", "deny"),
+] + [
+    (f"orchestrate:{role}", command, expected)
+    for role in ("scout", "reviewer")
+    for command, expected in (
+        ("git remote", "allow"),
+        ("git remote -v", "allow"),
+        ("git remote show origin", "allow"),
+        ("git remote get-url origin", "allow"),
+        ("git remote add o http://x", "deny"),
+        ("git remote set-url origin http://x", "deny"),
+        ("git remote remove origin", "deny"),
+        ("git config --get user.name", "allow"),
+        ("git config --get-all remote.origin.fetch", "allow"),
+        ("git config --get-regexp 'remote.*'", "allow"),
+        ("git config --list", "allow"),
+        ("git config -l", "allow"),
+        ("git config user.name x", "deny"),
+        ("git config --global user.name x", "deny"),
+        ("git config --list --edit", "deny"),
+        ("git config --get -f /x/cfg a", "deny"),
+        ("git config --get --file=/x/cfg a", "deny"),
+        ("git config --add a b", "deny"),
+        ("git config --unset a", "deny"),
+        ("git config --unset-all a", "deny"),
+        ("git config --replace-all a b", "deny"),
+        ("git config --list a", "deny"),
+        ("git config --get $K", "deny"),
+        ("git config", "deny"),
+    )
 ]
 
 # Both read-only roles must refuse every one of these (#83, #84, #85, #104, #105).
@@ -496,6 +528,22 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(decide("orchestrate:worker", command, cwd=tmp), "deny")
             self.assertEqual(decide("orchestrate:worker", "git push origin HEAD:trunk2", cwd=tmp), "allow")
             self.assertEqual(decide("orchestrate:worker", "git push origin main", cwd=tmp), "deny")
+
+    def test_default_branch_is_read_from_the_main_repo_in_a_linked_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main = Path(tmp) / "main"
+            ref = main / ".git" / "refs" / "remotes" / "origin"
+            ref.mkdir(parents=True)
+            (ref / "HEAD").write_text("ref: refs/remotes/origin/trunk\n")
+            gitdir = main / ".git" / "worktrees" / "x"
+            gitdir.mkdir(parents=True)
+            (gitdir / "commondir").write_text("../..\n")
+            work = Path(tmp) / "work"
+            work.mkdir()
+            (work / ".git").write_text(f"gitdir: {gitdir}\n")
+            for command in ("git push origin trunk", "git push origin HEAD:refs/heads/trunk"):
+                self.assertEqual(decide("orchestrate:worker", command, cwd=work), "deny")
+            self.assertEqual(decide("orchestrate:worker", "git push origin HEAD:trunk2", cwd=work), "allow")
 
     def test_unparseable_commands_are_refused_with_a_reason(self):
         for role in ("scout", "reviewer", "worker"):

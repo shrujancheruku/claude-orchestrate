@@ -35,10 +35,8 @@ WORKTREE_WRITES = frozenset(("add", "remove", "move", "prune"))
 # The reviewer reads a PR head with git, so `branch` (listing) and `worktree add --detach`
 # (a scratch checkout) are judged by reviewer_git below instead of being refused outright.
 # update-ref and symbolic-ref move refs without any of the other verbs.
-REVIEWER_GIT_WRITES = (GIT_WRITES - {"branch"}) | {"update-ref", "symbolic-ref", "config", "remote", "gc", "init",
-                                                    "clone", "update-index"}
-# `submodule` and `reflog` have read forms (status, show), so only their write forms are refused.
-SUBCOMMAND_READS = {"submodule": frozenset(("status", "summary")), "reflog": frozenset(("show", "exists"))}
+REVIEWER_GIT_WRITES = (GIT_WRITES - {"branch"}) | {"update-ref", "symbolic-ref", "gc", "init", "clone", "update-index"}
+CONFIG_READS = frozenset(("--get", "--get-all", "--get-regexp", "--list", "-l"))
 # The scout writes no ref or config either. It keeps `branch` (even listing) and every worktree change.
 SCOUT_GIT_WRITES = REVIEWER_GIT_WRITES | {"branch"}
 # git's global options that take their value as the next word (`--opt=value` is one word).
@@ -685,15 +683,40 @@ def rule_expansion(p: Parsed, cwd: str) -> str | None:
     return None
 
 
+def first_arg_reads(reads: frozenset):
+    """A read-form test: no arguments, or a first argument that is one of `reads`."""
+    def test(args: list) -> bool:
+        return not args or (not args[0].dynamic and args[0].text in reads)
+    return test
+
+
+def config_reads(args: list) -> bool:
+    """`git config` that only reads: one of CONFIG_READS and no other flag (-f, --edit, --add,
+    --unset, --replace-all ...). A name, and for --get* a value pattern, may follow; --list takes none."""
+    if any(a.dynamic for a in args):
+        return False
+    flags = [a.text for a in args if a.text.startswith("-")]
+    words = [a for a in args if not a.text.startswith("-")]
+    if not flags or any(f not in CONFIG_READS for f in flags):
+        return False
+    return len(words) <= (0 if flags[0] in ("--list", "-l") else 2)
+
+
+# Verbs whose read forms stay allowed, each as a test on the arguments; every other form is a write.
+SUBCOMMAND_READS = {
+    "submodule": first_arg_reads(frozenset(("status", "summary"))),
+    "reflog": first_arg_reads(frozenset(("show", "exists"))),
+    "remote": first_arg_reads(frozenset(("-v", "--verbose", "show", "get-url"))),
+    "config": config_reads,
+}
+
+
 def subcommand_writes(call: Call) -> bool:
-    """True for a `git submodule` or `git reflog` call that isn't one of its read forms. A bare
-    `git reflog` shows; a bare `git submodule` lists."""
-    for name, reads in SUBCOMMAND_READS.items():
+    """True for a `git submodule`, `reflog`, `remote` or `config` call that isn't one of its read
+    forms. `config` with no read flag is a write (or an error), so it is refused."""
+    for name, is_read in SUBCOMMAND_READS.items():
         if call.is_sub(name):
-            first = call.args[0] if call.args else None
-            if first is None:
-                return False
-            return first.dynamic or first.text.startswith("-") or first.text not in reads
+            return not is_read(call.args)
     return False
 
 
@@ -784,21 +807,51 @@ def default_branches(cwd: str) -> set:
     read in the checkout (or the main repo, from a linked worktree), never a git subprocess."""
     names = {"main", "master"}
     prefix = "ref: refs/remotes/origin/"
-    try:
-        for root in repo_roots(cwd):
-            head = (root / ".git" / "refs" / "remotes" / "origin" / "HEAD").read_text().strip()
-            if head.startswith(prefix) and len(head) > len(prefix):
-                names.add(head[len(prefix):])
-                break
-    except (OSError, UnicodeDecodeError):
-        pass  # unreadable: main and master still stand
+    for git_dir in common_git_dirs(cwd):
+        try:
+            head = (git_dir / "refs" / "remotes" / "origin" / "HEAD").read_text().strip()
+        except (OSError, UnicodeDecodeError):
+            continue  # unreadable here: try the next, and main and master still stand
+        if head.startswith(prefix) and len(head) > len(prefix):
+            names.add(head[len(prefix):])
+            break
     return names
+
+
+def common_git_dirs(cwd: str) -> list:
+    """Git directories that can hold refs/remotes for cwd: the common dir a linked worktree's
+    `.git` file points to (via its `commondir`), then each checkout's own `.git` directory."""
+    found = []
+    try:
+        start = Path(cwd or ".").resolve()
+        for directory in (start, *start.parents):
+            dot_git = directory / ".git"
+            if dot_git.is_file():
+                try:
+                    gitdir = (directory / dot_git.read_text().split("gitdir:", 1)[1].strip().splitlines()[0]).resolve()
+                    common = gitdir / (gitdir / "commondir").read_text().strip()
+                    found.append(common.resolve())
+                except (OSError, IndexError, UnicodeDecodeError):
+                    pass
+                break
+            if dot_git.is_dir():
+                found.append(dot_git)
+                break
+    except OSError:
+        pass
+    for root in repo_roots(cwd):
+        if (root / ".git").is_dir():
+            found.append(root / ".git")
+    return found
 
 
 def rule_push_default(p: Parsed, cwd: str) -> str | None:
     for call in p.tool("git"):
         if not call.is_sub("push"):
             continue
+        # --all and --mirror push every branch, the default branch among them.
+        if any(a.text in ("--all", "--mirror") for a in call.args if not a.dynamic):
+            return "pushes to the default branch (--all and --mirror push every branch)"
         names = "|".join(re.escape(n) for n in sorted(default_branches(cwd)))
         # A bare name or the destination of `src:dst`, spelled short or as refs/heads/<name>.
         pattern = rf"(?:[^:]*:)?(?:refs/heads/)?(?:{names})"
