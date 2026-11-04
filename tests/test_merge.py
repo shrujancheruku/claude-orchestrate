@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -408,11 +409,13 @@ class SweepTest(unittest.TestCase):
         self.assertIn("HANDBACK PR #8 pr-a: (sweep) (RuntimeError: disk on fire)", printed)
         self.assertIn("- main item\n- other", self.remote("pr-b", "CHANGELOG.md"))
 
-    def generated_scenario(self, command):
+    def generated_scenario(self, command, in_base=None):
         """pr-a and main both rebuild gen.txt (upper-case src.txt) after editing different lines of src.txt."""
         (self.env.repo / ".claude" / "orchestration.md").write_text(
             CONFIG.replace("- **Generated:** none", f"- **Generated:**\n  - `gen*.txt`: `{command}`"))
         self.env.commit("gen.txt", "ONE TWO\n", "chore: gen")
+        for path, text in (in_base or {}).items():
+            self.env.commit(path, text, f"chore: {path}")
         git(self.env.repo, "push", "origin", "main")
         self.base = git(self.env.repo, "rev-parse", "HEAD")
         self.git_log.write_text("")
@@ -460,11 +463,25 @@ class SweepTest(unittest.TestCase):
         self.assertIn("changed other.txt, outside the generated globs", p.stdout)
         self.assertEqual(self.pushes(), [])
 
+    def test_a_rename_on_main_is_not_mistaken_for_a_stray_change(self):
+        self.generated_scenario("tr a-z A-Z < src.txt | paste -sd' ' - > gen.txt",
+                                in_base={"notes-old.txt": "some unrelated notes\nwith two lines\n"})
+        git(self.env.repo, "mv", "notes-old.txt", "notes-new.txt")
+        git(self.env.repo, "commit", "-q", "-m", "chore: rename notes")
+        git(self.env.repo, "push", "origin", "main")
+        p = self.sweep()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.remote("pr-a", "gen.txt"), "ZERO ONE TWO THREE\n")
+        self.assertEqual(self.replays(), [("gen.txt", "regenerated")])
+
     def test_regenerate_command_that_hangs_is_handed_back(self):
         import replay
         self.addCleanup(setattr, replay, "REGENERATE_TIMEOUT", replay.REGENERATE_TIMEOUT)
-        replay.REGENERATE_TIMEOUT = 0.2
-        self.assertIn("timed out", replay._regenerate(str(self.env.repo), "sleep 5", [], {}))
+        replay.REGENERATE_TIMEOUT = 0.5
+        for cmd in ("sleep 20", "sh -c 'sleep 20 & wait'"):  # the second leaves a child holding the pipes
+            start = time.time()
+            self.assertIn("timed out", replay._regenerate(str(self.env.repo), cmd, [], {}))
+            self.assertLess(time.time() - start, 5, cmd)
 
     def test_generated_commands_parse(self):
         import replay

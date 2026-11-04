@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 from collections import Counter
@@ -184,17 +185,29 @@ def _regenerate(wt, cmd, generated, resolved):
     Files it wrote (unstaged changes; the merge's own changes are already staged) that match a generated
     glob join `resolved` to be staged; a change anywhere else fails the command.
     """
+    # Own session, so a timeout can kill the command's children too (they would hold the pipes open).
+    proc = subprocess.Popen(cmd, cwd=wt, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        r = subprocess.run(cmd, cwd=wt, shell=True, capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                           timeout=REGENERATE_TIMEOUT)
+        stdout, stderr = proc.communicate(timeout=REGENERATE_TIMEOUT)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()  # reap it
         return f"timed out after {REGENERATE_TIMEOUT}s"
-    if r.returncode != 0:
-        return common.one_line(r.stderr or r.stdout) or f"exit {r.returncode}"
-    out = git(wt, "status", "--porcelain", "-z", "-uall").stdout
+    if proc.returncode != 0:
+        return common.one_line(stderr or stdout) or f"exit {proc.returncode}"
+    fields = git(wt, "status", "--porcelain", "-z", "-uall").stdout.split("\0")
     extra, stray = [], []
-    for entry in out.split("\0"):
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
         xy, path = entry[:2], entry[3:]
+        if xy[:1] in ("R", "C"):
+            i += 1  # a rename or copy carries its source path as a second field
         if not path or xy in ("DD", "AU", "UD", "UA", "DU", "AA", "UU") or xy[1] == " ":
             continue
         (extra if any(fnmatch.fnmatchcase(path, g) for g, _ in generated) else stray).append(path)
