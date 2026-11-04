@@ -20,12 +20,15 @@ from pathlib import Path
 PLUGIN = "orchestrate"
 
 # git subcommands that change the repository, the index or the working tree.
-GIT_WRITES = (
-    "add|am|apply|branch|checkout|cherry-pick|clean|commit|merge|mv|pull|push|"
-    "rebase|reset|restore|revert|rm|stash|switch|tag|worktree\\s+(?:add|remove|move|prune)"
+GIT_WRITE_VERBS = (
+    "add", "am", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "merge", "mv", "pull",
+    "push", "rebase", "reset", "restore", "revert", "rm", "stash", "switch", "tag",
 )
+GIT_WRITES = "|".join(GIT_WRITE_VERBS) + "|worktree\\s+(?:add|remove|move|prune)"
 # Allow git's global options (-C dir, -c key=val, --no-pager) before the subcommand.
-GIT_PREFIX = r"\bgit\s+(?:(?:-[Cc]\s+\S+|--\S+)\s+)*"
+# Not preceded by a word char, `.`, `@`, `:` or `-`, so the end of a remote URL
+# (`o/r.git pull/71/head`) isn't read as a `git pull`.
+GIT_PREFIX = r"(?<![\w.@:-])git\s+(?:(?:-[Cc]\s+\S+|--\S+)\s+)*"
 
 GH_WRITE = re.compile(
     r"\bgh\s+(?:pr|issue|release|repo|label|workflow|run|secret|variable|project)\s+"
@@ -118,6 +121,109 @@ def git_write(subcommands: str) -> re.Pattern:
     return re.compile(GIT_PREFIX + r"(?:" + subcommands + r")\b")
 
 
+# The reviewer reads a PR head with git, so `branch` (listing) and `worktree add --detach`
+# (a scratch checkout) are judged by reviewer_git below instead of being refused outright.
+# update-ref and symbolic-ref move refs without any of the other verbs.
+REVIEWER_GIT_WRITES = (
+    "|".join(v for v in GIT_WRITE_VERBS if v != "branch")
+    + "|update-ref|symbolic-ref|worktree\\s+(?:remove|move|prune|lock|unlock|repair)"
+)
+# Global options that point git at another repo, config or hooks.
+UNSAFE_GIT_OPTION = re.compile(r"\s(?:-[cC]|--(?:git-dir|work-tree|exec-path|namespace|config-env))\b")
+# `-C <dir>` is fine before a fetch: it only picks which repo's FETCH_HEAD is written.
+UNSAFE_FETCH_OPTION = re.compile(r"\s(?:-c|--(?:git-dir|work-tree|exec-path|namespace|config-env))\b")
+GIT_CALL = re.compile(r"(" + GIT_PREFIX + r")(branch|fetch|worktree)\b([^;&|\n)]*)")
+BRANCH_LIST = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "-l", "--show-current"}
+BRANCH_REF_ARG = {"--contains", "--merged", "--no-merged", "--points-at"}
+WORKTREE_FLAGS = {"--detach", "-q", "--quiet", "--no-checkout"}
+
+
+def repo_roots(cwd: str) -> list[Path]:
+    """The checkout holding cwd and, inside a linked worktree (where `.git` is a file), the main
+    repo's checkout too."""
+    start = Path(cwd or ".").resolve()
+    for directory in (start, *start.parents):
+        dot_git = directory / ".git"
+        if dot_git.is_dir():
+            return [directory]
+        if dot_git.is_file():
+            # Fail closed: "/" is a parent of every absolute path, so an unreadable `.git` file
+            # makes every reviewer worktree add look like it is inside the repo.
+            closed = [Path("/")]
+            try:
+                gitdir = (directory / dot_git.read_text().split("gitdir:", 1)[1].strip().splitlines()[0]).resolve()
+                if not gitdir.is_dir():
+                    return closed
+                if (gitdir / "commondir").is_file():
+                    common = (gitdir / (gitdir / "commondir").read_text().strip()).resolve()
+                    return [directory, common.parent]
+                if gitdir.parent.name == "worktrees":
+                    return closed  # a linked worktree whose main repo can't be found
+                return [directory]  # a submodule: its own checkout
+            except (OSError, IndexError):
+                return closed
+    return [start]
+
+
+def branch_lists_only(args: list[str]) -> bool:
+    """True for `git branch` arguments that only list: listing flags, a ref after
+    --contains and the like, and name patterns only after --list."""
+    patterns_ok = "--list" in args or "-l" in args
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg in BRANCH_REF_ARG:
+            skip = True
+        elif arg not in BRANCH_LIST and (arg.startswith("-") or not patterns_ok):
+            return False
+    return True
+
+
+def reviewer_git(command: str, cwd: str) -> str | None:
+    """What a reviewer's `git branch`, `git fetch` or `git worktree` call does wrong, or None.
+
+    Listing branches, fetching into FETCH_HEAD and adding a detached scratch worktree outside
+    the repo are the reads a reviewer needs; everything else those verbs do changes state.
+
+    Calls are found in a copy of the command with quoted text blanked to the same length, so
+    quoted search text isn't taken for a call; their arguments are read from the raw command at
+    the same offsets, so a quoted refspec (`'pull/1/head:main'`) is still seen."""
+    blanked = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", lambda q: "'" + "_" * (len(q.group()) - 2) + "'", command)
+    for m in GIT_CALL.finditer(blanked):
+        prefix, verb = m.group(1), m.group(2)
+        args = command[m.start(3):m.end(3)].split()
+        if verb == "branch":
+            if not branch_lists_only(args):
+                return "creates, deletes or renames a branch (only listing is allowed)"
+        elif verb == "fetch":
+            if UNSAFE_FETCH_OPTION.search(prefix):
+                return "points fetch at another repo or config through a global git option"
+            # `fetch origin x:y` writes a local ref. A URL remote has colons of its own.
+            for arg in args:
+                if re.search(r"[$`]", arg):
+                    return "fetches with a shell expansion that can't be checked"
+                if ":" in arg and not re.match(r"^(?:\w+://|[\w.-]+@[\w.-]+:)", arg):
+                    return "fetches into a named local ref (fetch only into FETCH_HEAD)"
+        elif args[:1] == ["add"]:
+            flags = [a for a in args[1:] if a.startswith("-")]
+            names = [a for a in args[1:] if not a.startswith("-")]
+            if "--detach" not in flags or any(f not in WORKTREE_FLAGS for f in flags):
+                return "adds a worktree that isn't a plain `--detach` one"
+            if UNSAFE_GIT_OPTION.search(prefix) or not 1 <= len(names) <= 2:
+                return ("adds a worktree in a form that can't be checked "
+                        "(use `git worktree add --detach <dir> <ref>` with no -c, -C or --git-dir before it)")
+            target = names[0]
+            if not (target.startswith("/") or target.startswith("~/")) or re.search(r"[$`\\]|^''$", target):
+                return "adds a worktree at a path that isn't a plain absolute path"
+            path = Path(target).expanduser().resolve()
+            if any(path == root or root in path.parents for root in repo_roots(cwd)):
+                return "adds a worktree inside the repo (use a scratch dir outside it)"
+        elif args[:1] != ["list"]:
+            return "changes worktrees"
+    return None
+
+
 READ_ONLY = [
     (git_write(GIT_WRITES), "changes git state"),
     (GH_WRITE, "writes to the git host"),
@@ -128,7 +234,7 @@ READ_ONLY = [
 
 RULES = {
     "scout": READ_ONLY,
-    "reviewer": READ_ONLY,
+    "reviewer": [(git_write(REVIEWER_GIT_WRITES), "changes git state"), *READ_ONLY[1:]],
     "worker": [
         (GH_MERGE, "merges a PR (merging belongs to the orchestrator)"),
         (FORCE_PUSH, "force-pushes"),
@@ -138,7 +244,8 @@ RULES = {
 
 NEXT_STEP = {
     "scout": "Report what you found and let your caller act on it.",
-    "reviewer": "Read code with `gh pr diff` or `git show <ref>:<path>` and put the change in your findings.",
+    "reviewer": "Read code with `gh pr diff`, `git show <ref>:<path>` or a scratch checkout "
+                "(`git worktree add --detach <absolute dir outside the repo> FETCH_HEAD`) and put the change in your findings.",
     "worker": "Push your own branch normally and report the PR; the orchestrator merges.",
 }
 
@@ -234,6 +341,12 @@ def main() -> None:
              f"{NEXT_STEP[role]}")
         return
     text = strip_quotes(command)
+    if role == "reviewer":
+        # Also on the raw command: strip_quotes blanks a quoted refspec like 'pull/1/head:main'.
+        what = reviewer_git(command, data.get("cwd") or "")
+        if what:
+            deny(f"the reviewer role can't run a command that {what}. {NEXT_STEP[role]}")
+            return
     for pattern, what in RULES[role]:
         if pattern.search(text):
             deny(f"the {role} role can't run a command that {what}. {NEXT_STEP[role]}")

@@ -12,7 +12,7 @@ You review **one PR** at the **tier** your caller gives, and return a verdict. T
 ## Read
 
 - The ticket, with every comment: its acceptance criteria are the bar. An `## Agent Brief` comment, if there is one, overrides the body.
-- The diff: `gh pr diff <n>`. Read changed files at the PR's head with `git fetch origin pull/<n>/head` and `git show FETCH_HEAD:<path>`.
+- The diff: `gh pr diff <n>`. Read changed files at the PR's head with `git fetch origin pull/<n>/head` and `git show FETCH_HEAD:<path>`. To browse the whole tree, `git worktree add --detach <absolute scratch dir outside the repo>/pr-<n> FETCH_HEAD` is allowed too. `git worktree remove` and `prune` are refused, so leave scratch worktrees for the orchestrator to clean up. Other git writes (checkout, branch create or delete, `fetch origin x:y`, a redirect to a file) are refused.
 - The repo's rules: the config's **Review** section, the instruction files (`CLAUDE.md`, `AGENTS.md`) it points to, and the domain docs the way `docs/agents/domain.md` says: the glossary, and the ADRs that touch the changed area.
 
 You judge on two axes, as the `code-review` skill does: **spec** (does the PR do what the ticket asks, no more and no less?) and **standards** (does it follow the repo's rules, glossary and ADRs?).

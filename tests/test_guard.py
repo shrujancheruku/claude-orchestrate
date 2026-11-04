@@ -85,6 +85,92 @@ CASES = [
     ("orchestrate:reviewer", "git show origin/x:README.md", "allow"),
     ("orchestrate:reviewer", "gh pr review 12 --approve", "deny"),
     ("orchestrate:reviewer", "gh pr merge 12", "deny"),
+    # Reviewer git: reads allowed (a PR head, history, branch listing, a detached scratch checkout),
+    # every ref or tree write still refused. The scout keeps the stricter list.
+    *[
+        ("orchestrate:reviewer", c, "allow")
+        for c in (
+            "git fetch origin pull/71/head",
+            "git fetch origin refs/pull/71/head && git log --oneline origin/main..FETCH_HEAD",
+            "git fetch --prune origin",
+            "git fetch git@github.com:o/r.git pull/71/head",
+            "git log -p FETCH_HEAD",
+            "git diff origin/main...FETCH_HEAD",
+            "git show FETCH_HEAD:hooks/guard.py",
+            "git branch",
+            "git branch -a",
+            "git branch -r",
+            "git branch --list 'feat/*'",
+            "git branch -vv",
+            "git branch -r --contains FETCH_HEAD",
+            "git branch --show-current",
+            "git -C /repo fetch origin pull/71/head",
+            'grep -rn "git branch new" docs',
+            "gh pr diff 103 | grep 'git fetch origin x:y'",
+            "git log --grep='git branch x' FETCH_HEAD",
+            "git fetch https://x/y.git pull/71/head",
+            "git worktree list",
+            "git worktree add --detach /tmp/scratch/pr-71 FETCH_HEAD",
+            "git worktree add --detach ~/scratch/pr-71",
+            "git -C /repo worktree list",
+            "git -C /tmp/scratch/pr-71 log --oneline",
+        )
+    ],
+    *[
+        ("orchestrate:reviewer", c, "deny")
+        for c in (
+            "git push origin HEAD",
+            "/usr/bin/git push origin HEAD",
+            "git commit -m x",
+            "git branch new-branch",
+            "git branch new-branch FETCH_HEAD",
+            "git branch -d old",
+            "git branch -D old",
+            "git branch -m old new",
+            "git branch -f main FETCH_HEAD",
+            "git branch --list foo -d bar",
+            "git branch -a && git branch x",
+            "git checkout FETCH_HEAD",
+            "git switch -c x",
+            "git fetch origin pull/71/head:pr-71",
+            "git fetch origin +pull/71/head:refs/heads/pr-71",
+            "git fetch origin main:main",
+            "git fetch origin 'pull/1/head:main'",
+            'git fetch origin "+refs/pull/71/head:refs/heads/x"',
+            "git fetch origin pull/$N/head",
+            "git fetch origin `echo main:main`",
+            "git -c core.hooksPath=/x fetch origin pull/71/head",
+            "git --git-dir=/x/.git fetch origin pull/71/head",
+            "git update-ref -d x",
+            "git worktree add --detach /tmp/x HEAD; git push",
+            "git -c core.hooksPath=/x worktree add --detach /tmp/x",
+            "git --git-dir=/x worktree add --detach /tmp/x",
+            "git --work-tree=/x worktree add --detach /tmp/x",
+            "git --exec-path=/x worktree add --detach /tmp/x",
+            "git worktree add --detach /tmp/$X FETCH_HEAD",
+            "git fetch origin pull/71/head && git fetch origin x:y",
+            "git update-ref refs/heads/main FETCH_HEAD",
+            "git symbolic-ref HEAD refs/heads/x",
+            "git worktree add /tmp/scratch/pr-71 FETCH_HEAD",
+            "git worktree add -b x /tmp/scratch/pr-71",
+            "git worktree add --detach -B x /tmp/scratch/pr-71",
+            "git worktree add --detach ../pr-71 FETCH_HEAD",
+            "git worktree add --detach pr-71",
+            "git worktree add --detach '/tmp/scratch/pr-71'",
+            "git worktree add --detach $HOME/pr-71",
+            "git worktree add --detach /tmp/pr-71 FETCH_HEAD extra",
+            "git -C /repo worktree add --detach /tmp/pr-71",
+            f"git worktree add --detach {GUARD.parent.parent}/scratch/pr-71",
+            f"git worktree add --detach {GUARD.parent.parent} FETCH_HEAD",
+            "git worktree remove /tmp/scratch/pr-71",
+            "git worktree prune",
+            "git fetch origin pull/71/head > out.txt",  # a redirect stays refused, scratch dir or not
+            "git log > /tmp/scratch/log.txt",
+        )
+    ],
+    ("orchestrate:scout", "git branch new-branch", "deny"),
+    ("orchestrate:scout", "git branch -a", "deny"),
+    ("orchestrate:scout", "git worktree add --detach /tmp/scratch/pr-71", "deny"),
     ("orchestrate:worker", "git add src/a.ts && git commit -m 'fix: a'", "allow"),
     ("orchestrate:worker", "git push -u origin api/162-reasons", "allow"),
     ("orchestrate:worker", "gh pr create --title x --body y", "allow"),
@@ -158,6 +244,47 @@ class GuardTest(unittest.TestCase):
         for agent_type, command, expected in CASES:
             with self.subTest(agent=agent_type, command=command):
                 self.assertEqual(decide(agent_type, command), expected)
+
+    def test_reviewer_worktree_inside_main_repo_from_a_linked_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main = Path(tmp).resolve() / "main"
+            linked = Path(tmp).resolve() / "linked"
+            (main / ".git" / "worktrees" / "linked").mkdir(parents=True)
+            (main / ".git" / "worktrees" / "linked" / "commondir").write_text("../..\n")
+            linked.mkdir()
+            (linked / ".git").write_text(f"gitdir: {main}/.git/worktrees/linked\n")
+            add = "git worktree add --detach {} FETCH_HEAD"
+            for target, expected in ((main / "sub", "deny"), (linked / "sub", "deny"), (Path(tmp).resolve() / "scratch", "allow")):
+                with self.subTest(target=target):
+                    self.assertEqual(decide("orchestrate:reviewer", add.format(target), cwd=linked), expected)
+
+    def test_reviewer_worktree_add_fails_closed_on_an_unreadable_git_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp).resolve() / "broken"
+            broken.mkdir()
+            (broken / ".git").write_text("not a gitdir line\n")
+            command = f"git worktree add --detach {Path(tmp).resolve()}/scratch FETCH_HEAD"
+            self.assertEqual(decide("orchestrate:reviewer", command, cwd=broken), "deny")
+            missing = Path(tmp).resolve() / "missing"
+            missing.mkdir()
+            (missing / ".git").write_text(f"gitdir: {tmp}/nowhere\n")
+            self.assertEqual(decide("orchestrate:reviewer", command, cwd=missing), "deny")
+            nocommon = Path(tmp).resolve() / "nocommon"
+            (nocommon / "x").mkdir(parents=True)
+            (Path(tmp) / "g" / "worktrees" / "w").mkdir(parents=True)
+            (nocommon / ".git").write_text(f"gitdir: {tmp}/g/worktrees/w\n")
+            self.assertEqual(decide("orchestrate:reviewer", command, cwd=nocommon), "deny")
+
+    def test_reviewer_writes_list_is_git_writes_minus_branch(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("guard", GUARD)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        self.assertIn("branch", guard.GIT_WRITES.split("|"))
+        self.assertNotIn("branch", guard.REVIEWER_GIT_WRITES.split("|"))
+        for verb in guard.GIT_WRITE_VERBS:
+            if verb != "branch":
+                self.assertIn(verb, guard.REVIEWER_GIT_WRITES.split("|"))
 
     def test_review_posts(self):
         with tempfile.TemporaryDirectory() as root:
