@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -364,20 +365,38 @@ class QualityTest(unittest.TestCase):
         self.assertEqual(self.m["escalations"], {"count": 1, "tickets": [20]})
         self.assertEqual({t["ticket"]: t["worker_models"] for t in self.p["tickets"]}[20], ["haiku", "sonnet"])
 
-    def test_worker_model_comes_from_metadata(self):
-        # The transcript says Opus here; the metadata says Sonnet and wins.
+    def test_alias_metadata_names_the_worker_model_but_not_the_model_rollup(self):
+        # Real metadata holds the dispatch alias; the transcript holds the full id. One model, one row.
         sub = self.fx.main.with_suffix("") / "subagents"
-        write_jsonl(sub / "agent-w23.jsonl", [assistant(2, "w", "claude-opus-5-5", [])])
-        agents = {a["id"]: a for a in self.fx.run()["agents"]}
+        for meta in sub.glob("agent-w*.meta.json"):
+            data = json.loads(meta.read_text())
+            data["model"] = "haiku" if "haiku" in data["model"] else "sonnet"
+            meta.write_text(json.dumps(data))
+        p = self.fx.run()
+        self.assertEqual(set(p["metrics"]["tokens_by_model"]) - {"claude-opus-5-5"}, {"claude-haiku-4-5", "claude-sonnet-5-5"})
+        agents = {a["id"]: a for a in p["agents"]}
         self.assertEqual(agents["w23"]["model"], "claude-sonnet-5-5")
+        self.assertEqual(set(p["metrics"]["worker_models"]), {"haiku", "sonnet"})
+        self.assertEqual(p["metrics"]["escalations"]["tickets"], [20])
+
+    def test_dispatched_round_prefers_the_tier_round_and_repeats_follow_the_highest(self):
+        self.assertEqual(prof.dispatched_round("Review PR 5. Tier M, round 2. Check against your round 1 findings"), 2)
+        self.assertEqual(prof.dispatched_round("against your round 1 findings, round 2"), 2)
+        self.assertEqual(prof.dispatched_round("Review PR 5"), 1)
+        sub = self.fx.main.with_suffix("") / "subagents"
+        agent = lambda name: {"role": "reviewer", "id": name, "pr": 9, "ticket": None, "round": 1,
+                              "transcript": prof.Transcript(sub / f"agent-{name}.jsonl")}
+        r = prof.review_metrics([agent("r22a"), agent("r22b")], [], set())  # both briefs parse to round 1
+        self.assertEqual([v["round"] for v in r["prs"][0]["verdicts"]], [1, 2])
 
     def test_usage_rounds_and_round_1_approvals_split_by_worker_model(self):
         wm = self.m["worker_models"]
         self.assertEqual((wm["haiku"]["workers"], wm["sonnet"]["workers"]), (2, 3))
         # A ticket is credited to the model that finished it: #20 to Sonnet, #21 to Haiku.
         self.assertEqual((wm["haiku"]["tickets"], wm["sonnet"]["tickets"]), (1, 3))
-        self.assertEqual((wm["haiku"]["rounds"], wm["haiku"]["round1_approvals"], wm["haiku"]["round1_changes"]), (1, 1, 0))
-        self.assertEqual((wm["sonnet"]["rounds"], wm["sonnet"]["round1_approvals"], wm["sonnet"]["round1_changes"]), (5, 1, 2))
+        # Rounds go to the finishing model; round 1 to the model that started the ticket (#60 began on Haiku).
+        self.assertEqual((wm["haiku"]["rounds"], wm["haiku"]["round1_approvals"], wm["haiku"]["round1_changes"]), (1, 1, 1))
+        self.assertEqual((wm["sonnet"]["rounds"], wm["sonnet"]["round1_approvals"], wm["sonnet"]["round1_changes"]), (5, 1, 1))
         self.assertGreater(wm["haiku"]["cost"], 0)
         self.assertEqual(wm["haiku"]["tokens"], (6000 + 30 + 500 + 10) + (300_000 + 20 + 500 + 10))
 
@@ -397,6 +416,26 @@ class QualityTest(unittest.TestCase):
                          ("w22", 22, "d1", "d1x", "orchestrate:scout"))
         self.assertGreater(d["tokens"], 0)
         self.assertTrue(any("depth 2" in w for w in self.p["warnings"]))
+
+    def test_viewer_survives_a_profile_without_the_new_metrics(self):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        old = json.loads(json.dumps(self.p))
+        for k in ("review", "worker_models", "escalations", "depth2"):
+            del old["metrics"][k]
+        path = Path(self.tmp.name) / "old.json"
+        path.write_text(json.dumps(old))
+        run = lambda f: subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(f)],
+                                       capture_output=True, text=True)
+        out = run(path)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("predates review metrics", out.stdout)
+        # Reviews present but no depth-2 key: that section is skipped, not reported as clean.
+        del self.p["metrics"]["depth2"]
+        path.write_text(json.dumps(self.p))
+        out = run(path)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("Depth-2", out.stdout)
 
     def test_clean_session_has_no_depth_2_escalations_or_reviews(self):
         with tempfile.TemporaryDirectory() as d:

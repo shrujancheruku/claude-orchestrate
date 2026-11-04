@@ -302,6 +302,15 @@ def subagent_metas(main: Transcript) -> dict:
     return by_tool_use
 
 
+def dispatched_round(text: str) -> int:
+    """The review round a reviewer was dispatched for: "Tier M, round 2" first, else the last "round N" in the brief."""
+    m = re.search(r"\btier\s*[SML],?\s*round[:\s#]*(\d+)", text, re.I)
+    if m:
+        return int(m.group(1))
+    found = re.findall(r"\bround[:\s#]*(\d+)", text, re.I)
+    return int(found[-1]) if found else 1
+
+
 def collect_agents(main: Transcript) -> list:
     """Every orchestrate agent the session dispatched, joined to its own transcript."""
     sub = main.path.with_suffix("") / "subagents"
@@ -315,14 +324,15 @@ def collect_agents(main: Transcript) -> list:
         name, meta = by_tool_use.get(use.get("id"), (None, {}))
         t = Transcript(sub / f"{name}.jsonl") if name else None
         desc = inp.get("description") or meta.get("description") or ""
-        asked = re.search(r"\bround[:\s#]*(\d+)", f"{desc} {inp.get('prompt') or ''}", re.I)
+        asked = dispatched_round(f"{desc} {inp.get('prompt') or ''}")
         agents.append({
             "id": name[len("agent-"):] if name and name.startswith("agent-") else name,
             "role": role[len(PLUGIN):],
-            # The metadata names the agent's model; the transcript and the dispatch are fallbacks.
-            "model": meta.get("model") or (t.models[0] if t and t.models else None) or inp.get("model"),
+            "model": (t.models[0] if t and t.models else None) or inp.get("model") or meta.get("model"),
+            # What the metadata calls the model (often the dispatch alias, "haiku"): the worker-model split reads this.
+            "worker_model": meta.get("model") or (t.models[0] if t and t.models else None) or inp.get("model"),
             "description": desc,
-            "round": int(asked.group(1)) if asked else 1,  # the review round a reviewer was dispatched for
+            "round": asked,  # the review round a reviewer was dispatched for
             "tool_use_id": use.get("id"),
             "requests": len(t.requests) if t else 0,
             "contexts": t.contexts() if t else [],
@@ -402,7 +412,7 @@ def build_tickets(agents: list, main: Transcript, end: datetime) -> list:
             "ticket": n,
             "cost": cost,
             # Worker models in dispatch order: Haiku then Sonnet is an escalation.
-            "worker_models": [worker_model_name(w["model"]) for w in tk["workers"]],
+            "worker_models": [worker_model_name(w["worker_model"]) for w in tk["workers"]],
             # Filled once events.jsonl is read (a later ticket).
             "gate_runs": None,
             "pr": tk["pr"],
@@ -520,13 +530,17 @@ def review_verdicts(t: Transcript | None, first_round: int) -> list:
 def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
     """The review quality floor, from reviewer transcripts alone (so it holds with posting on or off)."""
     last_model = {tk["ticket"]: tk["worker_models"][-1] for tk in tickets if tk["worker_models"]}
+    first_model = {tk["ticket"]: tk["worker_models"][0] for tk in tickets if tk["worker_models"]}
     by_pr = {}
     for a in agents:
         if a["role"] != "reviewer":
             continue
         key = a.get("pr") or a["id"]
         pr = by_pr.setdefault(key, {"pr": a.get("pr"), "ticket": a.get("ticket"), "verdicts": []})
-        pr["verdicts"] += review_verdicts(a["transcript"], a["round"])
+        # A second reviewer whose brief parses to a round already seen follows the highest one.
+        seen = {v["round"] for v in pr["verdicts"]}
+        first = a["round"] if a["round"] not in seen else max(seen) + 1
+        pr["verdicts"] += review_verdicts(a["transcript"], first)
     prs = []
     for pr in by_pr.values():
         v = sorted(pr["verdicts"], key=lambda x: x["round"])
@@ -535,7 +549,7 @@ def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
         first = next((x for x in v if x["round"] == 1), None)
         rounds = {x["round"] for x in v}
         prs.append({
-            "pr": pr["pr"], "ticket": pr["ticket"], "worker_model": last_model.get(pr["ticket"]),
+            "pr": pr["pr"], "ticket": pr["ticket"], "worker_model": last_model.get(pr["ticket"]), "first_worker_model": first_model.get(pr["ticket"]),
             "rounds": len(rounds), "round1": first["verdict"] if first else None,
             "merged": pr["pr"] in merged_prs, "verdicts": v,
             # A round-1 approve with minors that merged with no second round: the minors rode along.
@@ -574,7 +588,7 @@ def worker_metrics(agents: list, tickets: list, review: dict) -> dict:
     for a in agents:
         if a["role"] != "worker":
             continue
-        m = out.setdefault(worker_model_name(a["model"]), {
+        m = out.setdefault(worker_model_name(a["worker_model"]), {
             "workers": 0, "tokens": 0, "cost": 0.0, "requests": [], "contexts": [], "tool_output_tokens": []})
         m["workers"] += 1
         m["tokens"] += sum(a["tokens"].values())
@@ -589,7 +603,8 @@ def worker_metrics(agents: list, tickets: list, review: dict) -> dict:
     result = {}
     for name, m in out.items():
         mine = [p for p in review["prs"] if p["worker_model"] == name]
-        firsts = [p for p in mine if p["round1"]]
+        # Round 1 is the first worker's work, so an escalated ticket's round 1 is credited to the model that started it.
+        firsts = [p for p in review["prs"] if p["round1"] and p["first_worker_model"] == name]
         result[name] = {
             "workers": m["workers"], "tickets": m.get("tickets", 0), "tokens": m["tokens"], "cost": m["cost"],
             "requests": sum(m["requests"]), "requests_median": statistics.median(m["requests"]),
