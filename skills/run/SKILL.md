@@ -36,6 +36,8 @@ Every pass rebuilds its picture from the tracker and the git host, so a pass can
 
 The **state file**, `.claude/orchestrate-state.json` (gitignored), holds what the tracker can't: for each claimed ticket, its worker's agent ID, the session ID, the worktree path and the time of its last report. Write the entry when you dispatch a worker and update it on each report; remove it when the slot frees. It is a cache: when it disagrees with the tracker, the tracker wins. An entry from another session can't be reached with SendMessage, so treat its ticket as stalled.
 
+**When to use the scout:** only for jobs that involve searching or judgement and would otherwise take two or more of your turns or pull a lot of output into your context: reconcile, touch maps and pre-merge checks. Do anything smaller yourself. Each comes back in the scout's fixed shape (see its definition), so you read conclusions, not evidence.
+
 The **held paths** at any moment are the files in open PRs' diffs, the touch maps of building tickets, and the config's exclusive holds. A ticket may not change a path another ticket holds.
 
 Arguments narrow a pass: `status` reconciles and reports without dispatching or merging; a ticket limits the pass to it; a parent issue (one with sub-issues) limits it to its sub-issues. `--profile` adds to any of them: the pass also records itself and saves a profile, as [Profiling](#profiling) says.
