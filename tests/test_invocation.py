@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 CLIS = sorted(p.name for p in SCRIPTS.iterdir() if p.suffix == "" and p.is_file())
 LIBRARIES = {"common", "checks", "replay"}
-STANDALONE = {"profile.py", "usage-tap.py"}
+STANDALONE = {"profile.py"}
 
 
 def run(argv, **kw):
@@ -55,7 +55,7 @@ class Invocation(unittest.TestCase):
                 self.assertNotIn("Traceback", r.stderr)
 
     def test_standalone_scripts_run_isolated_alone(self):
-        # usage-tap.py is copied out of the plugin, so run each from a lone copy.
+        # A standalone script imports nothing from scripts/, so it must run from a lone copy.
         for name in sorted(STANDALONE):
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
                 shutil.copy(SCRIPTS / name, d)

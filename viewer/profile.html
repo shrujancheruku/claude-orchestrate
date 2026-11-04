@@ -368,7 +368,7 @@ function cost(p) {
   }
   const m = p.metrics.meters;
   const meter = (k) => (m[k].per_merged_ticket == null ? "no samples" : m[k].per_merged_ticket.toFixed(1) + " points");
-  card.append(el("p", { class: "note" }, `Plan meters per merged ticket (unweighted, from the usage tap): 5-hour ${meter("five_hour")} · 7-day ${meter("seven_day")}.`));
+  card.append(el("p", { class: "note" }, `Plan meters per merged ticket (unweighted): 5-hour ${meter("five_hour")} · 7-day ${meter("seven_day")}.`));
   const det = el("details");
   det.setAttribute("open", "");
   det.append(el("summary", {}, "Per-ticket table"));
@@ -542,7 +542,7 @@ function usage(p) {
   card.append(el("h2", {}, "Plan usage"));
   const rows = p.usage.map((u) => ({ ms: t(u.ts), five: u.five_hour, week: u.seven_day })).filter((u) => u.ms != null);
   if (!rows.length) {
-    card.append(el("p", { class: "sub" }, "No usage samples for this session. Pipe your status line through scripts/usage-tap.py to record them (see the README)."));
+    card.append(el("p", { class: "sub" }, "Plan headroom isn't measured; limit hits and reset times come from transcripts."));
     return card;
   }
   const wins = p.metrics.windows;

@@ -5,7 +5,8 @@
     profile.py compare <before.json> <after.json> [--max-cost USD] [--max-orchestrator-cost USD]
 
 The first form reads the session's transcript and its subagents' transcripts,
-the repo's pass log and the status-line usage log, then writes
+the repo's pass log and, if one exists, `usage.jsonl` (the plugin writes none, so
+plan headroom is normally not measured), then writes
 `<repo>/.claude/orchestrate-profiles/<date>-<session>.json` and a `.html` copy
 of the viewer with that profile embedded, and prints a summary. The second
 form appends one pass to the pass log; `/orchestrate:run --profile` calls it
@@ -1155,7 +1156,7 @@ def summary(p: dict, saved: Path) -> str:
     c = m["cost"]
     idle = ", ".join(f"{k} {fmt_dur(v)}" for k, v in sorted(m["idle_s"].items()) if v >= 60) or "none"
     if m["five_hour_start"] is None:
-        plan = "no usage samples (status-line tap not wired in)"
+        plan = "headroom not measured (limit hits come from transcripts)"
     else:
         plan = f"5h window {m['five_hour_start']:.0f}% → {m['five_hour_end']:.0f}%, peak {m['five_hour_peak']:.0f}%"
         used = m["meters"]["five_hour"]["per_merged_ticket"]

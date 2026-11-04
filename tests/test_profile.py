@@ -1,4 +1,4 @@
-"""Tests for scripts/profile.py and scripts/usage-tap.py on fixture transcripts. Run: python3 -m unittest discover tests"""
+"""Tests for scripts/profile.py on fixture transcripts. Run: python3 -m unittest discover tests"""
 
 import json
 import os
@@ -287,6 +287,11 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(len(out.splitlines()), 5)
         self.assertIn("per merged ticket (1 merged)", out)
         self.assertIn("opus", out)
+
+    def test_summary_says_headroom_is_not_measured_without_usage_data(self):
+        out = prof.summary(self.fx.run(), Path("x.json"))
+        self.assertIn("headroom not measured", out)
+        self.assertNotIn("status", out.lower().split("plan", 1)[1].splitlines()[0])
 
 
 def verdict_text(verdict, minors=0, blocking=0):
@@ -669,20 +674,6 @@ class CommandTest(unittest.TestCase):
         out = self.root / "x.html"
         prof.write_html({"description": "</script><b>"}, out)
         self.assertNotIn("</script><b>", out.read_text())
-
-    def test_tap_logs_changes_only_and_stays_silent(self):
-        payload = {"rate_limits": {"five_hour": {"used_percentage": 12, "resets_at": 1793750400},
-                                   "seven_day": {"used_percentage": 40, "resets_at": 1794000000}}}
-        for pct in (12, 12, 13):
-            payload["rate_limits"]["five_hour"]["used_percentage"] = pct
-            self.assertEqual(self.script("usage-tap.py", stdin=json.dumps(payload)).stdout, "")
-        rows = [json.loads(line) for line in (self.root / "u.jsonl").read_text().splitlines()]
-        self.assertEqual([r["five_hour"] for r in rows], [12, 13])
-
-    def test_tap_ignores_sessions_without_limits_and_bad_input(self):
-        self.script("usage-tap.py", stdin=json.dumps({"model": {}}))
-        self.script("usage-tap.py", stdin="not json")
-        self.assertFalse((self.root / "u.jsonl").exists())
 
 
 class CompareTest(unittest.TestCase):
