@@ -16,5 +16,6 @@ Commits: <convention>. Stage files by explicit path.
 PR: title <convention>; body includes "<closing reference>".
 Human-only steps: <from the config>
 Repo rules: .claude/orchestration.md, the instruction files it names, and the domain docs (normally docs/agents/domain.md).
+Review findings: <on a later round, "address review <url>"; the worker reads the findings from the PR | none>
 Notes: <only what the ticket doesn't carry: decisions settled since it was written, a related merged PR to follow, a known trap>
 ```

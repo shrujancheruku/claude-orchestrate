@@ -9,7 +9,7 @@ You are the **orchestrator**. You hold the order of work and every judgement cal
 
 ## Before the first pass
 
-Read `.claude/orchestration.md` (the **config**) in full. It is the repo's single source for the backlog, slots, verify commands, gates and merge rule, and it wins over anything here. If it's missing, stop and tell the user to run `/orchestrate:setup`. If it has a **Lanes** table, it predates 0.2: stop and tell the user to re-run `/orchestrate:setup`.
+Read `.claude/orchestration.md` (the **config**) in full. It is the repo's single source for the backlog, slots, verify commands, gates and merge rule, and it wins over anything here. If it's missing, stop and tell the user to run `/orchestrate:setup`. If it has a **Lanes** table, it predates 0.2: stop and tell the user to re-run `/orchestrate:setup`. If its **Post reviews** line says the orchestrator posts reviews, it predates the reviewer posting its own: stop and tell the user to re-run `/orchestrate:setup`.
 
 Then read the **tracker docs** the config's **Backlog** section points to, normally `docs/agents/issue-tracker.md` (how to list, read, claim, label, comment on and close tickets, and how blocking is expressed) and `docs/agents/triage-labels.md` (the label string for each triage role). Wherever this skill names a role (`ready-for-agent`, `ready-for-human`, `needs-info`), use that repo's label string for it, and do every tracker operation the way the tracker doc says. Only when the config says the backlog is defined in the config itself, use its **Backlog** section instead.
 
@@ -67,9 +67,9 @@ The backlog is done when nothing in scope is takeable or claimed. Say so, list w
 3. **Review** with `orchestrate:reviewer` at the PR's tier and model. The tier comes from the PR's diff and the config's **Review** thresholds; a `size:S|M|L` label on the ticket overrides them.
    - **S** → model `haiku`.
    - **M** → model `sonnet`.
-   - **L** → model `sonnet`, then read its risk notes and those files yourself (the risky parts, not the whole diff).
-   Tell the reviewer the round (1 for a first review) and whether to post, from the config's `Post reviews`. A `posted: failed` verdict still counts; note the failure in your report. A reviewer that ends on an API error has nothing worth keeping: run a new one, unless a usage limit holds.
-4. **Changes requested** → send the findings to the same worker; back to 1 on its report. After three rounds, mark the ticket waiting and bring it to the user.
+   - **L** → model `sonnet`, then read its risk notes (they come in the hand-back) and those files yourself (the risky parts, not the whole diff).
+   Tell the reviewer the round (1 for a first review) and whether to post, from the config's `Post reviews`. A posted review comes back as a short hand-back (`verdict`, `round`, blocking and non-blocking counts, the review URL); you never read the findings. When posting is off or failed, the reviewer returns the full findings instead; a `posted: failed` verdict still counts, so note the failure in your report. A reviewer that ends on an API error has nothing worth keeping: run a new one, unless a usage limit holds.
+4. **Changes requested** → with a posted review, send the worker "address review `<url>`" and nothing more: it reads the findings from the PR. Without one, send the full findings. Send it to the same worker either way; back to 1 on its report. After three rounds, mark the ticket waiting and bring it to the user.
 5. **Approved** → if a merge gate applies, or the config says the orchestrator doesn't merge, mark the ticket waiting and ask the user. Otherwise merge with the config's method, after one last check that CI is green and every dependency has merged.
 6. **After the merge:** close the ticket if the host didn't; make the status update the config assigns to the orchestrator; remove the worker's worktree (`git worktree remove`) and its state-file entry; the slot is free. Done when the next pass would see the slot as free.
 
