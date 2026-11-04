@@ -110,7 +110,7 @@ A usage-limit or API error never escalates (see [Running out of usage](#running-
 ## Orchestrator-owned edits and shared-file conflicts
 
 - **Batch the edits.** Make no status edit per merge. At the end of a pass that leaves no ticket in flight, make every due edit in one branch and open one PR for them (title `chore: <what>`, no closing reference); its branch is `chore/orchestrator-edits-<date>`, an exception to the config's `<number>-<slug>` rule. It runs the review loop at its tier like a worker's PR (gate, then reviewer), then merges by the config's merge rule. With no edits due, no PR.
-- **Conflicts twice.** When a file outside the config's shared files and generated globs comes back in a hand-back (the `HANDBACK` lines of merge exit 4) for the second time, counted per file path from the events log's `replay` events with outcome `handed-back`, suggest adding it to **Shared files** with a per-PR rule, in one line. Say it on any repo, but it matters most with no merge history. Change the config only when the user says yes.
+- **Conflicts twice.** When a file outside the config's shared files and generated globs comes back in a hand-back (the `HANDBACK` lines of merge exit 4) for the second time, counted per file path from the events log's `replay` events with outcome `handed-back`, in different PRs (two hand-backs in one PR don't count; if the events log is missing, suggest nothing), suggest adding it to **Shared files** with a per-PR rule, in one line. Say it on any repo, but it matters most with no merge history. Change the config only when the user says yes.
 
 ## Running out of usage
 
