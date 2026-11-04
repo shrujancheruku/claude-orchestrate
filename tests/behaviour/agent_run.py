@@ -20,7 +20,17 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 STUB_PR = PLUGIN_ROOT / "tests" / "fixtures" / "stub-pr"
 BRIEFS = PLUGIN_ROOT / "tests" / "fixtures" / "briefs"
 
-RUNS = 3
+def _runs():
+    """ORCH_BEHAVIOUR_RUNS (1..3) lowers the runs per case while iterating; read only when the tier is on."""
+    if os.environ.get("ORCH_BEHAVIOUR") != "1":
+        return 3
+    try:
+        return max(1, min(3, int(os.environ.get("ORCH_BEHAVIOUR_RUNS", "3"))))
+    except ValueError:
+        return 3
+
+
+RUNS = _runs()
 MAX_BUDGET_USD = 1
 MAX_TURNS = 40
 TIMEOUT_S = 900
@@ -92,9 +102,16 @@ def child_env(env, base=None):
     return base
 
 
-def command(role, brief, plugin_dir, stub_dir=None):
-    """The `claude` command line (spike #111), without the environment."""
-    cmd = ["claude", "-p", "--agent", "orchestrate:" + role, "--plugin-dir", str(plugin_dir)]
+def command(role, brief, plugin_dir, stub_dir=None, tools="Bash"):
+    """The `claude` command line (spike #111), without the environment.
+
+    role=None runs the main session instead of an agent (for a skill such as /orchestrate:run).
+    tools is the --allowedTools list: headless `default` mode blocks any tool not listed (e.g. WebFetch).
+    """
+    cmd = ["claude", "-p"]
+    if role:
+        cmd += ["--agent", "orchestrate:" + role]
+    cmd += ["--plugin-dir", str(plugin_dir)]
     if stub_dir:
         cmd += ["--plugin-dir", str(stub_dir)]
     cmd += [
@@ -102,7 +119,7 @@ def command(role, brief, plugin_dir, stub_dir=None):
         "--setting-sources", "project,local",
         "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
         # Headless `default` mode would block Bash before the guard sees it; the guard still denies.
-        "--allowedTools", "Bash",
+        "--allowedTools", tools,
         "--output-format", "stream-json", "--verbose",
         "--max-turns", str(MAX_TURNS), "--max-budget-usd", str(MAX_BUDGET_USD),
         brief,
@@ -173,12 +190,12 @@ class Run:
         return bool(self.result)
 
 
-def run_agent(role, brief, env, with_stub_pr=True):
+def run_agent(role, brief, env, with_stub_pr=True, tools="Bash"):
     """Run the agent headless in env's repo, with copies of the plugin and the fake gh; never the real checkout."""
     plugin, stub = copy_plugins(Path(env.repo).parent / "plugins", with_stub_pr)
     try:
         p = subprocess.run(
-            command(role, brief, plugin, stub), cwd=env.repo, env=child_env(env),
+            command(role, brief, plugin, stub, tools), cwd=env.repo, env=child_env(env),
             capture_output=True, text=True, timeout=TIMEOUT_S,
         )
     except FileNotFoundError:
@@ -200,7 +217,7 @@ TABLE = []  # (case, verdict, passes, runs, cost)
 
 
 def run_case(name, build, check, runs=RUNS):
-    """Run a case `runs` times. build() -> (env, role, brief, with_stub_pr); check(run) raises AssertionError on a miss.
+    """Run a case `runs` times. build() -> (env, role, brief, with_stub_pr[, tools]); check(run) raises AssertionError on a miss.
 
     Returns (verdict, passes, cost, failures); each failure keeps the run's report and last tool calls.
     A run with no result at all (no auth, crash) is an environment problem that retrying won't fix:
@@ -209,9 +226,9 @@ def run_case(name, build, check, runs=RUNS):
     passes, cost, failures, errored = 0, 0.0, [], False
     try:
         for i in range(runs):
-            env, role, brief, with_stub = build()
+            env, role, brief, with_stub, *rest = build()
             try:
-                run = run_agent(role, brief, env, with_stub)
+                run = run_agent(role, brief, env, with_stub, *rest)
                 cost += run.cost
                 if not run.usable():
                     errored = True
@@ -220,8 +237,9 @@ def run_case(name, build, check, runs=RUNS):
                     check(run)
                     passes += 1
                 except AssertionError as e:
-                    failures.append("run %d: %s\n  report: %s\n  last tool calls: %s" % (
-                        i + 1, e, run.final_report[:1500], [(n, str(inp)[:200]) for n, inp in run.tool_calls()[-5:]]))
+                    unmatched = env.gh_unmatched()
+                    failures.append("run %d: %s\n  gh calls with no canned response: %s\n  report: %s\n  last tool calls: %s" % (
+                        i + 1, e, unmatched, run.final_report[:1500], [(n, str(inp)[:200]) for n, inp in run.tool_calls()[-5:]]))
             finally:
                 env.close()
     finally:

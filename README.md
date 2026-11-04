@@ -145,7 +145,7 @@ python3 -I ~/.claude/plugins/cache/claude-orchestrate/orchestrate/<version>/scri
 
 Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 
-**Behavioural tier (opt-in).** `ORCH_BEHAVIOUR=1 python3 -m unittest discover tests/behaviour` runs real headless `claude -p` agents against a temp repo with a fake `gh`, 3 runs per case (3/3 pass, 2/3 flaky, less fail), and prints a table with cost. Each run is capped at $1 and 40 turns, so a case costs at most $3; it is skipped without the variable, and CI never sets it.
+**Behavioural tier (opt-in).** `ORCH_BEHAVIOUR=1 python3 -m unittest discover tests/behaviour` runs real headless `claude -p` agents against a temp repo with a fake `gh`, 3 runs per case (3/3 pass, 2/3 flaky, less fail), and prints a table with cost. Each run is capped at $1 and 40 turns, so a case costs at most $3; it is skipped without the variable, and CI never sets it. `ORCH_BEHAVIOUR_RUNS=1` cuts it to one run per case while you iterate. The cases (`tests/behaviour/test_*.py`) replace the phrase tests they match: the worker writes its PR body with the `:pr` skill (with and without the stub), cites a source for an external fact, and stops on a held path; the scout reports a PR one commit behind as behind; the reviewer posts one accepted review and returns its URL; and an S ticket is dispatched to a haiku worker.
 
 **Exit codes of the scripts under `scripts/`.** One convention, so a broken environment never reads as a verdict:
 
