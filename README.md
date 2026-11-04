@@ -145,6 +145,8 @@ python3 -I ~/.claude/plugins/cache/claude-orchestrate/orchestrate/<version>/scri
 
 Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 
+**Behavioural tier (opt-in).** `ORCH_BEHAVIOUR=1 python3 -m unittest discover tests/behaviour` runs real headless `claude -p` agents against a temp repo with a fake `gh`, 3 runs per case (3/3 pass, 2/3 flaky, less fail), and prints a table with cost. Each run is capped at $1 and 40 turns, so a case costs at most $3; it is skipped without the variable, and CI never sets it.
+
 **How scripts under `scripts/` are found and run.** One rule, checked by `tests/test_invocation.py`:
 
 - **Found:** a skill uses `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`. An agent never relies on `${CLAUDE_PLUGIN_ROOT}` (it may be unset for subagents); the brief hands it the absolute path.
@@ -152,6 +154,14 @@ Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 - **Hooks follow the same rule.** `hooks/hooks.json` runs `guard.py` as `python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/guard.py"`, which is the standalone case.
 - **A `.py` file is a library or a standalone script.** A library (`common.py`, `checks.py`, `replay.py`) is only imported. A standalone script (`profile.py`) imports nothing from `scripts/` because it reads session transcripts, so it runs as `python3 -I <path>`.
 - Never work around a failed import with `PYTHONPATH`; fix the script's kind per the rules above.
+
+**Guard regression corpus.** `tests/fixtures/guard-corpus.jsonl` holds every distinct Bash call the plugin's subagents made in real sessions, one `{role, command, expected}` line each, and `tests/test_guard_corpus.py` runs `hooks/guard.py` over all of them, so a guard change that flips a decision shows up in the PR diff of the corpus. To add sessions (rerunnable, no duplicates, existing labels untouched), run the CLI from the repo root:
+
+```
+scripts/guard-corpus <session id or transcript path> [...] [--projects-dir ~/.claude/projects] [--dry-run]
+```
+
+It reads `<session>.jsonl` and `<session>/subagents/*.jsonl` and writes nothing under `~/.claude`. Commands are normalised before they are stored: home and repo paths, emails, token-shaped strings, heredoc bodies and long quoted text are replaced, and no tool output is kept. A line whose quoted text became `TEXT` (a `bash -c "..."`, `python3 -c "..."` or `gh api "..."` call) is a shape check, not the original command. Lines marked `"source": "hand"` are written by hand to pin refusals no session exercised. A new line's `expected` is a snapshot of the guard's decision (run in a directory whose config turns review posting on); read the new lines, especially the write-shaped ones (`git push`, PR merge, create or review, `gh api` with a method or `-f`/`-F`, `gh issue` edit, close or comment). If the guard is wrong, set the right `expected` and add `"gap": "#<ticket>"` for a ticket against the guard; the test then requires the guard to still be wrong there until the fix removes the `gap`.
 
 ## Limits
 

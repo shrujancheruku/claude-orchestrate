@@ -1,0 +1,5 @@
+{
+  "name": "stubpr",
+  "version": "0.0.0",
+  "description": "Test stub: a pr skill that only writes a fixed marker into the PR body."
+}
