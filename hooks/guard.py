@@ -35,7 +35,12 @@ WORKTREE_WRITES = frozenset(("add", "remove", "move", "prune"))
 # The reviewer reads a PR head with git, so `branch` (listing) and `worktree add --detach`
 # (a scratch checkout) are judged by reviewer_git below instead of being refused outright.
 # update-ref and symbolic-ref move refs without any of the other verbs.
-REVIEWER_GIT_WRITES = (GIT_WRITES - {"branch"}) | {"update-ref", "symbolic-ref"}
+REVIEWER_GIT_WRITES = (GIT_WRITES - {"branch"}) | {"update-ref", "symbolic-ref", "config", "remote", "gc", "init",
+                                                    "clone", "update-index"}
+# `submodule` and `reflog` have read forms (status, show), so only their write forms are refused.
+SUBCOMMAND_READS = {"submodule": frozenset(("status", "summary")), "reflog": frozenset(("show", "exists"))}
+# The scout writes no ref or config either. It keeps `branch` (even listing) and every worktree change.
+SCOUT_GIT_WRITES = REVIEWER_GIT_WRITES | {"branch"}
 # git's global options that take their value as the next word (`--opt=value` is one word).
 GIT_VALUE_OPTIONS = frozenset(
     ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env",
@@ -680,16 +685,33 @@ def rule_expansion(p: Parsed, cwd: str) -> str | None:
     return None
 
 
+def subcommand_writes(call: Call) -> bool:
+    """True for a `git submodule` or `git reflog` call that isn't one of its read forms. A bare
+    `git reflog` shows; a bare `git submodule` lists."""
+    for name, reads in SUBCOMMAND_READS.items():
+        if call.is_sub(name):
+            first = call.args[0] if call.args else None
+            if first is None:
+                return False
+            return first.dynamic or first.text.startswith("-") or first.text not in reads
+    return False
+
+
 def rule_git_writes(p: Parsed, cwd: str) -> str | None:
     for call in p.tool("git"):
-        if call.is_sub(*GIT_WRITES) or (call.is_sub("worktree") and call.args[:1] and call.args[0].text in WORKTREE_WRITES):
+        if call.is_sub(*SCOUT_GIT_WRITES) or subcommand_writes(call) or (
+                call.is_sub("worktree") and call.args[:1] and call.args[0].text in WORKTREE_WRITES):
             return "changes git state"
+        if call.is_sub("fetch"):  # the scout, like the reviewer, may fetch only into FETCH_HEAD
+            problem = reviewer_git_problem(call, cwd)
+            if problem:
+                return problem
     return None
 
 
 def rule_reviewer_git(p: Parsed, cwd: str) -> str | None:
     for call in p.tool("git"):
-        if call.is_sub(*REVIEWER_GIT_WRITES):
+        if call.is_sub(*REVIEWER_GIT_WRITES) or subcommand_writes(call):
             return "changes git state"
         problem = reviewer_git_problem(call, cwd)
         if problem:
@@ -757,10 +779,30 @@ def rule_force_push(p: Parsed, cwd: str) -> str | None:
     return None
 
 
+def default_branches(cwd: str) -> set:
+    """main and master, plus the branch origin/HEAD points at when that is cheap to read: a file
+    read in the checkout (or the main repo, from a linked worktree), never a git subprocess."""
+    names = {"main", "master"}
+    prefix = "ref: refs/remotes/origin/"
+    try:
+        for root in repo_roots(cwd):
+            head = (root / ".git" / "refs" / "remotes" / "origin" / "HEAD").read_text().strip()
+            if head.startswith(prefix) and len(head) > len(prefix):
+                names.add(head[len(prefix):])
+                break
+    except (OSError, UnicodeDecodeError):
+        pass  # unreadable: main and master still stand
+    return names
+
+
 def rule_push_default(p: Parsed, cwd: str) -> str | None:
     for call in p.tool("git"):
-        if call.is_sub("push") and any(
-                re.fullmatch(r"(?:[^:]+:)?(?:main|master)", a.text) for a in call.args if not a.dynamic):
+        if not call.is_sub("push"):
+            continue
+        names = "|".join(re.escape(n) for n in sorted(default_branches(cwd)))
+        # A bare name or the destination of `src:dst`, spelled short or as refs/heads/<name>.
+        pattern = rf"(?:[^:]*:)?(?:refs/heads/)?(?:{names})"
+        if any(re.fullmatch(pattern, a.text) for a in call.args if not a.dynamic):
             return "pushes to the default branch"
     return None
 
