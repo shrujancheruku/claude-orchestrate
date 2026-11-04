@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""rebuild-state [<session id | transcript.jsonl>] [--repo PATH] : rebuild .claude/orchestrate-state.json.
+
+The orchestrator never writes the state file; this does, from the session's transcripts, so it
+can't drift from what actually ran. A worker is joined to its ticket by its dispatch
+description, which must contain `#<ticket>` (the run skill recommends `Build #<ticket>`); a
+dispatch of any other agent type, or without a `#<n>`, is ignored. Per ticket
+it records the worker's agent ID, the worktree (derived from the agent ID), the worker model
+(from the agent's own transcript, else the dispatch, else its metadata) and the time of its
+last record (the last report). The worktree is null once it no longer exists. When a ticket was dispatched more than once, the latest wins.
+
+The file is a cache and the tracker wins. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import common
+
+STATE = Path(".claude") / "orchestrate-state.json"
+WORKER = "orchestrate:worker"
+TICKET = re.compile(r"#(\d+)")  # the first #<n> in the description, as profile.py reads it
+
+
+def find_transcript(arg: str) -> Path:
+    p = Path(arg).expanduser()
+    if p.suffix == ".jsonl" and p.exists():
+        return p
+    hits = sorted((common.claude_dir() / "projects").glob(f"*/{arg}.jsonl"))
+    if not hits:
+        sys.exit(f"rebuild-state: no transcript for session {arg} under {common.claude_dir() / 'projects'}")
+    return hits[0]
+
+
+def blocks(record):
+    msg = record.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    return content if isinstance(content, list) else []
+
+
+def last_timestamp(records):
+    """Latest record timestamp as an ISO string (UTC, Z); None if there are none."""
+    best = None
+    for r in records:
+        try:
+            ts = datetime.fromisoformat(str(r.get("timestamp")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        best = ts if best is None or ts > best else best
+    return best.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if best else None
+
+
+def model_of(records, dispatch_input, meta):
+    for r in records:
+        msg = r.get("message")
+        if isinstance(msg, dict) and msg.get("model"):
+            return msg["model"]
+    return dispatch_input.get("model") or meta.get("model")
+
+
+def rebuild(main_path: Path, repo: Path) -> dict:
+    main = list(common.read_jsonl(main_path))
+    sub = main_path.with_suffix("") / "subagents"
+    session = next((r["sessionId"] for r in main if r.get("sessionId")), main_path.stem)
+
+    metas = {}  # dispatch tool_use id -> (agent id, metadata)
+    for meta_path in sub.glob("*.meta.json"):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except ValueError:
+            continue
+        if isinstance(meta, dict):
+            stem = meta_path.name[: -len(".meta.json")]
+            metas[meta.get("toolUseId")] = (stem[len("agent-"):] if stem.startswith("agent-") else stem, meta)
+
+    tickets = {}
+    for r in main:
+        for b in blocks(r):
+            if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Agent"):
+                continue
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            if inp.get("subagent_type") != WORKER:
+                continue
+            m = TICKET.search(str(inp.get("description") or ""))
+            agent = metas.get(b.get("id"))
+            if not (m and agent):
+                continue  # no #<n> in the description, or no agent to join it to
+            agent_id, meta = agent
+            records = list(common.read_jsonl(sub / f"agent-{agent_id}.jsonl"))
+            # The harness removes the worktree once the agent ends; null says it is gone.
+            path = repo / ".claude" / "worktrees" / f"agent-{agent_id}"
+            worktree = str(path) if path.is_dir() else None
+            tickets[int(m.group(1))] = {  # a later dispatch for the same ticket replaces the earlier
+                "agent_id": agent_id,
+                "worktree": worktree,
+                "model": model_of(records, inp, meta),
+                "last_report": last_timestamp(records),
+            }
+    return {"session": session, "tickets": {str(n): tickets[n] for n in sorted(tickets)}}
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("session", nargs="?", default=os.environ.get("CLAUDE_SESSION_ID"),
+                    help="session id or transcript path (default: $CLAUDE_SESSION_ID)")
+    ap.add_argument("--repo", default=".", help="repo root; the state file is written under it")
+    args = ap.parse_args(argv)
+    if not args.session:
+        sys.exit("rebuild-state: no session id (pass one or set CLAUDE_SESSION_ID)")
+    repo = Path(args.repo).resolve()
+    state = rebuild(find_transcript(args.session), repo)
+    out = repo / STATE
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2) + "\n")
+    os.replace(tmp, out)  # whole file or nothing, never a half-written cache
+    for n, t in state["tickets"].items():
+        print(common.one_line(f"#{n} {t['agent_id']} {t['model']} {t['worktree']} last report {t['last_report']}"))
+    print(f"rebuilt {STATE} ({len(state['tickets'])} tickets)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

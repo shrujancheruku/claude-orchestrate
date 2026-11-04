@@ -74,6 +74,23 @@ def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = 
     return event
 
 
+def claude_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def read_jsonl(path):
+    """Yield each JSON line of a file; unreadable lines and a missing file are skipped."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        return
+
+
 def one_line(text, width: int = LINE_WIDTH) -> str:
     """Collapse whitespace to a single line, cut with an ellipsis past width."""
     flat = " ".join(str(text).split())
