@@ -5,7 +5,7 @@ Touch map: hello.txt:1
 Held paths: none
 Branch: 1-add-hello. If it exists on the remote, continue from it.
 Merged dependencies: none
-Verify: test -f hello.txt
+Verify: `test -f hello.txt` from the repo root (the current directory)
 Shared files: none
 Commits: Conventional Commits (`type(scope): description`). No attribution lines or trailers. Stage files by explicit path.
 PR: title Conventional Commits; body includes "Closes #1"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain.

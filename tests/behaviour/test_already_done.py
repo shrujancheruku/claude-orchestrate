@@ -1,6 +1,7 @@
 """Trivial end-to-end case: a ticket already done on the default branch makes the worker stop."""
 
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -33,7 +34,8 @@ def build():
 
 def check(run):
     report = run.final_report
-    assert "status: stopped" in report, "report lacks 'status: stopped': %r" % report[:300]
+    # Tolerates markdown around the field: `**status:** stopped`, `status: `stopped``.
+    assert re.search(r"(?im)^\W*status\W*:\W*stopped", report), "report lacks 'status: stopped'"
     made = [c for c in run.gh_calls() if c[:2] == ["pr", "create"]]
     assert not made, "opened a PR: %r" % made
 
@@ -42,6 +44,8 @@ def check(run):
 class AlreadyDone(unittest.TestCase):
     def test_worker_stops_when_ticket_is_done(self):
         v, passes, cost, failures = agent_run.run_case("worker: ticket already done", build, check)
+        if failures:
+            print("\nworker: ticket already done: %s, failing runs:\n%s" % (v, "\n".join(failures)))
         if v == "fail":
             self.fail("%d/%d passed\n%s" % (passes, agent_run.RUNS, "\n".join(failures)))
 

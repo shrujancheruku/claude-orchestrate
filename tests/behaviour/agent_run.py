@@ -8,6 +8,7 @@ fake, and the working directory is the temp repo.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,11 +28,62 @@ TIMEOUT_S = 900
 ENABLED = os.environ.get("ORCH_BEHAVIOUR") == "1"
 
 
-def command(role, brief, with_stub_pr=True):
-    """The `claude` command line (spike #111), without the environment."""
-    cmd = ["claude", "-p", "--agent", "orchestrate:" + role, "--plugin-dir", str(PLUGIN_ROOT)]
+# What a worker needs from the plugin. Copied out of the checkout so the agent never sees its path.
+PLUGIN_PARTS = ("agents", "skills", "hooks", "scripts", ".claude-plugin")
+
+# Credentials and config the agent could use to reach the real GitHub or remote.
+SCRUBBED_ENV = (
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR",
+    "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK", "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG",
+)
+
+
+def copy_plugins(dest, with_stub_pr=True):
+    """Copy the plugin and the stub into dest (outside the temp repo); returns (plugin_dir, stub_dir | None)."""
+    dest = Path(dest)
+    plugin = dest / "plugin"
+    plugin.mkdir(parents=True)
+    for part in PLUGIN_PARTS:
+        src = PLUGIN_ROOT / part
+        if src.is_dir():
+            shutil.copytree(src, plugin / part, ignore=shutil.ignore_patterns("__pycache__"))
+    stub = None
     if with_stub_pr:
-        cmd += ["--plugin-dir", str(STUB_PR)]
+        stub = dest / "stub-pr"
+        shutil.copytree(STUB_PR, stub)
+    return plugin, stub
+
+
+def child_env(env, base=None):
+    """The agent's environment: the fake gh first on PATH, no credentials, no user git config.
+
+    HOME stays real: a temp HOME was tried, and headless `claude -p` then reports "Not logged in".
+    Nothing under ~/.claude is copied or touched; the credentials and git config above are neutralised.
+    """
+    base = dict(os.environ if base is None else base)
+    for k in SCRUBBED_ENV:
+        base.pop(k, None)
+    for k in [k for k in base if k.startswith("GIT_CONFIG_")]:
+        base.pop(k)
+    empty = Path(env.repo).parent / "empty-gitconfig"
+    empty.write_text("")
+    base.update(
+        PATH=f"{env.bin}{os.pathsep}{base.get('PATH', '')}",
+        FAKE_GH_STATE=str(env.gh_state),
+        GIT_CONFIG_GLOBAL=str(empty),
+        GIT_CONFIG_NOSYSTEM="1",
+        CLAUDE_CODE_DISABLE_AUTO_MEMORY="1",
+        ENABLE_CLAUDEAI_MCP_SERVERS="false",
+    )
+    return base
+
+
+def command(role, brief, plugin_dir, stub_dir=None):
+    """The `claude` command line (spike #111), without the environment."""
+    cmd = ["claude", "-p", "--agent", "orchestrate:" + role, "--plugin-dir", str(plugin_dir)]
+    if stub_dir:
+        cmd += ["--plugin-dir", str(stub_dir)]
     cmd += [
         # Keep the user's own settings, MCP servers and permission allowlist out of the run.
         "--setting-sources", "project,local",
@@ -109,17 +161,11 @@ class Run:
 
 
 def run_agent(role, brief, env, with_stub_pr=True):
-    """Run the agent headless in env's repo; the env's fake gh goes first on PATH."""
-    child_env = dict(
-        os.environ,
-        PATH=f"{env.bin}{os.pathsep}{os.environ['PATH']}",
-        FAKE_GH_STATE=str(env.gh_state),
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY="1",
-        ENABLE_CLAUDEAI_MCP_SERVERS="false",
-    )
+    """Run the agent headless in env's repo, with copies of the plugin and the fake gh; never the real checkout."""
+    plugin, stub = copy_plugins(Path(env.repo).parent / "plugins", with_stub_pr)
     try:
         p = subprocess.run(
-            command(role, brief, with_stub_pr), cwd=env.repo, env=child_env,
+            command(role, brief, plugin, stub), cwd=env.repo, env=child_env(env),
             capture_output=True, text=True, timeout=TIMEOUT_S,
         )
     except FileNotFoundError:
@@ -143,27 +189,31 @@ TABLE = []  # (case, verdict, passes, runs, cost)
 def run_case(name, build, check, runs=RUNS):
     """Run a case `runs` times. build() -> (env, role, brief, with_stub_pr); check(run) raises AssertionError on a miss.
 
-    Returns (verdict, passes, cost, failures). Raises RuntimeError at once when a run
-    produced no result at all: an environment problem, which retrying won't fix.
+    Returns (verdict, passes, cost, failures); each failure keeps the run's report and last tool calls.
+    A run with no result at all (no auth, crash) is an environment problem that retrying won't fix:
+    the case gets an `error` row with the cost so far, then RuntimeError is raised.
     """
-    passes, cost, failures = 0, 0.0, []
-    for i in range(runs):
-        env, role, brief, with_stub = build()
-        try:
-            run = run_agent(role, brief, env, with_stub)
-            cost += run.cost
-            if not run.usable():
-                raise RuntimeError("no result event (exit %s): %s" % (run.returncode, run.stderr.strip()[-500:]))
+    passes, cost, failures, errored = 0, 0.0, [], False
+    try:
+        for i in range(runs):
+            env, role, brief, with_stub = build()
             try:
-                check(run)
-                passes += 1
-            except AssertionError as e:
-                failures.append("run %d: %s" % (i + 1, e))
-        finally:
-            env.close()
-    v = verdict(passes, runs)
-    TABLE.append((name, v, passes, runs, cost))
-    return v, passes, cost, failures
+                run = run_agent(role, brief, env, with_stub)
+                cost += run.cost
+                if not run.usable():
+                    errored = True
+                    raise RuntimeError("no result event (exit %s): %s" % (run.returncode, run.stderr.strip()[-500:]))
+                try:
+                    check(run)
+                    passes += 1
+                except AssertionError as e:
+                    failures.append("run %d: %s\n  report: %s\n  last tool calls: %s" % (
+                        i + 1, e, run.final_report[:1500], [(n, str(inp)[:200]) for n, inp in run.tool_calls()[-5:]]))
+            finally:
+                env.close()
+    finally:
+        TABLE.append((name, "error" if errored else verdict(passes, runs), passes, runs, cost))
+    return verdict(passes, runs), passes, cost, failures
 
 
 def format_table(rows=None):
