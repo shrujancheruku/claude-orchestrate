@@ -175,7 +175,7 @@ class ProfileTest(unittest.TestCase):
 
     def test_proxy_cost_per_merged_ticket_by_model_and_role(self):
         c = self.fx.run()["metrics"]["cost"]
-        opus, sonnet = 0.0100875, 0.0020175  # one default request each, at the PRICES rates
+        opus, sonnet = 0.00249, 0.001245  # one default request each (10 in, 100 out, 1000 read, 50 written) at Opus 5.5 and Sonnet 5.5 rates
         self.assertAlmostEqual(c["by_role"]["orchestrator"], 6 * opus)
         self.assertAlmostEqual(c["by_role"]["worker"], 19 * sonnet)
         self.assertAlmostEqual(c["by_role"]["reviewer"], sonnet)
@@ -191,7 +191,7 @@ class ProfileTest(unittest.TestCase):
 
     def test_per_ticket_table_joins_worker_and_reviewer_cost(self):
         tickets = {t["ticket"]: t for t in self.fx.run()["tickets"]}
-        sonnet = 0.0020175
+        sonnet = 0.001245
         self.assertAlmostEqual(tickets[10]["cost"]["worker"], 14 * sonnet)
         self.assertAlmostEqual(tickets[10]["cost"]["reviewer"], sonnet)
         self.assertAlmostEqual(tickets[10]["cost"]["total"], 15 * sonnet)
@@ -202,13 +202,21 @@ class ProfileTest(unittest.TestCase):
     def test_prices_carry_a_date_source_and_haiku_long_context_rate(self):
         self.assertRegex(prof.PRICES_AS_OF, r"^\d{4}-\d{2}-\d{2}$")
         self.assertTrue(prof.PRICES_SOURCE.startswith("https://"))
-        for family in ("opus", "sonnet", "haiku"):
-            self.assertEqual(set(prof.PRICES[family]) >= {"input", "output", "cache_read", "cache_write"}, True)
-        self.assertEqual(prof.PRICES["haiku"]["long_over"], 100_000)
-        short = prof.request_cost("claude-haiku-5", {"input_tokens": 90_000})
-        long = prof.request_cost("claude-haiku-5", {"input_tokens": 110_000})
-        self.assertAlmostEqual(short, 90_000 * prof.PRICES["haiku"]["input"] / 1e6)
-        self.assertAlmostEqual(long, 110_000 * prof.PRICES["haiku"]["long"]["input"] / 1e6)
+        for key, price in prof.PRICES.items():
+            self.assertTrue(set(price) >= {"input", "output", "cache_read", "cache_write"}, key)
+        # Rates as listed on the pricing page on PRICES_AS_OF.
+        self.assertEqual(prof.PRICES["claude-opus-5-5"], {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5})
+        self.assertEqual(prof.PRICES["claude-sonnet-5-5"]["cache_read"], 0.1)
+        self.assertEqual(prof.price_key("claude-opus-5-5-x"), "claude-opus-5-5")  # longest key wins
+        self.assertEqual(prof.price_key("claude-opus-5"), "claude-opus-5")
+        self.assertEqual(prof.PRICES["claude-haiku-5-5"]["long_over"], 100_000)
+        short = prof.request_cost("claude-haiku-5-5", {"input_tokens": 90_000})
+        long = prof.request_cost("claude-haiku-5-5", {"input_tokens": 110_000})
+        self.assertAlmostEqual(short, 90_000 * 0.10 / 1e6)
+        self.assertAlmostEqual(long, 110_000 * 0.50 / 1e6)
+        # The prompt counts cache reads: 60K fresh + 60K cached is over the line.
+        over = prof.request_cost("claude-haiku-5-5", {"input_tokens": 60_000, "cache_read_input_tokens": 60_000})
+        self.assertAlmostEqual(over, (60_000 * 0.50 + 60_000 * 0.05) / 1e6)
         self.assertIsNone(prof.request_cost("some-other-model", {"input_tokens": 1}))
 
     def test_unknown_models_are_flagged_not_priced(self):

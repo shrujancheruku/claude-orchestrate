@@ -36,25 +36,47 @@ TOKEN_KEYS = {
     "cache_read_input_tokens": "cache_read",
     "cache_creation_input_tokens": "cache_write",
 }
-# Proxy prices: USD per million tokens at API list, per model family and token type.
-# Source: Anthropic's public API pricing page. Update the date with the numbers.
-# `long` is the rate for a request whose context (input + cache read + cache write
-# tokens) passes `long_over`; Opus has no long-context tier. Haiku's over-100K
-# rate is an assumption (double the input-side rates), so check it on the next update.
+# Proxy prices: USD per million tokens at API list, per model version and token type.
+# Checked against the pricing page below on 2026-11-04. Cache writes are the 5-minute
+# rate (1.25x input); the harness doesn't log the cache TTL, so 1-hour writes are
+# priced as 5-minute. Update the date with the numbers.
+# A model id matches the longest key it contains ("claude-opus-5-5-..." -> "claude-opus-5-5").
+# Only Claude Haiku 5.5 has a long-context tier: a request whose prompt (input + cache
+# read + cache write tokens) is over 100,000 tokens pays the `long` rates. Every other
+# listed model has one rate across its whole context window.
 PRICES_AS_OF = "2026-11-04"
 PRICES_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing"
+
+
+def _rates(input_, output, cache_read):
+    return {"input": input_, "output": output, "cache_read": cache_read, "cache_write": input_ * 1.25}
+
+
 PRICES = {
-    "opus": {"input": 15.0, "output": 75.0, "cache_read": 1.5, "cache_write": 18.75},
-    "sonnet": {
-        "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75,
-        "long_over": 200_000,
-        "long": {"input": 6.0, "output": 22.5, "cache_read": 0.6, "cache_write": 7.5},
-    },
-    "haiku": {
-        "input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25,
+    "claude-fable-5-1": _rates(10, 50, 0.25),
+    "claude-mythos-5-1": _rates(10, 50, 0.25),
+    "claude-fable-5": _rates(10, 50, 1),
+    "claude-mythos-5": _rates(10, 50, 1),
+    "claude-opus-5-5": _rates(4, 20, 0.20),
+    "claude-opus-5": _rates(5, 25, 0.50),
+    "claude-opus-4-8": _rates(5, 25, 0.50),
+    "claude-opus-4-7": _rates(5, 25, 0.50),
+    "claude-opus-4-6": _rates(5, 25, 0.50),
+    "claude-opus-4-5": _rates(5, 25, 0.50),
+    "claude-opus-4-1": _rates(15, 75, 1.50),
+    "claude-opus-4": _rates(15, 75, 1.50),
+    "claude-sonnet-5-5": _rates(2, 10, 0.10),
+    "claude-sonnet-5": _rates(2, 10, 0.20),
+    "claude-sonnet-4-6": _rates(3, 15, 0.30),
+    "claude-sonnet-4-5": _rates(3, 15, 0.30),
+    "claude-sonnet-4": _rates(3, 15, 0.30),
+    "claude-haiku-5-5": {
+        **_rates(0.10, 0.50, 0.01),
         "long_over": 100_000,
-        "long": {"input": 2.0, "output": 5.0, "cache_read": 0.2, "cache_write": 2.5},
+        "long": _rates(0.50, 2.50, 0.05),
     },
+    "claude-haiku-4-5": _rates(1, 5, 0.10),
+    "claude-haiku-3-5": _rates(0.80, 4, 0.08),
 }
 LIMIT_TEXT = re.compile(r"usage limit|rate limit|limit reached|resets? (?:at|in)", re.I)
 
@@ -67,17 +89,23 @@ def usage_log() -> Path:
     return Path(os.environ.get("ORCHESTRATE_USAGE_LOG") or claude_dir() / "orchestrate" / "usage.jsonl")
 
 
-def model_family(model) -> str | None:
+def price_key(model) -> str | None:
     name = (model or "").lower()
-    return next((f for f in PRICES if f in name), None)
+    return max((k for k in PRICES if k in name), key=len, default=None)
+
+
+def model_family(model) -> str | None:
+    """opus, sonnet, haiku, fable or mythos for a priced model; None when it has no price."""
+    key = price_key(model)
+    return key.split("-")[1] if key else None
 
 
 def request_cost(model, usage: dict) -> float | None:
     """Proxy USD for one API request, or None for a model with no price."""
-    family = model_family(model)
-    if not family:
+    key = price_key(model)
+    if not key:
         return None
-    price = PRICES[family]
+    price = PRICES[key]
     tokens = {name: usage.get(key) or 0 for key, name in TOKEN_KEYS.items()}
     if price.get("long_over") and tokens["input"] + tokens["cache_read"] + tokens["cache_write"] > price["long_over"]:
         price = price["long"]
