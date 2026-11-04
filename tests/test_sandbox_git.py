@@ -87,11 +87,35 @@ class SandboxGitTest(unittest.TestCase):
     def test_refuses_non_list_excluded_commands(self):
         self.assert_refused('{"sandbox": {"excludedCommands": "git"}}')
 
-    def test_no_origin_changes_nothing(self):
+    def test_no_origin_exits_nonzero_with_the_git_error(self):
         git(self.env.repo, "remote", "remove", "origin")
+        r = self.run_script()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot read origin", r.stderr)
+        self.assertFalse(self.settings.exists())
+
+    def test_outside_a_repo_exits_nonzero(self):
+        r = self.env.run("sandbox-git", "--repo", self.env.repo.parent, check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot read origin", r.stderr)
+
+    def test_unknown_argument_is_bad_usage(self):
+        r = self.env.run("sandbox-git", "--bogus", check=False)
+        self.assertEqual(r.returncode, 2)
+
+    def test_non_ssh_origin_changes_nothing(self):
+        self.ssh("https://github.com/o/r.git")
         r = self.run_script()
         self.assertEqual(r.returncode, 0)
         self.assertFalse(self.settings.exists())
+
+    def test_non_utf8_settings_file_is_refused_without_a_traceback(self):
+        self.ssh()
+        self.settings.parent.mkdir(parents=True)
+        self.settings.write_bytes(b"\xff\xfe not utf-8")
+        r = self.run_script()
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.returncode, 1)
 
     def domains(self):
         return json.loads(self.settings.read_text())["sandbox"]["network"]["allowedDomains"]

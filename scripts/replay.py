@@ -322,6 +322,16 @@ def _final(events):
     return [e for e in events if e[1] == HANDED_BACK]
 
 
+MERGE_TREE_GIT = (2, 38)  # `git merge-tree --write-tree` first shipped in git 2.38
+
+
+def git_version(repo):
+    """git's (major, minor) as a tuple, or None when it can't be read."""
+    r = git(repo, "--version")
+    m = re.search(r"(\d+)\.(\d+)", r.stdout) if r.returncode == 0 else None
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
 def conflicts_with(repo, base, branch):
     """True when origin/<branch> no longer merges cleanly into origin/<base>; None when git can't say."""
     r = git(repo, "merge-tree", "--write-tree", f"origin/{base}", f"origin/{branch}")
