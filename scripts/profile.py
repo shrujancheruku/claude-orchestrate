@@ -537,8 +537,24 @@ def cost_metrics(orch: Transcript, agents: list, merged: int) -> dict:
     }
 
 
-VERDICT = re.compile(r"^\W*verdict:\s*(approve|changes)\b", re.I | re.M)
-ROUND_LINE = re.compile(r"^\W*round:\s*(\d+)", re.I | re.M)
+# Two shapes: a line "verdict: approve" / "round: 1", or the posted review's header
+# "Round 1 · verdict: approve · tier: L" (agents/reviewer.md, Body).
+VERDICT = re.compile(r"(?:^|·)\W*verdict:\s*(approve|changes)\b", re.I | re.M)
+ROUND_LINE = re.compile(r"^\W*round(?::\s*|\s+)(\d+)", re.I | re.M)
+# A finding line, once: in a posted review the inline `comments` repeat the body's findings.
+FINDING = re.compile(r"^\s*(?:[-*]|\d+\.)\s*\[(blocking|minor)\]", re.I | re.M)
+
+
+def review_body(text: str) -> str:
+    """A posted review is handed back as the JSON that was posted; what counts is its body."""
+    if text.lstrip().startswith("{"):
+        try:
+            body = json.loads(text).get("body")
+        except (ValueError, AttributeError):
+            return text
+        if isinstance(body, str):
+            return body
+    return text
 
 
 def review_verdicts(t: Transcript | None, first_round: int) -> list:
@@ -560,6 +576,7 @@ def review_verdicts(t: Transcript | None, first_round: int) -> list:
             elif b.get("type") == "tool_use" and b.get("name") == "SubagentHandback":
                 handbacks.append(str((b.get("input") or {}).get("message") or ""))
     for text in handbacks or texts:
+        text = review_body(text)
         m = VERDICT.search(text)
         if not m:
             continue
@@ -569,8 +586,8 @@ def review_verdicts(t: Transcript | None, first_round: int) -> list:
         out.append({
             "round": int(said.group(1)) if said else first_round + len(out),
             "verdict": m.group(1).lower(),
-            "blocking": int(blocking.group(1)) if blocking else text.count("[blocking]"),
-            "minor": int(minor.group(1)) if minor else text.count("[minor]"),
+            "blocking": int(blocking.group(1)) if blocking else len([f for f in FINDING.findall(text) if f.lower() == "blocking"]),
+            "minor": int(minor.group(1)) if minor else len([f for f in FINDING.findall(text) if f.lower() == "minor"]),
             # A second verdict from the same agent means the orchestrator continued it.
             "continued": bool(out),
         })
@@ -582,6 +599,7 @@ def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
     last_model = {tk["ticket"]: tk["worker_models"][-1] for tk in tickets if tk["worker_models"]}
     first_model = {tk["ticket"]: tk["worker_models"][0] for tk in tickets if tk["worker_models"]}
     by_pr = {}
+    unparsed = 0  # reviewer agents that returned no verdict the parser could read: a parser miss shows here
     for a in agents:
         if a["role"] != "reviewer":
             continue
@@ -592,7 +610,9 @@ def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
         # A second reviewer whose brief parses to a round already seen follows the highest one.
         seen = {v["round"] for v in pr["verdicts"]}
         first = a["round"] if a["round"] not in seen else max(seen) + 1
-        pr["verdicts"] += review_verdicts(a["transcript"], first)
+        got = review_verdicts(a["transcript"], first)
+        unparsed += not got
+        pr["verdicts"] += got
     prs = []
     for pr in by_pr.values():
         v = sorted(pr["verdicts"], key=lambda x: x["round"])
@@ -615,6 +635,7 @@ def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
     return {
         "prs": prs,
         "reviewed_prs": len(prs),
+        "unparsed_reviewers": unparsed,
         "rounds_total": sum(p["rounds"] for p in prs),
         "rounds_per_pr": sum(p["rounds"] for p in prs) / len(prs) if prs else None,
         "round1_approvals": len(firsts) - changes,
@@ -1249,6 +1270,8 @@ def figures(p: dict) -> dict:
         "approvals": None if r["round1_changes_rate"] is None else 1 - r["round1_changes_rate"],
         "rounds": r["rounds_per_pr"],
         "l_share": _rate(tiers.get("L", {}).get("merged", 0), tiered),
+        "untiered": tiers.get("?", {}).get("merged", 0),
+        "unparsed": r.get("unparsed_reviewers"),
         "tiers": tiers,
         # What the tier columns don't hold per merged ticket: the orchestrator, and agents on tickets that never merged.
         "overhead": None if not merged else c["per_merged_ticket"] - sum(t["cost"] for t in tiers.values()) / merged,
@@ -1292,7 +1315,8 @@ def gating(base: dict, f: dict, max_cost, max_orch) -> dict:
         "cost": le(f["cost"], max_cost),
         "orchestrator": le(f["orchestrator"], max_orch),
         "changes": le(f["changes"], base["changes"]),
-        # Round-1 approvals: as many outright as the baseline, or as many counting approve-with-minors.
+        # Round-1 approvals, as the spec's target row words it: as many outright as the baseline, or as many
+        # counting approve-with-minors (which is 1 - the "changes" rate, so it overlaps that row on purpose).
         "approvals": None if outright is None and approvals is None else bool(outright or approvals),
         "rounds": le(f["rounds"], base["rounds"]),
     }
@@ -1356,6 +1380,9 @@ def compare_report(before_name: str, after_name: str, r: dict) -> str:
         row(label, b[key], a[key], kind)
     row("round-1 approvals (outright)", b["outright"], a["outright"], "pct")
     row("L-tier share of merged tickets", b["l_share"], a["l_share"], "pct")
+    for name, f in (("before", b), ("after", a)):
+        unparsed = "unknown" if f["unparsed"] is None else f["unparsed"]
+        lines.append(f"  {name}: {f['untiered']} merged tickets with no tier (left out of the L share); {unparsed} reviewer agents returned no parseable verdict")
     lines.append("per tier, merged tickets and $ per merged ticket (workers and reviewers):")
     for t in sorted(set(b["tiers"]) | set(a["tiers"])):
         cells = []
@@ -1372,7 +1399,9 @@ def compare_report(before_name: str, after_name: str, r: dict) -> str:
         lines.append("INCONCLUSIVE: " + "; ".join(r["inconclusive"]))
     else:
         judged = [v for v in r["raw_verdict"].values() if v is not None]
-        lines.append("conclusive: " + ("every judged gating row passes" if all(judged) else "a gating row fails"))
+        unjudged = [LABELS[k] for k in ("cost", "orchestrator") if r["raw_verdict"][k] is None]
+        lines.append("conclusive: " + ("every judged gating row passes" if all(judged) else "a gating row fails")
+                     + (f" ({' and '.join(unjudged)} not judged: no target given)" if unjudged else ""))
     return "\n".join(lines)
 
 

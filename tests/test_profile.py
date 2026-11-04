@@ -769,6 +769,19 @@ class CompareTest(unittest.TestCase):
         same = self.profile("s.json", {"L": (10, 3.0), "M": (10, 0.5)})
         self.assertNotIn("INCONCLUSIVE", self.compare(before, same, "--max-cost", "2.30").stdout)
 
+    def test_without_dollar_targets_the_conclusion_says_they_were_not_judged(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)})
+        after = self.profile("a.json", {"L": (20, 4.0), "M": (20, 1.0)})
+        out = self.compare(before, after).stdout
+        self.assertIn("not judged: no target given", out)
+        self.assertNotIn("not judged", self.compare(before, after, "--max-cost", "9", "--max-orchestrator-cost", "9").stdout)
+
+    def test_untiered_tickets_and_unparsed_reviewers_are_printed(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "?": (5, 1.0)})
+        out = self.compare(before, before).stdout
+        self.assertIn("before: 5 merged tickets with no tier", out)
+        self.assertIn("unknown reviewer agents returned no parseable verdict", out)
+
     def test_a_profile_without_tier_figures_is_refused(self):
         old = self.root / "old.json"
         old.write_text(json.dumps({"schema": 1, "metrics": {}}))
@@ -801,6 +814,32 @@ class TierTest(unittest.TestCase):
         self.assertEqual((review["round1_changes"], review["round1_outright"]), (1, 0))  # the call counts, the text doesn't
         self.assertEqual(p["metrics"]["tiers"]["L"]["merged"], 1)
         self.assertEqual(p["metrics"]["tiers"]["L"]["round1_changes"], 1)
+
+    def handback(self, message):
+        sub = self.fx.main.with_suffix("") / "subagents"
+        write_jsonl(sub / "agent-ccc.jsonl", [assistant(20, "r1", "claude-sonnet-5-5", [tool_use("h1", "SubagentHandback", message=message)])])
+        return self.fx.run()["metrics"]["review"]
+
+    def test_a_posted_review_is_read_from_its_json_body_and_findings_count_once(self):
+        # The shape agents/reviewer.md has a posted review hand back: the JSON that was posted, the
+        # findings in the body and again, inline, in `comments`.
+        body = ("Round 1 \u00b7 verdict: approve \u00b7 tier: L\n\nspec:\n- thing \u2192 met\n\nfindings:\n"
+                "- [minor] [standards] a.ts:5 \u2014 add a why comment\n- [minor] [standards] b.ts:9 \u2014 rename\n\nposted: ok")
+        message = json.dumps({"event": "COMMENT", "body": body, "comments": [
+            {"path": "a.ts", "line": 5, "side": "RIGHT", "body": "[minor] add a why comment"},
+            {"path": "b.ts", "line": 9, "side": "RIGHT", "body": "[minor] rename"}]})
+        review = self.handback(message)
+        pr = review["prs"][0]
+        self.assertEqual([(v["round"], v["verdict"], v["blocking"], v["minor"]) for v in pr["verdicts"]], [(1, "approve", 0, 2)])
+        self.assertEqual((review["unparsed_reviewers"], review["round1_outright"]), (0, 0))
+
+    def test_a_posted_review_with_no_findings_is_an_outright_approval(self):
+        review = self.handback(json.dumps({"event": "COMMENT", "body": "Round 1 \u00b7 verdict: approve \u00b7 tier: S\n\nfindings: none", "comments": []}))
+        self.assertEqual(review["round1_outright"], 1)
+
+    def test_a_reviewer_with_no_readable_verdict_is_counted(self):
+        review = self.handback("I looked at it and it seems fine.")
+        self.assertEqual((review["reviewed_prs"], review["unparsed_reviewers"]), (0, 1))
 
     def test_tier_is_read_from_prompts_and_descriptions(self):
         self.assertEqual(prof.dispatched_tier("Review PR 5. Tier: L (touches proto). Round: 1."), "L")
