@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Mine session transcripts into the guard regression corpus.
+
+    guard-corpus SESSION [SESSION ...] [--projects-dir DIR] [--out FILE] [--dry-run]
+
+SESSION is a session id (looked up under every project dir in --projects-dir, default
+~/.claude/projects) or the path of a session's main transcript. For each subagent transcript
+beside it (`<session>/subagents/*.jsonl`, role from its `.meta.json` agentType) it takes every Bash
+call and appends one line to the corpus (default tests/fixtures/guard-corpus.jsonl):
+
+    {"role": "orchestrate:worker", "command": "...", "expected": "allow" | "deny"}
+
+The main session's own calls are skipped: the guard never acts on them. Transcripts are only
+read. The command is normalised first (home and repo paths, emails, token-shaped strings,
+heredoc bodies and long quoted text are replaced by TEXT, BODY, REDACTED or zeros), and no tool output is read. A line whose
+(role, command) is already in the corpus is skipped, so rerunning on the same or later sessions
+only adds new lines and never changes a label, including a hand-corrected one. A new line's
+`expected` is a snapshot of what hooks/guard.py decides now; review it, and relabel by hand
+only with a ticket for the guard (see tests/test_guard_corpus.py, "gap").
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+GUARD = ROOT / "hooks" / "guard.py"
+DEFAULT_OUT = ROOT / "tests" / "fixtures" / "guard-corpus.jsonl"
+
+TOKENS = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|sk-[A-Za-z0-9_-]{16,}|xox[a-z]-[\w-]{10,}"
+    r"|AKIA[0-9A-Z]{16}|AIza[\w-]{30,}|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})"
+    r"|(?i:\b(?:bearer|token|secret|password|passwd|api[_-]?key)\b(?:\s+|\s*[=:]\s*)(?!REDACTED)[^\s'\"]{8,})"
+)
+SHA = re.compile(r"\b[0-9a-f]{40}\b")
+LONG_RUN = re.compile(r"(?<![\w/.-])(?=[A-Za-z0-9+_-]*\d)(?=[A-Za-z0-9+_-]*[A-Za-z])[A-Za-z0-9+_-]{32,}(?![\w/.-])")
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+HOME = re.compile(r"(?:/Users|/home)/[^/\s'\"]+")
+HEREDOC = re.compile(r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*\n)(.*?)(\n[ \t]*\3[ \t]*(?:\n|$))", re.DOTALL)
+OWNER = re.compile(r"\bshrujan\w*", re.IGNORECASE)
+
+
+def _blank_json(value, key=None):
+    """A JSON payload keeps its shape and its `event`; every other string becomes `x`."""
+    if isinstance(value, dict):
+        return {k: _blank_json(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_blank_json(v) for v in value]
+    if isinstance(value, str) and key != "event":
+        return "x"
+    return value
+
+
+def _heredoc(m):
+    body = m.group(4)
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        replacement = "BODY"
+    else:
+        replacement = json.dumps(_blank_json(payload))
+    return m.group(1) + replacement + m.group(5)
+
+
+def shorten_quoted(command, limit=60):
+    """Replace the text of each long quoted string with `<text>`, reading quotes as a shell does
+    (no escapes inside single quotes, backslash escapes inside double quotes and outside quotes),
+    so nested quoting stays paired. Any `$`, backtick or backslash in the text is kept, after a space, because
+    the guard looks for them in review bodies."""
+    out, i, n = [], 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            out.append(command[i:i + 2])
+            i += 2
+        elif c in "'\"":
+            j = i + 1
+            while j < n and command[j] != c:
+                j += 2 if (c == '"' and command[j] == "\\") else 1
+            if j >= n:  # unterminated: leave the rest alone
+                out.append(command[i:])
+                break
+            text = command[i + 1:j]
+            if len(text) >= limit:
+                keep = "".join(k for k in "\\`$" if k in text)
+                text = "TEXT" + (" " + keep + "." if keep else "")
+            out.append(c + text + c)
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def normalise(command, repo_roots=()):
+    for root in sorted(set(repo_roots), key=len, reverse=True):
+        command = command.replace(root, "/repo")
+    command = re.sub(r"/repo/\.claude/worktrees/[\w-]+", "/repo/.claude/worktrees/agent-x", command)
+    command = HEREDOC.sub(_heredoc, command)
+    command = shorten_quoted(command)
+    command = TOKENS.sub("REDACTED", command)
+    command = SHA.sub("0" * 40, command)
+    command = LONG_RUN.sub("REDACTED", command)
+    command = EMAIL.sub("user@example.com", command)
+    command = HOME.sub("/home/user", command)
+    return OWNER.sub("owner", command)
+
+
+def repo_root(cwd):
+    """The checkout a transcript's cwd is in: the path before any `/.claude/worktrees/`."""
+    return (cwd or "").split("/.claude/worktrees/")[0]
+
+
+def bash_commands(path):
+    """(command, repo root) for each Bash call in a transcript. Reads only tool_use inputs."""
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        content = (rec.get("message") or {}).get("content")
+        if rec.get("type") != "assistant" or not isinstance(content, list):
+            continue
+        for block in content:
+            if block.get("type") == "tool_use" and block.get("name") == "Bash":
+                command = (block.get("input") or {}).get("command")
+                if isinstance(command, str) and command.strip():
+                    yield command, repo_root(rec.get("cwd"))
+
+
+def decide(role, command, cwd):
+    """The guard's decision for one call, run as the hook runs it."""
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd}
+    if role:
+        payload["agent_type"] = role
+    out = subprocess.run(
+        [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True, check=True
+    ).stdout
+    return "deny" if out and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" else "allow"
+
+
+def write_config(cwd):
+    """A cwd whose config turns review posting on, so a well-formed review post is judged on its shape.
+    tests/test_guard_corpus.py builds the same one."""
+    (Path(cwd) / ".claude").mkdir(exist_ok=True)
+    (Path(cwd) / ".claude" / "orchestration.md").write_text("- **Post reviews:** yes\n")
+
+
+def find_session(arg, projects_dir):
+    p = Path(arg).expanduser()
+    if p.is_file():
+        return p
+    found = sorted(Path(projects_dir).expanduser().glob(f"*/{arg}.jsonl"))
+    if not found:
+        sys.exit(f"guard-corpus: no transcript for session {arg!r} under {projects_dir}")
+    return found[0]
+
+
+def mine(main_transcript):
+    """(role, normalised command) per subagent Bash call in a session, in transcript order."""
+    sub_dir = main_transcript.with_suffix("") / "subagents"
+    for transcript in sorted(sub_dir.glob("*.jsonl")):
+        try:
+            role = json.loads(transcript.with_suffix(".meta.json").read_text())["agentType"]
+        except (OSError, ValueError, KeyError):
+            continue
+        for command, root in bash_commands(transcript):
+            yield role, normalise(command, [root] if root else [])
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Add a session's subagent Bash calls to the guard corpus.")
+    ap.add_argument("sessions", nargs="+", help="session id or main transcript path")
+    ap.add_argument("--projects-dir", default="~/.claude/projects")
+    ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--dry-run", action="store_true", help="report what would be added; write nothing")
+    args = ap.parse_args()
+
+    out = Path(args.out)
+    lines = out.read_text().splitlines() if out.exists() else []
+    seen = {(r["role"], r["command"]) for r in map(json.loads, lines)}
+    added = []
+    with tempfile.TemporaryDirectory() as cwd:
+        write_config(cwd)
+        for session in args.sessions:
+            for role, command in mine(find_session(session, args.projects_dir)):
+                if (role, command) in seen:
+                    continue
+                seen.add((role, command))
+                row = {"role": role, "command": command, "expected": decide(role, command, cwd)}
+                added.append(json.dumps(row, ensure_ascii=False))
+    if not args.dry_run and added:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("\n".join(lines + added) + "\n")
+    print(f"{'would add' if args.dry_run else 'added'} {len(added)} line(s); corpus has {len(lines) + len(added)}")
+
+
+if __name__ == "__main__":
+    main()
