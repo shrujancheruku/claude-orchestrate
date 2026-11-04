@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 
 import common
 
@@ -62,10 +63,12 @@ def delete_remote_branch(branch, cwd):
 
     Returns (deleted, note). A 404/422 means the host already removed it, which counts as deleted.
     """
-    e = run("gh", "api", f"repos/{{owner}}/{{repo}}/git/ref/heads/{branch}", cwd=cwd)
+    # Git allows `#` and `%` in branch names; unquoted, `feat#x` would address `heads/feat`.
+    quoted = urllib.parse.quote(branch, safe="/")
+    e = run("gh", "api", f"repos/{{owner}}/{{repo}}/git/ref/heads/{quoted}", cwd=cwd)
     if e.returncode != 0 and GONE.search(e.stderr + e.stdout):
         return True, "already gone"
-    d = run("gh", "api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{branch}", cwd=cwd)
+    d = run("gh", "api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd)
     if d.returncode == 0:
         return True, "deleted"
     if GONE.search(d.stderr + d.stdout):

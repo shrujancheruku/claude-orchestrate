@@ -151,6 +151,18 @@ class MergeTest(unittest.TestCase):
                 self.assertEqual(self.deletes(), [])
                 self.assertIn("left alone", p.stdout)
 
+    def test_special_characters_in_branch_are_quoted(self):
+        for branch, quoted in (("feat#x", "feat%23x"), ("fix%2Fy", "fix%252Fy"), ("a/b#c%d", "a/b%23c%25d")):
+            with self.subTest(branch=branch):
+                self.seq({"pr view": [pr("MERGED", branch=branch)], "issue view": CLOSED_ISSUE,
+                          f"api repos/{{owner}}/{{repo}}/git/ref/heads/{quoted}": [OK]})
+                p = self.merge()
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(self.called(["api"])[0], ["api", f"repos/{{owner}}/{{repo}}/git/ref/heads/{quoted}"])
+                self.assertEqual(self.deletes()[-1],
+                                 ["api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}"])
+                Path(str(self.env.gh_state) + ".calls").unlink()
+
     def test_fork_branch_never_deleted(self):
         self.seq({"pr view": [pr("MERGED", cross=True)], "issue view": CLOSED_ISSUE})
         p = self.merge()
