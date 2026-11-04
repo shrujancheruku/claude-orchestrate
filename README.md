@@ -60,7 +60,7 @@ Every full pass suggests a change of one slot, between 1 and 5: lower after a us
 
 | Role | Refused |
 |---|---|
-| scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. The reviewer may post one comment review on a PR, in the exact shape `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
+| scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. The reviewer may post one comment review on a PR (`gh api .../reviews` or `gh pr review --comment`, after an optional plain `cd <path> &&`), in the shapes `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
 | mechanic | git writes (staging and commits are the worker's), `gh` writes |
 | worker | `gh pr merge`, force-pushes, pushes to `main`/`master` |
 
