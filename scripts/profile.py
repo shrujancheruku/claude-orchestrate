@@ -554,7 +554,8 @@ def review_body(text: str) -> str:
             obj, _ = decoder.raw_decode(text, m.start())
         except ValueError:
             continue
-        if isinstance(obj, dict) and isinstance(obj.get("body"), str):
+        # Only a body with the verdict in it: a malformed outer payload must not fall through to an inline comment's own `body`.
+        if isinstance(obj, dict) and isinstance(obj.get("body"), str) and VERDICT.search(obj["body"]):
             return obj["body"]
     return text
 
