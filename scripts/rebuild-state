@@ -3,7 +3,7 @@
 
 The orchestrator never writes the state file; this does, from the session's transcripts, so it
 can't drift from what actually ran. A worker is joined to its ticket by its dispatch
-description, which must contain `#<ticket>` (the run skill recommends `Build #<ticket>`); a
+description, whose first `#<n>` must be its ticket (the run skill recommends `Build #<ticket>`); a
 dispatch of any other agent type, or without a `#<n>`, is ignored. Per ticket
 it records the worker's agent ID, the worktree (derived from the agent ID), the worker model
 (from the agent's own transcript, else the dispatch, else its metadata) and the time of its
