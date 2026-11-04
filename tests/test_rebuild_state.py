@@ -41,6 +41,7 @@ class RebuildState(unittest.TestCase):
 
     def test_each_ticket_has_agent_worktree_model_and_last_report(self):
         self.main_records += [dispatch("t1", "Build #183"), dispatch("t2", "Build #12", model="sonnet")]
+        (self.env.repo / ".claude" / "worktrees" / "agent-aaa111").mkdir(parents=True)
         self.agent("aaa111", "t1", [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5"),
                                     reply("2026-11-04T09:30:00.500Z", "claude-sonnet-5-5")])
         # No assistant model in the transcript: falls back to the dispatch's model.
@@ -60,18 +61,33 @@ class RebuildState(unittest.TestCase):
     def test_other_dispatches_are_ignored(self):
         self.main_records += [
             dispatch("t1", "Build #5"),
-            dispatch("t2", "Fix the thing for #6"),
-            dispatch("t3", "Build #7 please"),
+            dispatch("t2", "Fix the thing"),
             dispatch("t4", "Review PR #8", subagent="orchestrate:reviewer"),
             dispatch("t5", "Build #9"),  # no metadata/transcript to join
             {"type": "assistant", "message": {"content": "not a list"}},
             {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Agent", "input": None}]}},
         ]
-        for i, tid in enumerate(("t1", "t2", "t3", "t4")):
+        for i, tid in enumerate(("t1", "t2", "t4")):
             self.agent(f"ag{i}", tid, [reply("2026-11-04T09:01:00Z", "claude-haiku-5-5")])
         (self.sub / "agent-broken.meta.json").write_text("{not json")
         _, state = self.rebuild()
         self.assertEqual(list(state["tickets"]), ["5"])
+
+    def test_description_only_needs_the_ticket_number(self):
+        self.main_records += [dispatch("t1", "Build ticket #35"), dispatch("t2", "Build #7 please")]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5")])
+        self.agent("a2", "t2", [reply("2026-11-04T09:02:00Z", "claude-sonnet-5-5")])
+        _, state = self.rebuild()
+        self.assertEqual(list(state["tickets"]), ["7", "35"])
+
+    def test_worktree_is_null_once_removed(self):
+        self.main_records += [dispatch("t1", "Build #1"), dispatch("t2", "Build #2")]
+        self.agent("gone", "t1", [reply("2026-11-04T09:01:00Z")])
+        self.agent("here", "t2", [reply("2026-11-04T09:01:00Z")])
+        (self.env.repo / ".claude" / "worktrees" / "agent-here").mkdir(parents=True)
+        res, state = self.rebuild()
+        self.assertIsNone(state["tickets"]["1"]["worktree"])
+        self.assertTrue(state["tickets"]["2"]["worktree"].endswith("agent-here"))
 
     def test_latest_dispatch_for_a_ticket_wins(self):
         self.main_records += [dispatch("t1", "Build #5"), dispatch("t2", "Build #5")]
