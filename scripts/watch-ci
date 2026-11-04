@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""watch-ci <pr>... : wait for each PR's checks to settle; one line per PR as it settles.
+
+Run it as a Monitor command so the orchestrator never sleeps or polls. Each line:
+    PR #<n> <pass|fail> <merge state> <head commit>
+Each settle also appends one `ci` event (ref = the PR number). Exits 0 once every PR has
+settled. A PR with no checks yet counts as pending (checks may not be registered right after
+a push); the Monitor's timeout bounds the wait. A PR that is merged or closed settles at once.
+Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+
+import common
+
+FIELDS = "statusCheckRollup,mergeStateStatus,headRefOid,state"
+BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
+PENDING_STATES = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+
+
+def judge(view: dict):
+    """'pass' | 'fail' | None (still pending) from one `gh pr view --json` result."""
+    if view.get("state") in ("MERGED", "CLOSED"):
+        return "pass" if view["state"] == "MERGED" else "fail"
+    checks = view.get("statusCheckRollup") or []
+    if not checks:
+        return None
+    results = []
+    for c in checks:
+        # CheckRun has status+conclusion; a commit StatusContext has only state.
+        if "status" in c and c.get("status") != "COMPLETED":
+            return None
+        r = (c.get("conclusion") or c.get("state") or "").upper()
+        if r in PENDING_STATES or not r:
+            return None
+        results.append(r)
+    return "fail" if any(r in BAD for r in results) else "pass"
+
+
+def view_pr(pr: str):
+    p = subprocess.run(["gh", "pr", "view", pr, "--json", FIELDS], capture_output=True, text=True)
+    if p.returncode != 0:
+        print(f"watch-ci: gh failed for #{pr}: {common.one_line(p.stderr)}", file=sys.stderr, flush=True)
+        return None
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        return None
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("prs", nargs="+", help="PR numbers")
+    ap.add_argument("--interval", type=float, default=30, help="seconds between checks")
+    args = ap.parse_args(argv)
+    pending = [p.lstrip("#") for p in args.prs]
+    while pending:
+        for pr in list(pending):
+            view = view_pr(pr)
+            result = judge(view) if view else None
+            if result is None:
+                continue
+            pending.remove(pr)
+            merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
+            print(f"PR #{pr} {result} {merge} {head}", flush=True)
+            common.append_event(".", "ci", result, ref=int(pr) if pr.isdigit() else pr, merge_state=merge, head=head)
+        if pending:
+            time.sleep(args.interval)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
