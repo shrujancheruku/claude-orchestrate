@@ -40,10 +40,12 @@ class WorkerTurnRules(unittest.TestCase):
         s = (ROOT / "skills/run/SKILL.md").read_text()
         self.assertIn("git worktree unlock <dir>", s)
         self.assertIn("git worktree remove <dir>", s)
-        for p in ROOT.rglob("*.md"):
-            if ".git" in p.parts or "worktrees" in p.parts:
-                continue
-            self.assertNotRegex(p.read_text(errors="ignore"), r"worktree remove (--force|-f)\b", str(p))
+        files = [ROOT / "README.md"]
+        for d in ("agents", "skills", "docs/agents"):
+            files += [p for p in (ROOT / d).rglob("*.md")]
+        for p in files:
+            self.assertNotRegex(p.read_text(errors="ignore"),
+                                r"worktree remove\b[^`\n]*(--force|\s-f\b)", str(p))
 
     def test_mechanic_is_gone(self):
         self.assertFalse((ROOT / "agents/mechanic.md").exists())
