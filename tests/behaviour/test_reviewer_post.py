@@ -31,6 +31,10 @@ def build():
     git(env.repo, "checkout", "main")
     env.set_gh([
         {"args": ["api", "--method", "POST"], "stdout": json.dumps({"id": 4242, "html_url": URL})},
+        # The read-back after a `gh pr review`: real gh expands {owner}/{repo}; the fake prints the URL the --jq asks for.
+        {"args": ["api", "repos/{owner}/{repo}/pulls/7/reviews", "--jq", ".[-1].html_url"], "stdout": URL + "\n"},
+        {"args": ["api", "repos/example/demo/pulls/7/reviews", "--jq", ".[-1].html_url"], "stdout": URL + "\n"},
+        {"args": ["api", "repos/{owner}/{repo}/pulls/7/reviews"], "stdout": json.dumps([{"id": 4242, "html_url": URL}]) + "\n"},
         {"args": ["api", "repos/example/demo/pulls/7/reviews"], "stdout": json.dumps([{"id": 4242, "html_url": URL}]) + "\n"},
         {"args": ["pr", "review"], "stdout": ""},
         {"args": ["issue", "view"], "stdout": json.dumps(TICKET)},
