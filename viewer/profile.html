@@ -381,6 +381,59 @@ function cost(p) {
   return card;
 }
 
+// Review quality floor, workers by model and the depth-2 check.
+function quality(p) {
+  const m = p.metrics, r = m.review;
+  const card = el("section", { class: "card" });
+  card.append(el("h2", {}, "Review quality floor"));
+  // Schema-2 profiles written before these metrics lack them.
+  if (!r) {
+    card.append(el("p", { class: "sub" }, "This profile predates review metrics; regenerate it with scripts/profile.py."));
+    return card;
+  }
+  if (!r.reviewed_prs) {
+    card.append(el("p", { class: "sub" }, "No reviewer verdicts in this session's transcripts."));
+  } else {
+    card.append(el("p", { class: "sub" }, `${r.reviewed_prs} PR${r.reviewed_prs === 1 ? "" : "s"} reviewed in ${r.rounds_total} rounds (${r.rounds_per_pr.toFixed(2)} per PR). Read from reviewer transcripts, so it holds with posting on or off.`));
+    const tiles = el("div", { class: "tiles" });
+    tiles.append(
+      tile("Round-1 approvals", String(r.round1_approvals), `of ${r.round1_approvals + r.round1_changes} first rounds`),
+      tile("Round-1 \u201cchanges\u201d", r.round1_changes_rate == null ? "–" : pct(r.round1_changes_rate), `${r.round1_changes} PR${r.round1_changes === 1 ? "" : "s"}`),
+      tile("Minors merged, no round 2", String(r.minors_merged_no_round2), "approved with minors"),
+      tile("Later rounds", `${r.continued_rounds} continued · ${r.fresh_rounds} fresh`, "same reviewer vs. a new one"),
+    );
+    card.append(tiles);
+    const det = el("details");
+    det.append(el("summary", {}, "Per-PR rounds"));
+    det.append(table(["PR", "Ticket", "Worker model", "Rounds", "Round 1", "Merged", "Verdicts"], r.prs.map((x) => [
+      x.pr ? "#" + x.pr : "–", x.ticket ? "#" + x.ticket : "–", x.worker_model || "–", String(x.rounds), x.round1 || "–", x.merged ? "yes" : "no",
+      x.verdicts.map((v) => `${v.round}:${v.verdict}${v.continued ? " (continued)" : ""}`).join(" · ")]), [3]));
+    card.append(det);
+  }
+  const wm = Object.entries(m.worker_models || {});
+  if (wm.length) {
+    card.append(el("h2", { style: "margin-top:12px" }, "Workers by model"));
+    const e = m.escalations || { count: 0, tickets: [] };
+    card.append(el("p", { class: "sub" }, `${e.count} escalation${e.count === 1 ? "" : "s"} (Haiku, then a stronger worker)${e.count ? ": " + e.tickets.map((n) => "#" + n).join(", ") : ""}. A ticket counts under the model that finished it; round 1 under the model that started it.`));
+    const n = (v) => (v == null ? "–" : fmtTok(v));
+    card.append(table(["Model", "Workers", "Tickets", "Tokens", "Proxy $", "Requests (median)", "Context median", "Context p90", "Tool output (median)", "PRs reviewed", "Rounds", "Round-1 approvals"],
+      wm.map(([k, w]) => [k, String(w.workers), String(w.tickets), fmtTok(w.tokens), usd(w.cost), `${w.requests} (${w.requests_median})`, n(w.context_median), n(w.context_p90),
+        `${fmtTok(w.tool_output_tokens)} (${fmtTok(w.tool_output_tokens_median)})`, String(w.reviewed_prs), String(w.rounds), `${w.round1_approvals} of ${w.round1_approvals + w.round1_changes}`]), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]));
+    card.append(el("p", { class: "note" }, "Tool output is estimated at 4 characters per token."));
+  }
+  const d = m.depth2;
+  if (!d) return card;
+  card.append(el("h2", { style: "margin-top:12px" }, "Depth-2 agents"));
+  if (!d.length) {
+    card.append(el("p", { class: "sub" }, "None: no dispatched agent spawned another."));
+  } else {
+    card.append(el("p", { class: "note status-critical" }, `${d.length} defect${d.length === 1 ? "" : "s"}: plugin agents must not delegate further.`));
+    card.append(table(["Spawned by", "Ticket", "Agent", "Type", "Description", "Tokens", "Proxy $"], d.map((x) =>
+      [`${x.parent_role} ${x.parent || ""}`, x.ticket ? "#" + x.ticket : "–", x.agent || "no transcript", x.subagent_type || "–", x.description, fmtTok(x.tokens), usd(x.cost)]), [5, 6]));
+  }
+  return card;
+}
+
 // Plan usage: 5-hour and 7-day % on one 0–100 axis, crosshair readout.
 function usage(p) {
   const card = el("section", { class: "card" });
@@ -487,7 +540,7 @@ function render() {
   view.append(tiles);
   if (p.recommendation) view.append(el("div", { class: "advice" }, p.recommendation));
   if (p.warnings && p.warnings.length) for (const w of p.warnings) view.append(el("div", { class: "advice status-critical" }, w));
-  view.append(cost(p), timeline(p), tokens(p), usage(p));
+  view.append(cost(p), quality(p), timeline(p), tokens(p), usage(p));
   if (profiles.length > 1) view.append(compare());
 }
 
