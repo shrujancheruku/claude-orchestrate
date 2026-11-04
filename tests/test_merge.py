@@ -363,6 +363,51 @@ class SweepTest(unittest.TestCase):
                          [f"push --force-with-lease=refs/heads/pr-a:{old} origin HEAD:refs/heads/pr-a"])
         self.assertEqual(git(self.env.repo, "rev-parse", "origin/pr-a~1"), git(self.env.repo, "rev-parse", "origin/main"))
 
+    def test_line_check_still_covers_clusters_that_did_not_word_merge(self):
+        import replay
+        base, main = ["a\n", "b\n"], ["a\n", "b\n"]
+        pr = ["a\n", "PR\n"]
+        merged_new, merged_pr = replay.Counter({"MERGED\n": 1}), replay.Counter({"PRW\n": 1})
+        # A merged line is allowed; a foreign line elsewhere in the file is not.
+        self.assertTrue(replay._only_pr_lines(base, main, pr, ["a\n", "PR\n", "MERGED\n"], merged_new, merged_pr))
+        self.assertFalse(replay._only_pr_lines(base, main, pr, ["a\n", "PR\n", "MERGED\n", "FOREIGN\n"],
+                                               merged_new, merged_pr))
+
+    def test_an_exception_while_updating_one_branch_is_a_handback_not_a_crash(self):
+        import importlib.machinery
+        import importlib.util
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))  # the script's `import common`
+        self.addCleanup(sys.path.pop, 0)
+        loader = importlib.machinery.SourceFileLoader("merge_script", str(Path(__file__).resolve().parent.parent / "scripts" / "merge"))
+        spec = importlib.util.spec_from_loader("merge_script", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        self.pr_branch("pr-a", {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n"})
+        self.pr_branch("pr-b", {"CHANGELOG.md": "# Changes\n## Unreleased\n- other\n- old\n"})
+        self.land({"CHANGELOG.md": "# Changes\n## Unreleased\n- main item\n- old\n"})
+        listing = json.dumps([{"number": 8, "headRefName": "pr-a", "isCrossRepository": False},
+                              {"number": 9, "headRefName": "pr-b", "isCrossRepository": False}])
+        self.seq({"pr view": [pr("MERGED")], "issue view": CLOSED_ISSUE, REF_GET: [OK],
+                  "pr list": [{"stdout": listing}]})
+        real = mod.replay.update_branch
+        calls = []
+
+        def boom(repo, base, branch, method, patterns):
+            calls.append(branch)
+            if branch == "pr-a":
+                raise RuntimeError("disk on fire")
+            return real(repo, base, branch, method, patterns)
+
+        env = {"PATH": f"{self.env.bin}{os.pathsep}{os.environ['PATH']}", "FAKE_GH_STATE": str(self.env.gh_state)}
+        with unittest.mock.patch.dict(os.environ, env), unittest.mock.patch.object(mod.replay, "update_branch", boom), \
+                unittest.mock.patch("builtins.print") as out:
+            code = mod.main(["7", "--interval", "0", "--timeout", "5", "--cwd", str(self.env.repo)])
+        printed = "\n".join(str(c.args[0]) for c in out.call_args_list)
+        self.assertEqual(code, 4)
+        self.assertEqual(calls, ["pr-a", "pr-b"])  # went on to the next PR
+        self.assertIn("HANDBACK PR #8 pr-a: (sweep) (RuntimeError: disk on fire)", printed)
+        self.assertIn("- main item\n- other", self.remote("pr-b", "CHANGELOG.md"))
+
     def test_branch_that_is_only_behind_is_left_alone(self):
         self.pr_branch("pr-a", {"src.txt": "one\ntwo\nthree\n"})
         self.land({"CHANGELOG.md": "# Changes\n## Unreleased\n- main item\n- old\n"})

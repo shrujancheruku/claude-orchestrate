@@ -102,6 +102,7 @@ def replay(base, main, pr):
         else:
             clusters.append({"lo": c[0], "hi": c[1], "cs": [c]})
     out, pos, outcome = [], 0, LINE_REPLAY
+    merged_new, merged_pr = Counter(), Counter()  # only word-merged clusters are exempt from the line check
     for cl in clusters:
         lo, hi, cs = cl["lo"], cl["hi"], cl["cs"]
         out += base_l[pos:lo]
@@ -121,23 +122,24 @@ def replay(base, main, pr):
             if merged is None:
                 return None, HANDED_BACK
             out += merged.splitlines(keepends=True)
+            merged_new.update(merged.splitlines(keepends=True))
+            merged_pr.update(pr_t)
             outcome = WORD_MERGE
     out += base_l[pos:]
     result = "".join(out)
     return (result, outcome) if _only_pr_lines(base_l, main_l, pr_l, result.splitlines(keepends=True),
-                                                outcome) else (None, HANDED_BACK)
+                                                merged_new, merged_pr) else (None, HANDED_BACK)
 
 
-def _only_pr_lines(base_l, main_l, pr_l, result_l, outcome):
+def _only_pr_lines(base_l, main_l, pr_l, result_l, merged_new, merged_pr):
     """The result's diff against main holds only lines the PR added or changed, and all of them."""
     pr_added = Counter(l for _, _, _, ls in _changes(base_l, pr_l, "pr") for l in ls)
     added = Counter()
     for tag, _, _, j1, j2 in difflib.SequenceMatcher(None, main_l, result_l, autojunk=False).get_opcodes():
         if tag in ("insert", "replace"):
             added.update(result_l[j1:j2])
-    if outcome == WORD_MERGE:  # merged lines are new text: only the shape of the check relaxes
-        return True
-    return not (added - pr_added) and all(l in set(result_l) for l in pr_added)
+    # Word-merged clusters produce new text, so their lines are allowed and their PR lines not required.
+    return not (added - pr_added - merged_new) and all(l in set(result_l) for l in pr_added if l not in merged_pr)
 
 
 # ---- git plumbing -------------------------------------------------------------------------------

@@ -241,7 +241,10 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
             continue
         if not state:
             continue
-        status, conflicts, events = replay.update_branch(cwd, default, b, method, patterns)
+        try:
+            status, conflicts, events = replay.update_branch(cwd, default, b, method, patterns)
+        except Exception as e:  # the PR is already merged: one branch's failure must not lose the exit code
+            status, conflicts, events = "handed-back", [("(sweep)", f"{type(e).__name__}: {common.one_line(e)}")], []
         for path, outcome in events:
             common.append_event(cwd, "replay", outcome, ref=n, branch=b, file=path)
         if status == "updated":

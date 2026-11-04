@@ -32,6 +32,8 @@ Stop at the first of these, and report with `status: stopped`. Your report is ho
 
 ## Follow-ups
 
+If a push is rejected because the orchestrator's sweep updated your branch while you worked (it merged main in, or rebased it), run `git fetch origin`, then reset to or merge `origin/<branch>` and push again. Never force.
+
 If you're resumed with a **conflict list** (lines `HANDBACK PR #n <branch>: <path> (<why>)`), the script could not update your branch and left it untouched. Run `git fetch origin`, reset your local branch to `origin/<branch>`, merge `origin/<default branch>`, resolve exactly the listed files, re-run the verify commands, and push without force.
 
 If you're continued after a usage limit stopped you, run `git status` and `git log origin/<branch>..` first, then pick up at the step you were on. The orchestrator may also continue you with review findings, a CI failure, or "address review `<url>`". For a review URL, read the findings from the PR yourself (the review body, plus its inline comments with `gh api repos/{owner}/{repo}/pulls/<n>/reviews/<id>/comments`; the id is in the URL fragment after `pullrequestreview-`), taking every `[blocking]` finding and any `[minor]` one worth taking. If the PR holds no such review, say so in your report instead of guessing. Fix them on the same branch, re-run the verify commands, push, and report again. Merging is the orchestrator's: you open the PR and hand it over.
