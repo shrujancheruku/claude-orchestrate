@@ -2,7 +2,7 @@
 
 ## Context
 
-A worker builds one ticket end to end. It used to delegate: searches to the scout and mechanical edits (renames, moves, a pattern repeated across files) to a cheaper `mechanic` agent, then read the mechanic's diff before keeping it (the worker definition before #101).
+A worker builds one ticket end to end. It used to delegate: searches to the scout and mechanical edits (renames, moves, a pattern repeated across files) to a cheaper `mechanic` agent, then read the mechanic's diff before keeping it (`agents/worker.md` before #101, commit 11fab65).
 
 - **Workers get cheaper through fewer, smaller turns rather than delegation** (issue #43): independent calls in one turn, chained verify steps, `grep -n` then line-range reads, bounded output.
 
@@ -16,7 +16,7 @@ A worker builds one ticket end to end. It used to delegate: searches to the scou
 
 ## Consequences
 
-- A large mechanical change is made by the worker's own edits (inferred).
+- A large mechanical change is now made by the worker's own edits.
 - Configs with a mechanic Models row should drop it. The change shipped as a breaking one.
 - Rejected: keeping the mechanic, which #43 retired; leaving `Agent` on and asking workers not to use it (inferred: a prompt rule a worker can forget).
 - Reopen when trial data shows workers spending more on mechanical edits than delegation cost (inferred).

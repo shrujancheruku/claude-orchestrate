@@ -2,11 +2,11 @@
 
 ## Context
 
-Several tickets are in flight at once, so every merge can leave other open PRs conflicting with the default branch. Someone has to bring them up to date.
+Several tickets are in flight at once, so every merge can leave other open PRs conflicting with the default branch. Someone has to bring them up to date (inferred framing).
 
-- **Workers can't see each other.** A worker that merged or rebased main whenever it liked would do it against a moving target and could force-push over an update the orchestrator made.
-- **A shared file collides the same way every time.** Two PRs each add a line to the same index. Replaying the later PR's added lines onto main resolves it without a human.
-- **A force-push is the destructive step.** It is the one move that can lose a worker's commits, and under `Method: rebase` the history has to be rewritten by someone.
+- **Workers can't see each other.** A worker that merged or rebased main whenever it liked would do it against a moving target and could force-push over an update the orchestrator made (inferred).
+- **A shared file collides the same way every time.** Two PRs each add a line to the same index. Replaying the later PR's added lines onto main resolves it without a human (`scripts/replay.py` docstring).
+- **A force-push is the destructive step.** It is the one move that can lose a worker's commits (inferred), and under `Method: rebase` the orchestrator's sweep or merge rebases the history (#128).
 
 ## Decision
 
@@ -19,8 +19,8 @@ Several tickets are in flight at once, so every merge can leave other open PRs c
 
 ## Consequences
 
-- Each merge carries the sweep's work, and a bug in `replay.py` touches every conflicting open PR; the diff check above is the guard against it.
+- Each merge carries the sweep's work, and a bug in `replay.py` touches every conflicting open PR; the diff check above (`scripts/replay.py` docstring) limits the damage (inferred).
 - Under `Method: rebase`, a worker's pushed commits can change under it. It resets to or merges `origin/<branch>`, and never rebases.
-- A conflict outside shared and generated files always costs a worker turn, since it is a real one.
+- A conflict outside shared and generated files is handed back (`scripts/replay.py` docstring), which costs a worker turn.
 - Rejected: workers rebasing or merging main themselves (inferred: it would race the sweep and invite force-pushes; issue #128 fixed the rule as merge, never force); the orchestrator resolving every conflict by hand (inferred); handing back every conflict (inferred).
 - Reopen when hand-backs on shared files show the replay rules wrong (inferred).
