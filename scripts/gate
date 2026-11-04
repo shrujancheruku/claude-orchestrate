@@ -3,7 +3,7 @@
 
 Checks a PR's mergeability with its base (conflicts, and how far it is behind), its title against
 Conventional Commits, and each command the config's `Repo-specific checks` entry carries (a
-`backticked` span). Prints one line per check, with the last ~40 lines of a failure's output, in
+`run: \`cmd\``-marked span). Prints one line per check, with the last ~40 lines of a failure's output, in
 the same format as `verify`. Appends one `gate` event (ref = the PR number, outcome pass|fail,
 failed = the names of the failed checks). Exits 1 on any failure. Run the repo-specific commands
 in --cwd (the worker's worktree, so they see the PR's code); default is the current directory.
@@ -33,7 +33,10 @@ def check(name, ok, why=""):
 
 
 def repo_commands(cwd) -> list:
-    """Backticked spans in the `Repo-specific checks` item of the config's Review section."""
+    """Commands marked `run: `cmd`` in the `Repo-specific checks` item of the config's Review section.
+
+    Opt-in: plain backticked text (a file name, a flag) is prose and never executed.
+    """
     review = common.config_section(cwd, "Review")
     if not review:
         return []
@@ -44,7 +47,7 @@ def repo_commands(cwd) -> list:
         elif inside and not line.startswith((" ", "\t")):
             inside = False
         if inside:
-            found.extend(s.strip() for s in re.findall(r"`([^`]+)`", line) if s.strip())
+            found.extend(s.strip() for s in re.findall(r"\brun:\s*`([^`]+)`", line) if s.strip())
     return found
 
 

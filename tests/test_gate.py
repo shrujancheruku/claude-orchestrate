@@ -36,7 +36,7 @@ class GateTest(unittest.TestCase):
 
     def test_passing_gate(self):
         self.prime()
-        self.config("`echo ok` for codegen")
+        self.config("codegen is current (run: `echo ok`), see `README.md`")
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         lines = r.stdout.splitlines()
@@ -74,13 +74,24 @@ class GateTest(unittest.TestCase):
 
     def test_failing_repo_command(self):
         self.prime()
-        self.config("`echo stale codegen; exit 4` codegen is up to date")
+        self.config("codegen is up to date (run: `echo stale codegen; exit 4`)")
         r = self.gate()
         self.assertEqual(r.returncode, 1)
         self.assertIn("(exit 4)", r.stdout)
         self.assertIn("stale codegen", r.stdout)
         e = self.event()
         self.assertEqual(e["failed"], ["echo stale codegen; exit 4"])
+
+    def test_plain_backticks_are_never_run(self):
+        self.prime()
+        # This repo's own line (.claude/orchestration.md:66): `README.md` is prose, not a command.
+        self.config("behaviour changes come with tests; Python 3.9 compatible; user-facing changes update `README.md`; "
+                    "release-please files untouched; plugin features work out of the box, with no manual edits to the "
+                    "user's config scripts (degrade instead).")
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(len(r.stdout.splitlines()), 2)  # title + mergeable only
+        self.assertNotIn("README.md", r.stdout)
 
     def test_no_config_runs_builtin_checks_only(self):
         self.prime()
