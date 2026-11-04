@@ -18,7 +18,7 @@ orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gate
 
 From a local clone, use the clone's path in place of `shrujancheruku/claude-orchestrate`. While developing, load it without installing: `claude --plugin-dir /path/to/claude-orchestrate`.
 
-Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook. Run `/setup-matt-pocock-skills` in the repo first: orchestrate reads the tracker and domain docs it writes to `docs/agents/`. Without them, setup falls back to a backlog defined in the config.
+Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge-tree --write-tree`; on older git it says so and skips the sweep), `gh` (signed in), and `python3` 3.9 or later for the guard hook. Run `/setup-matt-pocock-skills` in the repo first: orchestrate reads the tracker and domain docs it writes to `docs/agents/`. Without them, setup falls back to a backlog defined in the config.
 
 ## Use it in a repo
 
