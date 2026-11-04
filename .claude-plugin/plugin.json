@@ -1,6 +1,6 @@
 {
   "name": "orchestrate",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Work a backlog of ready-for-agent GitHub issues in parallel: an orchestrator hands tickets to worktree-isolated workers, pushes searches and mechanical edits to cheaper agents, reviews each PR at a tier sized to it, and merges by the repo's own rule.",
   "author": {
     "name": "Shrujan Cheruku"
