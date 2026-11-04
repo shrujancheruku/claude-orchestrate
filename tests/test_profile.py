@@ -85,8 +85,8 @@ class Fixture:
         self.usage = root / "usage.jsonl"
         reset = at(60)
         write_jsonl(self.usage, [
-            {"ts": at(2), "five_hour": 20, "five_hour_resets_at": reset},
-            {"ts": at(40), "five_hour": 35, "five_hour_resets_at": reset},
+            {"ts": at(2), "five_hour": 20, "seven_day": 40, "five_hour_resets_at": reset},
+            {"ts": at(40), "five_hour": 35, "seven_day": 44, "five_hour_resets_at": reset},
             {"ts": at(500), "five_hour": 90, "five_hour_resets_at": at(600)},  # outside the session
         ])
 
@@ -173,6 +173,107 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(self.fx.run()["slots"], 3)
         self.assertEqual(self.fx.run(slots=4)["slots"], 4)
 
+    def test_proxy_cost_per_merged_ticket_by_model_and_role(self):
+        c = self.fx.run()["metrics"]["cost"]
+        opus, sonnet = 0.00249, 0.001245  # one default request each (10 in, 100 out, 1000 read, 50 written) at Opus 5.5 and Sonnet 5.5 rates
+        self.assertAlmostEqual(c["by_role"]["orchestrator"], 6 * opus)
+        self.assertAlmostEqual(c["by_role"]["worker"], 19 * sonnet)
+        self.assertAlmostEqual(c["by_role"]["reviewer"], sonnet)
+        self.assertAlmostEqual(c["by_model"]["opus"], 6 * opus)
+        self.assertAlmostEqual(c["by_model"]["sonnet"], 20 * sonnet)
+        self.assertAlmostEqual(c["by_role_model"]["reviewer"]["sonnet"], sonnet)
+        self.assertAlmostEqual(c["total"], 6 * opus + 20 * sonnet)
+        # One ticket merged, so per-ticket figures equal the totals.
+        self.assertAlmostEqual(c["per_merged_ticket"], c["total"])
+        self.assertAlmostEqual(c["per_merged_ticket_by_model"]["opus"], 6 * opus)
+        self.assertAlmostEqual(c["per_merged_ticket_by_role"]["worker"], 19 * sonnet)
+        self.assertEqual(c["unpriced_models"], [])
+
+    def test_per_ticket_table_joins_worker_and_reviewer_cost(self):
+        tickets = {t["ticket"]: t for t in self.fx.run()["tickets"]}
+        sonnet = 0.001245
+        self.assertAlmostEqual(tickets[10]["cost"]["worker"], 14 * sonnet)
+        self.assertAlmostEqual(tickets[10]["cost"]["reviewer"], sonnet)
+        self.assertAlmostEqual(tickets[10]["cost"]["total"], 15 * sonnet)
+        self.assertAlmostEqual(tickets[11]["cost"]["total"], 5 * sonnet)
+        self.assertEqual(tickets[10]["worker_models"], ["sonnet"])
+        self.assertIsNone(tickets[10]["gate_runs"])  # filled once events.jsonl is read
+
+    def test_prices_carry_a_date_source_and_haiku_long_context_rate(self):
+        self.assertRegex(prof.PRICES_AS_OF, r"^\d{4}-\d{2}-\d{2}$")
+        self.assertTrue(prof.PRICES_SOURCE.startswith("https://"))
+        for key, price in prof.PRICES.items():
+            self.assertTrue(set(price) >= {"input", "output", "cache_read", "cache_write"}, key)
+        # Rates as listed on the pricing page on PRICES_AS_OF.
+        self.assertEqual(prof.PRICES["claude-opus-5-5"], {"input": 4, "output": 20, "cache_read": 0.2, "cache_write": 5})
+        self.assertEqual(prof.PRICES["claude-sonnet-5-5"]["cache_read"], 0.1)
+        self.assertEqual(prof.price_key("claude-opus-5-5-x"), "claude-opus-5-5")  # longest key wins
+        self.assertEqual(prof.price_key("claude-opus-5"), "claude-opus-5")
+        self.assertEqual(prof.PRICES["claude-haiku-5-5"]["long_over"], 100_000)
+        short = prof.request_cost("claude-haiku-5-5", {"input_tokens": 90_000})
+        long = prof.request_cost("claude-haiku-5-5", {"input_tokens": 110_000})
+        self.assertAlmostEqual(short, 90_000 * 0.10 / 1e6)
+        self.assertAlmostEqual(long, 110_000 * 0.50 / 1e6)
+        # The prompt counts cache reads: 60K fresh + 60K cached is over the line.
+        over = prof.request_cost("claude-haiku-5-5", {"input_tokens": 60_000, "cache_read_input_tokens": 60_000})
+        self.assertAlmostEqual(over, (60_000 * 0.50 + 60_000 * 0.05) / 1e6)
+        self.assertIsNone(prof.request_cost("some-other-model", {"input_tokens": 1}))
+
+    def test_unlisted_newer_version_is_flagged_and_zero_usage_is_skipped(self):
+        self.assertTrue(prof.is_exact_version("claude-opus-4-8-20260101"))
+        self.assertTrue(prof.is_exact_version("claude-opus-4"))
+        self.assertFalse(prof.is_exact_version("claude-opus-4-9"))
+        self.assertEqual(prof.price_key("claude-3-5-haiku-20241022"), "claude-3-5-haiku")
+        self.assertEqual(prof.model_family("claude-3-5-haiku-20241022"), "haiku")
+        path = Path(self.tmp.name) / "newer.jsonl"
+        zero = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        write_jsonl(path, [assistant(1, "n1", "claude-opus-4-9", []), assistant(2, "z1", "<synthetic>", [], zero)])
+        c = prof.cost_metrics(prof.Transcript(path), [], 1)
+        self.assertEqual((c["approximate_models"], c["unpriced_models"]), (["claude-opus-4-9"], []))
+
+    def test_unknown_models_are_flagged_not_priced(self):
+        self.assertEqual(self.fx.run()["warnings"], [])
+        path = Path(self.tmp.name) / "mystery.jsonl"
+        write_jsonl(path, [assistant(21, "x1", "mystery-1", [])])
+        t = prof.Transcript(path)
+        self.assertEqual(t.cost(), {"unpriced": 0.0})
+        self.assertEqual(prof.cost_metrics(t, [], 1)["unpriced_models"], ["mystery-1"])
+
+    def test_meter_percent_per_merged_ticket_is_unweighted(self):
+        meters = self.fx.run()["metrics"]["meters"]
+        # Samples inside the session: 20 -> 35 (five-hour), 40 -> 44 (seven-day); one ticket merged.
+        self.assertEqual((meters["five_hour"]["used"], meters["five_hour"]["per_merged_ticket"]), (15.0, 15.0))
+        self.assertEqual((meters["seven_day"]["used"], meters["seven_day"]["per_merged_ticket"]), (4.0, 4.0))
+
+    def test_meter_reset_adds_nothing(self):
+        self.assertEqual(prof.meter_use([{"five_hour": 80}, {"five_hour": 10}, {"five_hour": 25}], "five_hour"), 15.0)
+        self.assertIsNone(prof.meter_use([{"x": 1}], "five_hour"))
+
+    def test_span_is_reported_and_a_later_record_warns(self):
+        p = self.fx.run()
+        self.assertEqual((p["start"], p["end"], p["warnings"]), (at(1), at(41), []))
+        # A reviewer wrote after the orchestrator's last record: the profile is partial.
+        late = self.fx.main.with_suffix("") / "subagents" / "agent-ccc.jsonl"
+        late.write_text(late.read_text() + json.dumps(assistant(55, "r2", "claude-sonnet-5-5", [])) + "\n")
+        p = self.fx.run()
+        self.assertEqual(p["last_record"], at(55))
+        self.assertEqual(len(p["warnings"]), 1)
+        self.assertIn("partial", p["warnings"][0])
+        self.assertIn("WARNING", prof.summary(p, Path("x.json")))
+
+    def test_schema_2_keeps_slot_efficiency_fields(self):
+        p = self.fx.run()
+        self.assertEqual(p["schema"], 2)
+        for key in ("occupancy", "building_share", "review_share", "idle_s", "windows"):
+            self.assertIn(key, p["metrics"])
+
+    def test_summary_is_about_five_lines(self):
+        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
+        out = prof.summary(self.fx.run(), Path("x.json"))
+        self.assertEqual(len(out.splitlines()), 5)
+        self.assertIn("per merged ticket (1 merged)", out)
+        self.assertIn("opus", out)
+
 
 class CommandTest(unittest.TestCase):
     def setUp(self):
@@ -206,6 +307,11 @@ class CommandTest(unittest.TestCase):
         html = saved.with_suffix(".html").read_text()
         self.assertIn('"session": "sess-1"', html)
         self.assertNotIn('type="application/json">null<', html)
+
+    def test_viewer_shows_a_banner_for_rejected_files(self):
+        html = prof.VIEWER.read_text()
+        self.assertIn("regenerate it with scripts/profile.py", html)
+        self.assertNotIn("console.warn", html)
 
     def test_html_escapes_script_close(self):
         out = self.root / "x.html"

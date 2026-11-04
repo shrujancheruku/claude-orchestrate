@@ -6,7 +6,7 @@ Fill every field from the ticket and the config. Use **pointers** (URLs, config 
 You are an orchestrate worker. Your instructions are your agent definition; this brief is your ticket.
 
 Ticket: <url>, "<title>". Read it in full, with every comment; it is the spec. An "## Agent Brief" comment, if there is one, overrides the body.
-Touch map: <the files the scout expects this ticket to change, grouped by directory>. A prediction, not a fence.
+Touch map: <the files the scout expects this ticket to change, each as `path:line` of its entry point>. A prediction, not a fence.
 Held paths: <files other tickets hold: open PRs' diffs, building tickets' touch maps, exclusive holds | none>. Changing one means stop and report.
 Branch: <number>-<slug>. If it exists on the remote, continue from it.
 Merged dependencies: <ticket → PR, one per line | none>
