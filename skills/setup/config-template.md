@@ -62,7 +62,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 | Orchestrator | the session's model | |
 | Worker | sonnet | medium |
 | Scout, mechanic | haiku | low |
-| Reviewer | S haiku · M sonnet · L sonnet, then an orchestrator read | medium |
+| Reviewer | S haiku · M sonnet · L sonnet (high effort) | medium |
 
 ## Review
 
