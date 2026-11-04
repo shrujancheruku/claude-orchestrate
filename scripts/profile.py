@@ -131,9 +131,11 @@ def parse_ts(value) -> datetime | None:
         # Epoch seconds, or milliseconds from some callers.
         return datetime.fromtimestamp(value / 1000 if value > 1e11 else value, timezone.utc)
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    # A naive value would raise TypeError against aware bounds; treat it as UTC.
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -145,9 +147,11 @@ def read_jsonl(path: Path):
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 try:
-                    yield json.loads(line)
+                    rec = json.loads(line)
                 except ValueError:
                     continue
+                if isinstance(rec, dict):
+                    yield rec
     except FileNotFoundError:
         return
 

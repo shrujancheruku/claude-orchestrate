@@ -79,6 +79,7 @@ def main(argv=None) -> int:
             merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
             print(f"PR #{pr} {result} {merge} {head}", flush=True)
             try:
+                # "." is fine: append_event resolves it to the main checkout.
                 common.append_event(".", "ci", result, ref=common.pr_ref(pr)[1], merge_state=merge, head=head)
             except OSError as e:
                 # The event log is best-effort; losing it must not drop the other PRs' settle lines.

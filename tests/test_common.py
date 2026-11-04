@@ -1,6 +1,9 @@
 """Unit tests for scripts/common.py: run, pr_ref, die and the exit-code constants."""
 
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,6 +27,51 @@ class RunTest(unittest.TestCase):
 
     def test_missing_cwd_is_127_not_a_crash(self):
         self.assertEqual(common.run(sys.executable, "-c", "pass", cwd="/no/such/dir/xyz").code, 127)
+
+
+def _vcs(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+class EventsRootTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name).resolve() / "repo"
+        self.repo.mkdir()
+        _vcs(self.repo, "init", "-q", "-b", "main")
+        for k, v in (("user.name", "T"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            _vcs(self.repo, "config", k, v)
+        _vcs(self.repo, "commit", "-q", "--allow-empty", "-m", "chore: init")
+        self.log = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
+
+    def test_subdirectory_writes_to_the_checkout_log(self):
+        sub = self.repo / "a" / "b"
+        sub.mkdir(parents=True)
+        common.append_event(sub, "gate", "pass", ref=1)
+        self.assertEqual(json.loads(self.log.read_text())["ref"], 1)
+        self.assertFalse((sub / ".claude").exists())
+
+    def test_linked_worktree_writes_to_the_main_checkout_log(self):
+        wt = self.repo / ".claude" / "worktrees" / "w1"
+        _vcs(self.repo, "worktree", "add", "-q", "-b", "w1", str(wt))
+        common.append_event(wt, "ci", "pass", ref=2)
+        self.assertEqual([json.loads(l)["ref"] for l in self.log.read_text().splitlines()], [2])
+        self.assertFalse((wt / ".claude" / "orchestrate-profiles").exists())
+
+    def test_outside_a_checkout_falls_back_to_the_given_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            common.append_event(d, "gate", "pass")
+            self.assertTrue((Path(d) / ".claude" / "orchestrate-profiles" / "events.jsonl").exists())
+
+
+class ReadJsonlTest(unittest.TestCase):
+    def test_yields_only_object_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x.jsonl"
+            p.write_text('{"a": 1}\n[]\n3\n\n"s"\nnull\nnot json\n{"b": 2}\n')
+            self.assertEqual(list(common.read_jsonl(p)), [{"a": 1}, {"b": 2}])
+            self.assertEqual(list(common.read_jsonl(Path(d) / "missing")), [])
 
 
 class PrRefTest(unittest.TestCase):

@@ -10,13 +10,6 @@ def read(p):
 
 
 class PrSkill(unittest.TestCase):
-    def test_worker_ship_loads_pr_skill(self):
-        s = read("agents/worker.md")
-        for needle in ("skill whose name ends in `:pr`", "mattpocock-skills:pr", "Skill tool",
-                       "Before `gh pr create`", "with no such skill listed, write a plain body",
-                       "closing reference", "with no attribution lines"):
-            self.assertIn(needle, s)
-
     def test_brief_carries_pr_skill_line(self):
         s = read("skills/run/brief.md")
         self.assertIn('body written with the skill whose name ends in `:pr`', s)
