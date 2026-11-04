@@ -673,5 +673,191 @@ class CommandTest(unittest.TestCase):
         self.assertFalse((self.root / "u.jsonl").exists())
 
 
+class CompareTest(unittest.TestCase):
+    """`profile.py compare` on hand-made profiles (the saved JSON is its input)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def profile(self, name, tiers, orchestrator=0.5, changes=(10, 20), outright=5, rounds=1.5):
+        """tiers: {tier: (merged tickets, $ per merged ticket)}. The orchestrator's $ is the only overhead."""
+        merged = sum(n for n, _ in tiers.values())
+        tier_rows = {t: {"merged": n, "cost": n * c, "reviewed_prs": n, "rounds": round(n * rounds),
+                         "round1": n, "round1_changes": round(n * changes[0] / changes[1]),
+                         "round1_outright": round(n * outright / changes[1])}
+                     for t, (n, c) in tiers.items()}
+        per = sum(r["cost"] for r in tier_rows.values()) / merged + orchestrator
+        path = self.root / name
+        path.write_text(json.dumps({"schema": 2, "metrics": {
+            "tickets_merged": merged,
+            "cost": {"per_merged_ticket": per, "per_merged_ticket_by_role": {"orchestrator": orchestrator}},
+            "review": {"round1_changes_rate": changes[0] / changes[1], "round1_outright_rate": outright / changes[1],
+                       "rounds_per_pr": rounds},
+            "tiers": tier_rows}}))
+        return path
+
+    def compare(self, before, after, *args):
+        return subprocess.run([sys.executable, "-I", str(SCRIPTS / "profile.py"), "compare", str(before), str(after), *args],
+                              capture_output=True, text=True)
+
+    def line(self, out, start):
+        return next(l for l in out.splitlines() if l.strip().startswith(start))
+
+    def gate(self, out, start):
+        """The row under the gating header: the figure as measured, its verdict, then mix-adjusted."""
+        return self.line(out[out.index("gating,"):], start)
+
+    def test_headline_figures_side_by_side_with_deltas(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)}, orchestrator=1.0, changes=(10, 20), outright=6)
+        after = self.profile("a.json", {"L": (20, 2.0), "M": (20, 0.5)}, orchestrator=0.5, changes=(6, 20), outright=8, rounds=1.25)
+        r = self.compare(before, after)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.line(r.stdout, "proxy $ per merged ticket"), r"\$3\.50\s+\$1\.75\s+-\$1\.75")
+        self.assertRegex(self.line(r.stdout, "orchestrator $ per merged ticket"), r"\$1\.00\s+\$0\.50\s+-\$0\.50")
+        self.assertRegex(self.line(r.stdout, 'round-1 "changes" rate'), r"50%\s+30%\s+-20 pts")
+        self.assertRegex(self.line(r.stdout, "round-1 approvals (outright)"), r"30%\s+40%\s+\+10 pts")
+        self.assertRegex(self.line(r.stdout, "rounds per PR"), r"1\.50\s+1\.25\s+-0\.25")
+        self.assertRegex(self.line(r.stdout, "L-tier share"), r"50%\s+50%\s+\+0 pts")
+        self.assertRegex(self.line(r.stdout, "tier L"), r"20\s+\$4\.00\s+20\s+\$2\.00")
+        self.assertNotIn("INCONCLUSIVE", r.stdout)
+
+    def test_targets_come_from_the_flags_not_from_code(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)})
+        after = self.profile("a.json", {"L": (20, 2.0), "M": (20, 0.5)})
+        none = self.compare(before, after).stdout
+        self.assertIn("pass --max-cost to judge", none)
+        met = self.compare(before, after, "--max-cost", "2.30", "--max-orchestrator-cost", "0.75").stdout
+        self.assertRegex(self.gate(met, "proxy $ per merged ticket"), r"pass\s+→.*pass")
+        missed = self.compare(before, after, "--max-cost", "1.50").stdout
+        self.assertRegex(self.gate(missed, "proxy $ per merged ticket"), r"FAIL")
+        self.assertIn("a gating row fails", missed)
+
+    def test_review_floor_is_judged_against_the_baseline(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)}, changes=(10, 20), outright=6, rounds=1.5)
+        worse = self.profile("a.json", {"L": (20, 4.0), "M": (20, 1.0)}, changes=(14, 20), outright=3, rounds=1.8)
+        out = self.compare(before, worse).stdout
+        for label in ('round-1 "changes" rate', "round-1 approvals (counting", "rounds per PR"):
+            self.assertIn("FAIL", self.gate(out, label))
+
+    def test_fewer_than_20_merged_tickets_is_inconclusive(self):
+        before = self.profile("b.json", {"L": (10, 4.0), "M": (10, 1.0)})
+        after = self.profile("a.json", {"L": (9, 4.0), "M": (10, 1.0)})
+        self.assertIn("INCONCLUSIVE: only 19 merged tickets", self.compare(before, after).stdout)
+        after = self.profile("a.json", {"L": (10, 4.0), "M": (10, 1.0)})
+        self.assertNotIn("INCONCLUSIVE", self.compare(before, after).stdout)
+
+    def test_l_share_gap_over_25_points_is_inconclusive(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)})  # 50%
+        near = self.profile("a.json", {"L": (30, 4.0), "M": (10, 1.0)})  # 75%: exactly 25 points
+        self.assertNotIn("INCONCLUSIVE", self.compare(before, near).stdout)
+        far = self.profile("a.json", {"L": (31, 4.0), "M": (9, 1.0)})  # 77.5%
+        self.assertIn("differs by more than 25 points", self.compare(before, far).stdout)
+
+    def test_mix_adjustment_reweights_to_the_baseline_mix_and_flags_a_flipped_verdict(self):
+        before = self.profile("b.json", {"L": (10, 4.0), "M": (10, 1.0)})
+        # 65% L against 50%: dearer overall only because of the mix. L $3.00, M $0.50 -> raw 2.625, mixed 2.25.
+        after = self.profile("a.json", {"L": (13, 3.0), "M": (7, 0.5)})
+        out = self.compare(before, after, "--max-cost", "2.30").stdout
+        row = self.gate(out, "proxy $ per merged ticket")
+        self.assertRegex(row, r"\$2\.62\s+FAIL\s+→\s+\$2\.25\s+pass")
+        self.assertIn("INCONCLUSIVE: the mix adjustment flips the verdict on proxy $ per merged ticket", out)
+        # With the same mix the adjustment changes nothing and nothing flips.
+        same = self.profile("s.json", {"L": (10, 3.0), "M": (10, 0.5)})
+        self.assertNotIn("INCONCLUSIVE", self.compare(before, same, "--max-cost", "2.30").stdout)
+
+    def test_without_dollar_targets_the_conclusion_says_they_were_not_judged(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)})
+        after = self.profile("a.json", {"L": (20, 4.0), "M": (20, 1.0)})
+        out = self.compare(before, after).stdout
+        self.assertIn("not judged: no target given", out)
+        self.assertNotIn("not judged", self.compare(before, after, "--max-cost", "9", "--max-orchestrator-cost", "9").stdout)
+
+    def test_untiered_tickets_and_unparsed_reviewers_are_printed(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "?": (5, 1.0)})
+        out = self.compare(before, before).stdout
+        self.assertIn("before: 5 merged tickets with no tier", out)
+        self.assertIn("unknown reviewer agents returned no parseable verdict", out)
+
+    def test_a_profile_without_tier_figures_is_refused(self):
+        old = self.root / "old.json"
+        old.write_text(json.dumps({"schema": 1, "metrics": {}}))
+        new = self.profile("a.json", {"L": (20, 1.0)})
+        r = self.compare(old, new)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("regenerate it", r.stderr)
+
+
+class TierTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(Path(self.tmp.name))
+
+    def tearDown(self):
+        os.environ.pop("ORCHESTRATE_USAGE_LOG", None)
+        self.tmp.cleanup()
+
+    def test_tier_comes_from_the_reviewer_dispatch_and_verdict_from_a_handback_call(self):
+        sub = self.fx.main.with_suffix("") / "subagents"
+        sonnet = "claude-sonnet-5-5"
+        write_jsonl(sub / "agent-ccc.jsonl", [
+            assistant(20, "r1", sonnet, [{"type": "text", "text": "verdict: approve (looking)"}]),
+            assistant(21, "r2", sonnet, [tool_use("h1", "SubagentHandback", message="verdict: changes\ntier: L\n[blocking] x\n[minor] y")])])
+        p = self.fx.run()
+        tickets = {t["ticket"]: t for t in p["tickets"]}
+        self.assertEqual(tickets[10]["tier"], "L")  # "Review PR 50 (L)"
+        self.assertIsNone(tickets[11]["tier"])
+        review = p["metrics"]["review"]
+        self.assertEqual((review["round1_changes"], review["round1_outright"]), (1, 0))  # the call counts, the text doesn't
+        self.assertEqual(p["metrics"]["tiers"]["L"]["merged"], 1)
+        self.assertEqual(p["metrics"]["tiers"]["L"]["round1_changes"], 1)
+
+    def handback(self, message):
+        sub = self.fx.main.with_suffix("") / "subagents"
+        write_jsonl(sub / "agent-ccc.jsonl", [assistant(20, "r1", "claude-sonnet-5-5", [tool_use("h1", "SubagentHandback", message=message)])])
+        return self.fx.run()["metrics"]["review"]
+
+    def test_a_posted_review_is_read_from_its_json_body_and_findings_count_once(self):
+        # The shape agents/reviewer.md has a posted review hand back: the JSON that was posted, the
+        # findings in the body and again, inline, in `comments`.
+        body = ("Round 1 \u00b7 verdict: approve \u00b7 tier: L\n\nspec:\n- thing \u2192 met\n\nfindings:\n"
+                "- [minor] [standards] a.ts:5 \u2014 add a why comment\n- [minor] [standards] b.ts:9 \u2014 rename\n\nposted: ok")
+        message = json.dumps({"event": "COMMENT", "body": body, "comments": [
+            {"path": "a.ts", "line": 5, "side": "RIGHT", "body": "[minor] add a why comment"},
+            {"path": "b.ts", "line": 9, "side": "RIGHT", "body": "[minor] rename"}]})
+        review = self.handback(message)
+        pr = review["prs"][0]
+        self.assertEqual([(v["round"], v["verdict"], v["blocking"], v["minor"]) for v in pr["verdicts"]], [(1, "approve", 0, 2)])
+        self.assertEqual((review["unparsed_reviewers"], review["round1_outright"]), (0, 0))
+
+    def test_posted_json_after_prose_is_still_read(self):
+        message = 'Posted. Here is what I sent: {"event":"COMMENT","body":"Round 2 \\u00b7 verdict: changes \\u00b7 tier: L\\n\\nfindings:\\n- [blocking] a.ts:1 \\u2014 x","comments":[]}'
+        v = self.handback(message)["prs"][0]["verdicts"][0]
+        self.assertEqual((v["verdict"], v["blocking"]), ("changes", 1))
+
+    def test_a_malformed_payload_does_not_fall_through_to_an_inline_comment(self):
+        message = ('```json\n{"event":"COMMENT","body":"Round 1 · verdict: approve · tier: L\\n\\nfindings:\\n- [minor] a.ts:1 x","comments":'
+                   '[{"path":"a.ts","line":1,"body":"[minor] x"}] oops')
+        v = self.handback(message)["prs"][0]["verdicts"][0]
+        self.assertEqual((v["verdict"], v["round"]), ("approve", 1))
+
+    def test_a_posted_review_with_no_findings_is_an_outright_approval(self):
+        review = self.handback(json.dumps({"event": "COMMENT", "body": "Round 1 \u00b7 verdict: approve \u00b7 tier: S\n\nfindings: none", "comments": []}))
+        self.assertEqual(review["round1_outright"], 1)
+
+    def test_a_reviewer_with_no_readable_verdict_is_counted(self):
+        review = self.handback("I looked at it and it seems fine.")
+        self.assertEqual((review["reviewed_prs"], review["unparsed_reviewers"]), (0, 1))
+
+    def test_tier_is_read_from_prompts_and_descriptions(self):
+        self.assertEqual(prof.dispatched_tier("Review PR 5. Tier: L (touches proto). Round: 1."), "L")
+        self.assertEqual(prof.dispatched_tier("Tier M, round 2"), "M")
+        self.assertEqual(prof.dispatched_tier("Review PR 5 (S, proto)"), "S")
+        self.assertIsNone(prof.dispatched_tier("Review PR 5 round 2"))
+
+
 if __name__ == "__main__":
     unittest.main()

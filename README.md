@@ -123,6 +123,14 @@ python3 scripts/profile.py <session id> [--repo PATH] [--slots N] [--threshold 5
 
 Without a pass log, idle reasons and whether slots were full with work waiting show as unknown.
 
+To judge a trial against a baseline, profile both sessions with the same version of the script, then:
+
+```sh
+python3 scripts/profile.py compare <baseline.json> <trial.json> [--max-cost USD] [--max-orchestrator-cost USD]
+```
+
+It prints the headline figures side by side with deltas (merged tickets, proxy $ and orchestrator $ per merged ticket, the round-1 "changes" rate, outright and with-minors round-1 approvals, rounds per PR), the L-tier share and each tier's $ per merged ticket (a PR's tier is the one its first reviewer was dispatched at). A second table gives the gating figures as measured and again mix-adjusted: each tier's figure in the trial reweighted by the baseline's tier mix, so a trial that drew more L tickets isn't judged dearer for that alone. The orchestrator's $ isn't attributed to tiers, so it isn't adjusted. The two $ targets aren't in the script; pass them from the spec (`--max-cost`, `--max-orchestrator-cost`) or those rows go unjudged. The review-quality rows are judged against the baseline: no more "changes" or rounds per PR, and as many round-1 approvals outright or counting approve-with-minors. The trial is flagged **INCONCLUSIVE** when it has fewer than 20 merged tickets, when its L share differs from the baseline's by more than 25 points, or when the mix adjustment flips a gating verdict.
+
 ## Limits
 
 - Workers branch from the default branch (Claude Code's worktree default), so a ticket starts only after its dependencies have merged.
