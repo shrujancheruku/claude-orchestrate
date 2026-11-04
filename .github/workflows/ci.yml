@@ -23,6 +23,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # Scripts with no test coverage still have to parse. The extensionless ones are found by shebang.
+      - run: python3 -m py_compile hooks/*.py scripts/*.py $(grep -lE '^#!.*python' scripts/*)
       - run: python3 -m unittest discover tests
 
   validate:
@@ -32,8 +34,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      # Pinned so a new Claude Code release can't change validation under us; bump deliberately.
-      - run: npm install -g @anthropic-ai/claude-code@2.1.311
+      # Pinned so a new Claude Code release can't change validation under us. The version lives in
+      # .github/claude-code-pin/package.json, where Dependabot bumps it as a PR.
+      - run: npm install -g "@anthropic-ai/claude-code@$(node -p "require('./.github/claude-code-pin/package.json').devDependencies['@anthropic-ai/claude-code']")"
       # Exits non-zero on errors only. Warnings (the expected root CLAUDE.md one, the
       # directory-icon one) print to the log without failing; no --strict, no API key.
       - run: claude plugin validate .
