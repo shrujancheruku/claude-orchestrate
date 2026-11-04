@@ -63,7 +63,9 @@ Every full pass suggests a change of one slot, between 1 and 5: lower after a us
 |---|---|
 | scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. The reviewer may post one comment review on a PR (`gh api .../reviews` or `gh pr review --comment`, after an optional plain `cd <path> &&`), in the shapes `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
 | mechanic | git writes (staging and commits are the worker's), `gh` writes |
-| worker | `gh pr merge`, force-pushes, pushes to `main`/`master` |
+| worker | `gh pr merge`, `scripts/merge`, force-pushes, pushes to `main`/`master` |
+
+Every role also refuses `scripts/merge` (the orchestrator's merge script, which re-checks the PR until it is MERGED, then deletes the branch, closes the ticket and removes the worktree), run as a command.
 
 It reads the command text, so it's a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top. Tests: `python3 -m unittest discover tests`.
 

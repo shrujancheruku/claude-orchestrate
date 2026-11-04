@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""merge <pr> [--method squash|merge|rebase] [--ticket N]... [--worktree DIR] : merge a PR, then clean up.
+
+`gh pr merge`'s exit is unreliable (a 502 can hide a merge that landed; a retry can answer "merge
+already in progress"; the branch can survive), so the PR's state is the only truth. The script runs
+the merge, then re-checks the PR until it is MERGED or --timeout runs out. Only once MERGED does it:
+delete the remote branch (over `gh api`, so it works where origin is SSH) and the local one, unless it
+is the default branch, main/master or a fork's branch; close the PR's linked tickets that the host
+left open (a --ticket the PR does not link is only reported); remove --worktree (a "not a working tree" answer is fine: the harness may
+have removed it), and append one `merge` event (ref = the PR number, outcome merged|timeout|closed,
+plus branch, branch_deleted, tickets). The merge passes --match-head-commit, so a push after
+review makes it a refusal (exit 1). Prints one line per step.
+Exit codes: 0 merged and cleaned up; 1 the merge was refused, or the PR was closed unmerged;
+2 the script could not run (`gh` cannot read the PR); 3 still not MERGED at the timeout (run it
+again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
+"already in progress") only means wait and re-check; the merge command is run again on a 5xx.
+Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+
+import common
+
+# "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
+IN_PROGRESS = re.compile(r"already in progress|already merged", re.I)
+GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exist", re.I)
+PROTECTED = ("main", "master")
+TRANSIENT = re.compile(r"\b5\d\d\b|bad gateway|service unavailable|gateway time-?out|timed? ?out|"
+                       r"connection (?:reset|refused)|try again", re.I)
+
+
+def run(*cmd, cwd=None):
+    return subprocess.run(list(cmd), capture_output=True, text=True, cwd=cwd)
+
+
+def view(pr, cwd):
+    p = run("gh", "pr", "view", pr, "--json", "state,headRefName,headRefOid,isCrossRepository,closingIssuesReferences", cwd=cwd)
+    if p.returncode != 0:
+        return None
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        return None
+
+
+def default_branch(cwd):
+    """The repo's default branch name, or None when gh can't say (callers then delete nothing)."""
+    p = run("gh", "repo", "view", "--json", "defaultBranchRef", cwd=cwd)
+    try:
+        return json.loads(p.stdout)["defaultBranchRef"]["name"] if p.returncode == 0 else None
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def delete_remote_branch(branch, cwd):
+    """Delete refs/heads/<branch> over gh's HTTPS API (origin may be SSH, which can be denied).
+
+    Returns (deleted, note). A 404/422 means the host already removed it, which counts as deleted.
+    """
+    # Git allows `#` and `%` in branch names; unquoted, `feat#x` would address `heads/feat`.
+    quoted = urllib.parse.quote(branch, safe="/")
+    e = run("gh", "api", f"repos/{{owner}}/{{repo}}/git/ref/heads/{quoted}", cwd=cwd)
+    if e.returncode != 0 and GONE.search(e.stderr + e.stdout):
+        return True, "already gone"
+    d = run("gh", "api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd)
+    if d.returncode == 0:
+        return True, "deleted"
+    if GONE.search(d.stderr + d.stdout):
+        return True, "already gone"
+    return False, f"NOT deleted: {common.one_line(d.stderr or d.stdout)}"
+
+
+def delete_local_branch(branch, cwd):
+    """`git branch -D` unless the branch is absent or checked out in some worktree."""
+    if run("git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=cwd).returncode != 0:
+        return "local branch already gone"
+    wt = run("git", "worktree", "list", "--porcelain", cwd=cwd).stdout.splitlines()
+    if f"branch refs/heads/{branch}" in wt:
+        return f"local branch {branch} kept: checked out in a worktree"
+    d = run("git", "branch", "-D", branch, cwd=cwd)
+    return f"local branch {branch} " + ("deleted" if d.returncode == 0 else f"NOT deleted: {common.one_line(d.stderr)}")
+
+
+def say(msg):
+    print(msg, flush=True)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("pr", help="PR number")
+    ap.add_argument("--method", default="squash", choices=["squash", "merge", "rebase"])
+    ap.add_argument("--ticket", action="append", default=[], help="a ticket the PR must link; one it does not link is reported, not closed (repeatable)")
+    ap.add_argument("--worktree", help="the worker's worktree to remove after the merge")
+    ap.add_argument("--cwd", default=".", help="the repo (default: current directory)")
+    ap.add_argument("--timeout", type=float, default=300, help="seconds to wait for MERGED")
+    ap.add_argument("--interval", type=float, default=5, help="seconds between state checks")
+    args = ap.parse_args(argv)
+    pr = args.pr.lstrip("#")
+    cwd = args.cwd
+    ref = int(pr) if pr.isdigit() else pr
+
+    v = view(pr, cwd)
+    if v is None:
+        say(f"merge: could not read PR #{pr} with gh")
+        return 2
+    branch = v.get("headRefName") or ""
+    state = v.get("state")
+    head_oid = v.get("headRefOid") or ""
+    deadline = time.monotonic() + args.timeout
+    attempt = state == "OPEN"  # run the merge command only while the PR is open
+    refused = None
+    while True:
+        if attempt:
+            # --match-head-commit: a push after review makes this a refusal, not a merge of unreviewed code.
+            guard = ["--match-head-commit", head_oid] if head_oid else []
+            p = run("gh", "pr", "merge", pr, f"--{args.method}", *guard, cwd=cwd)
+            err = common.one_line(p.stderr or p.stdout)
+            if p.returncode == 0:
+                say(f"merge command accepted for PR #{pr}")
+                attempt = False
+            elif IN_PROGRESS.search(err):
+                say(f"merge already in progress for PR #{pr}; waiting")
+                attempt = False
+            elif TRANSIENT.search(err):
+                say(f"merge command failed transiently ({err}); re-checking")
+            else:
+                refused, attempt = err, False  # a real refusal, unless the state says it landed anyway
+        nv = view(pr, cwd)
+        if nv:
+            v, state = nv, nv.get("state")
+        if state == "MERGED":
+            break
+        if state == "CLOSED":
+            say(f"PR #{pr} closed without merging")
+            common.append_event(cwd, "merge", "closed", ref=ref, branch=branch)
+            return 1
+        if refused:
+            say(f"merge refused for PR #{pr}: {refused}")
+            return 1
+        if time.monotonic() >= deadline:
+            say(f"PR #{pr} not MERGED after {args.timeout:g}s (state {state}); run merge again later")
+            common.append_event(cwd, "merge", "timeout", ref=ref, branch=branch)
+            return 3
+        time.sleep(args.interval)
+
+    say(f"PR #{pr} MERGED")
+
+    # Never delete a branch name we can't vouch for: the default branch, main/master, a fork's branch.
+    default = default_branch(cwd)
+    safe = bool(branch) and default is not None and branch != default and branch not in PROTECTED \
+        and not v.get("isCrossRepository")
+    deleted = False
+    if safe:
+        deleted, note = delete_remote_branch(branch, cwd)
+        say(f"remote branch {branch} {note}")
+    else:
+        say(f"remote branch {branch or '?'} left alone (default, protected name, fork, or default unknown)")
+
+    tickets = []
+    for r in v.get("closingIssuesReferences") or []:
+        if str(r.get("number")) not in tickets:
+            tickets.append(str(r.get("number")))
+    for t in (x.lstrip("#") for x in args.ticket):
+        if t not in tickets:
+            say(f"ticket #{t} is not linked by PR #{pr}; not closed")
+    for t in tickets:
+        p = run("gh", "issue", "view", t, "--json", "state", cwd=cwd)
+        try:
+            is_open = json.loads(p.stdout).get("state") == "OPEN"
+        except ValueError:
+            is_open = False
+        if p.returncode != 0:
+            say(f"ticket #{t}: could not read ({common.one_line(p.stderr)})")
+        elif not is_open:
+            say(f"ticket #{t} already closed")
+        else:
+            c = run("gh", "issue", "close", t, cwd=cwd)
+            say(f"ticket #{t} " + ("closed" if c.returncode == 0 else f"NOT closed: {common.one_line(c.stderr)}"))
+
+    if args.worktree:
+        w = run("git", "worktree", "remove", args.worktree, cwd=cwd)
+        err = common.one_line(w.stderr)
+        if w.returncode == 0:
+            say(f"worktree {args.worktree} removed")
+        elif "not a working tree" in err:
+            say(f"worktree {args.worktree} already removed")
+        else:
+            say(f"worktree {args.worktree} NOT removed: {err}")
+
+    # After the worktree is gone, so the branch it held is free to delete.
+    if safe:
+        say(delete_local_branch(branch, cwd))
+
+    common.append_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
+                        tickets=[int(t) for t in tickets if t.isdigit()])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
