@@ -80,6 +80,16 @@ class RebuildState(unittest.TestCase):
         _, state = self.rebuild()
         self.assertEqual(list(state["tickets"]), ["7", "35"])
 
+    def test_first_number_in_the_description_is_the_ticket(self):
+        # A description may name other tickets too; the first #<n> is the one it was dispatched for.
+        self.main_records += [dispatch("t1", "Build #35 after #31"), dispatch("t2", "Unblock #31 for #35")]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5")])
+        self.agent("a2", "t2", [reply("2026-11-04T09:02:00Z", "claude-sonnet-5-5")])
+        _, state = self.rebuild()
+        self.assertEqual(list(state["tickets"]), ["31", "35"])
+        self.assertEqual(state["tickets"]["35"]["agent_id"], "a1")
+        self.assertEqual(state["tickets"]["31"]["agent_id"], "a2")
+
     def test_worktree_is_null_once_removed(self):
         self.main_records += [dispatch("t1", "Build #1"), dispatch("t2", "Build #2")]
         self.agent("gone", "t1", [reply("2026-11-04T09:01:00Z")])
