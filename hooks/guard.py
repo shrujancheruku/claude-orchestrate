@@ -683,10 +683,20 @@ def rule_expansion(p: Parsed, cwd: str) -> str | None:
     return None
 
 
+QUIET_FLAGS = frozenset(("-v", "--verbose", "-q", "--quiet"))
+
+
 def first_arg_reads(reads: frozenset):
-    """A read-form test: no arguments, or a first argument that is one of `reads`."""
+    """A read-form test: after any leading -v/-q flags, no subcommand or one of `reads`. A
+    subcommand hiding behind a flag (`git remote -v add x y`) is still judged, and any other
+    flag or a dynamic argument is refused because it can't be judged."""
     def test(args: list) -> bool:
-        return not args or (not args[0].dynamic and args[0].text in reads)
+        if any(a.dynamic for a in args):
+            return False
+        words = list(args)
+        while words and words[0].text in QUIET_FLAGS:
+            words.pop(0)
+        return not words or words[0].text in reads
     return test
 
 
@@ -706,7 +716,7 @@ def config_reads(args: list) -> bool:
 SUBCOMMAND_READS = {
     "submodule": first_arg_reads(frozenset(("status", "summary"))),
     "reflog": first_arg_reads(frozenset(("show", "exists"))),
-    "remote": first_arg_reads(frozenset(("-v", "--verbose", "show", "get-url"))),
+    "remote": first_arg_reads(frozenset(("show", "get-url"))),
     "config": config_reads,
 }
 
