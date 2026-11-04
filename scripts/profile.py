@@ -2,13 +2,15 @@
 
     profile.py <session id | transcript.jsonl> [--repo PATH] [--slots N] [--threshold PCT] [--out DIR] [--quiet]
     profile.py record --repo PATH --session ID '<pass json>'
+    profile.py compare <before.json> <after.json> [--max-cost USD] [--max-orchestrator-cost USD]
 
 The first form reads the session's transcript and its subagents' transcripts,
 the repo's pass log and the status-line usage log, then writes
 `<repo>/.claude/orchestrate-profiles/<date>-<session>.json` and a `.html` copy
 of the viewer with that profile embedded, and prints a summary. The second
 form appends one pass to the pass log; `/orchestrate:run --profile` calls it
-at the end of each pass. Everything here only reads, apart from those files.
+at the end of each pass. The third prints two saved profiles side by side and
+says whether the later one is a conclusive trial. Everything here only reads, apart from those files.
 """
 
 # macOS ships Python 3.9, which needs this for `str | None` annotations.
@@ -344,6 +346,12 @@ def dispatched_round(text: str) -> int:
     return int(found[-1]) if found else 1
 
 
+def dispatched_tier(text: str) -> str | None:
+    """The review tier a reviewer was dispatched at: "Tier: L", "Tier M", else a "(L)" or "(L, proto)" in the description."""
+    m = re.search(r"\btier[:\s]+([SML])\b", text, re.I) or re.search(r"\(([SML])[,)]", text)
+    return m.group(1).upper() if m else None
+
+
 def collect_agents(main: Transcript) -> list:
     """Every orchestrate agent the session dispatched, joined to its own transcript."""
     sub = main.path.with_suffix("") / "subagents"
@@ -366,6 +374,7 @@ def collect_agents(main: Transcript) -> list:
             "worker_model": meta.get("model") or (t.models[0] if t and t.models else None) or inp.get("model"),
             "description": desc,
             "round": asked,  # the review round a reviewer was dispatched for
+            "tier": dispatched_tier(f"{inp.get('prompt') or ''} {desc}") if role == PLUGIN + "reviewer" else None,
             "tool_use_id": use.get("id"),
             "requests": len(t.requests) if t else 0,
             "contexts": t.contexts() if t else [],
@@ -539,25 +548,32 @@ def review_verdicts(t: Transcript | None, first_round: int) -> list:
     twice. A hand-back names its round; a full verdict doesn't, so the dispatch's round numbers
     the first verdict and each later one (the reviewer was continued) follows on."""
     out = []
+    # A reviewer that ends with SubagentHandback returns its verdict in the call, not in a text block;
+    # when it does, those messages are the verdicts and any text blocks are thinking aloud.
+    texts, handbacks = [], []
     for r in t.records if t else []:
         if r.get("type") != "assistant":
             continue
         for b in blocks(r):
-            text = b.get("text") or "" if b.get("type") == "text" else ""
-            m = VERDICT.search(text)
-            if not m:
-                continue
-            said = ROUND_LINE.search(text)
-            minor = re.search(r"^\W*non-blocking:\s*(\d+)", text, re.I | re.M)
-            blocking = re.search(r"^\W*blocking:\s*(\d+)", text, re.I | re.M)
-            out.append({
-                "round": int(said.group(1)) if said else first_round + len(out),
-                "verdict": m.group(1).lower(),
-                "blocking": int(blocking.group(1)) if blocking else text.count("[blocking]"),
-                "minor": int(minor.group(1)) if minor else text.count("[minor]"),
-                # A second verdict from the same agent means the orchestrator continued it.
-                "continued": bool(out),
-            })
+            if b.get("type") == "text":
+                texts.append(b.get("text") or "")
+            elif b.get("type") == "tool_use" and b.get("name") == "SubagentHandback":
+                handbacks.append(str((b.get("input") or {}).get("message") or ""))
+    for text in handbacks or texts:
+        m = VERDICT.search(text)
+        if not m:
+            continue
+        said = ROUND_LINE.search(text)
+        minor = re.search(r"^\W*non-blocking:\s*(\d+)", text, re.I | re.M)
+        blocking = re.search(r"^\W*blocking:\s*(\d+)", text, re.I | re.M)
+        out.append({
+            "round": int(said.group(1)) if said else first_round + len(out),
+            "verdict": m.group(1).lower(),
+            "blocking": int(blocking.group(1)) if blocking else text.count("[blocking]"),
+            "minor": int(minor.group(1)) if minor else text.count("[minor]"),
+            # A second verdict from the same agent means the orchestrator continued it.
+            "continued": bool(out),
+        })
     return out
 
 
@@ -570,7 +586,9 @@ def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
         if a["role"] != "reviewer":
             continue
         key = a.get("pr") or a["id"]
-        pr = by_pr.setdefault(key, {"pr": a.get("pr"), "ticket": a.get("ticket"), "verdicts": []})
+        pr = by_pr.setdefault(key, {"pr": a.get("pr"), "ticket": a.get("ticket"), "verdicts": [], "tier": None})
+        # The PR's tier is the first one a reviewer was dispatched at.
+        pr["tier"] = pr["tier"] or a.get("tier")
         # A second reviewer whose brief parses to a round already seen follows the highest one.
         seen = {v["round"] for v in pr["verdicts"]}
         first = a["round"] if a["round"] not in seen else max(seen) + 1
@@ -583,10 +601,12 @@ def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
         first = next((x for x in v if x["round"] == 1), None)
         rounds = {x["round"] for x in v}
         prs.append({
-            "pr": pr["pr"], "ticket": pr["ticket"], "worker_model": last_model.get(pr["ticket"]), "first_worker_model": first_model.get(pr["ticket"]),
+            "pr": pr["pr"], "ticket": pr["ticket"], "tier": pr["tier"], "worker_model": last_model.get(pr["ticket"]), "first_worker_model": first_model.get(pr["ticket"]),
             "rounds": len(rounds), "round1": first["verdict"] if first else None,
             "merged": pr["pr"] in merged_prs, "verdicts": v,
             # A round-1 approve with minors that merged with no second round: the minors rode along.
+            # A round-1 approve with nothing to take or leave: the "outright" approvals of the quality floor.
+            "round1_outright": bool(first and first["verdict"] == "approve" and not first["minor"]),
             "minors_merged_no_round2": bool(first and first["verdict"] == "approve" and first["minor"] and 2 not in rounds and pr["pr"] in merged_prs),
         })
     firsts = [p for p in prs if p["round1"]]
@@ -600,10 +620,38 @@ def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
         "round1_approvals": len(firsts) - changes,
         "round1_changes": changes,
         "round1_changes_rate": changes / len(firsts) if firsts else None,
+        "round1_outright": sum(1 for p in firsts if p["round1_outright"]),
+        "round1_outright_rate": sum(1 for p in firsts if p["round1_outright"]) / len(firsts) if firsts else None,
         "minors_merged_no_round2": sum(1 for p in prs if p["minors_merged_no_round2"]),
         "continued_rounds": sum(1 for x in later if x["continued"]),
         "fresh_rounds": sum(1 for x in later if not x["continued"]),
     }
+
+
+def tier_metrics(tickets: list, review: dict) -> dict:
+    """Per review tier: merged tickets and their $, and the round-1 and rounds figures of the tier's reviewed PRs.
+
+    `compare` reweights these by a baseline's tier mix, so a trial that happened to draw more L tickets isn't
+    judged cheaper or dearer for that alone. A ticket with no reviewer has no tier ("?")."""
+    out = {}
+
+    def tier(name):
+        return out.setdefault(name or "?", {"merged": 0, "cost": 0.0, "reviewed_prs": 0, "rounds": 0,
+                                            "round1": 0, "round1_changes": 0, "round1_outright": 0})
+    for tk in tickets:
+        if tk["outcome"] == "merged":
+            t = tier(tk["tier"])
+            t["merged"] += 1
+            t["cost"] += tk["cost"]["total"]
+    for p in review["prs"]:
+        t = tier(p["tier"])
+        t["reviewed_prs"] += 1
+        t["rounds"] += p["rounds"]
+        if p["round1"]:
+            t["round1"] += 1
+            t["round1_changes"] += p["round1"] == "changes"
+            t["round1_outright"] += p["round1_outright"]
+    return out
 
 
 def percentile(xs: list, q: float):
@@ -951,6 +999,9 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     limits = limit_events(main, agents, passes)
     review = review_metrics(agents, tickets, set(ticket_endings(main)[0]))
     depth2 = depth2_agents(main, agents)
+    pr_tier = {p["ticket"]: p["tier"] for p in review["prs"] if p["tier"]}
+    for tk in tickets:
+        tk["tier"] = pr_tier.get(tk["ticket"])
     events = read_events(repo, session, start, end)
     if events is not None:
         gates = [e for e in events if e.get("kind") == "gate"]
@@ -1020,7 +1071,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         ],
         "tickets": [
             {
-                "ticket": tk["ticket"], "pr": tk["pr"], "outcome": tk["outcome"], "slot": tk["slot"],
+                "ticket": tk["ticket"], "pr": tk["pr"], "tier": tk["tier"], "outcome": tk["outcome"], "slot": tk["slot"],
                 "start": iso(tk["start"]), "end": iso(tk["end"]), "building": interval(tk["building"]),
                 "tokens": tk["tokens"], "cost": tk["cost"], "worker_models": tk["worker_models"],
                 "gate_runs": tk["gate_runs"], "gate_failed": tk["gate_failed"],
@@ -1051,6 +1102,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "cost": cost,
             "meters": meters,
             "review": review,
+            "tiers": tier_metrics(tickets, review),
             "worker_models": worker_metrics(agents, tickets, review),
             "escalations": escalations(tickets),
             "depth2": depth2,
@@ -1161,9 +1213,185 @@ def cmd_record(argv: list) -> None:
         f.write(json.dumps(entry) + "\n")
 
 
+MIN_MERGED = 20  # a trial with fewer merged tickets is inconclusive
+MAX_L_SHARE_GAP = 25.0  # percentage points between the two sessions' L shares
+# The gating targets ($ per merged ticket) live in the spec (#27), not here: pass them with --max-cost
+# and --max-orchestrator-cost. The review-quality rows are judged against the baseline itself.
+
+
+def load_profile(path: Path) -> dict:
+    try:
+        p = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        sys.exit(f"profile compare: can't read {path}: {e}")
+    if not isinstance(p, dict) or p.get("schema", 0) < 2 or "tiers" not in p.get("metrics", {}):
+        sys.exit(f"profile compare: {path} has no per-tier figures; regenerate it with the current profile.py")
+    return p
+
+
+def _rate(num, den):
+    return num / den if den else None
+
+
+def figures(p: dict) -> dict:
+    """The headline figures `compare` sets side by side, from one profile."""
+    m = p["metrics"]
+    c, r, tiers = m["cost"], m["review"], m["tiers"]
+    merged = m["tickets_merged"]
+    # Tickets with no reviewer have no tier; they stay out of the L share.
+    tiered = sum(t["merged"] for k, t in tiers.items() if k != "?")
+    return {
+        "merged": merged,
+        "cost": c["per_merged_ticket"],
+        "orchestrator": c["per_merged_ticket_by_role"].get("orchestrator"),
+        "changes": r["round1_changes_rate"],
+        "outright": r["round1_outright_rate"],
+        "approvals": None if r["round1_changes_rate"] is None else 1 - r["round1_changes_rate"],
+        "rounds": r["rounds_per_pr"],
+        "l_share": _rate(tiers.get("L", {}).get("merged", 0), tiered),
+        "tiers": tiers,
+        # What the tier columns don't hold per merged ticket: the orchestrator, and agents on tickets that never merged.
+        "overhead": None if not merged else c["per_merged_ticket"] - sum(t["cost"] for t in tiers.values()) / merged,
+    }
+
+
+def mix_adjust(before: dict, after: dict) -> dict:
+    """The trial's figures as if it had drawn the baseline's tier mix.
+
+    Each tier's figure in the trial is weighted by the baseline's share of that tier, over the tiers the trial
+    has data for (weights renormalised). The orchestrator's $ isn't attributed to tiers, so it isn't adjusted."""
+    def weighted(field, weight, value):
+        tiers = [t for t in before["tiers"] if t in after["tiers"] and before["tiers"][t][weight] and after["tiers"][t][weight]]
+        total = sum(before["tiers"][t][weight] for t in tiers)
+        if not total:
+            return None
+        return sum(before["tiers"][t][weight] / total * value(after["tiers"][t]) for t in tiers)
+
+    cost = weighted("cost", "merged", lambda t: t["cost"] / t["merged"])
+    changes = weighted("changes", "round1", lambda t: t["round1_changes"] / t["round1"])
+    outright = weighted("outright", "round1", lambda t: t["round1_outright"] / t["round1"])
+    return {
+        "cost": None if cost is None or after["overhead"] is None else cost + after["overhead"],
+        "orchestrator": after["orchestrator"],
+        "changes": changes,
+        "outright": outright,
+        "approvals": None if changes is None else 1 - changes,
+        "rounds": weighted("rounds", "reviewed_prs", lambda t: t["rounds"] / t["reviewed_prs"]),
+    }
+
+
+def gating(base: dict, f: dict, max_cost, max_orch) -> dict:
+    """pass / fail per gating row for one set of figures; None when it can't be judged."""
+    def le(x, limit):
+        return None if x is None or limit is None else x <= limit + 1e-9
+
+    def ge(x, limit):
+        return None if x is None or limit is None else x >= limit - 1e-9
+    outright, approvals = ge(f["outright"], base["outright"]), ge(f["approvals"], base["approvals"])
+    return {
+        "cost": le(f["cost"], max_cost),
+        "orchestrator": le(f["orchestrator"], max_orch),
+        "changes": le(f["changes"], base["changes"]),
+        # Round-1 approvals: as many outright as the baseline, or as many counting approve-with-minors.
+        "approvals": None if outright is None and approvals is None else bool(outright or approvals),
+        "rounds": le(f["rounds"], base["rounds"]),
+    }
+
+
+ROWS = [
+    ("cost", "proxy $ per merged ticket", "usd", "max-cost"),
+    ("orchestrator", "orchestrator $ per merged ticket", "usd", "max-orchestrator-cost"),
+    ("changes", 'round-1 "changes" rate', "pct", None),
+    ("approvals", "round-1 approvals (counting minors)", "pct", None),
+    ("rounds", "rounds per PR", "num", None),
+]
+
+
+LABELS = {k: label for k, label, _, _ in ROWS}
+
+
+def compare(before: dict, after: dict, max_cost=None, max_orch=None) -> dict:
+    b, a = figures(before), figures(after)
+    adj = mix_adjust(b, a)
+    raw_verdict = gating(b, a, max_cost, max_orch)
+    adj_verdict = gating(b, {**a, **adj}, max_cost, max_orch)
+    flips = [k for k in raw_verdict if raw_verdict[k] is not None and adj_verdict[k] is not None and raw_verdict[k] != adj_verdict[k]]
+    inconclusive = []
+    if a["merged"] < MIN_MERGED:
+        inconclusive.append(f"only {a['merged']} merged tickets (needs {MIN_MERGED})")
+    if a["l_share"] is not None and b["l_share"] is not None and abs(a["l_share"] - b["l_share"]) * 100 > MAX_L_SHARE_GAP:
+        inconclusive.append(f"L share {a['l_share']:.0%} against the baseline's {b['l_share']:.0%} differs by more than {MAX_L_SHARE_GAP:.0f} points")
+    if flips:
+        inconclusive.append("the mix adjustment flips the verdict on " + ", ".join(LABELS[k] for k in flips))
+    return {"before": b, "after": a, "adjusted": adj, "raw_verdict": raw_verdict, "adjusted_verdict": adj_verdict,
+            "inconclusive": inconclusive}
+
+
+def _show(x, kind) -> str:
+    if x is None:
+        return "–"
+    return {"usd": fmt_usd, "pct": lambda v: f"{v:.0%}", "num": lambda v: f"{v:.2f}"}[kind](x)
+
+
+def _delta(b, a, kind) -> str:
+    if b is None or a is None:
+        return "–"
+    d = a - b
+    return {"usd": f"{'+' if d >= 0 else '-'}${abs(d):.2f}", "pct": f"{d * 100:+.0f} pts", "num": f"{d:+.2f}"}[kind]
+
+
+def _verdict(v) -> str:
+    return "n/a" if v is None else "pass" if v else "FAIL"
+
+
+def compare_report(before_name: str, after_name: str, r: dict) -> str:
+    b, a = r["before"], r["after"]
+    lines = [f"Compare · before {before_name} → after {after_name}",
+             f"{'':38}{'before':>10}{'after':>10}{'delta':>12}"]
+
+    def row(label, bv, av, kind):
+        lines.append(f"{label:38}{_show(bv, kind):>10}{_show(av, kind):>10}{_delta(bv, av, kind):>12}")
+    lines.append(f"{'merged tickets':38}{b['merged']:>10}{a['merged']:>10}{a['merged'] - b['merged']:>+12}")
+    for key, label, kind, _ in ROWS:
+        row(label, b[key], a[key], kind)
+    row("round-1 approvals (outright)", b["outright"], a["outright"], "pct")
+    row("L-tier share of merged tickets", b["l_share"], a["l_share"], "pct")
+    lines.append("per tier, merged tickets and $ per merged ticket (workers and reviewers):")
+    for t in sorted(set(b["tiers"]) | set(a["tiers"])):
+        cells = []
+        for f in (b, a):
+            x = f["tiers"].get(t)
+            cells.append((x["merged"], x["cost"] / x["merged"] if x["merged"] else None) if x else (0, None))
+        lines.append(f"  tier {t:<32}{cells[0][0]:>3} {_show(cells[0][1], 'usd'):>6}{cells[1][0]:>3} {_show(cells[1][1], 'usd'):>6}")
+    lines.append("gating, as measured and mixed-adjusted to the baseline's tier mix (the orchestrator's $ isn't attributed to tiers):")
+    for key, label, kind, flag in ROWS:
+        adj = r["adjusted"][key]
+        note = "" if flag is None or r["raw_verdict"][key] is not None else f" (pass --{flag} to judge)"
+        lines.append(f"  {label:36}{_show(a[key], kind):>8} {_verdict(r['raw_verdict'][key]):>5}  →{_show(adj, kind):>8} {_verdict(r['adjusted_verdict'][key]):>5}{note}")
+    if r["inconclusive"]:
+        lines.append("INCONCLUSIVE: " + "; ".join(r["inconclusive"]))
+    else:
+        judged = [v for v in r["raw_verdict"].values() if v is not None]
+        lines.append("conclusive: " + ("every judged gating row passes" if all(judged) else "a gating row fails"))
+    return "\n".join(lines)
+
+
+def cmd_compare(argv: list) -> None:
+    ap = argparse.ArgumentParser(prog="profile.py compare")
+    ap.add_argument("before", type=Path, help="the baseline profile JSON")
+    ap.add_argument("after", type=Path, help="the trial's profile JSON")
+    ap.add_argument("--max-cost", type=float, help="gating target: proxy $ per merged ticket (from the spec)")
+    ap.add_argument("--max-orchestrator-cost", type=float, help="gating target: orchestrator $ per merged ticket (from the spec)")
+    args = ap.parse_args(argv)
+    r = compare(load_profile(args.before), load_profile(args.after), args.max_cost, args.max_orchestrator_cost)
+    print(compare_report(args.before.name, args.after.name, r))
+
+
 def main(argv: list) -> None:
     if argv and argv[0] == "record":
         cmd_record(argv[1:])
+    elif argv and argv[0] == "compare":
+        cmd_compare(argv[1:])
     else:
         cmd_profile(argv)
 
