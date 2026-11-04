@@ -160,7 +160,8 @@ def _only_pr_lines(base_l, main_l, pr_l, result_l, merged_new, merged_pr):
         if tag in ("insert", "replace"):
             added.update(result_l[j1:j2])
     # Word-merged clusters produce new text, so their lines are allowed and their PR lines not required.
-    return not (added - pr_added - merged_new) and all(l in set(result_l) for l in pr_added if l not in merged_pr)
+    in_result = set(result_l)  # built once, not per PR line
+    return not (added - pr_added - merged_new) and all(l in in_result for l in pr_added if l not in merged_pr)
 
 
 # ---- git plumbing -------------------------------------------------------------------------------

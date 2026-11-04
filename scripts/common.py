@@ -25,6 +25,9 @@ EVENTS_LOG = "events.jsonl"
 EVENT_KINDS = ("gate", "ci", "merge", "replay")
 TAIL_LINES = 40  # failure tails
 LINE_WIDTH = 200  # one line per item, never wider
+PLUGIN = "orchestrate:"  # the prefix of every agent type the plugin ships (hooks/guard.py can't import this and keeps its own)
+WORKER = PLUGIN + "worker"
+TICKET = re.compile(r"#(\d+)")
 
 
 def config_section(repo, name: str) -> str | None:
@@ -169,3 +172,55 @@ def tail(text: str, n: int = TAIL_LINES) -> str:
     if len(lines) <= n:
         return "\n".join(lines)
     return "\n".join([f"... {len(lines) - n} earlier lines omitted"] + lines[-n:])
+
+
+def ticket_of(description) -> int | None:
+    """The ticket a dispatch description names: its first `#<n>` wins (the run skill recommends `Build #<ticket>`).
+
+    None when there is no `#<n>`. The one place this rule lives; profile.py and rebuild-state both ask it.
+    """
+    m = TICKET.search(str(description or ""))
+    return int(m.group(1)) if m else None
+
+
+def blocks(record) -> list:
+    """Content blocks of a conversation turn (a `user` or `assistant` record); [] for anything else.
+
+    Other record types (api-request-blob) echo earlier turns' blocks, so only conversation turns count.
+    """
+    if record.get("type") not in ("user", "assistant"):
+        return []
+    msg = record.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    return content if isinstance(content, list) else []
+
+
+def find_transcript(arg, projects_dir=None) -> Path | None:
+    """The transcript for a session: `arg` as a `.jsonl` path, else a session id under `<projects_dir>/*/`.
+
+    projects_dir defaults to the Claude config dir's `projects`. None when nothing matches; the caller
+    words its own error, since each script exits differently.
+    """
+    p = Path(arg).expanduser()
+    if p.suffix == ".jsonl" and p.is_file():
+        return p
+    root = Path(projects_dir).expanduser() if projects_dir else claude_dir() / "projects"
+    hits = sorted(root.glob(f"*/{arg}.jsonl"))
+    return hits[0] if hits else None
+
+
+def subagent_metas(main_path) -> dict:
+    """toolUseId -> (agent file stem, metadata) for every subagent the harness recorded beside a session transcript.
+
+    The stem is `agent-<id>`, which names the agent's own `<stem>.jsonl`. Unreadable or non-object
+    metadata files are skipped.
+    """
+    out = {}
+    for meta_path in (Path(main_path).with_suffix("") / "subagents").glob("*.meta.json"):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(meta, dict):
+            out[meta.get("toolUseId")] = (meta_path.name[: -len(".meta.json")], meta)
+    return out
