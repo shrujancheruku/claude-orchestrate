@@ -26,7 +26,12 @@ Tickets run in parallel only when their touch maps don't overlap outside the sha
 
 ## Shared files
 
-<Files many PRs touch, and the only change each PR may make in them. Name the status updates the orchestrator owns. Generated code counts: say how a worker regenerates it after a rebase, so it never merges generated files by hand.>
+A **shared file** is one many PRs edit. The `merge` script resolves collisions in the files listed here by replaying each PR's lines onto main, so nobody merges them by hand; a conflict in any other file is handed to the worker.
+
+- **Shared files:** one nested bullet per file (a path or glob in backticks), with the only change each PR may make in it.
+  - `<path>`: <per-PR rule, e.g. "add one line under Unreleased">
+- **Generated:** <globs of generated code, and the command that regenerates it | none>
+- **Orchestrator-owned edits:** <status updates only the orchestrator makes, e.g. "tick the roadmap box after merge" | none>
 
 ## PRs and merging
 

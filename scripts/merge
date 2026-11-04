@@ -10,7 +10,14 @@ left open (a --ticket the PR does not link is only reported); remove --worktree 
 have removed it), and append one `merge` event (ref = the PR number, outcome merged|timeout|closed,
 plus branch, branch_deleted, tickets). The merge passes --match-head-commit, so a push after
 review makes it a refusal (exit 1). Prints one line per step.
-Exit codes: 0 merged and cleaned up; 1 the merge was refused, or the PR was closed unmerged;
+After the cleanup it sweeps (see replay.py): each other open PR whose branch now conflicts with the
+default branch is updated and pushed, shared-file conflicts resolved by replay, one `replay` event per
+file and outcome (line-replay|word-merge|handed-back). The method decides how: squash and merge
+merge main into the branch (a plain push); rebase rebases it and pushes with --force-with-lease.
+A conflict the script can't resolve (a file that isn't shared, or overlapping words) aborts that
+branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
+Exit codes: 0 merged and cleaned up; 4 the same, but a swept branch was handed back (resume its worker
+with the printed conflict list); 1 the merge was refused, or the PR was closed unmerged;
 2 the script could not run (`gh` cannot read the PR); 3 still not MERGED at the timeout (run it
 again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
@@ -26,6 +33,7 @@ import time
 import urllib.parse
 
 import common
+import replay
 
 # "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
 IN_PROGRESS = re.compile(r"already in progress|already merged", re.I)
@@ -199,7 +207,54 @@ def main(argv=None) -> int:
 
     common.append_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
                         tickets=[int(t) for t in tickets if t.isdigit()])
-    return 0
+    return 4 if sweep(cwd, pr, branch, default, args.method) else 0
+
+
+def sweep(cwd, merged_pr, merged_branch, default, method):
+    """Update every other open PR on the default branch that now conflicts. True if any was handed back.
+
+    A branch that is merely behind is left alone. Fork branches can't be pushed to and are skipped.
+    """
+    if default is None:
+        say("sweep skipped: the default branch is unknown")
+        return False
+    patterns = replay.shared_patterns(common.config_section(cwd, "Shared files"))
+    p = run("gh", "pr", "list", "--state", "open", "--base", default, "--json",
+            "number,headRefName,isCrossRepository", cwd=cwd)
+    try:
+        prs = json.loads(p.stdout) if p.returncode == 0 else None
+    except ValueError:
+        prs = None
+    if prs is None:
+        say(f"sweep skipped: could not list open PRs ({common.one_line(p.stderr)})")
+        return False
+    replay.git(cwd, "fetch", "--prune", "origin")
+    handed = False
+    for r in prs:
+        n, b = r.get("number"), r.get("headRefName") or ""
+        if str(n) == str(merged_pr) or b == merged_branch or not b or b in PROTECTED or b == default \
+                or r.get("isCrossRepository"):
+            continue
+        state = replay.conflicts_with(cwd, default, b)
+        if state is None:
+            say(f"sweep: PR #{n} {b}: could not check for conflicts; left alone")
+            continue
+        if not state:
+            continue
+        try:
+            status, conflicts, events = replay.update_branch(cwd, default, b, method, patterns)
+        except Exception as e:  # the PR is already merged: one branch's failure must not lose the exit code
+            status, conflicts, events = "handed-back", [("(sweep)", f"{type(e).__name__}: {common.one_line(e)}")], []
+        for path, outcome in events:
+            common.append_event(cwd, "replay", outcome, ref=n, branch=b, file=path)
+        if status == "updated":
+            say(f"sweep: PR #{n} {b} updated" + (" (force-with-lease)" if method == "rebase" else ""))
+            continue
+        handed = True
+        say(f"sweep: PR #{n} {b} NOT updated")
+        for path, why in conflicts:
+            say(f"HANDBACK PR #{n} {b}: {path} ({why})")
+    return handed
 
 
 if __name__ == "__main__":
