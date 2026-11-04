@@ -271,7 +271,7 @@ def build_tickets(agents: list, main: Transcript, end: datetime) -> list:
     pr_to_ticket = {tk["pr"]: n for n, tk in tickets.items() if tk["pr"]}
     for a in agents:
         if a["role"] != "worker":
-            m = re.search(r"PR #(\d+)", a["description"]) or re.search(r"#(\d+)", a["description"])
+            m = re.search(r"\bPR #?(\d+)", a["description"]) or re.search(r"#(\d+)", a["description"])
             if m:
                 a["pr"] = int(m.group(1))
                 a["ticket"] = pr_to_ticket.get(a["pr"])
