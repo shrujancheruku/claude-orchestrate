@@ -129,11 +129,6 @@ READ_ONLY = [
 RULES = {
     "scout": READ_ONLY,
     "reviewer": READ_ONLY,
-    "mechanic": [
-        (git_write(GIT_WRITES), "changes git state (the worker stages and commits)"),
-        (GH_WRITE, "writes to the git host"),
-        (GH_API_WRITE, "writes through the GitHub API"),
-    ],
     "worker": [
         (GH_MERGE, "merges a PR (merging belongs to the orchestrator)"),
         (FORCE_PUSH, "force-pushes"),
@@ -144,7 +139,6 @@ RULES = {
 NEXT_STEP = {
     "scout": "Report what you found and let your caller act on it.",
     "reviewer": "Read code with `gh pr diff` or `git show <ref>:<path>` and put the change in your findings.",
-    "mechanic": "Leave staging and committing to the worker; report the files you changed.",
     "worker": "Push your own branch normally and report the PR; the orchestrator merges.",
 }
 

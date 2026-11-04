@@ -1,12 +1,10 @@
 # orchestrate
 
-A Claude Code plugin that works through a backlog of GitHub issues in parallel, picking up the tickets that [Matt Pocock's skills](https://github.com/mattpocock/skills) (`to-tickets`, `to-spec`, `triage`) leave `ready-for-agent`. Your main session acts as the **orchestrator**: it decides the order of work, hands each ticket to a **worker** in its own git worktree, pushes searches and mechanical edits down to cheaper agents, reviews each PR at a depth sized to it, and merges by your repo's rule. Anything that is yours to decide waits for you.
+A Claude Code plugin that works through a backlog of GitHub issues in parallel, picking up the tickets that [Matt Pocock's skills](https://github.com/mattpocock/skills) (`to-tickets`, `to-spec`, `triage`) leave `ready-for-agent`. Your main session acts as the **orchestrator**: it decides the order of work, hands each ticket to a **worker** in its own git worktree, pushes searches down to a cheaper agent, reviews each PR at a depth sized to it, and merges by your repo's rule. Anything that is yours to decide waits for you.
 
 ```
 orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gates
  ├─ worker        Sonnet, own worktree      one ticket → one PR
- │   ├─ scout     Haiku, read-only          searches, callers, CI logs
- │   └─ mechanic  Haiku                     mechanical edits in the worker's worktree
  ├─ reviewer      Haiku (S) / Sonnet (M, L high effort) one PR against its ticket, read-only, posts its review
  └─ scout         Haiku, read-only          tracker, CI and pre-merge checks
 ```
@@ -62,7 +60,6 @@ Every full pass suggests a change of one slot, between 1 and 5: lower after a us
 | Role | Refused |
 |---|---|
 | scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. The reviewer may post one comment review on a PR (`gh api .../reviews` or `gh pr review --comment`, after an optional plain `cd <path> &&`), in the shapes `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
-| mechanic | git writes (staging and commits are the worker's), `gh` writes |
 | worker | `gh pr merge`, `scripts/merge`, force-pushes, pushes to `main`/`master` |
 
 Every role also refuses `scripts/merge` (the orchestrator's merge script, which re-checks the PR until it is MERGED, then deletes the branch, closes the ticket and removes the worktree), run as a command.
