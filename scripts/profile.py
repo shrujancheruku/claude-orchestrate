@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -230,6 +231,15 @@ class Transcript:
                 if LIMIT_TEXT.search(text):
                     yield parse_ts(r.get("timestamp")), text[:200]
 
+    def contexts(self) -> list:
+        """The prompt size of each API request: input plus cache reads and writes."""
+        return [(u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
+                + (u.get("cache_creation_input_tokens") or 0) for _, u in self.requests.values()]
+
+    def tool_output_tokens(self) -> int:
+        """Tokens the tools handed back, estimated at 4 characters each: the transcript holds text, not counts."""
+        return sum(len(text) for text in self.tool_results().values()) // 4
+
     def compactions(self) -> int:
         return sum(1 for r in self.records if r.get("type") == "system" and r.get("subtype") == "compact_boundary")
 
@@ -280,16 +290,22 @@ def clip(intervals, start, end) -> list:
     return [[max(s, start), min(e, end)] for s, e in intervals if e > start and s < end]
 
 
-def collect_agents(main: Transcript) -> list:
-    """Every orchestrate agent the session dispatched, joined to its own transcript."""
-    sub = main.path.with_suffix("") / "subagents"
+def subagent_metas(main: Transcript) -> dict:
+    """toolUseId -> (agent file stem, metadata) for every subagent the harness recorded for the session."""
     by_tool_use = {}
-    for meta_path in sub.glob("*.meta.json"):
+    for meta_path in (main.path.with_suffix("") / "subagents").glob("*.meta.json"):
         try:
             meta = json.loads(meta_path.read_text())
         except ValueError:
             continue
         by_tool_use[meta.get("toolUseId")] = (meta_path.name[: -len(".meta.json")], meta)
+    return by_tool_use
+
+
+def collect_agents(main: Transcript) -> list:
+    """Every orchestrate agent the session dispatched, joined to its own transcript."""
+    sub = main.path.with_suffix("") / "subagents"
+    by_tool_use = subagent_metas(main)
     agents = []
     for ts, use in main.tool_uses("Agent"):
         inp = use.get("input") or {}
@@ -299,11 +315,18 @@ def collect_agents(main: Transcript) -> list:
         name, meta = by_tool_use.get(use.get("id"), (None, {}))
         t = Transcript(sub / f"{name}.jsonl") if name else None
         desc = inp.get("description") or meta.get("description") or ""
+        asked = re.search(r"\bround[:\s#]*(\d+)", f"{desc} {inp.get('prompt') or ''}", re.I)
         agents.append({
             "id": name[len("agent-"):] if name and name.startswith("agent-") else name,
             "role": role[len(PLUGIN):],
-            "model": (t.models[0] if t and t.models else None) or inp.get("model") or meta.get("model"),
+            # The metadata names the agent's model; the transcript and the dispatch are fallbacks.
+            "model": meta.get("model") or (t.models[0] if t and t.models else None) or inp.get("model"),
             "description": desc,
+            "round": int(asked.group(1)) if asked else 1,  # the review round a reviewer was dispatched for
+            "tool_use_id": use.get("id"),
+            "requests": len(t.requests) if t else 0,
+            "contexts": t.contexts() if t else [],
+            "tool_output_tokens": t.tool_output_tokens() if t else 0,
             "dispatched": ts,
             "segments": t.segments() if t else [],
             "tokens": t.tokens if t else {v: 0 for v in TOKEN_KEYS.values()},
@@ -379,7 +402,7 @@ def build_tickets(agents: list, main: Transcript, end: datetime) -> list:
             "ticket": n,
             "cost": cost,
             # Worker models in dispatch order: Haiku then Sonnet is an escalation.
-            "worker_models": [model_family(w["model"]) or w["model"] for w in tk["workers"]],
+            "worker_models": [worker_model_name(w["model"]) for w in tk["workers"]],
             # Filled once events.jsonl is read (a later ticket).
             "gate_runs": None,
             "pr": tk["pr"],
@@ -461,6 +484,157 @@ def cost_metrics(orch: Transcript, agents: list, merged: int) -> dict:
     }
 
 
+VERDICT = re.compile(r"^\W*verdict:\s*(approve|changes)\b", re.I | re.M)
+ROUND_LINE = re.compile(r"^\W*round:\s*(\d+)", re.I | re.M)
+
+
+def review_verdicts(t: Transcript | None, first_round: int) -> list:
+    """The verdicts a reviewer returned, in order, whether it posted (short hand-back) or not (full block).
+
+    Only the reviewer's own text counts, not the commands it ran, so a posted review isn't counted
+    twice. A hand-back names its round; a full verdict doesn't, so the dispatch's round numbers
+    the first verdict and each later one (the reviewer was continued) follows on."""
+    out = []
+    for r in t.records if t else []:
+        if r.get("type") != "assistant":
+            continue
+        for b in blocks(r):
+            text = b.get("text") or "" if b.get("type") == "text" else ""
+            m = VERDICT.search(text)
+            if not m:
+                continue
+            said = ROUND_LINE.search(text)
+            minor = re.search(r"^\W*non-blocking:\s*(\d+)", text, re.I | re.M)
+            blocking = re.search(r"^\W*blocking:\s*(\d+)", text, re.I | re.M)
+            out.append({
+                "round": int(said.group(1)) if said else first_round + len(out),
+                "verdict": m.group(1).lower(),
+                "blocking": int(blocking.group(1)) if blocking else text.count("[blocking]"),
+                "minor": int(minor.group(1)) if minor else text.count("[minor]"),
+                # A second verdict from the same agent means the orchestrator continued it.
+                "continued": bool(out),
+            })
+    return out
+
+
+def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
+    """The review quality floor, from reviewer transcripts alone (so it holds with posting on or off)."""
+    last_model = {tk["ticket"]: tk["worker_models"][-1] for tk in tickets if tk["worker_models"]}
+    by_pr = {}
+    for a in agents:
+        if a["role"] != "reviewer":
+            continue
+        key = a.get("pr") or a["id"]
+        pr = by_pr.setdefault(key, {"pr": a.get("pr"), "ticket": a.get("ticket"), "verdicts": []})
+        pr["verdicts"] += review_verdicts(a["transcript"], a["round"])
+    prs = []
+    for pr in by_pr.values():
+        v = sorted(pr["verdicts"], key=lambda x: x["round"])
+        if not v:
+            continue
+        first = next((x for x in v if x["round"] == 1), None)
+        rounds = {x["round"] for x in v}
+        prs.append({
+            "pr": pr["pr"], "ticket": pr["ticket"], "worker_model": last_model.get(pr["ticket"]),
+            "rounds": len(rounds), "round1": first["verdict"] if first else None,
+            "merged": pr["pr"] in merged_prs, "verdicts": v,
+            # A round-1 approve with minors that merged with no second round: the minors rode along.
+            "minors_merged_no_round2": bool(first and first["verdict"] == "approve" and first["minor"] and 2 not in rounds and pr["pr"] in merged_prs),
+        })
+    firsts = [p for p in prs if p["round1"]]
+    changes = sum(1 for p in firsts if p["round1"] == "changes")
+    later = [x for p in prs for x in p["verdicts"] if x["round"] >= 2]
+    return {
+        "prs": prs,
+        "reviewed_prs": len(prs),
+        "rounds_total": sum(p["rounds"] for p in prs),
+        "rounds_per_pr": sum(p["rounds"] for p in prs) / len(prs) if prs else None,
+        "round1_approvals": len(firsts) - changes,
+        "round1_changes": changes,
+        "round1_changes_rate": changes / len(firsts) if firsts else None,
+        "minors_merged_no_round2": sum(1 for p in prs if p["minors_merged_no_round2"]),
+        "continued_rounds": sum(1 for x in later if x["continued"]),
+        "fresh_rounds": sum(1 for x in later if not x["continued"]),
+    }
+
+
+def percentile(xs: list, q: float):
+    """Nearest-rank percentile; None for no data."""
+    xs = sorted(xs)
+    return xs[max(-(-len(xs) * q // 100) - 1, 0)] if xs else None
+
+
+def worker_model_name(model) -> str:
+    return model_family(model) or (re.search(r"opus|sonnet|haiku|fable|mythos", (model or "").lower()) or [model or "unknown"])[0]
+
+
+def worker_metrics(agents: list, tickets: list, review: dict) -> dict:
+    """Workers split by model: usage, requests, context and tool output, then reviews by the model that finished the ticket."""
+    out = {}
+    for a in agents:
+        if a["role"] != "worker":
+            continue
+        m = out.setdefault(worker_model_name(a["model"]), {
+            "workers": 0, "tokens": 0, "cost": 0.0, "requests": [], "contexts": [], "tool_output_tokens": []})
+        m["workers"] += 1
+        m["tokens"] += sum(a["tokens"].values())
+        m["cost"] += sum(a["cost"].values())
+        m["requests"].append(a["requests"])
+        m["contexts"] += a["contexts"]
+        m["tool_output_tokens"].append(a["tool_output_tokens"])
+    for tk in tickets:
+        if tk["worker_models"]:
+            m = out[tk["worker_models"][-1]]
+            m["tickets"] = m.get("tickets", 0) + 1
+    result = {}
+    for name, m in out.items():
+        mine = [p for p in review["prs"] if p["worker_model"] == name]
+        firsts = [p for p in mine if p["round1"]]
+        result[name] = {
+            "workers": m["workers"], "tickets": m.get("tickets", 0), "tokens": m["tokens"], "cost": m["cost"],
+            "requests": sum(m["requests"]), "requests_median": statistics.median(m["requests"]),
+            "context_median": statistics.median(m["contexts"]) if m["contexts"] else None,
+            "context_p90": percentile(m["contexts"], 90),
+            "tool_output_tokens": sum(m["tool_output_tokens"]),
+            "tool_output_tokens_median": statistics.median(m["tool_output_tokens"]),
+            "reviewed_prs": len(mine), "rounds": sum(p["rounds"] for p in mine),
+            "round1_approvals": sum(1 for p in firsts if p["round1"] == "approve"),
+            "round1_changes": sum(1 for p in firsts if p["round1"] == "changes"),
+        }
+    return result
+
+
+def escalations(tickets: list) -> dict:
+    """Tickets whose first worker ran Haiku and a later one ran something stronger."""
+    hit = [tk["ticket"] for tk in tickets if "haiku" in tk["worker_models"] and tk["worker_models"][-1] != "haiku"]
+    return {"count": len(hit), "tickets": hit}
+
+
+def depth2_agents(main: Transcript, agents: list) -> list:
+    """Agents a dispatched agent spawned itself, joined to the spawning agent by toolUseId.
+
+    Plugin agents have no Agent tool, so any hit is a defect. A spawn call with no recorded
+    subagent is still listed: it was tried."""
+    metas = subagent_metas(main)
+    sub = main.path.with_suffix("") / "subagents"
+    out = []
+    for a in agents:
+        if not a["transcript"]:
+            continue
+        for _, use in a["transcript"].tool_uses("Agent"):
+            name, meta = metas.get(use.get("id"), (None, {}))
+            t = Transcript(sub / f"{name}.jsonl") if name else None
+            inp = use.get("input") or {}
+            out.append({
+                "parent": a["id"], "parent_role": a["role"], "ticket": a.get("ticket"),
+                "tool_use_id": use.get("id"), "agent": name[len("agent-"):] if name and name.startswith("agent-") else name,
+                "subagent_type": inp.get("subagent_type") or meta.get("agentType"),
+                "description": inp.get("description") or "",
+                "tokens": sum(t.tokens.values()) if t else 0, "cost": sum(t.cost().values()) if t else 0.0,
+            })
+    return out
+
+
 def windows(usage: list, passes: list, threshold: float, now: datetime) -> list:
     """Each 5-hour window the samples saw: its peak, and whether it reset with room left under pressure."""
     by_reset = {}
@@ -539,6 +713,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     usage = read_usage(start, end)
     wins = windows(usage, passes, threshold, now)
     limits = limit_events(main, agents, passes)
+    review = review_metrics(agents, tickets, set(ticket_endings(main)[0]))
+    depth2 = depth2_agents(main, agents)
     idle_total = max(slots * span - occupied, 0.0)
     idle = idle_reasons(passes, end)
     idle["unknown"] = max(idle_total - sum(idle.values()), 0.0)
@@ -566,6 +742,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         warnings.append("no price for model(s) " + ", ".join(cost["unpriced_models"]) + ": their cost counts as $0")
     if cost["approximate_models"]:
         warnings.append("version not in PRICES for " + ", ".join(cost["approximate_models"]) + ": priced at the nearest older version's rates")
+    if depth2:
+        warnings.append(f"{len(depth2)} agent(s) spawned by another agent (depth 2): plugin agents must not delegate further")
     meters = {}
     for key in ("five_hour", "seven_day"):
         used = meter_use(usage, key)
@@ -593,6 +771,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
                 "id": a["id"], "role": a["role"], "model": a["model"], "description": a["description"],
                 "ticket": a.get("ticket"), "pr": a.get("pr"), "dispatched": iso(a["dispatched"]),
                 "segments": interval(a["segments"]), "tokens": a["tokens"], "cost": a["cost"],
+                "requests": a["requests"], "context_median": statistics.median(a["contexts"]) if a["contexts"] else None,
+                "tool_output_tokens": a["tool_output_tokens"], "round": a["round"] if a["role"] == "reviewer" else None,
             }
             for a in agents
         ],
@@ -628,6 +808,10 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "limit_hits": len(limits),
             "cost": cost,
             "meters": meters,
+            "review": review,
+            "worker_models": worker_metrics(agents, tickets, review),
+            "escalations": escalations(tickets),
+            "depth2": depth2,
         },
         "recommendation": recommend(slots, occupancy, wins, limits),
     }
