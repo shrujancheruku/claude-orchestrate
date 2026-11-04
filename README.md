@@ -153,15 +153,9 @@ Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 - `1` a verdict: a check failed, or the action was refused (a worker is sent the output).
 - `2` could not run: a missing tool (`gh`, `git`), bad input or a missing directory, or output the script could not read. Nothing about the code under test was decided; fix the environment and run it again.
 
-A script may add its own codes above 2 for a specific state (`gate` 3 and `merge` 3/4 are documented in their docstrings). `common.run` reports a missing binary as code 127 instead of raising, and `gate`, `merge`, `watch-ci` and `verify` turn that into 2. `profile.py` (a standalone script) still exits 1 for unreadable input. Commands run by `verify` and `gate` get `--timeout` seconds (default 1800); one that outlives it is killed with its process group and fails with "timed out after Ns".
+A script may add its own codes above 2 for a specific state (`gate` 3 and `merge` 3/4 are documented in their docstrings). `common.run` reports a missing binary as code 127 instead of raising, and `gate`, `merge`, `watch-ci` and `verify` turn that into 2. `profile.py` still exits 1 for unreadable input. Commands run by `verify` and `gate` get `--timeout` seconds (default 1800); one that outlives it is killed with its process group and fails with "timed out after Ns".
 
-**How scripts under `scripts/` are found and run.** One rule, checked by `tests/test_invocation.py`:
-
-- **Found:** a skill uses `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`. An agent never relies on `${CLAUDE_PLUGIN_ROOT}` (it may be unset for subagents); the brief hands it the absolute path.
-- **A CLI is an executable without an extension** (`gate`, `merge`, `verify`, ...) with a `#!/usr/bin/env python3` shebang, run by path with no interpreter and no `-I`. It may import siblings (`common`, `checks`, `replay`): running a script by path puts its own directory first on `sys.path`, and `-I` would remove it. The current directory is not added, so a repo's own `common.py` cannot shadow the plugin's, so no repo Python is imported; the commands they run are the config's, by design. CLIs don't use `-I`, so they trust the caller's `PYTHON*` environment.
-- **Hooks follow the same rule.** `hooks/hooks.json` runs `guard.py` as `python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/guard.py"`, which is the standalone case.
-- **A `.py` file is a library or a standalone script.** A library (`common.py`, `checks.py`, `replay.py`) is only imported. A standalone script (`profile.py`) runs as `python3 -I <path>`, which leaves its own directory off `sys.path`, so it appends that directory itself to import `common` (appended, never inserted, so the stdlib `profile` module is not shadowed).
-- Never work around a failed import with `PYTHONPATH`; fix the script's kind per the rules above.
+**How scripts under `scripts/` are found and run:** see [ADR-0003](docs/adr/0003-script-invocation.md), checked by `tests/test_invocation.py`.
 
 **Guard regression corpus.** `tests/fixtures/guard-corpus.jsonl` holds every distinct Bash call the plugin's subagents made in real sessions, one `{role, command, expected}` line each, and `tests/test_guard_corpus.py` runs `hooks/guard.py` over all of them, so a guard change that flips a decision shows up in the PR diff of the corpus. To add sessions (rerunnable, no duplicates, existing labels untouched), run the CLI from the repo root:
 
