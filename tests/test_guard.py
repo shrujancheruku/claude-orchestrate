@@ -36,6 +36,9 @@ CASES = [
     ("orchestrate:mechanic", "gh pr view 12", "allow"),
     ("other-plugin:worker", "git push --force", "allow"),
     ("", "git push --force", "allow"),
+    (" orchestrate:worker", "git push --force", "deny"),
+    ("ORCHESTRATE:worker", "git push --force", "deny"),
+    ("orchestrate:Worker", "touch x", "deny"),  # role is exact: unknown, so read-only
     ("orchestrate:scout", "git log --oneline -5 && git diff main...HEAD", "allow"),
     ("orchestrate:scout", "git -C ../repo status", "allow"),
     ("orchestrate:scout", "gh pr checks 12 2>&1 | tail -5", "allow"),
@@ -404,9 +407,16 @@ class GuardTest(unittest.TestCase):
         for payload in ([1], "x", 3, None, {"agent_type": "orchestrate:scout", "tool_input": "rm x"},
                         {"agent_type": "orchestrate:scout", "tool_input": [1]},
                         {"agent_type": ["orchestrate:scout"], "tool_input": {"command": "rm x"}},
-                        {"agent_type": "orchestrate:scout", "tool_input": {"command": 5}}):
+                        {"agent_type": "orchestrate:scout", "tool_input": {}}):
             with self.subTest(payload=payload):
                 self.assertIsNone(self.run_guard(payload))
+
+    def test_non_string_command_from_our_agent_is_denied(self):
+        for command in (["rm", "x"], 5, {"a": 1}):
+            with self.subTest(command=command):
+                reason = self.run_guard({"agent_type": "orchestrate:scout", "tool_input": {"command": command}})
+                self.assertIn("couldn't parse or check", reason)
+        self.assertIsNone(self.run_guard({"agent_type": "other:x", "tool_input": {"command": 5}}))
 
     def test_reviewer_worktree_inside_main_repo_from_a_linked_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:

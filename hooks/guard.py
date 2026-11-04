@@ -788,7 +788,7 @@ def role_of(agent_type: str) -> str | None:
     A role with no rule set (retired, from another version, a typo) is still returned: it is
     ours, so verdict() holds it to the read-only rules rather than letting it run unguarded."""
     plugin, _, role = agent_type.partition(":")
-    if plugin == PLUGIN:
+    if plugin.strip().lower() == PLUGIN:  # the role part stays exact
         return role
     return None
 
@@ -959,11 +959,11 @@ def main() -> None:
     tool_input = data.get("tool_input")
     role = role_of(agent_type if isinstance(agent_type, str) else "")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        command = ""
-    if role is None or not command:
+    if role is None or command is None or command == "":
         return
     try:
+        if not isinstance(command, str):
+            raise TypeError("command is not a string")
         reason = verdict(role, command, data.get("cwd") or "")
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
