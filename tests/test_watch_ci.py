@@ -14,7 +14,11 @@ with open(state + ".calls", "a") as f:
 seq = json.load(open(state + ".seq"))
 n = sum(1 for l in open(state + ".calls") if json.loads(l)[:3] == args[:3]) - 1
 steps = seq[args[2]]
-print(json.dumps(steps[min(n, len(steps) - 1)]))
+step = steps[min(n, len(steps) - 1)]
+if step == "GH_ERROR":
+    sys.stderr.write("HTTP 502: bad gateway\\n")
+    sys.exit(1)
+print(json.dumps(step))
 '''
 
 
@@ -65,6 +69,31 @@ class WatchCi(unittest.TestCase):
         v = {"statusCheckRollup": [{"state": "ERROR"}], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
         self.seq({"8": [v]})
         self.assertEqual(self.watch("8").stdout.splitlines(), ["PR #8 fail CLEAN abc1234"])
+
+    def test_merged_settles_as_pass_and_closed_as_fail(self):
+        self.seq({"4": [view(None, state="MERGED", head="4444444aaa")],
+                  "5": [view(None, state="CLOSED", merge="DIRTY", head="5555555bbb")]})
+        out = self.watch("4", "5").stdout.splitlines()
+        self.assertEqual(out, ["PR #4 pass CLEAN 4444444", "PR #5 fail DIRTY 5555555"])
+        self.assertEqual([(e["ref"], e["outcome"]) for e in self.env.events()], [(4, "pass"), (5, "fail")])
+
+    def test_gh_error_is_retried(self):
+        self.seq({"6": ["GH_ERROR", "GH_ERROR", view("SUCCESS", head="6666666ccc")]})
+        r = self.watch("6")
+        self.assertEqual(r.stdout.splitlines(), ["PR #6 pass CLEAN 6666666"])
+        self.assertIn("gh failed for #6", r.stderr)
+        self.assertEqual(len(self.env.gh_calls()), 3)
+
+    def test_unwritable_event_log_still_prints_every_line(self):
+        # A file where the profiles directory should be makes append_event raise OSError.
+        claude = self.env.repo / ".claude"
+        claude.mkdir(exist_ok=True)
+        (claude / "orchestrate-profiles").write_text("not a directory")
+        self.seq({"1": [view("SUCCESS", head="1111111aaa")], "2": [view("FAILURE", head="2222222bbb")]})
+        r = self.watch("1", "2")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.splitlines(), ["PR #1 pass CLEAN 1111111", "PR #2 fail CLEAN 2222222"])
+        self.assertIn("could not write event", r.stderr)
 
 
 if __name__ == "__main__":
