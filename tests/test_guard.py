@@ -60,6 +60,8 @@ CASES = [
     ("orchestrate:worker", "git push -u origin api/162-reasons", "allow"),
     ("orchestrate:worker", "gh pr create --title x --body y", "allow"),
     ("orchestrate:worker", "make lint test > /tmp/out.txt", "allow"),
+    ("orchestrate:worker", 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/verify" "make lint" --then "make test"', "allow"),
+    ("orchestrate:worker", "python3 /plugins/orchestrate/scripts/verify --cwd . 'python3 -m unittest discover tests'", "allow"),
     ("orchestrate:worker", "gh pr merge 12 --squash", "deny"),
     ("orchestrate:worker", "git push --force-with-lease", "deny"),
     ("orchestrate:worker", "git push -f origin x", "deny"),
