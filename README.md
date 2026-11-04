@@ -28,7 +28,7 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook. Ru
 2. **`/orchestrate:run`** runs one **pass**. It rebuilds state from the tracker, reviews and merges finished PRs, fills free slots with workers, and reports a table of tickets. Passes are safe to repeat and to start in a fresh session, because the state lives in the tracker, not in the conversation.
    - `/orchestrate:run status` reports without dispatching or merging.
    - `/orchestrate:run <ticket>` narrows a pass to one ticket; `/orchestrate:run <parent issue>` to its sub-issues.
-   - `/loop /orchestrate:run` keeps going: worker completions wake the orchestrator, and it schedules its own checks on CI.
+   - Plain `/orchestrate:run` is the only supported flow. After its pass the orchestrator ends its turn and wakes only on worker and reviewer completions, on `watch-ci` lines (CI settling) and on its own usage-limit cron hops. It reads the config and tracker docs once per session, and again after a compaction summary, keeps every command's output bounded, and ends a wake with one line, or nothing when nothing needs you. It shows the full table only when a pass ends or something needs you, and a pass that ends with nothing in flight says so and stops.
    - Add `--profile` to any of these to profile the session as it runs: see [Profiling](#profiling).
 
 ### Concepts
@@ -84,11 +84,13 @@ Every agent draws on your plan, so a usage limit tends to stop several workers a
 - Workers push after every commit whose checks pass, so little is lost.
 - `.claude/orchestrate-state.json` (gitignored) remembers each ticket's worker, worktree, model and last report between passes. `scripts/rebuild-state` rebuilds it from the session's transcripts at the start of each pass, joining workers to tickets by the `#<ticket>` in their dispatch description (`Build #<ticket>`); the orchestrator never writes it. The tracker stays the source of truth.
 
-For unattended `/loop /orchestrate:run`, turn on **Continue automatically at usage limit** in `/config` (`autoContinueAtUsageLimit`). Without it, a loop whose own turn hits the limit ends after one retry about 20 minutes later; restart it with `/loop /orchestrate:run` and the next pass picks up where things stopped. A fallback model doesn't help: rate-limit errors never trigger one, and the orchestrator never switches models on its own.
+While a limit holds and the orchestrator can still run, it schedules a one-shot cron at the reset time, in hops of at most 60 minutes; each hop runs a `status` pass. These cron jobs are session-only and fire only while the REPL is idle.
+
+For unattended runs, turn on **Continue automatically at usage limit** in `/config` (`autoContinueAtUsageLimit`). Without it, a session whose own turn hits the limit ends after one retry about 20 minutes later; run `/orchestrate:run` again and the pass picks up where things stopped. A fallback model doesn't help: rate-limit errors never trigger one, and the orchestrator never switches models on its own.
 
 ## Profiling
 
-`/orchestrate:run --profile` (or `/loop /orchestrate:run --profile`) runs normal passes, and at the end of each one records the pass and saves a profile of the session so far:
+`/orchestrate:run --profile` runs normal passes, and at the end of each one records the pass and saves a profile of the session so far:
 
 ```
 Profile · session 346d1ea2 · 2026-11-03T16:01Z → 2026-11-03T16:22Z (21m) · 2 slots
@@ -118,7 +120,7 @@ A profile prints the span it covers and warns when a transcript has records late
 Any past session can be profiled after the fact, without `--profile`, by its ID or transcript path:
 
 ```sh
-python3 scripts/profile.py <session id> [--repo PATH] [--slots N] [--threshold 50]
+python3 -I ~/.claude/plugins/cache/claude-orchestrate/orchestrate/<version>/scripts/profile.py <session id> [--repo PATH] [--slots N] [--threshold 50]
 ```
 
 Without a pass log, idle reasons and whether slots were full with work waiting show as unknown.
@@ -126,10 +128,19 @@ Without a pass log, idle reasons and whether slots were full with work waiting s
 To judge a trial against a baseline, profile both sessions with the same version of the script, then:
 
 ```sh
-python3 scripts/profile.py compare <baseline.json> <trial.json> [--max-cost USD] [--max-orchestrator-cost USD]
+python3 -I ~/.claude/plugins/cache/claude-orchestrate/orchestrate/<version>/scripts/profile.py compare <baseline.json> <trial.json> [--max-cost USD] [--max-orchestrator-cost USD]
 ```
 
 It prints the headline figures side by side with deltas (merged tickets, proxy $ and orchestrator $ per merged ticket, the round-1 "changes" rate, outright and with-minors round-1 approvals, rounds per PR), the L-tier share and each tier's $ per merged ticket (a PR's tier is the one its first reviewer was dispatched at). A second table gives the gating figures as measured and again mix-adjusted: each tier's figure in the trial reweighted by the baseline's tier mix, so a trial that drew more L tickets isn't judged dearer for that alone. The orchestrator's $ isn't attributed to tiers, so it isn't adjusted. The two $ targets aren't in the script; pass them from the spec (`--max-cost`, `--max-orchestrator-cost`) or those rows go unjudged. The review-quality rows are judged against the baseline: no more "changes" or rounds per PR, and as many round-1 approvals outright or counting approve-with-minors. The trial is flagged **INCONCLUSIVE** when it has fewer than 20 merged tickets, when its L share differs from the baseline's by more than 25 points, or when the mix adjustment flips a gating verdict.
+
+To trial the orchestrator on a backlog:
+
+1. Run plain `/orchestrate:run` (add `--profile` if you want per-pass records) and let it work until a pass ends with nothing in flight.
+2. Note the session ID, then profile the finished session by hand:
+
+```sh
+python3 -I ~/.claude/plugins/cache/claude-orchestrate/orchestrate/<version>/scripts/profile.py <session>
+```
 
 ## Limits
 
