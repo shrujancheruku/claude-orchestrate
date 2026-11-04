@@ -24,7 +24,7 @@ Needs `git`, `gh` (signed in), and `python3` 3.9 or later for the guard hook. Ru
 
 ## Use it in a repo
 
-1. **`/orchestrate:setup`** scouts the repo (tracker, commands, layout, conventions, anything that would collide across parallel worktrees) and asks you the decisions in one round: backlog source, slots, gates, merge authority, models, review tiers. It writes `.claude/orchestration.md` (the **config**) and a `.worktreeinclude`.
+1. **`/orchestrate:setup`** scouts the repo (tracker, commands, layout, conventions, anything that would collide across parallel worktrees) and asks you the decisions in one round: backlog source, slots, gates, merge authority, models, review tiers. It infers shared files and their per-PR rules from your docs and merge history, advises on risk paths, and prints a recommendation if `autoCompactWindow` is above 200K (it never edits your settings). It writes `.claude/orchestration.md` (the **config**) and a `.worktreeinclude`.
 2. **`/orchestrate:run`** runs one **pass**. It rebuilds state from the tracker, reviews and merges finished PRs, fills free slots with workers, and reports a table of tickets. Passes are safe to repeat and to start in a fresh session, because the state lives in the tracker, not in the conversation.
    - `/orchestrate:run status` reports without dispatching or merging.
    - `/orchestrate:run <ticket>` narrows a pass to one ticket; `/orchestrate:run <parent issue>` to its sub-issues.
