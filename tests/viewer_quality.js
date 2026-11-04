@@ -1,4 +1,5 @@
-// Runs viewer/profile.html's quality() card against a profile JSON with a stub DOM. Usage: node viewer_quality.js <viewer.html> <profile.json>
+// Runs one of viewer/profile.html's cards (quality by default) against a profile JSON with a stub DOM.
+// Usage: node viewer_quality.js <viewer.html> <profile.json> [card function name]
 const fs = require("fs");
 const html = fs.readFileSync(process.argv[2], "utf8");
 const profile = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
@@ -11,4 +12,5 @@ global.document = { createElement: node, createElementNS: (n, t) => node(t), get
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 const src = scripts[scripts.length - 1][1].replace(/\nrender\(\);\s*$/, "\n");
 const text = (n) => (n._t || "") + (n.children || []).map((x) => (typeof x === "string" ? x : text(x))).join("|");
-console.log(text(new Function(src + "\nreturn quality;")()(profile)));
+const card = process.argv[4] || "quality";
+console.log(text(new Function(src + "\nreturn " + card + ";")()(profile)));
