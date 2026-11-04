@@ -60,7 +60,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 | Role | Model | Effort |
 |---|---|---|
 | Orchestrator | the session's model | |
-| Worker | sonnet | medium |
+| Worker | sonnet; haiku for S tickets (at most <3> files, the **Tiers** file limit) | medium |
 | Scout, mechanic | haiku | low |
 | Reviewer | S haiku · M sonnet · L sonnet (high effort) | medium |
 
@@ -69,5 +69,5 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 - **Instruction files:** <paths the reviewer checks against>
 - **Risk paths** (any PR touching them is reviewed as L): <globs>
 - **Tiers:** S is at most <50> changed lines in at most <3> files, none on a risk path; L touches a risk path or changes more than <400> lines; M is everything else. A `size:S|M|L` label on the ticket overrides.
-- **Repo-specific checks:** <what the reviewer judges, e.g. "docs updated">. An entry may carry a command, marked `run:` and backticked, e.g. "codegen is up to date (run: `make codegen && git diff --exit-code`)"; plain backticked text is never executed. The script gate runs each marked command before any reviewer, so mechanical failures cost no review round.
+- **Repo-specific checks:** <what the reviewer judges, e.g. "docs updated">. An entry may carry a command, marked `run:` and backticked, e.g. "codegen is up to date (run: `make codegen && git diff --exit-code`)"; plain backticked text is never executed. A `run:` with no backticked command (e.g. "must run: the tests") fails the gate as malformed. The script gate runs each marked command before any reviewer, so mechanical failures cost no review round.
 - **Post reviews:** <yes | no>. When yes, the reviewer posts each round on the PR itself.

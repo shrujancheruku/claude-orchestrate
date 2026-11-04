@@ -10,10 +10,10 @@ Touch map: <the files the scout expects this ticket to change, each as `path:lin
 Held paths: <files other tickets hold: open PRs' diffs, building tickets' touch maps, exclusive holds | none>. Changing one means stop and report.
 Branch: <number>-<slug>. If it exists on the remote, continue from it.
 Merged dependencies: <ticket → PR, one per line | none>
-Verify: python3 "<the plugin's absolute scripts/verify path, from the skill's base directory>" <commands from the config>
+Verify: "<the plugin's absolute scripts/verify path, from the skill's base directory>" <commands from the config>
 Shared files: <the config's shared-file rules>
 Commits: <convention>. Stage files by explicit path.
-PR: title <convention>; body includes "<closing reference>".
+PR: title <convention>; body includes "<closing reference>"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain.
 Human-only steps: <from the config>
 Repo rules: .claude/orchestration.md, the instruction files it names, and the domain docs (normally docs/agents/domain.md).
 Review findings: <on a later round, "address review <url>"; the worker reads the findings from the PR. After an approve with minors: "take or leave the minors in <url>" | none>

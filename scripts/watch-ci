@@ -67,7 +67,11 @@ def main(argv=None) -> int:
             pending.remove(pr)
             merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
             print(f"PR #{pr} {result} {merge} {head}", flush=True)
-            common.append_event(".", "ci", result, ref=int(pr) if pr.isdigit() else pr, merge_state=merge, head=head)
+            try:
+                common.append_event(".", "ci", result, ref=int(pr) if pr.isdigit() else pr, merge_state=merge, head=head)
+            except OSError as e:
+                # The event log is best-effort; losing it must not drop the other PRs' settle lines.
+                print(f"watch-ci: could not write event for #{pr}: {common.one_line(str(e))}", file=sys.stderr, flush=True)
         if pending:
             time.sleep(args.interval)
     return 0
