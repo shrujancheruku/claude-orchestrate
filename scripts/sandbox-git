@@ -18,18 +18,44 @@ Exit 0 done (or nothing to do), 1 refused. Stdlib only, Python 3.9+.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 COMMANDS = ["git fetch *", "git pull *", "git push *"]
 SETTINGS = ".claude/settings.local.json"
 
 
+HOST = r"(\[[^\]]+\]|[^@/:\[\s]+)"  # a bracketed IPv6 literal, or a plain name
+
+
 def ssh_host(url):
-    m = re.match(r"^ssh://(?:[^@/]+@)?([^/:]+)", url) or re.match(r"^[^@/\s]+@([^:/\s]+):", url)
-    return m.group(1) if m else None
+    """The host of an SSH remote (brackets stripped from IPv6), or None for anything else."""
+    m = re.match(r"^ssh://(?:[^@/]+@)?" + HOST, url)
+    if not m and "://" not in url:
+        # scp-like `[user@]host:path`: no slash before the colon, and a host longer than
+        # one letter so a Windows drive (`C:\\x`) isn't mistaken for one.
+        m = re.match(r"^(?:[^@/\s:]+@)?" + HOST + ":", url)
+        if m and len(m.group(1)) < 2:
+            m = None
+    return m.group(1).strip("[]") if m else None
+
+
+def write_atomic(path, text):
+    """Write beside the target, then replace, so a crash never leaves a half-written file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def union(existing, wanted):
@@ -74,13 +100,16 @@ def main(argv):
         return refuse("has non-list excludedCommands or allowedDomains")
     sandbox["excludedCommands"] = union(excluded, COMMANDS)
     network["allowedDomains"] = union(domains, [host])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    write_atomic(path, json.dumps(data, indent=2) + "\n")
 
-    ignore = repo / ".gitignore"
-    lines = ignore.read_text().splitlines() if ignore.exists() else []
-    if not any(l.strip().lstrip("/") in (SETTINGS, "settings.local.json") for l in lines):
-        ignore.write_text("\n".join(lines + [SETTINGS]) + "\n")
+    # check-ignore handles `.claude/`, `*.local.json` and negations; append only if not ignored.
+    ignored = subprocess.run(["git", "check-ignore", "-q", SETTINGS], cwd=repo).returncode == 0
+    if not ignored:
+        ignore = repo / ".gitignore"
+        old = ignore.read_text() if ignore.exists() else ""
+        if old and not old.endswith("\n"):
+            old += "\n"
+        write_atomic(ignore, old + SETTINGS + "\n")
     print(f"updated {SETTINGS}: {', '.join(COMMANDS)} now run unsandboxed; {host} allowed")
     return 0
 

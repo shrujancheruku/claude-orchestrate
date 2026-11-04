@@ -15,6 +15,8 @@ class SandboxGitTest(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
+        # The developer's global excludes may already cover the path.
+        git(self.env.repo, "config", "core.excludesFile", "/dev/null")
         self.settings = self.env.repo / ".claude" / "settings.local.json"
 
     def ssh(self, url="git@github.com:o/r.git"):
@@ -37,6 +39,9 @@ class SandboxGitTest(unittest.TestCase):
         self.run_script()
         d = json.loads(self.settings.read_text())
         self.assertEqual(d["sandbox"]["network"]["allowedDomains"], ["example.com"])
+        self.assertEqual(d["sandbox"]["excludedCommands"], CMDS)
+        self.assertNotIn("2222", json.dumps(d))
+        self.assertNotIn("git@", json.dumps(d))
 
     def test_union_without_duplicates_and_keeps_other_keys(self):
         self.ssh()
@@ -63,6 +68,56 @@ class SandboxGitTest(unittest.TestCase):
         r = self.run_script()
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.settings.read_text(), "{not json")
+
+    def assert_refused(self, content):
+        self.ssh()
+        self.settings.parent.mkdir(exist_ok=True)
+        self.settings.write_text(content)
+        r = self.run_script()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.settings.read_text(), content)
+
+    def test_refuses_non_object_root(self):
+        self.assert_refused("[1, 2]")
+
+    def test_refuses_non_object_sandbox(self):
+        self.assert_refused('{"sandbox": "on"}')
+
+    def test_refuses_non_list_excluded_commands(self):
+        self.assert_refused('{"sandbox": {"excludedCommands": "git"}}')
+
+    def test_no_origin_changes_nothing(self):
+        git(self.env.repo, "remote", "remove", "origin")
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0)
+        self.assertFalse(self.settings.exists())
+
+    def domains(self):
+        return json.loads(self.settings.read_text())["sandbox"]["network"]["allowedDomains"]
+
+    def test_ipv6_hosts_lose_brackets(self):
+        for url in ("ssh://u@[::1]:22/p", "git@[::1]:o/r"):
+            self.settings.unlink() if self.settings.exists() else None
+            self.ssh(url)
+            self.assertEqual(self.run_script().returncode, 0)
+            self.assertEqual(self.domains(), ["::1"], url)
+
+    def test_scp_like_without_user(self):
+        self.ssh("github.com:o/r")
+        self.run_script()
+        self.assertEqual(self.domains(), ["github.com"])
+
+    def test_gitignore_already_covering_is_left_alone(self):
+        self.ssh()
+        (self.env.repo / ".gitignore").write_text(".claude/\n")
+        self.run_script()
+        self.assertEqual((self.env.repo / ".gitignore").read_text(), ".claude/\n")
+
+    def test_gitignore_without_trailing_newline(self):
+        self.ssh()
+        (self.env.repo / ".gitignore").write_text("dist")
+        self.run_script()
+        self.assertEqual((self.env.repo / ".gitignore").read_text().splitlines(), ["dist", ".claude/settings.local.json"])
 
     def test_non_ssh_remote_changes_nothing(self):
         self.ssh("https://github.com/o/r.git")
