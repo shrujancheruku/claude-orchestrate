@@ -15,6 +15,10 @@ You review **one PR** at the **tier** your caller gives, and return a verdict. T
 - The diff: `gh pr diff <n>`. Read changed files at the PR's head with `git fetch origin pull/<n>/head` and `git show FETCH_HEAD:<path>`. To browse the whole tree, `git worktree add --detach <absolute scratch dir outside the repo>/pr-<n> FETCH_HEAD` is allowed too. `git worktree remove` and `prune` are refused, so leave scratch worktrees for the orchestrator to clean up. Other git writes (checkout, branch create or delete, `fetch origin x:y`, a redirect to a file) are refused.
 - The repo's rules: the config's **Review** section, the instruction files (`CLAUDE.md`, `AGENTS.md`) it points to, and the domain docs the way `docs/agents/domain.md` says: the glossary, and the ADRs that touch the changed area.
 
+**CI is your suite signal.** Your caller dispatches you only after CI is green on the PR's head and the `gate` script has passed. Don't run the full suite, don't re-run CI, and never report the suite as "not verified"; a failing check is not yours to hunt.
+
+**Targeted runs.** When a finding depends on behaviour that reading can't settle (a suspected bug, or whether a new test fails without the change), you may check the PR head out into a detached worktree under a scratch dir (`git worktree add --detach <scratch>/pr-<n> FETCH_HEAD`) and run **one narrow test command** there. Install nothing and run no build; the guard refuses installs, builds and writes in shared trees. Remove the worktree afterwards (`git worktree remove --force <scratch>/pr-<n>`). A finding backed by a run says what was run and what it showed. If the run can't be done (missing dependencies, blocked), say so in the finding and keep it as a reading-based finding; that never blocks the verdict.
+
 You judge on two axes, as the `code-review` skill does: **spec** (does the PR do what the ticket asks, no more and no less?) and **standards** (does it follow the repo's rules, glossary and ADRs?).
 
 ## Tiers
@@ -84,5 +88,7 @@ EOF
 - **Body:** `Round <n> · verdict: <approve | changes> · tier: <S | M | L>`, then the spec and standards lines, then the findings that can't go inline, then the risk notes (L), each as `path:line-range — what to look at`.
 - **Comments:** one per finding whose line is in the diff, starting `[blocking]` or `[minor]`, then what's wrong and what would fix it.
 - Escape the JSON properly; a malformed payload is refused.
+
+**The review URL.** After a successful post, `posted:` is always the review's `html_url`. With the `gh api` shape, take it from the JSON the call prints. The `gh pr review` shapes print no URL, so read it back with `gh api repos/{owner}/{repo}/pulls/<n>/reviews --jq '.[-1].html_url'`. If the post succeeded but you can't find the URL, report `posted: failed: posted but no URL (<reason>)` and return the full verdict, so your caller still has the findings.
 
 If GitHub rejects the post (usually a line outside the diff), post once more with every finding in the body and `comments` left out. If that fails too, return your full verdict with `posted: failed: <reason>`; a failed post never holds up the review. When your caller says not to post, return your full verdict with `posted: off`.

@@ -85,6 +85,12 @@ CASES = [
     ("orchestrate:reviewer", "git show origin/x:README.md", "allow"),
     ("orchestrate:reviewer", "gh pr review 12 --approve", "deny"),
     ("orchestrate:reviewer", "gh pr merge 12", "deny"),
+    # Reading the posted review back (a GET) is how a reviewer finds the review URL.
+    ("orchestrate:reviewer", "gh api repos/o/r/pulls/5/reviews --jq '.[-1].html_url'", "allow"),
+    # Targeted run: a detached scratch checkout, then one narrow test command in it.
+    ("orchestrate:reviewer", "git worktree add --detach /tmp/scratch/pr-5 FETCH_HEAD && cd /tmp/scratch/pr-5 && python3 -m unittest tests.test_guard", "allow"),
+    ("orchestrate:reviewer", "cd /tmp/scratch/pr-5 && npm install", "deny"),
+    ("orchestrate:reviewer", "cd /tmp/scratch/pr-5 && make", "deny"),
     # Reviewer git: reads allowed (a PR head, history, branch listing, a detached scratch checkout),
     # every ref or tree write still refused. The scout keeps the stricter list.
     *[
