@@ -42,9 +42,23 @@ posted: <review url | failed: reason | off>
 
 `approve` means no blocking findings. Minor findings ride along for the worker to take or leave.
 
+## Hand-back
+
+What you return depends on `posted`:
+
+- **Posted** (`posted` is a review URL): return only this, about 150 tokens. The findings are on the PR, so they never pass through your caller's context; don't repeat them.
+  ```
+  verdict: approve | changes
+  round: <n>
+  blocking: <count>
+  non-blocking: <count>
+  review: <review url>
+  ```
+- **Not posted** (`posted: off` or `posted: failed: <reason>`): return the full verdict block above, with every finding, so the caller can pass them on and the loop still works.
+
 ## Post
 
-When your caller says to post, put the verdict on the PR as one **comment review** before you return it. It's a record for the humans reading the PR; the worker still gets your findings from the orchestrator. GitHub doesn't let an account approve or request changes on its own PR, so the event is always `COMMENT` and the verdict lives in the body. Post exactly this way; the guard refuses any other shape:
+When your caller says to post, put the verdict on the PR as one **comment review** before you return it. It's the record for the humans reading the PR and the worker's source for the fixes: the worker reads your findings from the PR, not from your caller. GitHub doesn't let an account approve or request changes on its own PR, so the event is always `COMMENT` and the verdict lives in the body. Post exactly this way; the guard refuses any other shape:
 
 ```
 gh api --method POST repos/{owner}/{repo}/pulls/<n>/reviews --input - <<'EOF'
@@ -56,4 +70,4 @@ EOF
 - **Comments:** one per finding whose line is in the diff, starting `[blocking]` or `[minor]`, then what's wrong and what would fix it.
 - Escape the JSON properly; a malformed payload is refused.
 
-If GitHub rejects the post (usually a line outside the diff), post once more with every finding in the body and `comments` left out. If that fails too, return your verdict with `posted: failed: <reason>`; a failed post never holds up the review. When your caller says not to post, return `posted: off`.
+If GitHub rejects the post (usually a line outside the diff), post once more with every finding in the body and `comments` left out. If that fails too, return your full verdict with `posted: failed: <reason>`; a failed post never holds up the review. When your caller says not to post, return your full verdict with `posted: off`.

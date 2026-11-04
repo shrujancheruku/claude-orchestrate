@@ -32,7 +32,7 @@ Stop at the first of these, and report with `status: stopped`. Your report is ho
 
 ## Follow-ups
 
-If you're continued after a usage limit stopped you, run `git status` and `git log origin/<branch>..` first, then pick up at the step you were on. The orchestrator may also continue you with review findings or a CI failure. Fix them on the same branch, re-run the verify commands, push, and report again. Merging is the orchestrator's: you open the PR and hand it over.
+If you're continued after a usage limit stopped you, run `git status` and `git log origin/<branch>..` first, then pick up at the step you were on. The orchestrator may also continue you with review findings, a CI failure, or "address review `<url>`". For a review URL, read the findings from the PR yourself (`gh api` on the review and its comments, or `gh pr view <n> --comments`), taking every `[blocking]` finding and any `[minor]` one worth taking. If the PR holds no such review, say so in your report instead of guessing. Fix them on the same branch, re-run the verify commands, push, and report again. Merging is the orchestrator's: you open the PR and hand it over.
 
 ## Report
 
