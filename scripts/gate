@@ -7,9 +7,9 @@ Conventional Commits, and each command the config's `Repo-specific checks` entry
 the same format as `verify`. Appends one `gate` event (ref = the PR number, outcome pass|fail,
 failed = the names of the failed checks). Exit codes: 0 every check passed; 1 a check failed (send the
 output to the worker); 2 the gate could not run (bad --cwd, `gh` failed); 3 GitHub still reports the
-PR's mergeability as UNKNOWN after retries and nothing else failed (run the gate again; not the worker's
-fault). A marker is `run: \`cmd\``; one that yields no command fails the gate as malformed. Run the repo-specific commands
-in --cwd (the worker's worktree, so they see the PR's code); default is the current directory.
+PR's mergeability as UNKNOWN after retries, behind_by reads 0, and nothing else failed (run the gate again;
+not the worker's fault); UNKNOWN with behind_by above 0 or unreadable exits 1. A marker is `run: \`cmd\``;
+one that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's worktree, so they see the PR's code); default is the current directory.
 Stdlib only, Python 3.9+.
 """
 
@@ -84,7 +84,9 @@ def pr_checks(pr, base_override, retries=4, delay=2.5):
     if mergeable == "CONFLICTING":
         problems.append(f"conflicts with {base}")
     elif mergeable == "UNKNOWN":
-        problems.append("GitHub still reports mergeability as UNKNOWN; run the gate again (not the worker's fault)")
+        # Rerun advice only when behind_by reads 0; otherwise it would hide the real problem.
+        rerun = "; run the gate again (not the worker's fault)" if behind == 0 else ""
+        problems.append(f"GitHub still reports mergeability as UNKNOWN{rerun}")
     elif mergeable != "MERGEABLE":
         problems.append(f"not mergeable ({mergeable})")
     if behind is None:
@@ -122,7 +124,8 @@ def main(argv=None) -> int:
     print(checks.format_results(results))
     failed = [r.command for r in results if r.status == "fail"]
     # An UNKNOWN mergeability that was the only failure is not a verdict: rerun, don't send to the worker.
-    undecided = unknown and len(failed) == 1
+    # Only when behind_by is a readable 0; behind above 0 or unreadable is a real failure to report.
+    undecided = unknown and behind == 0 and len(failed) == 1
     outcome = "unknown" if undecided else "fail" if failed else "pass"
     # The event lands in the orchestrator's repo, beside the pass log.
     common.append_event(".", "gate", outcome, ref=ref, failed=failed, behind_by=behind)
