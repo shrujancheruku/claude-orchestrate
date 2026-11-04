@@ -122,6 +122,7 @@ body.drag .empty, body.drag main { outline: 2px solid var(--series-1); outline-o
 <script>
 "use strict";
 const profiles = [];
+const rejected = []; // files the viewer refused, shown as a banner
 const $ = (id) => document.getElementById(id);
 const SVG = "http://www.w3.org/2000/svg";
 const ROLES = ["orchestrator", "worker", "reviewer", "scout", "mechanic"];
@@ -151,6 +152,7 @@ function fmtDur(s) {
   if (s >= 3600) return (s / 3600).toFixed(1) + "h";
   return Math.round(s / 60) + "m";
 }
+const usd = (x) => (x == null ? "–" : "$" + x.toFixed(2));
 const pct = (x) => (x == null ? "–" : Math.round(x * 100) + "%");
 const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const sum = (o) => Object.values(o || {}).reduce((a, b) => a + b, 0);
@@ -337,6 +339,48 @@ function tokens(p) {
   return card;
 }
 
+// Cost: proxy $ (API list prices, per request) per merged ticket, by role and by model, then each ticket.
+function cost(p) {
+  const c = p.metrics.cost;
+  const card = el("section", { class: "card" });
+  card.append(el("h2", {}, "Proxy $ per merged ticket"));
+  card.append(el("p", { class: "sub" }, `${usd(c.per_merged_ticket)} per merged ticket · ${usd(c.total)} in all, orchestrator and every agent. Prices as of ${c.prices_as_of}.`));
+  const rows = (map) => Object.entries(map).filter(([, v]) => v).sort((a, b) => b[1] - a[1]);
+  for (const [title, map] of [["By role", c.per_merged_ticket_by_role], ["By model", c.per_merged_ticket_by_model]]) {
+    const entries = rows(map);
+    if (!entries.length) continue;
+    card.append(el("h2", { style: "margin-top:12px" }, title));
+    const max = Math.max(...entries.map(([, v]) => v), 0.0001);
+    const W = 1000, L = 104, R = 70, ROW = 30, BAR = 18;
+    const s = sv("svg", { viewBox: `0 0 ${W} ${entries.length * ROW + 4}`, role: "img", "aria-label": title });
+    s.append(sv("line", { x1: L, x2: L, y1: 0, y2: entries.length * ROW + 4, stroke: "var(--axis)", "stroke-width": 1 }));
+    entries.forEach(([k, v], i) => {
+      const w = (v / max) * (W - L - R), y = i * ROW + (ROW - BAR) / 2;
+      s.append(sv("text", { x: 0, y: y + BAR / 2 + 4, class: "ink" }, k));
+      const g = sv("g");
+      g.append(sv("rect", { x: L, y, width: Math.max(w, 2), height: BAR, rx: 3, fill: "var(--series-1)" }));
+      g.append(sv("rect", { x: L, y: y - 5, width: Math.max(w, 24), height: BAR + 10, fill: "transparent" }));
+      s.append(sv("text", { x: L + w + 6, y: y + BAR / 2 + 4, class: "ink" }, usd(v)));
+      hover(g, k, [["per merged ticket", usd(v)], ["in all", usd(map === c.per_merged_ticket_by_role ? c.by_role[k] : c.by_model[k])]]);
+      s.append(g);
+    });
+    card.append(chart(s));
+  }
+  const m = p.metrics.meters;
+  const meter = (k) => (m[k].per_merged_ticket == null ? "no samples" : m[k].per_merged_ticket.toFixed(1) + " points");
+  card.append(el("p", { class: "note" }, `Plan meters per merged ticket (unweighted, from the usage tap): 5-hour ${meter("five_hour")} · 7-day ${meter("seven_day")}.`));
+  if (c.unpriced_models.length) card.append(el("p", { class: "note status-critical" }, "No price for " + c.unpriced_models.join(", ") + ": counted as $0."));
+  const det = el("details");
+  det.setAttribute("open", "");
+  det.append(el("summary", {}, "Per-ticket table"));
+  det.append(table(["Ticket", "PR", "Outcome", "Worker models", "Worker", "Reviewers", "Other", "Total", "Gate runs"], p.tickets.map((tk) => [
+    "#" + tk.ticket, tk.pr ? "#" + tk.pr : "–", tk.outcome, (tk.worker_models || []).join(" → ") || "–",
+    usd(tk.cost.worker), usd(tk.cost.reviewer), usd(tk.cost.other), usd(tk.cost.total), tk.gate_runs == null ? "–" : String(tk.gate_runs),
+  ]), [4, 5, 6, 7, 8]));
+  card.append(det);
+  return card;
+}
+
 // Plan usage: 5-hour and 7-day % on one 0–100 axis, crosshair readout.
 function usage(p) {
   const card = el("section", { class: "card" });
@@ -411,16 +455,17 @@ function usage(p) {
 function compare() {
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Sessions compared"));
-  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "Tokens / ticket", "Orchestrator share", "Peak 5-hour", "Limit hits"],
+  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Peak 5-hour", "Limit hits"],
     profiles.map((p) => [p.session.slice(0, 8), new Date(t(p.start)).toLocaleString(), fmtDur(p.metrics.span_s), String(p.slots), pct(p.metrics.occupancy),
-      String(p.metrics.tickets_merged), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
-      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9]));
+      String(p.metrics.tickets_merged), usd(p.metrics.cost.per_merged_ticket), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
+      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 10]));
   return card;
 }
 
 function render() {
   const view = $("view");
   view.replaceChildren();
+  for (const msg of rejected) view.append(el("div", { class: "advice status-critical" }, msg));
   $("empty").hidden = profiles.length > 0;
   const pick = $("pick");
   pick.hidden = profiles.length < 2;
@@ -432,6 +477,7 @@ function render() {
   const m = p.metrics;
   const tiles = el("div", { class: "tiles" });
   tiles.append(
+    tile("Proxy $ per merged ticket", usd(m.cost.per_merged_ticket), `${usd(m.cost.total)} in all`),
     tile("Slots occupied", pct(m.occupancy), `building ${pct(m.building_share)}`),
     tile("Tickets merged", String(m.tickets_merged), m.tokens_per_merged_ticket ? `${fmtTok(m.tokens_per_merged_ticket)} tokens each` : ""),
     tile("Tokens", fmtTok(m.tokens_total), `orchestrator ${pct(m.orchestrator_share)}`),
@@ -440,12 +486,17 @@ function render() {
   );
   view.append(tiles);
   if (p.recommendation) view.append(el("div", { class: "advice" }, p.recommendation));
-  view.append(timeline(p), tokens(p), usage(p));
+  if (p.warnings && p.warnings.length) for (const w of p.warnings) view.append(el("div", { class: "advice status-critical" }, w));
+  view.append(cost(p), timeline(p), tokens(p), usage(p));
   if (profiles.length > 1) view.append(compare());
 }
 
 function add(data, name) {
-  if (!data || data.schema !== 1 || !data.metrics) { console.warn("Not an orchestrate profile (schema 1):", name); return; }
+  if (!data || data.schema !== 2 || !data.metrics) {
+    const why = data && data.schema != null && data.schema !== 2 ? `is schema ${data.schema}; regenerate it with scripts/profile.py` : "is not an orchestrate profile";
+    rejected.push(`${name} ${why}`);
+    return;
+  }
   const i = profiles.findIndex((p) => p.session === data.session);
   if (i >= 0) profiles[i] = data; else profiles.push(data);
   profiles.sort((x, y) => (x.start < y.start ? -1 : 1));
@@ -454,8 +505,9 @@ function add(data, name) {
   pick.value = String(profiles.findIndex((p) => p.session === data.session));
 }
 async function load(files) {
+  rejected.length = 0;
   for (const f of files) {
-    try { add(JSON.parse(await f.text()), f.name); } catch (e) { console.warn("Couldn't read", f.name, e); }
+    try { add(JSON.parse(await f.text()), f.name); } catch (e) { rejected.push(`${f.name} is not valid JSON`); }
   }
   render();
 }
@@ -464,7 +516,7 @@ $("pick").addEventListener("change", render);
 document.addEventListener("dragover", (ev) => { ev.preventDefault(); document.body.classList.add("drag"); });
 document.addEventListener("dragleave", () => document.body.classList.remove("drag"));
 document.addEventListener("drop", (ev) => { ev.preventDefault(); document.body.classList.remove("drag"); load(ev.dataTransfer.files); });
-try { add(JSON.parse($("profile-data").textContent), "embedded"); } catch (e) { /* no embedded profile */ }
+try { const emb = JSON.parse($("profile-data").textContent); if (emb) add(emb, "embedded"); } catch (e) { /* no embedded profile */ }
 render();
 </script>
 </body>
