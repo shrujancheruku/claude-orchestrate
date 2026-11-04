@@ -47,6 +47,9 @@ LEAKS = re.compile(
 
 
 def load_extract():
+    # The script does `import common`; run by path it has its own directory on sys.path, a loader doesn't.
+    if str(EXTRACT.parent) not in sys.path:
+        sys.path.insert(0, str(EXTRACT.parent))
     loader = importlib.machinery.SourceFileLoader("guard_corpus", str(EXTRACT))
     spec = importlib.util.spec_from_loader("guard_corpus", loader)
     module = importlib.util.module_from_spec(spec)
