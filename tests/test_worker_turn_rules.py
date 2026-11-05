@@ -15,10 +15,12 @@ class WorkerTurnRules(unittest.TestCase):
     def test_worker_has_turn_rules_and_short_report(self):
         s = (ROOT / "agents/worker.md").read_text()
         self.assertIn("## Turn rules", s)
-        # Structure: the section holds a list of rules, each a bullet. Which
-        # rules they are is covered by the behavioural cases (tests/behaviour).
+        # No behavioural case covers these, so each rule keeps one key term,
+        # in its own bullet of the Turn rules section.
         rules = s[s.index("## Turn rules"):s.index("## Pushing")]
-        self.assertGreaterEqual(len(re.findall(r"(?m)^- ", rules)), 4)
+        bullets = [l for l in rules.splitlines() if l.startswith("- ")]
+        for term in ("independent", "Chain", "grep -n", "re-read", "--jq"):
+            self.assertTrue(any(term in b for b in bullets), term)
         report = s[s.index("## Report"):]
         self.assertIn("status: pr-opened | stopped", report)
         self.assertNotIn("changed:", report)
@@ -28,7 +30,6 @@ class WorkerTurnRules(unittest.TestCase):
         stop = s[s.index("## Stop and report"):]
         # The rule is two parts in one bullet: strip `:line`, and a shared file overlaps.
         bullet = next(l for l in stop.splitlines() if ":line" in l)
-        self.assertIn("file", bullet)
         self.assertIn("overlap", bullet)
 
     def test_worker_leaves_no_background_commands(self):

@@ -14,7 +14,7 @@ class SetupInference(unittest.TestCase):
         s = read("skills/setup/SKILL.md")
         # key terms only; each names a setting or file the step reads or refuses to write
         for needle in ("gh pr list --state merged", ".gitattributes", "orchestrator-owned", "merge gates",
-                       "autoCompactWindow", "never edits user config"):
+                       "autoCompactWindow", "never edits user config", "25%", "150000"):
             self.assertIn(needle, s)
 
     def test_run_rules(self):

@@ -854,6 +854,7 @@ class CompareTest(unittest.TestCase):
         row = self.gate(out, "proxy $ per merged ticket")
         self.assertRegex(row, r"\$2\.62\s+FAIL\s+→\s+\$2\.25\s+pass")
         self.assertIn("INCONCLUSIVE", out)
+        self.assertIn("mix", out)
         # With the same mix the adjustment changes nothing and nothing flips.
         same = self.profile("s.json", {"L": (10, 3.0), "M": (10, 0.5)})
         self.assertNotIn("INCONCLUSIVE", self.compare(before, same, "--max-cost", "2.30").stdout)

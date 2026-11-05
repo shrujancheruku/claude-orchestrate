@@ -28,7 +28,7 @@ class HaikuRouting(unittest.TestCase):
 
     def test_models_row(self):
         row = next(l for l in read("skills/setup/config-template.md").splitlines() if "haiku" in l)
-        self.assertIn("S", row)
+        self.assertIn("S tickets", row)
 
 
 if __name__ == "__main__":
