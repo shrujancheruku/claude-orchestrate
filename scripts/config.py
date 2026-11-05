@@ -36,6 +36,8 @@ class Config(NamedTuple):
     tier_s_lines: int | None = None  # S: at most this many changed lines ...
     tier_s_files: int | None = None  # ... in at most this many files
     tier_l_lines: int | None = None  # L: more than this many changed lines
+    verify_groups: tuple = ()  # the Verify section's commands: a tuple of groups, each a tuple of command strings
+    has_verify: bool = False  # the config has a `## Verify` section at all
     problems: tuple = ()  # Problem entries
 
     @classmethod
@@ -82,6 +84,8 @@ class Config(NamedTuple):
             tier_s_lines=s_lines,
             tier_s_files=s_files,
             tier_l_lines=l_lines,
+            verify_groups=_verify_groups(common.section_of(text, "Verify")),
+            has_verify=common.section_of(text, "Verify") is not None,
             problems=tuple(problems),
         )
 
@@ -133,6 +137,31 @@ def _check_commands(review):
             bad = len(_MARKER.findall(line)) - len(found)
             problems += [Problem(RUN, "`run:` marker without a single `backticked` command")] * max(0, bad)
     return commands, problems
+
+
+_VERIFY_ITEM = re.compile(r"[-*]\s+`([^`]+)`")
+THEN = "--then"
+
+
+def _verify_groups(section):
+    """The commands of the `Verify` section as groups: a top-level bullet that opens with a backticked span.
+
+    Only the first backticked span of a bullet is the command, and only when it starts the bullet; text
+    after it (`(errors fail; warnings don't)`) and every bullet or paragraph that doesn't start with a span
+    is prose. A bullet whose span is exactly `--then` starts the next group, which depends on the ones
+    before it (verify skips it when one fails). Empty groups are dropped.
+    """
+    groups = [[]]
+    for line in (section or "").splitlines():
+        m = _VERIFY_ITEM.match(line)  # no leading space: nested bullets are prose
+        if not m:
+            continue
+        cmd = m.group(1).strip()
+        if cmd == THEN:
+            groups.append([])
+        elif cmd:
+            groups[-1].append(cmd)
+    return tuple(tuple(g) for g in groups if g)
 
 
 def _item_text(review, label):
