@@ -15,7 +15,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import profile as prof  # noqa: E402
 import runlog  # noqa: E402
-from transcripts import write_jsonl  # noqa: E402
+from transcripts import write_agent, write_jsonl  # noqa: E402
 
 T0 = datetime(2026, 11, 3, 16, 0, tzinfo=timezone.utc)
 SESSION = "sess-1"
@@ -78,12 +78,10 @@ class Fixture:
         w1 += [assistant(11, "w1pr", sonnet, [tool_use("b1", "Bash", command="gh pr create --fill")]),
                tool_result(11, "b1", "https://github.com/o/r/pull/50")]
         w1 += [assistant(m, f"w1-{m}", sonnet, [{"type": "text", "text": "y"}]) for m in (25, 26, 27)]
-        write_jsonl(sub / "agent-aaa.jsonl", w1)
-        (sub / "agent-aaa.meta.json").write_text(json.dumps({"agentType": "orchestrate:worker", "toolUseId": "u1"}))
-        write_jsonl(sub / "agent-bbb.jsonl", [assistant(m, f"w2-{m}", sonnet, []) for m in range(1, 6)])
-        (sub / "agent-bbb.meta.json").write_text(json.dumps({"agentType": "orchestrate:worker", "toolUseId": "u2"}))
-        write_jsonl(sub / "agent-ccc.jsonl", [assistant(20, "r1", sonnet, [])])
-        (sub / "agent-ccc.meta.json").write_text(json.dumps({"agentType": "orchestrate:reviewer", "toolUseId": "u3"}))
+        write_agent(sub, "aaa", w1, {"agentType": "orchestrate:worker", "toolUseId": "u1"})
+        write_agent(sub, "bbb", [assistant(m, f"w2-{m}", sonnet, []) for m in range(1, 6)],
+                    {"agentType": "orchestrate:worker", "toolUseId": "u2"})
+        write_agent(sub, "ccc", [assistant(20, "r1", sonnet, [])], {"agentType": "orchestrate:reviewer", "toolUseId": "u3"})
         self.usage = root / "usage.jsonl"
         reset = at(60)
         write_jsonl(self.usage, [
@@ -428,21 +426,19 @@ class QualityFixture:
             if pr:
                 recs += [assistant(3, f"{name}-pr", model, [tool_use(f"{name}-b", "Bash", command="gh pr create --fill")], usage(500)),
                          tool_result(3, f"{name}-b", f"https://github.com/o/r/pull/{pr}")]  # 30 characters
-            write_jsonl(sub / f"agent-{name}.jsonl", recs + list(extra))
-            (sub / f"agent-{name}.meta.json").write_text(json.dumps({"agentType": "orchestrate:worker", "toolUseId": use_id, "model": model}))
+            write_agent(sub, name, recs + list(extra), {"agentType": "orchestrate:worker", "toolUseId": use_id, "model": model})
 
         worker("w20h", "u20h", haiku, 60, contexts=(1000, 3000, 2000), out_chars=4000)
         worker("w20s", "u20s", sonnet, contexts=(5000,))
         worker("w21", "u21", haiku, 61, contexts=(100_000, 200_000), out_chars=800)
         spawn = [assistant(9, "w22-spawn", sonnet, [tool_use("d1", "Agent", subagent_type="orchestrate:scout", description="find callers")])]
         worker("w22", "u22", sonnet, 62, extra=spawn)
-        write_jsonl(sub / "agent-d1x.jsonl", [assistant(10, "d1-a", haiku, [])])
-        (sub / "agent-d1x.meta.json").write_text(json.dumps({"agentType": "orchestrate:scout", "toolUseId": "d1"}))
+        write_agent(sub, "d1x", [assistant(10, "d1-a", haiku, [])], {"agentType": "orchestrate:scout", "toolUseId": "d1"})
         worker("w23", "u23", sonnet, 63)
 
         def reviewer(name, use_id, texts):
-            write_jsonl(sub / f"agent-{name}.jsonl", [assistant(20 + k, f"{name}-{k}", sonnet, [{"type": "text", "text": t}]) for k, t in enumerate(texts)])
-            (sub / f"agent-{name}.meta.json").write_text(json.dumps({"agentType": "orchestrate:reviewer", "toolUseId": use_id}))
+            write_agent(sub, name, [assistant(20 + k, f"{name}-{k}", sonnet, [{"type": "text", "text": t}]) for k, t in enumerate(texts)],
+                        {"agentType": "orchestrate:reviewer", "toolUseId": use_id})
 
         reviewer("r20", "r20", [verdict_text("changes", blocking=1), verdict_text("approve")])  # one agent, two verdicts: continued
         reviewer("r21", "r21", ["verdict: approve\nround: 1\nblocking: 0\nnon-blocking: 2\nreview: https://github.com/o/r/pull/61#r"])

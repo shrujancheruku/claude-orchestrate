@@ -174,8 +174,7 @@ class Extract(unittest.TestCase):
 
     def add_agent(self, name, agent_type, commands, cwd=None):
         cwd = cwd or str(self.repo / ".claude" / "worktrees" / "agent-abc")
-        transcripts.write_jsonl(self.sub / f"{name}.jsonl", [self.call(c, cwd) for c in commands])
-        (self.sub / f"{name}.meta.json").write_text(json.dumps({"agentType": agent_type}))
+        transcripts.write_agent(self.sub, name, [self.call(c, cwd) for c in commands], {"agentType": agent_type})
 
     def run_extract(self, *extra):
         import subprocess
@@ -286,8 +285,7 @@ class Extract(unittest.TestCase):
         # A `[]` line used to make the extract raise (common.read_jsonl skips it now); non-dict blocks are skipped too.
         good = {"type": "assistant", "cwd": str(self.repo), "message": {"content": [
             "text", 3, None, {"type": "tool_use", "name": "Bash", "input": {"command": "git log"}}]}}
-        transcripts.write_jsonl(self.sub / "a1.jsonl", ["[]", json.dumps(good), "3", "not json"])
-        (self.sub / "a1.meta.json").write_text(json.dumps({"agentType": "orchestrate:scout"}))
+        transcripts.write_agent(self.sub, "a1", ["[]", json.dumps(good), "3", "not json"], {"agentType": "orchestrate:scout"})
         self.run_extract()
         self.assertEqual(self.lines(), [{"role": "orchestrate:scout", "command": "git log", "expected": "allow"}])
 

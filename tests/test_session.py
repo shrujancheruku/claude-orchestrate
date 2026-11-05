@@ -69,6 +69,8 @@ class SessionReader(unittest.TestCase):
         self.assertEqual(session.branch_of(brief), "3-slug")
         self.assertEqual(session.touch_map("Touch map is mentioned mid-sentence: a.py"), [])
         self.assertEqual(session.touch_map(None), [])
+        self.assertEqual(session.touch_map("Touch map: a.py:1; b.py:2 and none"), ["a.py:1", "b.py:2 and none"])
+        self.assertEqual(session.touch_map("Touch map: none."), [])
         self.assertIsNone(session.branch_of("no brief here"))
 
 

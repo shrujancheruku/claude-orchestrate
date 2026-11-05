@@ -17,6 +17,12 @@ def write_jsonl(path, records):
     path.write_text("".join(json.dumps(r) + "\n" if not isinstance(r, str) else r + "\n" for r in records))
 
 
+def write_agent(sub, agent_id, records, meta):
+    """One subagent beside a session: `agent-<id>.jsonl` with its transcript, and its `.meta.json` as the harness wrote it."""
+    write_jsonl(Path(sub) / f"agent-{agent_id}.jsonl", records)
+    (Path(sub) / f"agent-{agent_id}.meta.json").write_text(json.dumps(meta))
+
+
 def main_path(projects_dir, sid="sess-1", project="-repo"):
     """Where a session's main transcript lives under a projects dir."""
     return Path(projects_dir) / project / f"{sid}.jsonl"
