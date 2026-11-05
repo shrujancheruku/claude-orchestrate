@@ -47,18 +47,17 @@ class Invocation(unittest.TestCase):
                 # The path form skills use: skills/<skill>/../../scripts/<name>.
                 path = ROOT / "skills" / "run" / ".." / ".." / "scripts" / name
                 args = ["--cwd", str(ROOT), "true"] if name == "verify" else ["--help"]
-                if name == "sandbox-git":  # no --help; a repo without an SSH remote is a no-op
-                    args = ["--repo", tmp]
-                    subprocess.run(["git", "init", "-q", tmp], check=True)
                 r = run([str(path), *args], cwd=tempfile.gettempdir(), env=env)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertNotIn("Traceback", r.stderr)
 
     def test_standalone_scripts_run_isolated_alone(self):
-        # A standalone script imports nothing from scripts/, so it must run from a lone copy.
+        # `-I` leaves the script's directory off sys.path, so a standalone script that imports common
+        # must find it itself; it runs from a copy holding only the script and common.py.
         for name in sorted(STANDALONE):
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
                 shutil.copy(SCRIPTS / name, d)
+                shutil.copy(SCRIPTS / "common.py", d)
                 argv = [sys.executable, "-I", str(Path(d) / name)]
                 if name == "profile.py":
                     argv.append("--help")

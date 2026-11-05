@@ -10,13 +10,13 @@ it records the worker's agent ID, the worktree (derived from the agent ID), the 
 last record (the last report). The worktree is null once it no longer exists. When a ticket was
 dispatched more than once, the latest wins.
 
-The file is a cache and the tracker wins. Stdlib only, Python 3.9+.
+The file is a cache and the tracker wins. Exit codes: 0 rebuilt; 2 could not run (no session id,
+no transcript). Stdlib only, Python 3.9+.
 """
 
 import argparse
 import json
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,24 +24,13 @@ from pathlib import Path
 import common
 
 STATE = Path(".claude") / "orchestrate-state.json"
-WORKER = "orchestrate:worker"
-TICKET = re.compile(r"#(\d+)")  # the first #<n> in the description, as profile.py reads it
 
 
 def find_transcript(arg: str) -> Path:
-    p = Path(arg).expanduser()
-    if p.suffix == ".jsonl" and p.exists():
-        return p
-    hits = sorted((common.claude_dir() / "projects").glob(f"*/{arg}.jsonl"))
-    if not hits:
-        sys.exit(f"rebuild-state: no transcript for session {arg} under {common.claude_dir() / 'projects'}")
-    return hits[0]
-
-
-def blocks(record):
-    msg = record.get("message")
-    content = msg.get("content") if isinstance(msg, dict) else None
-    return content if isinstance(content, list) else []
+    found = common.find_transcript(arg)
+    if not found:
+        common.die(f"rebuild-state: no transcript for session {arg} under {common.claude_dir() / 'projects'}")
+    return found
 
 
 def last_timestamp(records):
@@ -72,33 +61,27 @@ def rebuild(main_path: Path, repo: Path) -> dict:
     session = next((r["sessionId"] for r in main if r.get("sessionId")), main_path.stem)
 
     metas = {}  # dispatch tool_use id -> (agent id, metadata)
-    for meta_path in sub.glob("*.meta.json"):
-        try:
-            meta = json.loads(meta_path.read_text())
-        except ValueError:
-            continue
-        if isinstance(meta, dict):
-            stem = meta_path.name[: -len(".meta.json")]
-            metas[meta.get("toolUseId")] = (stem[len("agent-"):] if stem.startswith("agent-") else stem, meta)
+    for tool_use_id, (stem, meta) in common.subagent_metas(main_path).items():
+        metas[tool_use_id] = (stem[len("agent-"):] if stem.startswith("agent-") else stem, meta)
 
     tickets = {}
     for r in main:
-        for b in blocks(r):
+        for b in common.blocks(r):
             if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Agent"):
                 continue
             inp = b.get("input") if isinstance(b.get("input"), dict) else {}
-            if inp.get("subagent_type") != WORKER:
+            if inp.get("subagent_type") != common.WORKER:
                 continue
-            m = TICKET.search(str(inp.get("description") or ""))
+            ticket = common.ticket_of(inp.get("description"))
             agent = metas.get(b.get("id"))
-            if not (m and agent):
+            if ticket is None or not agent:
                 continue  # no #<n> in the description, or no agent to join it to
             agent_id, meta = agent
             records = list(common.read_jsonl(sub / f"agent-{agent_id}.jsonl"))
             # The harness removes the worktree once the agent ends; null says it is gone.
             path = repo / ".claude" / "worktrees" / f"agent-{agent_id}"
             worktree = str(path) if path.is_dir() else None
-            tickets[int(m.group(1))] = {  # a later dispatch for the same ticket replaces the earlier
+            tickets[ticket] = {  # a later dispatch for the same ticket replaces the earlier
                 "agent_id": agent_id,
                 "worktree": worktree,
                 "model": model_of(records, inp, meta),
@@ -114,7 +97,7 @@ def main(argv=None) -> int:
     ap.add_argument("--repo", default=".", help="repo root; the state file is written under it")
     args = ap.parse_args(argv)
     if not args.session:
-        sys.exit("rebuild-state: no session id (pass one or set CLAUDE_SESSION_ID)")
+        common.die("rebuild-state: no session id (pass one or set CLAUDE_SESSION_ID)")
     repo = Path(args.repo).resolve()
     state = rebuild(find_transcript(args.session), repo)
     out = repo / STATE

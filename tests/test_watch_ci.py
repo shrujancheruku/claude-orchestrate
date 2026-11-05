@@ -1,5 +1,9 @@
 import json
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 from harness import ScriptEnv
 
@@ -60,6 +64,24 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(events[1]["merge_state"], "BLOCKED")
         self.assertEqual(events[1]["head"], "2222222")
 
+    def watch_from(self, cwd):
+        env = dict(os.environ, PATH=f"{self.env.bin}{os.pathsep}{os.environ['PATH']}", FAKE_GH_STATE=str(self.env.gh_state))
+        script = Path(__file__).resolve().parent.parent / "scripts" / "watch-ci"
+        return subprocess.run([sys.executable, str(script), "--interval", "0", "1"], cwd=cwd, env=env,
+                              capture_output=True, text=True)
+
+    def test_events_from_a_subdirectory_and_a_worktree_land_in_the_main_log(self):
+        self.seq({"1": [view("SUCCESS", head="1111111aaa")]})
+        sub = self.env.repo / "pkg"
+        sub.mkdir()
+        wt = self.env.repo / ".claude" / "worktrees" / "w1"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "w1", str(wt)], cwd=self.env.repo, check=True)
+        for cwd in (sub, wt):
+            self.assertEqual(self.watch_from(cwd).returncode, 0)
+        self.assertEqual(len(self.env.events()), 2)
+        self.assertFalse((sub / ".claude").exists())
+        self.assertFalse((wt / ".claude" / "orchestrate-profiles").exists())
+
     def test_empty_rollup_is_pending_until_checks_appear(self):
         empty = {"statusCheckRollup": [], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
         self.seq({"7": [empty, view("SUCCESS", head="abc1234")]})
@@ -94,6 +116,12 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.splitlines(), ["PR #1 pass CLEAN 1111111", "PR #2 fail CLEAN 2222222"])
         self.assertIn("could not write event", r.stderr)
+
+    def test_missing_gh_exits_could_not_run_instead_of_waiting(self):
+        r = self.env.run("watch-ci", "--interval", "0", "7", check=False, no_gh=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
 
 if __name__ == "__main__":

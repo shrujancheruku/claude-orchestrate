@@ -5,13 +5,13 @@ Run it as a Monitor command so the orchestrator never sleeps or polls. Each line
     PR #<n> <pass|fail> <merge state> <head commit>
 Each settle also appends one `ci` event (ref = the PR number). Exits 0 once every PR has
 settled. A PR with no checks yet counts as pending (checks may not be registered right after
-a push); the Monitor's timeout bounds the wait. A PR that is merged or closed settles at once.
+a push); the Monitor's timeout bounds the wait. A PR that is merged or closed settles at once. A transient `gh` failure is retried; a missing
+`gh` exits 2 (could not run), with one line on stderr.
 Stdlib only, Python 3.9+.
 """
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 
@@ -41,9 +41,16 @@ def judge(view: dict):
     return "fail" if any(r in BAD for r in results) else "pass"
 
 
+class GhMissing(Exception):
+    pass
+
+
 def view_pr(pr: str):
-    p = subprocess.run(["gh", "pr", "view", pr, "--json", FIELDS], capture_output=True, text=True)
-    if p.returncode != 0:
+    p = common.run("gh", "pr", "view", pr, "--json", FIELDS)
+    if p.code == common.NOT_FOUND:
+        # Retrying cannot fix a missing tool; say so instead of waiting forever.
+        raise GhMissing(common.one_line(p.stderr))
+    if p.code != 0:
         print(f"watch-ci: gh failed for #{pr}: {common.one_line(p.stderr)}", file=sys.stderr, flush=True)
         return None
     try:
@@ -57,10 +64,14 @@ def main(argv=None) -> int:
     ap.add_argument("prs", nargs="+", help="PR numbers")
     ap.add_argument("--interval", type=float, default=30, help="seconds between checks")
     args = ap.parse_args(argv)
-    pending = [p.lstrip("#") for p in args.prs]
+    pending = [common.pr_ref(p)[0] for p in args.prs]
     while pending:
         for pr in list(pending):
-            view = view_pr(pr)
+            try:
+                view = view_pr(pr)
+            except GhMissing as e:
+                print(f"watch-ci: cannot run gh: {e}", file=sys.stderr, flush=True)
+                return 2
             result = judge(view) if view else None
             if result is None:
                 continue
@@ -68,7 +79,8 @@ def main(argv=None) -> int:
             merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
             print(f"PR #{pr} {result} {merge} {head}", flush=True)
             try:
-                common.append_event(".", "ci", result, ref=int(pr) if pr.isdigit() else pr, merge_state=merge, head=head)
+                # "." is fine: append_event resolves it to the main checkout.
+                common.append_event(".", "ci", result, ref=common.pr_ref(pr)[1], merge_state=merge, head=head)
             except OSError as e:
                 # The event log is best-effort; losing it must not drop the other PRs' settle lines.
                 print(f"watch-ci: could not write event for #{pr}: {common.one_line(str(e))}", file=sys.stderr, flush=True)

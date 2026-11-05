@@ -21,11 +21,16 @@ state = os.environ["FAKE_GH_STATE"]
 args = sys.argv[1:]
 with open(state + ".calls", "a") as f:
     f.write(json.dumps(args) + "\\n")
+if "-" in args:  # a body or payload on stdin (`--body-file -`, `--input -`): keep it, tests assert on it
+    with open(state + ".stdin", "a") as f:
+        f.write(json.dumps({"args": args, "stdin": sys.stdin.read()}) + "\\n")
 for r in json.load(open(state))["responses"]:
     if args[: len(r["args"])] == r["args"]:
         sys.stdout.write(r.get("stdout", ""))
         sys.stderr.write(r.get("stderr", ""))
         sys.exit(r.get("exit", 0))
+with open(state + ".unmatched", "a") as f:
+    f.write(json.dumps(args) + "\\n")
 sys.stderr.write("fake gh: no canned response for %r\\n" % (args,))
 sys.exit(1)
 '''
@@ -77,20 +82,37 @@ class ScriptEnv:
         calls = Path(str(self.gh_state) + ".calls")
         return [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
 
+    def gh_unmatched(self):
+        """Argument lists of gh calls no canned response matched (the fake exited 1 on them)."""
+        f = Path(str(self.gh_state) + ".unmatched")
+        return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
+
+    def gh_stdin(self):
+        """[{"args": [...], "stdin": "..."}] for each gh call that read stdin (`-` among its args)."""
+        f = Path(str(self.gh_state) + ".stdin")
+        return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
+
     def events(self):
         log = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
-    def run(self, script, *args, check=True):
+    def _tmp_empty(self):
+        empty = Path(self._tmp.name) / "empty-bin"
+        empty.mkdir(exist_ok=True)
+        return empty
+
+    def run(self, script, *args, check=True, no_gh=False):
         """Run a CLI (absolute path, or a name under scripts/) in the repo with the fake gh first on PATH."""
         path = Path(script)
         if not path.is_absolute():
             path = SCRIPTS / script
         # No -I: it drops a script's own directory from sys.path and would break `import common`.
         # No PYTHONPATH either: scripts run here exactly as they do for real.
+        # no_gh: a PATH that holds no `gh` at all (not even a real one), to test a missing tool.
+        search_path = str(self._tmp_empty()) if no_gh else f"{self.bin}{os.pathsep}{os.environ['PATH']}"
         env = dict(
             os.environ,
-            PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            PATH=search_path,
             FAKE_GH_STATE=str(self.gh_state),
         )
         return subprocess.run(

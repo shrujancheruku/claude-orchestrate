@@ -25,12 +25,12 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 from collections import Counter
 from pathlib import Path
 
+import checks
 import common
 
 LINE_REPLAY, WORD_MERGE, HANDED_BACK = "line-replay", "word-merge", "handed-back"
@@ -56,7 +56,7 @@ def shared_patterns(section):
 
 
 def generated_commands(section):
-    """(glob, regenerate command) pairs under the `**Generated:**` item of the Shared files section.
+    r"""(glob, regenerate command) pairs under the `**Generated:**` item of the Shared files section.
 
     Each nested bullet is `- \`<glob>\`: \`<command>\``. `none` or free text after the item gives no pairs.
     """
@@ -160,13 +160,14 @@ def _only_pr_lines(base_l, main_l, pr_l, result_l, merged_new, merged_pr):
         if tag in ("insert", "replace"):
             added.update(result_l[j1:j2])
     # Word-merged clusters produce new text, so their lines are allowed and their PR lines not required.
-    return not (added - pr_added - merged_new) and all(l in set(result_l) for l in pr_added if l not in merged_pr)
+    in_result = set(result_l)  # built once, not per PR line
+    return not (added - pr_added - merged_new) and all(l in in_result for l in pr_added if l not in merged_pr)
 
 
 # ---- git plumbing -------------------------------------------------------------------------------
 
-def git(cwd, *args, check=False):
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check)
+def git(cwd, *args):
+    return common.run("git", *args, cwd=cwd)
 
 
 def _stage(cwd, n, path):
@@ -185,20 +186,11 @@ def _regenerate(wt, cmd, generated, resolved):
     Files it wrote (unstaged changes; the merge's own changes are already staged) that match a generated
     glob join `resolved` to be staged; a change anywhere else fails the command.
     """
-    # Own session, so a timeout can kill the command's children too (they would hold the pipes open).
-    proc = subprocess.Popen(cmd, cwd=wt, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, start_new_session=True)
-    try:
-        stdout, stderr = proc.communicate(timeout=REGENERATE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        proc.communicate()  # reap it
+    r = checks.run_shell(cmd, wt, REGENERATE_TIMEOUT)
+    if r.timed_out:
         return f"timed out after {REGENERATE_TIMEOUT}s"
-    if proc.returncode != 0:
-        return common.one_line(stderr or stdout) or f"exit {proc.returncode}"
+    if r.code != 0:
+        return common.one_line(r.stderr or r.stdout) or f"exit {r.code}"
     fields = git(wt, "status", "--porcelain", "-z", "-uall").stdout.split("\0")
     extra, stray = [], []
     i = 0
@@ -329,6 +321,16 @@ def update_branch(repo, base, branch, method, patterns, generated=()):
 def _final(events):
     """On an abort only the hand-backs are worth logging: the other replays were thrown away."""
     return [e for e in events if e[1] == HANDED_BACK]
+
+
+MERGE_TREE_GIT = (2, 38)  # `git merge-tree --write-tree` first shipped in git 2.38
+
+
+def git_version(repo):
+    """git's (major, minor) as a tuple, or None when it can't be read."""
+    r = git(repo, "--version")
+    m = re.search(r"(\d+)\.(\d+)", r.stdout) if r.returncode == 0 else None
+    return (int(m.group(1)), int(m.group(2))) if m else None
 
 
 def conflicts_with(repo, base, branch):

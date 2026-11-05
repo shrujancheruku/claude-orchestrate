@@ -231,6 +231,7 @@ class MergeTest(unittest.TestCase):
 # Logs every git call (to $GIT_LOG) before running the real one, so tests can see what was pushed.
 GIT_WRAPPER = '''#!/bin/sh
 printf '%s\\n' "$*" >> "$GIT_LOG"
+if [ "$1" = "--version" ] && [ -n "$FAKE_GIT_VERSION" ]; then echo "git version $FAKE_GIT_VERSION"; exit 0; fi
 exec REAL_GIT "$@"
 '''
 
@@ -490,6 +491,27 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(replay.shared_patterns(sec), ["A.md"])
         self.assertEqual(replay.generated_commands("- **Generated:** none\n"), [])
 
+    def test_old_git_skips_the_sweep_with_one_line_and_leaves_prs_alone(self):
+        self.pr_branch("pr-a", {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n"})
+        self.pr_branch("pr-b", {"src.txt": "one\nPR\n"})
+        self.land({"CHANGELOG.md": "# Changes\n## Unreleased\n- main item\n- old\n", "src.txt": "one\nMAIN\n"})
+        with unittest.mock.patch.dict(os.environ, {"FAKE_GIT_VERSION": "2.37.9"}):
+            p = self.sweep(branches=("pr-a", "pr-b"))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.count("git >= 2.38"), 1, p.stdout)
+        self.assertIn("this is git 2.37", p.stdout)
+        self.assertNotIn("could not check", p.stdout)
+        self.assertEqual(self.pushes(), [])
+        self.assertEqual(self.replays(), [])
+        self.assertFalse([l for l in self.git_log.read_text().splitlines() if l.startswith("merge-tree")])
+
+    def test_git_2_38_still_sweeps(self):
+        self.pr_branch("pr-a", {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n"})
+        self.land({"CHANGELOG.md": "# Changes\n## Unreleased\n- main item\n- old\n"})
+        with unittest.mock.patch.dict(os.environ, {"FAKE_GIT_VERSION": "2.38.0"}):
+            p = self.sweep()
+        self.assertEqual(self.replays(), [("CHANGELOG.md", "line-replay")], p.stdout + p.stderr)
+
     def test_branch_that_is_only_behind_is_left_alone(self):
         self.pr_branch("pr-a", {"src.txt": "one\ntwo\nthree\n"})
         self.land({"CHANGELOG.md": "# Changes\n## Unreleased\n- main item\n- old\n"})
@@ -497,6 +519,19 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.pushes(), [])
         self.assertEqual(self.replays(), [])
+
+    def test_gh_missing_at_the_merge_call_is_could_not_run(self):
+        self.seq({"pr view": [pr("OPEN")], "pr merge": [{"exit": 127, "stderr": "gh: command not found"}]})
+        p = self.env.run("merge", "7", check=False)
+        self.assertEqual(p.returncode, 2, p.stdout)
+        self.assertNotIn("refused", p.stdout)
+
+    def test_missing_gh_is_could_not_run(self):
+        p = self.env.run("merge", "7", check=False, no_gh=True)
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(len(p.stdout.strip().splitlines()), 1, p.stdout)
+        self.assertNotIn("Traceback", p.stdout + p.stderr)
+        self.assertEqual(self.env.events(), [])
 
 
 if __name__ == "__main__":
