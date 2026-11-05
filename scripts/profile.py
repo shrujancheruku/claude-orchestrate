@@ -33,6 +33,7 @@ _HERE = str(Path(__file__).resolve().parent)
 if _HERE not in sys.path:
     sys.path.append(_HERE)
 import common  # noqa: E402
+import config  # noqa: E402
 import runlog  # noqa: E402
 import session  # noqa: E402
 from session import TOKEN_KEYS, Transcript, iso, parse_ts  # noqa: E402
@@ -133,11 +134,7 @@ def repo_of(main: Transcript) -> Path | None:
 
 
 def config_slots(repo: Path | None) -> int | None:
-    if not repo:
-        return None
-    section = common.config_section(repo, "Slots")
-    m = re.search(r"\*\*Slots:\*\*\s*(\d+)", section or "")
-    return int(m.group(1)) if m else None
+    return config.Config.load(repo).slots if repo else None
 
 
 def merge_intervals(intervals: list) -> list:
