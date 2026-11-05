@@ -13,7 +13,7 @@ Merged dependencies: <ticket → PR, one per line | none>
 Verify: "<the plugin's absolute scripts/verify path, from the skill's base directory>" <commands from the config>
 Shared files: <the config's shared-file rules>
 Commits: <convention>. No attribution lines or trailers. Stage files by explicit path.
-PR: title <convention>; body includes "<closing reference>"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain.
+PR: title <convention>; body includes "<closing reference>"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain; no attribution lines.
 Human-only steps: <from the config>
 Repo rules: .claude/orchestration.md, the instruction files it names, and the domain docs (normally docs/agents/domain.md).
 Review findings: <on a later round, "address review <url>"; the worker reads the findings from the PR. After an approve with minors: "take or leave the minors in <url>" | none>
