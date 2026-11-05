@@ -102,7 +102,7 @@ def _word_merge(base, main, pr):
             with open(p, "w", encoding="utf-8") as f:
                 f.write("".join(json.dumps(w) + "\n" for w in _words(lines)))
             paths.append(p)
-        r = subprocess.run(["git", "merge-file", "-p", *paths], capture_output=True, text=True)
+        r = common.run("git", "merge-file", "-p", *paths)
     if r.returncode != 0:
         return None
     try:
@@ -171,6 +171,8 @@ def git(cwd, *args):
 
 
 def _stage(cwd, n, path):
+    # Stays on subprocess: it needs the blob as bytes, and common.run decodes with errors="replace",
+    # which would hide the non-UTF-8 case this function maps to None.
     r = subprocess.run(["git", "show", f":{n}:{path}"], cwd=cwd, capture_output=True)
     if r.returncode != 0:
         return None
@@ -289,8 +291,7 @@ def update_branch(repo, base, branch, method, patterns, generated=()):
                     git(wt, "rebase", "--abort")
                     return "handed-back", conflicts or [("(rebase)", p.stderr.strip()[-200:])], _final(events)
                 _finish(wt, resolved)
-                p = subprocess.run(["git", "rebase", "--continue"], cwd=wt, capture_output=True, text=True,
-                                   env=dict(os.environ, GIT_EDITOR="true"))
+                p = common.run("git", "rebase", "--continue", cwd=wt, env=dict(os.environ, GIT_EDITOR="true"))
             else:
                 git(wt, "rebase", "--abort")
                 return "handed-back", [("(rebase)", "did not finish")], _final(events)
@@ -302,8 +303,7 @@ def update_branch(repo, base, branch, method, patterns, generated=()):
                     git(wt, "merge", "--abort")
                     return "handed-back", conflicts or [("(merge)", p.stderr.strip()[-200:])], _final(events)
                 _finish(wt, resolved)
-                c = subprocess.run(["git", "commit", "--no-edit"], cwd=wt, capture_output=True, text=True,
-                                   env=dict(os.environ, GIT_EDITOR="true"))
+                c = common.run("git", "commit", "--no-edit", cwd=wt, env=dict(os.environ, GIT_EDITOR="true"))
                 if c.returncode != 0:
                     git(wt, "merge", "--abort")
                     return "handed-back", [("(merge)", c.stderr.strip()[-200:])], _final(events)
