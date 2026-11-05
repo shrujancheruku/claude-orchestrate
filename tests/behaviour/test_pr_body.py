@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_run  # noqa: E402
 import scenario  # noqa: E402
-from scenario import BRIEFS, pr_create_body, ticket, worker_env  # noqa: E402
+from scenario import BRIEFS, no_attribution, no_commit_attribution, pr_create_body, ticket, worker_env  # noqa: E402
 
 MARKER = "STUB-PR-BODY-MARKER"
 TICKET = ticket(1, "feat: add hello.txt", "Add a file `hello.txt` at the repo root containing the line `hello`.\n\n"
@@ -31,11 +31,6 @@ def creates_pr(name, inp):
     return name == "Bash" and "gh pr create" in inp.get("command", "")
 
 
-def no_attribution(body):
-    low = body.lower()
-    assert "generated with" not in low and "co-authored-by" not in low, "PR body has an attribution line: %r" % body
-
-
 def check_stub(run):
     skill = first_index(run, lambda n, i: n == "Skill" and str(i.get("skill", "")).endswith(":pr"))
     create = first_index(run, creates_pr)
@@ -44,7 +39,8 @@ def check_stub(run):
     assert skill < create, "the :pr skill was called after gh pr create"
     body = pr_create_body(run)
     assert body and MARKER in body, "PR body lacks the stub's marker: %r" % body
-    no_attribution(body)
+    no_attribution(body, "PR body")
+    no_commit_attribution(run)
 
 
 def check_plain(run):
@@ -53,7 +49,8 @@ def check_plain(run):
     assert body and body.strip(), "PR body is empty"
     assert "Closes #1" in body, "PR body lacks the closing reference: %r" % body
     assert MARKER not in body, "a plain body carries the stub's marker"
-    no_attribution(body)
+    no_attribution(body, "PR body")
+    no_commit_attribution(run)
 
 
 @unittest.skipUnless(agent_run.ENABLED, "behavioural tier: set ORCH_BEHAVIOUR=1 (costs money)")

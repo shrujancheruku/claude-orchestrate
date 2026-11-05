@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_run  # noqa: E402
 import scenario  # noqa: E402
-from scenario import BRIEFS, pr_create_body, ticket, worker_env  # noqa: E402
+from scenario import BRIEFS, no_commit_attribution, pr_create_body, ticket, worker_env  # noqa: E402
 
 TICKET = ticket(2, "feat: record the current Copilot Pro price",
                 "Add `PRICE.md` at the repo root with the current monthly price in USD of the GitHub Copilot Pro plan, "
@@ -32,6 +32,7 @@ def check(run):
     seen = " ".join(str(i) for n, i in run.tool_calls() if n == "WebFetch")
     seen += " ".join(json.dumps(e) for e in run.events if e.get("type") == "user" and "WebSearch" in json.dumps(e))
     assert any(u.rstrip("/.,") in seen for u in urls), "cited URLs %r are in no WebFetch input or WebSearch result" % urls
+    no_commit_attribution(run)
 
 
 @unittest.skipUnless(agent_run.ENABLED, "behavioural tier: set ORCH_BEHAVIOUR=1 (costs money)")
