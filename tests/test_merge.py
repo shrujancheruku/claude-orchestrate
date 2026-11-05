@@ -91,6 +91,14 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(len(self.called(["pr", "merge"])), 2)  # not retried after "in progress"
         self.assertEqual(len(self.deletes()), 1)
 
+    def test_unparseable_issue_view_is_could_not_read_not_already_closed(self):
+        self.seq({"pr view": [pr("MERGED")], "issue view": [{"stdout": "<html>"}], REF_GET: [OK]})
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("ticket #5: could not read", p.stdout)
+        self.assertNotIn("already closed", p.stdout)
+        self.assertEqual(self.called(["issue", "close"]), [])
+
     def test_502_then_already_merged_waits_not_refuses(self):
         self.seq({"pr view": [pr("OPEN"), pr("OPEN"), pr("OPEN"), pr("MERGED")],
                   "pr merge": [{"exit": 1, "stderr": "HTTP 502"},

@@ -197,6 +197,16 @@ class GateTest(unittest.TestCase):
         e = self.event()
         self.assertEqual((e["outcome"], e["behind_by"]), ("fail", 3))
 
+    def test_non_numeric_behind_by_is_a_failure_with_a_reason(self):
+        self.env.set_gh([
+            {"args": ["pr", "view"], "stdout": json.dumps(
+                {"title": "feat(x): add y", "mergeable": "MERGEABLE", "baseRefName": "main", "headRefName": "br"})},
+            {"args": ["api"], "stdout": "null\n"},
+        ])
+        r = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("could not read behind_by", r.stdout)
+
     def test_unknown_with_unreadable_behind_is_a_failure_not_a_rerun(self):
         self.env.set_gh([
             {"args": ["pr", "view"], "stdout": json.dumps(
