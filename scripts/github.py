@@ -5,6 +5,7 @@ Stdlib only, Python 3.9+. A sibling script imports it with `import github`.
 Each function runs one `gh` call and returns parsed data or raises `GhError`, whose `kind` says why:
   missing    no `gh` on PATH (retrying cannot help)
   failed     `gh` exited non-zero (message = its stderr, else stdout, on one line)
+             (one whose message says git has no repository or working directory counts as could not run)
   malformed  `gh` printed unparseable JSON, or JSON of the wrong shape for the call (a `[]` for a PR)
 `could_not_run(e)` maps missing and malformed to each script's "could not run" exit (2).
 """
@@ -22,6 +23,11 @@ MISSING, FAILED, MALFORMED = "missing", "failed", "malformed"
 GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exist", re.I)
 
 
+# git has no usable repository or working directory: retrying cannot clear it.
+NO_REPO = re.compile(r"not a git repository|unable to read current working directory|"
+                     r"cannot determine current working directory|getcwd", re.I)
+
+
 class GhError(Exception):
     def __init__(self, kind: str, message: str):
         super().__init__(message)
@@ -30,7 +36,7 @@ class GhError(Exception):
 
 def could_not_run(e: GhError) -> bool:
     """True when the script should exit 2 ("could not run") rather than treat the call as one more failure."""
-    return e.kind in (MISSING, MALFORMED)
+    return e.kind in (MISSING, MALFORMED) or (e.kind == FAILED and bool(NO_REPO.search(e.message)))
 
 
 def call(*args, cwd=None) -> str:
