@@ -153,7 +153,7 @@ Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 - `1` a verdict: a check failed, or the action was refused (a worker is sent the output).
 - `2` could not run: a missing tool (`gh`, `git`), bad input or a missing directory, or output the script could not read. Nothing about the code under test was decided; fix the environment and run it again.
 
-A script may add its own codes above 2 for a specific state (`gate` 3 and `merge` 3/4 are documented in their docstrings). `common.run` reports a missing binary as code 127 instead of raising, and `gate`, `merge`, `watch-ci` and `verify` turn that into 2. `profile.py` still exits 1 for unreadable input. Commands run by `verify` and `gate` get `--timeout` seconds (default 1800); one that outlives it is killed with its process group and fails with "timed out after Ns".
+A script may add its own codes above 2 for a specific state (`gate` 3 and `merge` 3/4 are documented in their docstrings). `common.run` reports a missing binary as code 127 instead of raising, and `gate`, `merge`, `watch-ci` and `verify` turn that into 2. Commands run by `verify` and `gate` get `--timeout` seconds (default 1800); one that outlives it is killed with its process group and fails with "timed out after Ns".
 
 **How scripts under `scripts/` are found and run:** see [ADR-0003](docs/adr/0003-script-invocation.md), checked by `tests/test_invocation.py`.
 

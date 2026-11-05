@@ -739,6 +739,24 @@ class CommandTest(unittest.TestCase):
         self.assertEqual([(r["session"], r["free"]) for r in rows], [("s", 1), ("s", 0)])
         self.assertIn("ts", rows[0])
 
+    def run_profile(self, *args):
+        return subprocess.run([sys.executable, "-I", str(SCRIPTS / "profile.py"), *args],
+                              capture_output=True, text=True, env=self.env)
+
+    def test_record_with_bad_json_could_not_run(self):
+        repo = str(self.root / "repo")
+        for bad in ("{nope", "[1]"):
+            r = self.run_profile("record", "--repo", repo, "--session", "s", bad)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("profile record", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+
+    def test_unknown_session_could_not_run(self):
+        r = self.run_profile("no-such-session")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("no transcript", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
     def test_profile_by_session_id_saves_json_and_html(self):
         fx = Fixture(self.root)
         self.env["ORCHESTRATE_USAGE_LOG"] = str(fx.usage)
@@ -877,7 +895,7 @@ class CompareTest(unittest.TestCase):
         old.write_text(json.dumps({"schema": 1, "metrics": {}}))
         new = self.profile("a.json", {"L": (20, 1.0)})
         r = self.compare(old, new)
-        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.returncode, 2)
         self.assertIn("regenerate it", r.stderr)
 
 
