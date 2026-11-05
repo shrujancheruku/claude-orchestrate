@@ -39,7 +39,7 @@ Never turn the sandbox off, retry with it off, or ask for a bypass to push. If t
 ## Stop and report
 
 Stop at the first of these, and report with `status: stopped`. Your report is how the orchestrator decides; working around the problem hides it.
-- The ticket needs a change to a file listed under Held paths in the brief. Files outside your touch map that nothing holds are yours to change.
+- The ticket needs a change to a file listed under Held paths in the brief, unless the brief's Shared files line lets you edit it (a shared file's overlap is reported by `holds` but doesn't count). Files outside your touch map that nothing holds are yours to change.
 - The ticket gives you no spec: neither its body nor an `## Agent Brief` comment has acceptance criteria. Report `stopped-because` saying the ticket read empty; never build from the brief and touch map alone. An empty body with an `## Agent Brief` comment is a valid spec, not a stop.
 - The ticket is ambiguous in a way that changes the design.
 - The ticket can't be met without contradicting an ADR. A smaller conflict goes in your report's `adr-conflicts`; never override an ADR silently.
