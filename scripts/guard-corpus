@@ -31,6 +31,8 @@ import tempfile
 from pathlib import Path
 
 import common
+import runlog
+import session
 
 ROOT = Path(__file__).resolve().parent.parent
 GUARD = ROOT / "hooks" / "guard.py"
@@ -136,28 +138,6 @@ def normalise(command, repo_roots=()):
     return OWNER.sub(r"\1owner/", command)
 
 
-def repo_root(cwd):
-    """The checkout a transcript's cwd is in: the path before any `/.claude/worktrees/`."""
-    return (cwd or "").split("/.claude/worktrees/")[0]
-
-
-def bash_commands(path):
-    """(command, repo root) for each Bash call in a transcript. Reads only tool_use inputs."""
-    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        content = (rec.get("message") or {}).get("content")
-        if rec.get("type") != "assistant" or not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash":
-                command = (block.get("input") or {}).get("command")
-                if isinstance(command, str) and command.strip():
-                    yield command, repo_root(rec.get("cwd"))
-
-
 def decide(role, command, cwd):
     """The guard's decision for one call, run as the hook runs it."""
     payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd}
@@ -188,14 +168,18 @@ def find_session(arg, projects_dir):
 
 
 def mine(main_transcript):
-    """(role, normalised command) per subagent Bash call in a session, in transcript order."""
-    sub_dir = main_transcript.with_suffix("") / "subagents"
-    for transcript in sorted(sub_dir.glob("*.jsonl")):
-        try:
-            role = json.loads(transcript.with_suffix(".meta.json").read_text())["agentType"]
-        except (OSError, ValueError, KeyError):
-            continue
-        for command, root in bash_commands(transcript):
+    """(role, normalised command) per subagent Bash call in a session, in transcript order.
+
+    The repo a call is normalised against is the main checkout its cwd belongs to (runlog.main_checkout,
+    which also finds the checkout of a worktree the harness has since removed); looked up once per cwd."""
+    checkouts = {}
+    for role, transcript in session.subagents(session.Transcript(main_transcript)):
+        for command, cwd in transcript.bash_calls():
+            if cwd not in checkouts:
+                # When the worktree and its checkout are both gone, git can't answer and main_checkout returns the
+                # path itself: the text before `/.claude/worktrees/` still names the checkout.
+                checkouts[cwd] = str(runlog.main_checkout(cwd)).split("/.claude/worktrees/")[0] if cwd else None
+            root = checkouts[cwd]
             yield role, normalise(command, [root] if root else [])
 
 

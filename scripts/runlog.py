@@ -41,22 +41,25 @@ def main_checkout(repo) -> Path:
     A linked worktree shares the main checkout's common dir, so its parent is the one root every
     worktree agrees on. Outside a checkout (or with the VCS tool missing) `repo` itself is the root.
 
-    Known limits: a bare repository with linked worktrees has a common dir not named `.git`, so each
-    worktree is its own root there; a `repo` that no longer exists (a worktree removed before the
-    profile runs) resolves to that dead path, so its logs are not found.
+    A `repo` that no longer exists (a worktree the harness removed, whose transcript still names it) is asked
+    from its nearest parent that exists, which is the main checkout or its `.claude` dir, so it resolves the same.
+
+    Known limit: a bare repository with linked worktrees has a common dir not named `.git`, so each
+    worktree is its own root there.
     """
     repo = Path(repo)
-    code, out, _ = common.run("git", "rev-parse", "--git-common-dir", cwd=repo)
+    start = next((p for p in (repo, *repo.parents) if p.is_dir()), repo)
+    code, out, _ = common.run("git", "rev-parse", "--git-common-dir", cwd=start)
     if code != 0 or not out.strip():
         return repo
     common_dir = Path(out.strip())
     if not common_dir.is_absolute():
-        common_dir = repo / common_dir
+        common_dir = start / common_dir
     common_dir = common_dir.resolve()
     if common_dir.name == ".git":
         return common_dir.parent
     # A submodule or a GIT_DIR checkout: the common dir isn't `.git`, so use this checkout's own toplevel.
-    code, out, _ = common.run("git", "rev-parse", "--show-toplevel", cwd=repo)
+    code, out, _ = common.run("git", "rev-parse", "--show-toplevel", cwd=start)
     return Path(out.strip()) if code == 0 and out.strip() else repo
 
 

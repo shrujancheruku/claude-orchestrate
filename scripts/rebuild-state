@@ -5,23 +5,26 @@ The orchestrator never writes the state file; this does, from the session's tran
 can't drift from what actually ran. A worker is joined to its ticket by its dispatch
 description, whose first `#<n>` must be its ticket (the run skill recommends `Build #<ticket>`); a
 dispatch of any other agent type, or without a `#<n>`, is ignored. Per ticket
-it records the worker's agent ID, the worktree (derived from the agent ID), the worker model
-(from the agent's own transcript, else the dispatch, else its metadata) and the time of its
-last record (the last report). The worktree is null once it no longer exists. When a ticket was
-dispatched more than once, the latest wins.
+it records the worker's agent ID, the worktree, the worker model (from the agent's own transcript,
+else the dispatch, else its metadata), the time of its last record (the last report) and the touch
+map its brief names. The worktree is the first of these that exists: the path the harness reported
+in the worker's completion, the harness's `.claude/worktrees/agent-<id>`, the worktree `git worktree
+list` shows for the brief's branch; else null. When a ticket was dispatched more than once, the latest wins.
 
 The file is a cache and the tracker wins. Exit codes: 0 rebuilt; 2 could not run (no session id,
 no transcript). Stdlib only, Python 3.9+.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import common
+import session
 
 STATE = Path(".claude") / "orchestrate-state.json"
 
@@ -33,61 +36,59 @@ def find_transcript(arg: str) -> Path:
     return found
 
 
-def last_timestamp(records):
-    """Latest record timestamp as an ISO string (UTC, Z); None if there are none."""
-    best = None
-    for r in records:
-        try:
-            ts = datetime.fromisoformat(str(r.get("timestamp")).replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        best = ts if best is None or ts > best else best
-    return best.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if best else None
-
-
-def model_of(records, dispatch_input, meta):
+def model_of(records, dispatch_model, meta_model):
     for r in records:
         msg = r.get("message")
         if isinstance(msg, dict) and msg.get("model"):
             return msg["model"]
-    return dispatch_input.get("model") or meta.get("model")
+    return dispatch_model or meta_model
+
+
+def worktree_for_branch(repo: Path, branch: str) -> str | None:
+    """The path `git worktree list` gives for the checkout of `branch`, or None."""
+    code, out, _ = common.run("git", "worktree", "list", "--porcelain", cwd=repo)
+    if code != 0:
+        return None
+    path = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == f"branch refs/heads/{branch}" and path:
+            return path
+    return None
+
+
+def worktree_of(agent_id: str, branch, repo: Path, completions: dict) -> str | None:
+    """Where the worker's worktree is, or None once it is gone. Each source must exist to count.
+
+    The harness's completion names the path it used; the `.claude/worktrees/agent-<id>` path is where the
+    harness puts it; the ticket's branch covers a worktree the worker was resumed in under another name.
+    """
+    for path in (completions.get(agent_id), repo / ".claude" / "worktrees" / f"agent-{agent_id}"):
+        if path and Path(path).is_dir():
+            return str(Path(path))
+    found = worktree_for_branch(repo, branch) if branch else None
+    return found if found and Path(found).is_dir() else None
 
 
 def rebuild(main_path: Path, repo: Path) -> dict:
-    main = list(common.read_jsonl(main_path))
-    sub = main_path.with_suffix("") / "subagents"
-    session = next((r["sessionId"] for r in main if r.get("sessionId")), main_path.stem)
-
-    metas = {}  # dispatch tool_use id -> (agent id, metadata)
-    for tool_use_id, (stem, meta) in common.subagent_metas(main_path).items():
-        metas[tool_use_id] = (stem[len("agent-"):] if stem.startswith("agent-") else stem, meta)
-
+    main = session.Transcript(main_path)
+    sid = next((r["sessionId"] for r in main.records if r.get("sessionId")), main_path.stem)
+    completions = main.completions()
     tickets = {}
-    for r in main:
-        for b in common.blocks(r):
-            if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Agent"):
-                continue
-            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
-            if inp.get("subagent_type") != common.WORKER:
-                continue
-            ticket = common.ticket_of(inp.get("description"))
-            agent = metas.get(b.get("id"))
-            if ticket is None or not agent:
-                continue  # no #<n> in the description, or no agent to join it to
-            agent_id, meta = agent
-            records = list(common.read_jsonl(sub / f"agent-{agent_id}.jsonl"))
-            # The harness removes the worktree once the agent ends; null says it is gone.
-            path = repo / ".claude" / "worktrees" / f"agent-{agent_id}"
-            worktree = str(path) if path.is_dir() else None
-            tickets[ticket] = {  # a later dispatch for the same ticket replaces the earlier
-                "agent_id": agent_id,
-                "worktree": worktree,
-                "model": model_of(records, inp, meta),
-                "last_report": last_timestamp(records),
-            }
-    return {"session": session, "tickets": {str(n): tickets[n] for n in sorted(tickets)}}
+    for a in session.agents(main):
+        if a["role"] != "worker" or a["ticket"] is None or not a["id"]:
+            continue  # not a worker, no #<n> in the description, or no agent to join it to
+        records = a["transcript"].records if a["transcript"] else []
+        # A later dispatch for the same ticket replaces the earlier.
+        tickets[a["ticket"]] = {
+            "agent_id": a["id"],
+            "worktree": worktree_of(a["id"], session.branch_of(a["prompt"]), repo, completions),
+            "model": model_of(records, a["dispatch_model"], a["meta_model"]),
+            "last_report": session.iso(a["last_record"]),
+            "touch_map": session.touch_map(a["prompt"]),
+        }
+    return {"session": sid, "tickets": {str(n): tickets[n] for n in sorted(tickets)}}
 
 
 def main(argv=None) -> int:

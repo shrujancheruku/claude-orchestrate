@@ -34,20 +34,12 @@ if _HERE not in sys.path:
     sys.path.append(_HERE)
 import common  # noqa: E402
 import runlog  # noqa: E402
+import session  # noqa: E402
+from session import TOKEN_KEYS, Transcript, iso, parse_ts  # noqa: E402
 
 SCHEMA = 2
-PLUGIN = common.PLUGIN
 PROFILES = runlog.PROFILES  # saved profiles sit beside the run log
 VIEWER = Path(__file__).resolve().parent.parent / "viewer" / "profile.html"
-# Activity in an agent's transcript further apart than this is two segments:
-# a worker waiting on review between them isn't building.
-SEGMENT_GAP_S = 120
-TOKEN_KEYS = {
-    "input_tokens": "input",
-    "output_tokens": "output",
-    "cache_read_input_tokens": "cache_read",
-    "cache_creation_input_tokens": "cache_write",
-}
 # Proxy prices: USD per million tokens at API list, per model version and token type.
 # Checked against the pricing page below on 2026-11-04. Cache writes are the 5-minute
 # rate (1.25x input); the harness doesn't log the cache TTL, so 1-hour writes are
@@ -90,7 +82,6 @@ PRICES = {
     "claude-haiku-4-5": _rates(1, 5, 0.10),
     "claude-3-5-haiku": _rates(0.80, 4, 0.08),
 }
-LIMIT_TEXT = re.compile(r"usage limit|rate limit|limit reached|resets? (?:at|in)", re.I)
 
 
 def usage_log() -> Path:
@@ -125,140 +116,6 @@ def request_cost(model, usage: dict) -> float | None:
         price = price["long"]
     return sum(tokens[k] * price[k] for k in tokens) / 1e6
 
-
-def parse_ts(value) -> datetime | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        # Epoch seconds, or milliseconds from some callers.
-        return datetime.fromtimestamp(value / 1000 if value > 1e11 else value, timezone.utc)
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    # A naive value would raise TypeError against aware bounds; treat it as UTC.
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def iso(dt: datetime | None) -> str | None:
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
-
-
-def text_of(block) -> str:
-    content = block.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(c.get("text", "") for c in content if isinstance(c, dict))
-    return block.get("text", "") or ""
-
-
-class Transcript:
-    """One transcript: tokens counted once per API message, plus its activity times."""
-
-    def __init__(self, path: Path):
-        self.path = path
-        self.records = list(common.read_jsonl(path))
-        self.requests = {}  # message id -> (model, usage), each API request once: the one source of per-request usage
-        self.models = []
-        self.times = []
-        for r in self.records:
-            ts = parse_ts(r.get("timestamp"))
-            if ts:
-                self.times.append(ts)
-            msg = r.get("message")
-            if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
-                # A response is logged once per content block, each with the same usage.
-                self.requests[msg.get("id") or id(r)] = (msg.get("model"), msg["usage"])
-                if msg.get("model") and msg["model"] not in self.models:
-                    self.models.append(msg["model"])
-        self.times.sort()
-        self.tokens = {v: 0 for v in TOKEN_KEYS.values()}
-        for _, u in self.requests.values():
-            for k, v in TOKEN_KEYS.items():
-                self.tokens[v] += u.get(k) or 0
-
-    def cost(self) -> dict:
-        """Proxy USD by model family; requests from a model with no price count under `unpriced`."""
-        out = {}
-        for model, u in self.requests.values():
-            c = request_cost(model, u)
-            key = model_family(model) if c is not None else "unpriced"
-            out[key] = out.get(key, 0.0) + (c or 0.0)
-        return out
-
-    def segments(self) -> list:
-        out = []
-        for ts in self.times:
-            if out and (ts - out[-1][1]).total_seconds() <= SEGMENT_GAP_S:
-                out[-1][1] = ts
-            else:
-                out.append([ts, ts])
-        return out
-
-    def tool_uses(self, name: str):
-        for r in self.records:
-            for b in common.blocks(r):
-                if b.get("type") == "tool_use" and b.get("name") == name:
-                    yield parse_ts(r.get("timestamp")), b
-
-    def tool_results(self) -> dict:
-        out = {}
-        for r in self.records:
-            for b in common.blocks(r):
-                if b.get("type") == "tool_result":
-                    out[b.get("tool_use_id")] = text_of(b)
-        return out
-
-    def api_errors(self):
-        for r in self.records:
-            if r.get("isApiErrorMessage"):
-                text = " ".join(text_of(b) for b in common.blocks(r))
-                if LIMIT_TEXT.search(text):
-                    yield parse_ts(r.get("timestamp")), text[:200]
-
-    def contexts(self) -> list:
-        """The prompt size of each API request: input plus cache reads and writes."""
-        return [(u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
-                + (u.get("cache_creation_input_tokens") or 0) for _, u in self.requests.values()]
-
-    def tool_output_tokens(self) -> int:
-        """Tokens the tools handed back, estimated at 4 characters each: the transcript holds text, not counts."""
-        return sum(len(text) for text in self.tool_results().values()) // 4
-
-    def compactions(self) -> int:
-        return sum(1 for r in self.records if r.get("type") == "system" and r.get("subtype") == "compact_boundary")
-
-    def compaction_details(self) -> list:
-        """Each compaction: when, what triggered it (auto|manual) and the context size it compacted (`preTokens`).
-
-        Trigger and size are None when the harness didn't record them."""
-        out = []
-        for r in self.records:
-            if r.get("type") == "system" and r.get("subtype") == "compact_boundary":
-                meta = r.get("compactMetadata") or r.get("compact_metadata") or {}
-                out.append({"ts": iso(parse_ts(r.get("timestamp"))), "trigger": meta.get("trigger"), "pre_tokens": meta.get("preTokens")})
-        return out
-
-    def turns(self) -> list:
-        """One entry per API request (a response logged once per content block is one turn), in order:
-        its time, model, usage, tool calls and text."""
-        out, by_id = [], {}
-        for r in self.records:
-            msg = r.get("message")
-            if r.get("type") != "assistant" or not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
-                continue
-            key = msg.get("id") or id(r)
-            turn = by_id.get(key)
-            if turn is None:
-                turn = by_id[key] = {"ts": parse_ts(r.get("timestamp")), "model": msg.get("model"), "usage": msg["usage"], "tools": [], "text": ""}
-                out.append(turn)
-            for b in common.blocks(r):
-                if b.get("type") == "tool_use":
-                    turn["tools"].append((b.get("name") or "", b.get("input") or {}))
-                elif b.get("type") == "text":
-                    turn["text"] += b.get("text") or ""
-        return out
 
 
 def find_transcript(arg: str) -> Path:
@@ -301,11 +158,6 @@ def clip(intervals, start, end) -> list:
     return [[max(s, start), min(e, end)] for s, e in intervals if e > start and s < end]
 
 
-def subagent_metas(main: Transcript) -> dict:
-    """toolUseId -> (agent file stem, metadata) for every subagent the harness recorded for the session."""
-    return common.subagent_metas(main.path)
-
-
 def dispatched_round(text: str) -> int:
     """The review round a reviewer was dispatched for: "Tier M, round 2" first, else the last "round N" in the brief."""
     m = re.search(r"\btier\s*[SML],?\s*round[:\s#]*(\d+)", text, re.I)
@@ -321,40 +173,24 @@ def dispatched_tier(text: str) -> str | None:
     return m.group(1).upper() if m else None
 
 
+def cost_of(t: Transcript) -> dict:
+    """Proxy USD by model family for one transcript; requests from a model with no price count under `unpriced`."""
+    out = {}
+    for model, u in t.requests.values():
+        c = request_cost(model, u)
+        key = model_family(model) if c is not None else "unpriced"
+        out[key] = out.get(key, 0.0) + (c or 0.0)
+    return out
+
+
 def collect_agents(main: Transcript) -> list:
-    """Every orchestrate agent the session dispatched, joined to its own transcript."""
-    sub = main.path.with_suffix("") / "subagents"
-    by_tool_use = subagent_metas(main)
-    agents = []
-    for ts, use in main.tool_uses("Agent"):
-        inp = use.get("input") or {}
-        role = inp.get("subagent_type") or ""
-        if not role.startswith(PLUGIN):
-            continue
-        name, meta = by_tool_use.get(use.get("id"), (None, {}))
-        t = Transcript(sub / f"{name}.jsonl") if name else None
-        desc = inp.get("description") or meta.get("description") or ""
-        asked = dispatched_round(f"{desc} {inp.get('prompt') or ''}")
-        agents.append({
-            "id": name[len("agent-"):] if name and name.startswith("agent-") else name,
-            "role": role[len(PLUGIN):],
-            "model": (t.models[0] if t and t.models else None) or inp.get("model") or meta.get("model"),
-            # What the metadata calls the model (often the dispatch alias, "haiku"): the worker-model split reads this.
-            "worker_model": meta.get("model") or (t.models[0] if t and t.models else None) or inp.get("model"),
-            "description": desc,
-            "round": asked,  # the review round a reviewer was dispatched for
-            "tier": dispatched_tier(f"{inp.get('prompt') or ''} {desc}") if role == PLUGIN + "reviewer" else None,
-            "tool_use_id": use.get("id"),
-            "requests": len(t.requests) if t else 0,
-            "contexts": t.contexts() if t else [],
-            "tool_output_tokens": t.tool_output_tokens() if t else 0,
-            "dispatched": ts,
-            "segments": t.segments() if t else [],
-            "tokens": t.tokens if t else {v: 0 for v in TOKEN_KEYS.values()},
-            "cost": t.cost() if t else {},
-            "last_record": t.times[-1] if t and t.times else None,
-            "transcript": t,
-        })
+    """Every orchestrate agent the session dispatched (session.agents), with what only the profile reads: the
+    review round and tier, and the proxy cost."""
+    agents = session.agents(main)
+    for a in agents:
+        a["round"] = dispatched_round(f"{a['description']} {a['prompt']}")  # the review round a reviewer was dispatched for
+        a["tier"] = dispatched_tier(f"{a['prompt']} {a['description']}") if a["role"] == "reviewer" else None
+        a["cost"] = cost_of(a["transcript"]) if a["transcript"] else {}
     return agents
 
 
@@ -521,7 +357,7 @@ def meter_use(usage: list, key: str) -> float | None:
 def cost_metrics(orch: Transcript, agents: list, merged: int) -> dict:
     """Proxy $ for the whole session: the orchestrator and every agent, split by role and model."""
     by_role, by_model, by_role_model = {}, {}, {}
-    for role, cost in [("orchestrator", orch.cost())] + [(a["role"], a["cost"]) for a in agents]:
+    for role, cost in [("orchestrator", cost_of(orch))] + [(a["role"], a["cost"]) for a in agents]:
         for model, usd in cost.items():
             by_role[role] = by_role.get(role, 0.0) + usd
             by_model[model] = by_model.get(model, 0.0) + usd
@@ -750,22 +586,21 @@ def depth2_agents(main: Transcript, agents: list) -> list:
 
     Plugin agents have no Agent tool, so any hit is a defect. A spawn call with no recorded
     subagent is still listed: it was tried."""
-    metas = subagent_metas(main)
-    sub = main.path.with_suffix("") / "subagents"
+    metas = session.subagent_metas(main)
     out = []
     for a in agents:
         if not a["transcript"]:
             continue
         for _, use in a["transcript"].tool_uses("Agent"):
             name, meta = metas.get(use.get("id"), (None, {}))
-            t = Transcript(sub / f"{name}.jsonl") if name else None
+            t = main.subagent(name) if name else None
             inp = use.get("input") or {}
             out.append({
                 "parent": a["id"], "parent_role": a["role"], "ticket": a.get("ticket"),
                 "tool_use_id": use.get("id"), "agent": name[len("agent-"):] if name and name.startswith("agent-") else name,
                 "subagent_type": inp.get("subagent_type") or meta.get("agentType"),
                 "description": inp.get("description") or "",
-                "tokens": sum(t.tokens.values()) if t else 0, "cost": sum(t.cost().values()) if t else 0.0,
+                "tokens": sum(t.tokens.values()) if t else 0, "cost": sum(cost_of(t).values()) if t else 0.0,
             })
     return out
 
@@ -998,15 +833,15 @@ def recommend(slots: int, occupancy: float, wins: list, limits: list) -> str | N
 
 def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: float, now: datetime) -> dict:
     main = Transcript(transcript)
-    session = transcript.stem
+    sid = transcript.stem
     repo = repo or repo_of(main)
-    passes = runlog.read_passes(repo, session)
+    passes = runlog.read_passes(repo, sid)
     agents = collect_agents(main)
     end = main.times[-1] if main.times else now
     starts = [a["dispatched"] for a in agents if a["dispatched"]] + [parse_ts(p.get("ts")) for p in passes]
     starts = [s for s in starts if s]
     start = min(starts) if starts else (main.times[0] if main.times else now)
-    events = runlog.read_events(repo, session, start, end)
+    events = runlog.read_events(repo, sid, start, end)
     tickets = build_tickets(agents, main, end, events)
     assign_slots(tickets)
     # Each pass's own slot count holds until the next pass. More tickets at once than the count in force
@@ -1069,7 +904,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
 
     return {
         "schema": SCHEMA,
-        "session": session,
+        "session": sid,
         "repo": str(repo) if repo else None,
         "generated_at": iso(now),
         "start": iso(start),
