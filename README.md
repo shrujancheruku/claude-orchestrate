@@ -2,7 +2,7 @@
 
 **Turn a backlog of GitHub issues into reviewed, merged pull requests, several at a time, from one Claude Code session.**
 
-[![version](https://img.shields.io/badge/version-0.4.1-blue)](.claude-plugin/plugin.json)
+[![release](https://img.shields.io/github/v/release/shrujancheruku/claude-orchestrate)](https://github.com/shrujancheruku/claude-orchestrate/releases/latest)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)](https://code.claude.com/docs/en/plugins)
 [![python](https://img.shields.io/badge/python-3.9%2B%20stdlib%20only-3776ab)](#development)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
