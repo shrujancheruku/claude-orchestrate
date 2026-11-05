@@ -12,6 +12,7 @@ You write the tickets. orchestrate runs the rest: it picks what to build next, g
 ```
 /orchestrate:setup    # once per repo: scouts the codebase, asks you a few questions
 /orchestrate:run      # works the backlog until nothing is left to take
+/orchestrate:run --greedy --profile   # as many tickets at once as don't collide, with a cost and slot profile
 ```
 
 ---
@@ -80,7 +81,7 @@ You need `git` 2.38+, `gh` (signed in) and `python3` 3.9+.
 
 1. **Write tickets.** orchestrate works the GitHub issues labelled `ready-for-agent`. It pairs with [Matt Pocock's skills](https://github.com/mattpocock/skills): `to-spec` and `to-tickets` write the backlog, `triage` labels it, and `/setup-matt-pocock-skills` writes the tracker and domain docs orchestrate reads.
 2. **`/orchestrate:setup`** scouts the repo (tracker, commands, layout, conventions, files that would collide across worktrees) and asks you in one round: slots, gates, who merges, models, review tiers. It writes `.claude/orchestration.md`.
-3. **`/orchestrate:run`** starts working. `/orchestrate:run status` reports without acting; `/orchestrate:run <issue>` narrows to one ticket or one parent's sub-issues.
+3. **`/orchestrate:run`** starts working. `/orchestrate:run status` reports without acting; `/orchestrate:run <issue>` narrows to one ticket or one parent's sub-issues. Add `--greedy` to run every ticket that doesn't collide with another (up to 5 at once) instead of the config's slot count, and `--profile` to save what the session cost and how busy its slots were ([guide](docs/guide.md#choosing-a-slot-count)).
 
 ## Documentation
 
