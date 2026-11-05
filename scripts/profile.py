@@ -265,7 +265,7 @@ class Transcript:
 def find_transcript(arg: str) -> Path:
     found = common.find_transcript(arg)
     if not found:
-        sys.exit(f"profile: no transcript for session {arg} under {common.claude_dir() / 'projects'}")
+        common.die(f"profile: no transcript for session {arg} under {common.claude_dir() / 'projects'}")
     return found
 
 
@@ -1259,9 +1259,9 @@ def cmd_record(argv: list) -> None:
     try:
         entry = json.loads(args.pass_json)
     except ValueError as e:
-        sys.exit(f"profile record: not JSON: {e}")
+        common.die(f"profile record: not JSON: {e}")
     if not isinstance(entry, dict):
-        sys.exit("profile record: expected a JSON object")
+        common.die("profile record: expected a JSON object")
     entry = {"ts": iso(datetime.now(timezone.utc)), "session": args.session, **entry}
     log = args.repo / PROFILES / PASS_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -1279,9 +1279,9 @@ def load_profile(path: Path) -> dict:
     try:
         p = json.loads(path.read_text())
     except (OSError, ValueError) as e:
-        sys.exit(f"profile compare: can't read {path}: {e}")
+        common.die(f"profile compare: can't read {path}: {e}")
     if not isinstance(p, dict) or p.get("schema", 0) < 2 or "tiers" not in p.get("metrics", {}):
-        sys.exit(f"profile compare: {path} has no per-tier figures; regenerate it with the current profile.py")
+        common.die(f"profile compare: {path} has no per-tier figures; regenerate it with the current profile.py")
     return p
 
 
