@@ -12,24 +12,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv, git  # noqa: E402
 
-# A gh that answers each `<group> <verb>` (e.g. `pr merge`) from a queue: the Nth call gets reply
-# min(N, last). Replies: {"stdout", "stderr", "exit"}. Calls are recorded in <state>.calls.
-SCRIPTED_GH = '''#!/usr/bin/env python3
-import json, os, sys
-state = os.environ["FAKE_GH_STATE"]
-args = sys.argv[1:]
-with open(state + ".calls", "a") as f:
-    f.write(json.dumps(args) + "\\n")
-key = " ".join(args[:2])
-n = sum(1 for l in open(state + ".calls") if " ".join(json.loads(l)[:2]) == key) - 1
-steps = json.load(open(state + ".seq")).get(key) or [{"exit": 1, "stderr": "no reply for " + key}]
-r = steps[min(n, len(steps) - 1)]
-sys.stdout.write(r.get("stdout", ""))
-sys.stderr.write(r.get("stderr", ""))
-sys.exit(r.get("exit", 0))
-'''
-
-
 def pr(state, issues=(5,), branch="feat-br", cross=False):
     return {"stdout": json.dumps({"state": state, "headRefName": branch, "headRefOid": "abc123",
                                   "isCrossRepository": cross,
@@ -48,12 +30,12 @@ class MergeTest(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
-        (self.env.bin / "gh").write_text(SCRIPTED_GH)
         git(self.env.repo, "branch", "feat-br")
 
     def seq(self, steps):
         steps = {"repo view": REPO, "api -X": [OK], **steps}
-        self.env.gh_state.with_name("gh-state.json.seq").write_text(json.dumps(steps))
+        # {"pr view": [reply, ...]}: the Nth matching call gets reply min(N, last).
+        self.env.set_gh([{"args": key.split(), "seq": replies} for key, replies in steps.items()])
 
     def merge(self, *extra):
         return self.env.run("merge", "7", "--interval", "0", "--timeout", "5", *extra, check=False)
@@ -247,7 +229,6 @@ class SweepTest(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
-        (self.env.bin / "gh").write_text(SCRIPTED_GH)
         git(self.env.repo, "branch", "feat-br")
         self.git_log = self.env.repo.parent / "git.log"
         wrapper = self.env.bin / "git"
@@ -525,13 +506,26 @@ class SweepTest(unittest.TestCase):
         p = self.env.run("merge", "7", check=False)
         self.assertEqual(p.returncode, 2, p.stdout)
         self.assertNotIn("refused", p.stdout)
+        self.assertIn("could not run gh", p.stderr)
 
     def test_missing_gh_is_could_not_run(self):
         p = self.env.run("merge", "7", check=False, no_gh=True)
         self.assertEqual(p.returncode, 2)
-        self.assertEqual(len(p.stdout.strip().splitlines()), 1, p.stdout)
-        self.assertNotIn("Traceback", p.stdout + p.stderr)
+        self.assertEqual(p.stdout, "")
+        self.assertEqual(len(p.stderr.strip().splitlines()), 1, p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
         self.assertEqual(self.env.events(), [])
+
+    def test_reply_that_is_not_a_pr_object_is_could_not_run(self):
+        for reply in ("[]", "<html>not json"):
+            with self.subTest(reply=reply):
+                self.seq({"pr view": [{"stdout": reply}]})
+                p = self.merge()
+                self.assertEqual(p.returncode, 2, p.stdout)
+                self.assertEqual(p.stdout, "")
+                self.assertEqual(len(p.stderr.strip().splitlines()), 1, p.stderr)
+                self.assertNotIn("Traceback", p.stderr)
+                self.assertEqual(self.called(["pr", "merge"]), [])
 
 
 if __name__ == "__main__":

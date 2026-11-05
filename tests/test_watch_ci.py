@@ -1,30 +1,8 @@
 import json
-import os
 import subprocess
-import sys
 import unittest
-from pathlib import Path
 
 from harness import ScriptEnv
-
-# A gh that serves each PR a sequence of replies: the Nth `pr view <pr>` call gets
-# step min(N, last). Steps live in <state>.seq as {"<pr>": [<json view>, ...]}.
-SEQ_GH = '''#!/usr/bin/env python3
-import json, os, sys
-state = os.environ["FAKE_GH_STATE"]
-args = sys.argv[1:]
-with open(state + ".calls", "a") as f:
-    f.write(json.dumps(args) + "\\n")
-seq = json.load(open(state + ".seq"))
-n = sum(1 for l in open(state + ".calls") if json.loads(l)[:3] == args[:3]) - 1
-steps = seq[args[2]]
-step = steps[min(n, len(steps) - 1)]
-if step == "GH_ERROR":
-    sys.stderr.write("HTTP 502: bad gateway\\n")
-    sys.exit(1)
-print(json.dumps(step))
-'''
-
 
 def view(result, merge="CLEAN", head="abcdef1234567", state="OPEN"):
     if result is None:
@@ -38,10 +16,15 @@ class WatchCi(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
-        (self.env.bin / "gh").write_text(SEQ_GH)
 
     def seq(self, steps):
-        self.env.gh_state.with_name("gh-state.json.seq").write_text(json.dumps(steps))
+        """{"<pr>": [view, ...]}: the Nth `pr view <pr>` gets step min(N, last); "GH_ERROR" is a failed call."""
+        def reply(step):
+            if step == "GH_ERROR":
+                return {"stderr": "HTTP 502: bad gateway\n", "exit": 1}
+            return {"stdout": json.dumps(step)}
+        self.env.set_gh([{"args": ["pr", "view", pr], "seq": [reply(s) for s in pr_steps]}
+                         for pr, pr_steps in steps.items()])
 
     def watch(self, *prs):
         return self.env.run("watch-ci", "--interval", "0", *prs)
@@ -64,12 +47,6 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(events[1]["merge_state"], "BLOCKED")
         self.assertEqual(events[1]["head"], "2222222")
 
-    def watch_from(self, cwd):
-        env = dict(os.environ, PATH=f"{self.env.bin}{os.pathsep}{os.environ['PATH']}", FAKE_GH_STATE=str(self.env.gh_state))
-        script = Path(__file__).resolve().parent.parent / "scripts" / "watch-ci"
-        return subprocess.run([sys.executable, str(script), "--interval", "0", "1"], cwd=cwd, env=env,
-                              capture_output=True, text=True)
-
     def test_events_from_a_subdirectory_and_a_worktree_land_in_the_main_log(self):
         self.seq({"1": [view("SUCCESS", head="1111111aaa")]})
         sub = self.env.repo / "pkg"
@@ -77,7 +54,7 @@ class WatchCi(unittest.TestCase):
         wt = self.env.repo / ".claude" / "worktrees" / "w1"
         subprocess.run(["git", "worktree", "add", "-q", "-b", "w1", str(wt)], cwd=self.env.repo, check=True)
         for cwd in (sub, wt):
-            self.assertEqual(self.watch_from(cwd).returncode, 0)
+            self.assertEqual(self.env.run("watch-ci", "--interval", "0", "1", cwd=cwd, check=False).returncode, 0)
         self.assertEqual(len(self.env.events()), 2)
         self.assertFalse((sub / ".claude").exists())
         self.assertFalse((wt / ".claude" / "orchestrate-profiles").exists())
@@ -122,6 +99,15 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
         self.assertNotIn("Traceback", r.stderr)
+
+    def test_reply_that_is_not_a_pr_object_is_could_not_run(self):
+        for reply in ("[]", "<html>not json"):
+            with self.subTest(reply=reply):
+                self.env.set_gh([{"args": ["pr", "view"], "stdout": reply}])
+                r = self.env.run("watch-ci", "--interval", "0", "7", check=False)
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+                self.assertNotIn("Traceback", r.stderr)
 
 
 if __name__ == "__main__":

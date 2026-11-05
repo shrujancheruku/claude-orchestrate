@@ -18,25 +18,23 @@ A conflict the script can't resolve (a file that isn't shared, or overlapping wo
 branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
 Exit codes: 0 merged and cleaned up; 4 the same, but a swept branch was handed back (resume its worker
 with the printed conflict list); 1 the merge was refused, or the PR was closed unmerged;
-2 the script could not run (`gh` is missing or cannot read the PR); 3 still not MERGED at the timeout (run it
+2 the script could not run (`gh` is missing or cannot read the PR; the error goes to stderr); 3 still not MERGED at the timeout (run it
 again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
 Stdlib only, Python 3.9+.
 """
 
 import argparse
-import json
 import re
 import sys
 import time
-import urllib.parse
 
 import common
+import github
 import replay
 
 # "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
 IN_PROGRESS = re.compile(r"already in progress|already merged", re.I)
-GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exist", re.I)
 PROTECTED = ("main", "master")
 TRANSIENT = re.compile(r"\b5\d\d\b|bad gateway|service unavailable|gateway time-?out|timed? ?out|"
                        r"connection (?:reset|refused)|try again", re.I)
@@ -46,40 +44,27 @@ run = common.run  # (code, stdout, stderr); a missing gh or git is code 127, not
 
 
 def view(pr, cwd):
-    p = run("gh", "pr", "view", pr, "--json", "state,headRefName,headRefOid,isCrossRepository,closingIssuesReferences", cwd=cwd)
-    if p.returncode != 0:
-        return None, common.one_line(p.stderr or p.stdout)
+    """(view, "") or (None, why); a failed or unusable `gh pr view` is never a traceback."""
     try:
-        return json.loads(p.stdout), ""
-    except ValueError:
-        return None, "gh returned malformed JSON"
+        return github.pr_view(pr, "state,headRefName,headRefOid,isCrossRepository,closingIssuesReferences", cwd), ""
+    except github.GhError as e:
+        return None, e.message
 
 
 def default_branch(cwd):
     """The repo's default branch name, or None when gh can't say (callers then delete nothing)."""
-    p = run("gh", "repo", "view", "--json", "defaultBranchRef", cwd=cwd)
     try:
-        return json.loads(p.stdout)["defaultBranchRef"]["name"] if p.returncode == 0 else None
-    except (ValueError, KeyError, TypeError):
+        return github.default_branch(cwd)
+    except github.GhError:
         return None
 
 
 def delete_remote_branch(branch, cwd):
-    """Delete refs/heads/<branch> over gh's HTTPS API (origin may be SSH, which can be denied).
-
-    Returns (deleted, note). A 404/422 means the host already removed it, which counts as deleted.
-    """
-    # Git allows `#` and `%` in branch names; unquoted, `feat#x` would address `heads/feat`.
-    quoted = urllib.parse.quote(branch, safe="/")
-    e = run("gh", "api", f"repos/{{owner}}/{{repo}}/git/ref/heads/{quoted}", cwd=cwd)
-    if e.returncode != 0 and GONE.search(e.stderr + e.stdout):
-        return True, "already gone"
-    d = run("gh", "api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd)
-    if d.returncode == 0:
-        return True, "deleted"
-    if GONE.search(d.stderr + d.stdout):
-        return True, "already gone"
-    return False, f"NOT deleted: {common.one_line(d.stderr or d.stdout)}"
+    """Delete the remote branch. Returns (deleted, note); "already gone" counts as deleted."""
+    try:
+        return True, github.delete_branch(branch, cwd)
+    except github.GhError as e:
+        return False, f"NOT deleted: {e.message}"
 
 
 def delete_local_branch(branch, cwd):
@@ -112,7 +97,7 @@ def main(argv=None) -> int:
 
     v, why = view(pr, cwd)
     if v is None:
-        say(f"merge: could not read PR #{pr} with gh: {why}")
+        print(f"merge: could not read PR #{pr} with gh: {why}", file=sys.stderr)
         return 2
     branch = v.get("headRefName") or ""
     state = v.get("state")
@@ -122,14 +107,15 @@ def main(argv=None) -> int:
     refused = None
     while True:
         if attempt:
-            # --match-head-commit: a push after review makes this a refusal, not a merge of unreviewed code.
-            guard = ["--match-head-commit", head_oid] if head_oid else []
-            p = run("gh", "pr", "merge", pr, f"--{args.method}", *guard, cwd=cwd)
-            err = common.one_line(p.stderr or p.stdout)
-            if p.returncode == common.NOT_FOUND:  # gh vanished mid-run: not a refusal
-                say(f"merge: could not run gh: {err}")
-                return 2
-            if p.returncode == 0:
+            try:
+                github.merge_pr(pr, args.method, head_oid, cwd)
+                err = None
+            except github.GhError as e:
+                if e.kind == github.MISSING:  # gh vanished mid-run: not a refusal
+                    print(f"merge: could not run gh: {e.message}", file=sys.stderr)
+                    return 2
+                err = e.message
+            if err is None:
                 say(f"merge command accepted for PR #{pr}")
                 attempt = False
             elif IN_PROGRESS.search(err):
@@ -178,18 +164,19 @@ def main(argv=None) -> int:
         if t not in tickets:
             say(f"ticket #{t} is not linked by PR #{pr}; not closed")
     for t in tickets:
-        p = run("gh", "issue", "view", t, "--json", "state", cwd=cwd)
         try:
-            is_open = json.loads(p.stdout).get("state") == "OPEN"
-        except ValueError:
-            is_open = False
-        if p.returncode != 0:
-            say(f"ticket #{t}: could not read ({common.one_line(p.stderr)})")
-        elif not is_open:
+            is_open = github.issue_state(t, cwd) == "OPEN"
+        except github.GhError as e:
+            say(f"ticket #{t}: could not read ({e.message})")
+            continue
+        if not is_open:
             say(f"ticket #{t} already closed")
-        else:
-            c = run("gh", "issue", "close", t, cwd=cwd)
-            say(f"ticket #{t} " + ("closed" if c.returncode == 0 else f"NOT closed: {common.one_line(c.stderr)}"))
+            continue
+        try:
+            github.close_issue(t, cwd)
+            say(f"ticket #{t} closed")
+        except github.GhError as e:
+            say(f"ticket #{t} NOT closed: {e.message}")
 
     if args.worktree:
         w = run("git", "worktree", "remove", args.worktree, cwd=cwd)
@@ -225,14 +212,10 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
         return False
     section = common.config_section(cwd, "Shared files")
     patterns, generated = replay.shared_patterns(section), replay.generated_commands(section)
-    p = run("gh", "pr", "list", "--state", "open", "--base", default, "--json",
-            "number,headRefName,isCrossRepository", cwd=cwd)
     try:
-        prs = json.loads(p.stdout) if p.returncode == 0 else None
-    except ValueError:
-        prs = None
-    if prs is None:
-        say(f"sweep skipped: could not list open PRs ({common.one_line(p.stderr)})")
+        prs = github.open_prs(default, cwd)
+    except github.GhError as e:
+        say(f"sweep skipped: could not list open PRs ({e.message})")
         return False
     replay.git(cwd, "fetch", "--prune", "origin")
     handed = False
