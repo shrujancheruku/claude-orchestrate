@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # ci.yml installs the claude-code version pinned in .github/claude-code-pin/package.json,
+  # so a bump here is a reviewable PR whose CI run is the validation.
+  - package-ecosystem: npm
+    directory: /.github/claude-code-pin
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "build(deps)"

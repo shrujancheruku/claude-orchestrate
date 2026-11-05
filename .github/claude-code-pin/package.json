@@ -1,0 +1,8 @@
+{
+  "name": "claude-code-pin",
+  "private": true,
+  "description": "The Claude Code version CI validates the plugin with. Dependabot bumps it; ci.yml installs exactly this version.",
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.311"
+  }
+}
