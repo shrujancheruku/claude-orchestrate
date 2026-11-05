@@ -520,3 +520,8 @@
 {"role": "orchestrate:scout", "command": "gh issue edit 5 --add-label x", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "touch x", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "echo hi > notes.md", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git push origin HEAD:refs/heads/main", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git fetch origin pull/1/head:pr-1", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git update-ref refs/heads/x HEAD", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git config user.name x", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git remote -v add evil https://example.invalid/x.git", "expected": "deny", "source": "hand"}
