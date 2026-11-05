@@ -24,6 +24,7 @@ from pathlib import Path
 import checks
 import common
 import github
+import runlog
 
 TITLE_RE = re.compile(
     r"^(feat|fix|docs|refactor|test|chore|build|ci|perf|style|revert)(\([^()\s][^()]*\))?!?: \S")
@@ -130,8 +131,8 @@ def main(argv=None) -> int:
     # Only when behind_by is a readable 0; behind above 0 or unreadable is a real failure to report.
     undecided = unknown and behind == 0 and len(failed) == 1
     outcome = "unknown" if undecided else "fail" if failed else "pass"
-    # The event lands in the orchestrator's repo, beside the pass log.
-    common.append_event(args.cwd, "gate", outcome, ref=ref, failed=failed, behind_by=behind)
+    # The event lands in the main checkout's run log, beside the pass log.
+    runlog.append_event(args.cwd, "gate", outcome, ref=ref, failed=failed, behind_by=behind)
     return 3 if undecided else 1 if failed else 0
 
 
