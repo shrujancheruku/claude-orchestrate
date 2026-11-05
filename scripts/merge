@@ -205,44 +205,36 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
     if default is None:
         say("sweep skipped: the default branch is unknown")
         return False
-    version = replay.git_version(cwd)  # once per run; unreadable means try anyway
-    if version is not None and version < replay.MERGE_TREE_GIT:
-        say("sweep skipped: it needs git >= %d.%d (git merge-tree --write-tree); this is git %d.%d"
-            % (replay.MERGE_TREE_GIT + version))
-        return False
     section = common.config_section(cwd, "Shared files")
-    patterns, generated = replay.shared_patterns(section), replay.generated_commands(section)
+    rules = replay.Rules.from_section(section)
     try:
         prs = github.open_prs(default, cwd)
     except github.GhError as e:
         say(f"sweep skipped: could not list open PRs ({e.message})")
         return False
-    replay.git(cwd, "fetch", "--prune", "origin")
+    common.run("git", "fetch", "--prune", "origin", cwd=cwd)
     handed = False
     for r in prs:
         n, b = r.get("number"), r.get("headRefName") or ""
         if str(n) == str(merged_pr) or b == merged_branch or not b or b in PROTECTED or b == default \
                 or r.get("isCrossRepository"):
             continue
-        state = replay.conflicts_with(cwd, default, b)
-        if state is None:
+        result = replay.sweep_branch(cwd, default, b, method, rules)
+        if result.status == "skipped":
+            say(result.note)
+            return False
+        if result.status == "unchecked":
             say(f"sweep: PR #{n} {b}: could not check for conflicts; left alone")
             continue
-        if not state:
-            continue
-        try:
-            status, conflicts, events = replay.update_branch(cwd, default, b, method, patterns, generated)
-        except Exception as e:  # the PR is already merged: one branch's failure must not lose the exit code
-            status, conflicts, events = "handed-back", [("(sweep)", f"{type(e).__name__}: {common.one_line(e)}")], []
-        for path, outcome in events:
+        for path, outcome in result.events:
             common.append_event(cwd, "replay", outcome, ref=n, branch=b, file=path)
-        if status == "updated":
+        if result.status == "updated":
             say(f"sweep: PR #{n} {b} updated" + (" (force-with-lease)" if method == "rebase" else ""))
-            continue
-        handed = True
-        say(f"sweep: PR #{n} {b} NOT updated")
-        for path, why in conflicts:
-            say(f"HANDBACK PR #{n} {b}: {path} ({why})")
+        elif result.status == "handed-back":
+            handed = True
+            say(f"sweep: PR #{n} {b} NOT updated")
+            for line in result.handback_lines(f"PR #{n} {b}"):
+                say(line)
     return handed
 
 
