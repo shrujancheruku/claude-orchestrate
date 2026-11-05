@@ -1,4 +1,4 @@
-"""Shared helpers for the plugin scripts: config sections, the events log, bounded output.
+"""Shared helpers for the plugin scripts: config sections, bounded output.
 
 Stdlib only, Python 3.9+. A sibling script imports it with `import common`
 (its own directory is already on sys.path).
@@ -19,10 +19,6 @@ EXIT_OK, EXIT_VERDICT, EXIT_COULD_NOT_RUN = 0, 1, 2
 NOT_FOUND = 127  # the shell's "command not found"; what run() reports for a missing binary
 
 CONFIG = Path(".claude") / "orchestration.md"
-# The events log sits beside the pass log (passes.jsonl) the profiler already reads.
-PROFILES = Path(".claude") / "orchestrate-profiles"
-EVENTS_LOG = "events.jsonl"
-EVENT_KINDS = ("gate", "ci", "merge", "replay")
 TAIL_LINES = 40  # failure tails
 LINE_WIDTH = 200  # one line per item, never wider
 PLUGIN = "orchestrate:"  # the prefix of every agent type the plugin ships (hooks/guard.py can't import this and keeps its own)
@@ -59,49 +55,13 @@ def section_of(text: str, name: str) -> str | None:
     return None if body is None else "\n".join(body).strip("\n")
 
 
-def events_root(repo) -> Path:
-    """The main checkout that owns the events log for `repo`, which may be a subdirectory or a linked worktree.
-
-    A linked worktree shares the main checkout's common dir, so its parent is the one root every
-    worktree agrees on. Outside a checkout (or with the VCS tool missing) `repo` itself is the root.
-    """
-    repo = Path(repo)
-    code, out, _ = run("git", "rev-parse", "--git-common-dir", cwd=repo)
-    if code != 0 or not out.strip():
-        return repo
-    common_dir = Path(out.strip())
-    if not common_dir.is_absolute():
-        common_dir = repo / common_dir
-    common_dir = common_dir.resolve()
-    if common_dir.name == ".git":
-        return common_dir.parent
-    # A submodule or a GIT_DIR checkout: the common dir isn't `.git`, so use this checkout's own toplevel.
-    code, out, _ = run("git", "rev-parse", "--show-toplevel", cwd=repo)
-    return Path(out.strip()) if code == 0 and out.strip() else repo
-
-
 def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = None, **extra) -> dict:
-    """Append one event line to events.jsonl beside the pass log. Write-only: nothing here reads it back.
+    """Append one event to the run log: a thin call into runlog.append_event, which owns the log.
 
-    Fields: ts (UTC ISO), session, kind (gate|ci|merge|replay), ref (PR or ticket), outcome,
-    plus any extra keys. Session defaults to $CLAUDE_SESSION_ID.
+    Imported on use because runlog imports this module.
     """
-    if kind not in EVENT_KINDS:
-        raise ValueError(f"unknown event kind {kind!r}; expected one of {EVENT_KINDS}")
-    event = {
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "session": session if session is not None else os.environ.get("CLAUDE_SESSION_ID"),
-        "kind": kind,
-        "ref": ref,
-        "outcome": outcome,
-    }
-    event.update(extra)
-    path = events_root(repo) / PROFILES / EVENTS_LOG
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # One write of one line: small appends stay whole when scripts run in parallel.
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, separators=(",", ":")) + "\n")
-    return event
+    import runlog
+    return runlog.append_event(repo, kind, outcome, ref=ref, session=session, **extra)
 
 
 class Run(NamedTuple):

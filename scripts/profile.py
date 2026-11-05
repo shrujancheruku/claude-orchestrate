@@ -33,12 +33,11 @@ _HERE = str(Path(__file__).resolve().parent)
 if _HERE not in sys.path:
     sys.path.append(_HERE)
 import common  # noqa: E402
+import runlog  # noqa: E402
 
 SCHEMA = 2
 PLUGIN = common.PLUGIN
-PROFILES = common.PROFILES
-PASS_LOG = "passes.jsonl"
-EVENTS_LOG = common.EVENTS_LOG  # the plugin scripts append here (common.append_event), beside the pass log
+PROFILES = runlog.PROFILES  # saved profiles sit beside the run log
 VIEWER = Path(__file__).resolve().parent.parent / "viewer" / "profile.html"
 # Activity in an agent's transcript further apart than this is two segments:
 # a worker waiting on review between them isn't building.
@@ -502,12 +501,6 @@ def slot_segments(passes: list, tickets: list, start: datetime, end: datetime, f
     return out, raised
 
 
-def read_passes(repo: Path | None, session: str) -> list:
-    if not repo:
-        return []
-    return [p for p in common.read_jsonl(repo / PROFILES / PASS_LOG) if p.get("session") == session]
-
-
 def read_usage(start: datetime, end: datetime) -> list:
     out = []
     for u in common.read_jsonl(usage_log()):
@@ -913,23 +906,6 @@ def orchestrator_metrics(main: Transcript, agents: list, passes: list, merged: i
     }
 
 
-def read_events(repo: Path | None, session: str, start: datetime, end: datetime) -> list | None:
-    """This session's events from events.jsonl, or None when the log doesn't exist or holds none of this session's (no scripts ran, or an older plugin).
-
-    An event with no session (a script run where the session ID wasn't in its environment) counts when it falls in the session's span."""
-    if not repo or not (repo / PROFILES / EVENTS_LOG).exists():
-        return None
-    out = []
-    for e in common.read_jsonl(repo / PROFILES / EVENTS_LOG):
-        if not isinstance(e, dict):
-            continue
-        ts = parse_ts(e.get("ts"))
-        if e.get("session") == session or (not e.get("session") and ts and start <= ts <= end):
-            out.append(e)
-    # A log with nothing for this session is the same as no log: an older plugin's session, so the transcript fallback applies.
-    return out or None
-
-
 def count_by_outcome(events: list) -> dict:
     out = {}
     for e in events:
@@ -950,7 +926,7 @@ def event_metrics(events: list | None, review: dict) -> dict:
             failed_checks[name] = failed_checks.get(name, 0) + 1
     # The replay outcomes (line-replay, word-merge, regenerated, handed-back) are scripts/merge's `replay`
     # events; with none logged the rate reads "–".
-    handed = sum(1 for e in replay if e.get("outcome") == "handed-back")
+    handed = sum(1 for e in replay if e.get("outcome") == runlog.HANDED_BACK)
     return {
         "available": True,
         # A gate failure goes back to the worker without a review round: counted here, never in `review`.
@@ -1024,13 +1000,13 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     main = Transcript(transcript)
     session = transcript.stem
     repo = repo or repo_of(main)
-    passes = read_passes(repo, session)
+    passes = runlog.read_passes(repo, session)
     agents = collect_agents(main)
     end = main.times[-1] if main.times else now
     starts = [a["dispatched"] for a in agents if a["dispatched"]] + [parse_ts(p.get("ts")) for p in passes]
     starts = [s for s in starts if s]
     start = min(starts) if starts else (main.times[0] if main.times else now)
-    events = read_events(repo, session, start, end)
+    events = runlog.read_events(repo, session, start, end)
     tickets = build_tickets(agents, main, end, events)
     assign_slots(tickets)
     # Each pass's own slot count holds until the next pass. More tickets at once than the count in force
@@ -1266,11 +1242,7 @@ def cmd_record(argv: list) -> None:
         common.die("profile record: expected a JSON object")
     if not isinstance(entry.get("greedy", False), bool):
         common.die("profile record: greedy must be true or false")
-    entry = {"ts": iso(datetime.now(timezone.utc)), "session": args.session, **entry}
-    log = args.repo / PROFILES / PASS_LOG
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    runlog.append_pass(args.repo, args.session, entry)
 
 
 MIN_MERGED = 20  # a trial with fewer merged tickets is inconclusive

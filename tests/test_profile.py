@@ -14,6 +14,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import profile as prof  # noqa: E402
+import runlog  # noqa: E402
 
 T0 = datetime(2026, 11, 3, 16, 0, tzinfo=timezone.utc)
 SESSION = "sess-1"
@@ -96,10 +97,10 @@ class Fixture:
         ])
 
     def passes(self, rows):
-        write_jsonl(self.repo / prof.PROFILES / prof.PASS_LOG, [{"session": SESSION, **r} for r in rows])
+        write_jsonl(runlog.log_path(self.repo, runlog.PASS_LOG), [{"session": SESSION, **r} for r in rows])
 
     def events(self, rows):
-        write_jsonl(self.repo / prof.PROFILES / prof.EVENTS_LOG, rows)
+        write_jsonl(runlog.log_path(self.repo, runlog.EVENTS_LOG), rows)
 
     def run(self, now_minutes=120, **kw):
         os.environ["ORCHESTRATE_USAGE_LOG"] = str(self.usage)
@@ -158,7 +159,7 @@ class ProfileTest(unittest.TestCase):
         self.assertNotIn("+", naive)
         subprocess.run([sys.executable, str(SCRIPTS / "profile.py"), "record", "--repo", str(self.fx.repo),
                         "--session", SESSION, json.dumps({"ts": naive, "slots": 2, "free": 0})], check=True)
-        log = self.fx.repo / prof.PROFILES / prof.PASS_LOG
+        log = runlog.log_path(self.fx.repo, runlog.PASS_LOG)
         with open(log, "a") as f:
             f.write("[]\n3\n\n\"text\"\nnot json\n")
         with open(self.fx.usage, "a") as f:
@@ -751,11 +752,11 @@ class CommandTest(unittest.TestCase):
         repo = self.root / "repo"
         self.script("profile.py", "record", "--repo", str(repo), "--session", "s", '{"slots": 2, "free": 1}')
         self.script("profile.py", "record", "--repo", str(repo), "--session", "s", '{"slots": 2, "free": 0}')
-        rows = [json.loads(line) for line in (repo / prof.PROFILES / prof.PASS_LOG).read_text().splitlines()]
+        rows = [json.loads(line) for line in (runlog.log_path(repo, runlog.PASS_LOG)).read_text().splitlines()]
         self.assertEqual([(r["session"], r["free"]) for r in rows], [("s", 1), ("s", 0)])
         self.assertIn("ts", rows[0])
         self.script("profile.py", "record", "--repo", str(repo), "--session", "s", '{"slots": 5, "free": 2, "greedy": true}')
-        self.assertIs(json.loads((repo / prof.PROFILES / prof.PASS_LOG).read_text().splitlines()[-1])["greedy"], True)
+        self.assertIs(json.loads((runlog.log_path(repo, runlog.PASS_LOG)).read_text().splitlines()[-1])["greedy"], True)
 
     def run_profile(self, *args):
         return subprocess.run([sys.executable, "-I", str(SCRIPTS / "profile.py"), *args],

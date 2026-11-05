@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 CLIS = sorted(p.name for p in SCRIPTS.iterdir() if p.suffix == "" and p.is_file())
-LIBRARIES = {"common", "checks", "replay", "github"}
+LIBRARIES = {"common", "checks", "replay", "github", "runlog"}
 STANDALONE = {"profile.py"}
 
 
@@ -53,11 +53,12 @@ class Invocation(unittest.TestCase):
 
     def test_standalone_scripts_run_isolated_alone(self):
         # `-I` leaves the script's directory off sys.path, so a standalone script that imports common
-        # must find it itself; it runs from a copy holding only the script and common.py.
+        # must find it itself; it runs from a copy holding only the script and its libraries.
         for name in sorted(STANDALONE):
             with self.subTest(name), tempfile.TemporaryDirectory() as d:
                 shutil.copy(SCRIPTS / name, d)
                 shutil.copy(SCRIPTS / "common.py", d)
+                shutil.copy(SCRIPTS / "runlog.py", d)
                 argv = [sys.executable, "-I", str(Path(d) / name)]
                 if name == "profile.py":
                     argv.append("--help")
