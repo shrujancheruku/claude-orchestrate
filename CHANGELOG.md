@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/shrujancheruku/claude-orchestrate/compare/v0.6.0...v0.7.0) (2026-11-05)
+
+
+### Features
+
+* **merge:** merge decides readiness against the approved head ([#186](https://github.com/shrujancheruku/claude-orchestrate/issues/186)) ([0f13267](https://github.com/shrujancheruku/claude-orchestrate/commit/0f13267aff19b1ed4773e0f1aa94585edd829e6f))
+* **run:** a holds script decides held paths and overlap ([#183](https://github.com/shrujancheruku/claude-orchestrate/issues/183)) ([d4c3d49](https://github.com/shrujancheruku/claude-orchestrate/commit/d4c3d49d0bf188efb944be9155ef4ce93f07c1a0))
+
+
+### Bug Fixes
+
+* **run:** verify --config reads the commands from the config, unexpanded ([#185](https://github.com/shrujancheruku/claude-orchestrate/issues/185)) ([7f0a0a3](https://github.com/shrujancheruku/claude-orchestrate/commit/7f0a0a3fd6d296e85023b2abd5c97b79bacef3d2))
+* **scripts:** one run log for events and passes, kept in the main checkout ([#176](https://github.com/shrujancheruku/claude-orchestrate/issues/176)) ([ce0be7d](https://github.com/shrujancheruku/claude-orchestrate/commit/ce0be7d0f7a3171aab445e0087a3c204694d76be))
+* **watch-ci:** end a watch with an error line when gh keeps failing ([#187](https://github.com/shrujancheruku/claude-orchestrate/issues/187)) ([0d36251](https://github.com/shrujancheruku/claude-orchestrate/commit/0d362516d3b73ff80b96b4ffe58de49e05eae4a5))
+
 ## [0.6.0](https://github.com/shrujancheruku/claude-orchestrate/compare/v0.5.0...v0.6.0) (2026-11-05)
 
 
