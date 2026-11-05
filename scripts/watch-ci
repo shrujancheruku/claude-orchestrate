@@ -99,7 +99,7 @@ def main(argv=None) -> int:
             merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
             print(f"PR #{pr} {result} {merge} {head}", flush=True)
             try:
-                # "." is fine: the run log resolves it to the main checkout.
+                # root is the main checkout resolved at startup, where the run log lives.
                 runlog.append_event(root, "ci", result, ref=common.pr_ref(pr)[1], merge_state=merge, head=head)
             except OSError as e:
                 # The event log is best-effort; losing it must not drop the other PRs' settle lines.
