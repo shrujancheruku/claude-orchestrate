@@ -78,6 +78,11 @@ def merge_pr(pr, method: str, head_oid: str = "", cwd=None) -> None:
     call("pr", "merge", str(pr), f"--{method}", *guard, cwd=cwd)
 
 
+def update_branch(pr, cwd=None) -> None:
+    """Merge the base into the PR's branch on the host (`gh pr update-branch`)."""
+    call("pr", "update-branch", str(pr), cwd=cwd)
+
+
 def delete_branch(branch: str, cwd=None) -> str:
     """Delete refs/heads/<branch> over gh's HTTPS API (origin may be SSH, which can be denied).
 
