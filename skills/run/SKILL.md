@@ -153,7 +153,7 @@ With `--profile`, at the end of each pass, before the report:
    ```sh
    python3 -I "${CLAUDE_SKILL_DIR}/../../scripts/profile.py" record --repo . --session ${CLAUDE_SESSION_ID} '<json>'
    ```
-   Fields: `scope` (`full`, `status`, `#<ticket>` or `parent #<n>`), `slots` (the config's count), `claimed` (ticket number → state), `free` (free slots after step 4), `idle` (why each free slot stayed free: counts under `overlap`, `gate`, `empty` for nothing takeable, `limit`; they sum to `free`), `takeable_waiting` (takeable tickets left undispatched), `limit_hit`, `reset_at` (ISO, or null), `dispatched` and `merged` (ticket numbers), `suggestion` (e.g. `"2 → 3"`, or null).
+   Fields: `scope` (`full`, `status`, `#<ticket>` or `parent #<n>`), `slots` (the slot count in force: the config's count, or the greedy cap on a greedy pass), `greedy` (true on a greedy pass; omit or false otherwise), `claimed` (ticket number → state), `free` (free slots after step 4), `idle` (why each free slot stayed free: counts under `overlap`, `gate`, `empty` for nothing takeable, `limit`; they sum to `free`), `takeable_waiting` (takeable tickets left undispatched), `limit_hit`, `reset_at` (ISO, or null), `dispatched` and `merged` (ticket numbers), `suggestion` (e.g. `"2 → 3"`, or null).
 2. **Build the profile:**
    ```sh
    python3 -I "${CLAUDE_SKILL_DIR}/../../scripts/profile.py" ${CLAUDE_SESSION_ID} --repo .

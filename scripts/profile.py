@@ -1102,6 +1102,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         "warnings": warnings,
         "slots": slots,
         "slots_raised": slots_raised,
+        # Any pass ran under --greedy: its `slots` is the greedy cap in force, so occupancy is against the cap.
+        "greedy": any(p.get("greedy") is True for p in passes),
         # Slot count over time: [from, slots] per stretch; `slots` above is the last one.
         "slots_timeline": [[iso(a), n] for a, _, n in segments],
         "threshold": threshold,
@@ -1213,12 +1215,12 @@ def summary(p: dict, saved: Path) -> str:
 
 
 def slots_label(p: dict) -> str:
-    """`2 slots`, or `3→2 slots` when the count changed during the session."""
+    """`2 slots`, or `3→2 slots` when the count changed during the session, with ` (greedy)` after a greedy pass."""
     counts = []
     for _, n in p.get("slots_timeline") or [(None, p["slots"])]:
         if not counts or counts[-1] != n:
             counts.append(n)
-    return "→".join(str(n) for n in counts) + " slots"
+    return "→".join(str(n) for n in counts) + " slots" + (" (greedy)" if p.get("greedy") else "")
 
 
 def write_html(data: dict, path: Path) -> None:
@@ -1262,6 +1264,8 @@ def cmd_record(argv: list) -> None:
         common.die(f"profile record: not JSON: {e}")
     if not isinstance(entry, dict):
         common.die("profile record: expected a JSON object")
+    if not isinstance(entry.get("greedy", False), bool):
+        common.die("profile record: greedy must be true or false")
     entry = {"ts": iso(datetime.now(timezone.utc)), "session": args.session, **entry}
     log = args.repo / PROFILES / PASS_LOG
     log.parent.mkdir(parents=True, exist_ok=True)

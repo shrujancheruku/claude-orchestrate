@@ -628,7 +628,7 @@ function render() {
   const p = profiles[Math.min(Number(pick.value) || 0, profiles.length - 1)];
   const repo = p.repo ? p.repo.split("/").pop() : "repo";
   $("title").textContent = `Orchestrate profile · ${repo}`;
-  $("subtitle").textContent = `Session ${p.session.slice(0, 8)} · ${new Date(t(p.start)).toLocaleString()} · ${fmtDur(p.metrics.span_s)} · ${p.slots} slots`;
+  $("subtitle").textContent = `Session ${p.session.slice(0, 8)} · ${new Date(t(p.start)).toLocaleString()} · ${fmtDur(p.metrics.span_s)} · ${p.slots} slots${p.greedy ? " (greedy)" : ""}`;
   const m = p.metrics;
   const tiles = el("div", { class: "tiles" });
   tiles.append(

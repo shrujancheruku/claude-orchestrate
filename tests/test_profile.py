@@ -350,6 +350,22 @@ class ProfileTest(unittest.TestCase):
         self.fx.passes([{"ts": at(1), "slots": 1, "free": 1}])
         self.assertTrue(self.fx.run()["slots_raised"])
 
+    def test_a_greedy_session_is_measured_against_its_cap(self):
+        # Two tickets run 1-30 and 1-31 under a greedy cap of 5: occupancy is against the cap, not the count run.
+        self.fx.passes([{"ts": at(1), "slots": 5, "free": 3, "greedy": True, "idle": {"overlap": 2, "empty": 1}}])
+        self.fx.events([MERGED_50])
+        p = self.fx.run()
+        self.assertTrue(p["greedy"])
+        self.assertFalse(p["slots_raised"])
+        self.assertAlmostEqual(p["metrics"]["occupancy"], (29 + 30) * 60 / (5 * 40 * 60))
+        self.assertIn("5 slots (greedy)", prof.summary(p, Path("x.json")))
+
+    def test_a_pass_log_without_greedy_reads_as_not_greedy(self):
+        self.fx.passes([{"ts": at(1), "slots": 2, "free": 1}])
+        p = self.fx.run()
+        self.assertFalse(p["greedy"])
+        self.assertNotIn("greedy", prof.summary(p, Path("x.json")))
+
     def test_a_log_holding_only_other_sessions_events_falls_back_to_the_transcript(self):
         self.fx.events([{"ts": at(30), "session": "other", "kind": "merge", "ref": 50, "outcome": "merged"}])
         p = self.fx.run()
@@ -738,6 +754,8 @@ class CommandTest(unittest.TestCase):
         rows = [json.loads(line) for line in (repo / prof.PROFILES / prof.PASS_LOG).read_text().splitlines()]
         self.assertEqual([(r["session"], r["free"]) for r in rows], [("s", 1), ("s", 0)])
         self.assertIn("ts", rows[0])
+        self.script("profile.py", "record", "--repo", str(repo), "--session", "s", '{"slots": 5, "free": 2, "greedy": true}')
+        self.assertIs(json.loads((repo / prof.PROFILES / prof.PASS_LOG).read_text().splitlines()[-1])["greedy"], True)
 
     def run_profile(self, *args):
         return subprocess.run([sys.executable, "-I", str(SCRIPTS / "profile.py"), *args],
@@ -745,7 +763,7 @@ class CommandTest(unittest.TestCase):
 
     def test_record_with_bad_json_could_not_run(self):
         repo = str(self.root / "repo")
-        for bad in ("{nope", "[1]"):
+        for bad in ("{nope", "[1]", '{"slots": 5, "greedy": "yes"}'):
             r = self.run_profile("record", "--repo", repo, "--session", "s", bad)
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertIn("profile record", r.stderr)
