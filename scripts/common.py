@@ -115,15 +115,16 @@ class Run(NamedTuple):
         return self.code
 
 
-def run(*cmd, cwd=None) -> Run:
+def run(*cmd, cwd=None, env=None, input=None) -> Run:
     """Run a command (no shell) and return (code, stdout, stderr), never raising for a missing tool.
 
     A binary that is missing or not executable (OSError) is code 127 with the reason in stderr, so a
     caller treats "gh is not installed" like any failed call instead of crashing.
+    `env` replaces the whole environment (pass `dict(os.environ, K=V)` to add to it); `input` is text for stdin.
     """
     try:
-        p = subprocess.run([str(c) for c in cmd], cwd=cwd, capture_output=True, text=True,
-                           errors="replace")
+        p = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env, input=input,
+                           capture_output=True, text=True, errors="replace")
     except OSError as e:
         return Run(NOT_FOUND, "", f"{cmd[0]}: {e.strerror or e}")
     return Run(p.returncode, p.stdout, p.stderr)
