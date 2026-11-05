@@ -3,10 +3,18 @@
 
 Run it as a Monitor command so the orchestrator never sleeps or polls. Each line:
     PR #<n> <pass|fail> <merge state> <head commit>
-Each settle also appends one `ci` event (ref = the PR number). Exits 0 once every PR has
-settled. A PR with no checks yet counts as pending (checks may not be registered right after
-a push); the Monitor's timeout bounds the wait. A PR that is merged or closed settles at once. A transient `gh` failure is retried; a missing
-`gh` exits 2 (could not run), with one line on stderr.
+Each settle also appends one `ci` event (ref = the PR number). A PR with no checks yet counts as
+pending (checks may not be registered right after a push); the Monitor's timeout bounds the wait. A PR
+that is merged or closed settles at once.
+A `gh` failure is retried; a PR whose `gh` calls fail 5 times in a row (a success resets the count)
+ends with the line
+    PR #<n> error <one-line reason>
+and is no longer watched; the other PRs carry on. A `gh` failure that cannot clear (no repository or
+working directory) ends the watch at once as could-not-run.
+The repository is resolved once at startup (the main checkout) and every `gh` call runs there, so a
+later change to the shell's directory, such as a removed worktree, cannot break the watch.
+Exit codes: 0 every PR settled; 2 could not run (no `gh`, no repository, a reply that is not a PR),
+one line on stderr; 3 every PR ended but at least one with an `error` line.
 Stdlib only, Python 3.9+.
 """
 
@@ -18,6 +26,8 @@ import common
 import github
 import runlog
 
+MAX_FAILURES = 5  # consecutive `gh` failures for one PR before it ends in an error line
+EXIT_ERROR = 3
 FIELDS = "statusCheckRollup,mergeStateStatus,headRefOid,state"
 BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
 PENDING_STATES = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
@@ -42,16 +52,16 @@ def judge(view: dict):
     return "fail" if any(r in BAD for r in results) else "pass"
 
 
-def view_pr(pr: str):
-    """The PR's view, or None after a transient `gh` failure (retried next round). Raises GhError when
-    retrying cannot help: `gh` missing, or a reply that is not a PR object."""
+def view_pr(pr: str, root):
+    """(view, None) on success, (None, reason) after a `gh` failure to retry. Raises GhError when
+    retrying cannot help: `gh` missing, no repository, or a reply that is not a PR object."""
     try:
-        return github.pr_view(pr, FIELDS)
+        return github.pr_view(pr, FIELDS, cwd=root), None
     except github.GhError as e:
         if github.could_not_run(e):
             raise
         print(f"watch-ci: gh failed for #{pr}: {e.message}", file=sys.stderr, flush=True)
-        return None
+        return None, e.message
 
 
 def main(argv=None) -> int:
@@ -60,28 +70,43 @@ def main(argv=None) -> int:
     ap.add_argument("--interval", type=float, default=30, help="seconds between checks")
     args = ap.parse_args(argv)
     pending = [common.pr_ref(p)[0] for p in args.prs]
+    code, _, _ = common.run("git", "rev-parse", "--show-toplevel")
+    if code != 0:
+        print("watch-ci: cannot run: not inside a git repository", file=sys.stderr, flush=True)
+        return 2
+    root = runlog.main_checkout(".").resolve()
+    failures = {pr: 0 for pr in pending}
+    errored = False
     while pending:
         for pr in list(pending):
             try:
-                view = view_pr(pr)
+                view, reason = view_pr(pr, root)
             except github.GhError as e:
                 print(f"watch-ci: cannot run gh: {e.message}", file=sys.stderr, flush=True)
                 return 2
-            result = judge(view) if view else None
+            if reason is not None:
+                failures[pr] += 1
+                if failures[pr] >= MAX_FAILURES:
+                    pending.remove(pr)
+                    errored = True
+                    print(f"PR #{pr} error {common.one_line(reason)}", flush=True)
+                continue
+            failures[pr] = 0
+            result = judge(view)
             if result is None:
                 continue
             pending.remove(pr)
             merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
             print(f"PR #{pr} {result} {merge} {head}", flush=True)
             try:
-                # "." is fine: the run log resolves it to the main checkout.
-                runlog.append_event(".", "ci", result, ref=common.pr_ref(pr)[1], merge_state=merge, head=head)
+                # root is the main checkout resolved at startup, where the run log lives.
+                runlog.append_event(root, "ci", result, ref=common.pr_ref(pr)[1], merge_state=merge, head=head)
             except OSError as e:
                 # The event log is best-effort; losing it must not drop the other PRs' settle lines.
                 print(f"watch-ci: could not write event for #{pr}: {common.one_line(str(e))}", file=sys.stderr, flush=True)
         if pending:
             time.sleep(args.interval)
-    return 0
+    return EXIT_ERROR if errored else 0
 
 
 if __name__ == "__main__":

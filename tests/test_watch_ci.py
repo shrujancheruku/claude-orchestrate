@@ -1,8 +1,13 @@
 import json
+import os
+import shutil
 import subprocess
+import sys
+import tempfile
+import time
 import unittest
 
-from harness import ScriptEnv
+from harness import SCRIPTS, ScriptEnv
 
 def view(result, merge="CLEAN", head="abcdef1234567", state="OPEN"):
     if result is None:
@@ -108,6 +113,65 @@ class WatchCi(unittest.TestCase):
                 self.assertEqual(r.returncode, 2, r.stdout)
                 self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
                 self.assertNotIn("Traceback", r.stderr)
+
+
+    def watch_any(self, *prs, **kw):
+        return self.env.run("watch-ci", "--interval", "0", *prs, check=False, **kw)
+
+    def test_repeated_failures_end_in_an_error_line_and_exit_3(self):
+        self.seq({"6": ["GH_ERROR"]})
+        r = self.watch_any("6")
+        self.assertEqual(r.stdout.splitlines(), ["PR #6 error HTTP 502: bad gateway"])
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(len(self.env.gh_calls()), 5)
+
+    def test_failures_under_the_bound_still_settle(self):
+        self.seq({"6": ["GH_ERROR"] * 4 + [view("SUCCESS", head="6666666ccc")]})
+        r = self.watch_any("6")
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #6 pass CLEAN 6666666"], 0))
+
+    def test_a_success_resets_the_failure_count(self):
+        ok = view(None)
+        self.seq({"6": ["GH_ERROR"] * 4 + [ok] + ["GH_ERROR"] * 4 + [view("SUCCESS", head="6666666ccc")]})
+        r = self.watch_any("6")
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #6 pass CLEAN 6666666"], 0))
+
+    def test_one_pr_erroring_does_not_stop_the_others(self):
+        self.seq({"6": ["GH_ERROR"], "7": [view(None), view(None), view("SUCCESS", head="7777777ccc")]})
+        r = self.watch_any("6", "7")
+        self.assertIn("PR #6 error HTTP 502: bad gateway", r.stdout)
+        self.assertIn("PR #7 pass CLEAN 7777777", r.stdout)
+        self.assertEqual(r.returncode, 3)
+
+    def test_no_repository_failure_ends_at_once(self):
+        self.env.set_gh([{"args": ["pr", "view"], "stderr": "fatal: not a git repository\n", "exit": 1}])
+        r = self.watch_any("6")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(len(self.env.gh_calls()), 1)
+
+    def test_started_outside_a_repository_exits_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self.watch_any("6", cwd=d)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertEqual(self.env.gh_calls(), [])
+
+    def test_removed_working_directory_after_startup_still_settles(self):
+        wt = self.env.repo / ".claude" / "worktrees" / "w2"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "w2", str(wt)], cwd=self.env.repo, check=True)
+        self.seq({"6": [view(None)]})
+        p = subprocess.Popen([sys.executable, str(SCRIPTS / "watch-ci"), "--interval", "0.05", "6"], cwd=wt,
+                             env=dict(os.environ, PATH=f"{self.env.bin}{os.pathsep}{os.environ['PATH']}",
+                                      FAKE_GH_STATE=str(self.env.gh_state)),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(p.kill)
+        while not self.env.gh_calls():
+            time.sleep(0.02)
+        shutil.rmtree(wt)
+        self.seq({"6": [view("SUCCESS", head="6666666ccc")]})
+        out, err = p.communicate(timeout=20)
+        self.assertEqual((out.splitlines(), p.returncode), (["PR #6 pass CLEAN 6666666"], 0), err)
 
 
 if __name__ == "__main__":
