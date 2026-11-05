@@ -39,8 +39,22 @@ def worker_env(tk, files=None):
     for path, content in (files or {}).items():
         env.commit(path, content, "chore: add " + path)
     git(env.repo, "push", "origin", "main")
+    env.base = git(env.repo, "rev-parse", "HEAD")  # what the worker's commits are counted from
     env.set_gh(gh_responses(tk))
     return env
+
+
+def no_attribution(text, what):
+    """Fail when `text` carries an attribution line or trailer; `what` names it in the message."""
+    low = text.lower()
+    assert "generated with" not in low and "co-authored-by" not in low, "%s has an attribution line: %r" % (what, text)
+
+
+def no_commit_attribution(run):
+    """No commit the worker made since the scenario's base carries an attribution line or trailer."""
+    msgs = git(Path(run.env.repo), "log", "--all", "--format=%B%x00", "^" + run.env.base)
+    for msg in filter(None, (m.strip() for m in msgs.split("\0"))):
+        no_attribution(msg, "commit message")
 
 
 def pr_create_body(run):
