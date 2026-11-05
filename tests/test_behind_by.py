@@ -1,4 +1,4 @@
-"""Structural checks: "up to date" means behind_by is 0, from the compare API, before merging (#64)."""
+"""Structural checks: the orchestrator leaves "up to date" (behind_by 0) to `merge --approved-head` (#64, #167)."""
 import pathlib
 import unittest
 
@@ -10,15 +10,18 @@ def read(p):
 
 
 class BehindBy(unittest.TestCase):
-    def test_run_rechecks_behind_by_before_merge(self):
+    def test_run_leaves_the_behind_check_to_merge(self):
         s = read("skills/run/SKILL.md")
         step = next(l for l in s.splitlines() if l.startswith("6. **Approved**"))
-        for needle in ("read `behind_by` again now", "because another PR may have merged since the gate ran",
-                       "`gh pr update-branch <pr>`", "wait for CI", "don't merge",
-                       "If `update-branch` fails", "A main-only update needs no re-review"):
+        for needle in ("--approved-head", "Exit 5", "Exit 6", "wait for CI", "a main-only update needs no re-review"):
             self.assertIn(needle, step)
-        self.assertNotIn("merge the base", step)
-        self.assertLess(step.index("read `behind_by` again"), step.index("scripts/merge"))
+        self.assertNotIn("read `behind_by`", s)
+        self.assertNotIn("Post-approval risk guard:", s)
+
+    def test_scout_no_longer_checks_behind_by_in_its_checklist(self):
+        s = read("agents/scout.md")
+        checklist = s.split("## Pre-merge checklist")[1].split("##")[0]
+        self.assertNotIn("behind_by", checklist)
 
 
 if __name__ == "__main__":

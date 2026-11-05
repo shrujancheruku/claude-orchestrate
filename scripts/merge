@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""merge <pr> [--method squash|merge|rebase] [--ticket N]... [--worktree DIR] : merge a PR, then clean up.
+"""merge <pr> [--method squash|merge|rebase] [--approved-head SHA] [--ticket N]... [--worktree DIR] : merge a PR, then clean up.
+
+With --approved-head (the PR head the reviewer approved; the orchestrator always passes it) the script
+first decides readiness and merges nothing unless the PR is ready: a PR behind the default branch is
+updated with `gh pr update-branch` (exit 5); the worker's own change since the approved head, not counting
+what merges of the default branch brought in, that touches a config risk path or exceeds the S thresholds
+needs re-review (exit 6). Without the flag it merges as before.
 
 `gh pr merge`'s exit is unreliable (a 502 can hide a merge that landed; a retry can answer "merge
 already in progress"; the branch can survive), so the PR's state is the only truth. The script runs
@@ -17,7 +23,8 @@ merge main into the branch (a plain push); rebase rebases it and pushes with --f
 A conflict the script can't resolve (a file that isn't shared, or overlapping words) aborts that
 branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
 Exit codes: 0 merged and cleaned up; 4 the same, but a swept branch was handed back (resume its worker
-with the printed conflict list); 1 the merge was refused, or the PR was closed unmerged;
+with the printed conflict list); 5 behind the default branch, branch updated: wait for CI, then run
+again; 6 the change since --approved-head needs re-review (nothing merged); 1 the merge was refused, or the PR was closed unmerged (or the branch update for exit 5 failed; the output says why);
 2 the script could not run (`gh` is missing or cannot read the PR; the error goes to stderr); 3 still not MERGED at the timeout (run it
 again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
@@ -83,10 +90,77 @@ def say(msg):
     print(msg, flush=True)
 
 
+def own_changes(cwd, approved, head, default):
+    """(files, lines) the worker changed from `approved` to `head`, or None when git can't say.
+
+    Counts only the worker's non-merge commits that the default branch lacks, so a merge of the default
+    branch (the sweep's, or update-branch) adds nothing; --cherry-pick drops commits a rebase re-made
+    with the same patch. The sum is per commit, so a line added and removed again still counts: the
+    guard errs towards re-review.
+    """
+    run("git", "fetch", "--quiet", "origin", cwd=cwd)
+    revs = run("git", "rev-list", "--no-merges", "--right-only", "--cherry-pick", f"{approved}...{head}",
+               "--not", f"origin/{default}", cwd=cwd)
+    if revs.returncode != 0:
+        return None
+    shas = revs.stdout.split()
+    if not shas:
+        return set(), 0
+    stat = run("git", "show", "--no-renames", "--numstat", "--format=", *shas, cwd=cwd)
+    if stat.returncode != 0:
+        return None
+    files, lines = set(), 0
+    for row in stat.stdout.splitlines():
+        parts = row.split("\t", 2)
+        if len(parts) == 3:
+            files.add(parts[2])
+            lines += sum(int(n) for n in parts[:2] if n.isdigit())
+    return files, lines
+
+
+def readiness(cwd, pr, v, approved):
+    """Exit code 1, 2, 5 or 6 when the PR is not ready to merge against `approved`, else None (ready)."""
+    default = default_branch(cwd)
+    head = v.get("headRefOid") or ""
+    if default is None or not head:
+        say(f"merge: cannot decide readiness for PR #{pr}: the default branch or head is unknown")
+        return 2
+    try:
+        behind = github.behind_by(default, v.get("headRefName") or head, cwd)
+    except github.GhError as e:
+        say(f"merge: could not read behind_by for PR #{pr}: {e.message}")
+        return 2
+    if behind:
+        try:
+            github.update_branch(pr, cwd)
+        except github.GhError as e:
+            say(f"PR #{pr} is behind {default} by {behind} and update-branch failed: {e.message}")
+            return 1
+        say(f"PR #{pr} was behind {default} by {behind}; branch updated; wait for CI, then run merge again")
+        return 5
+    changes = own_changes(cwd, approved, head, default)
+    if changes is None:
+        say(f"PR #{pr} needs re-review: the approved head {approved[:12]} or the head is unknown to git")
+        return 6
+    files, lines = changes
+    cfg = config.Config.load(cwd)
+    risky = sorted(f for f in files if replay.is_shared(f, cfg.risk_paths))
+    over = cfg.tier_s_lines is not None and cfg.tier_s_files is not None \
+        and (lines > cfg.tier_s_lines or len(files) > cfg.tier_s_files)
+    if risky or over:
+        why = f"touches risk path(s) {', '.join(risky)}" if risky else \
+            f"changed {lines} line(s) in {len(files)} file(s), over the S thresholds"
+        say(f"PR #{pr} needs re-review: its change since the approved head {approved[:12]} {why}")
+        return 6
+    say(f"PR #{pr} is up to date, and its change since the approved head is within the S thresholds")
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("pr", help="PR number")
     ap.add_argument("--method", default="squash", choices=["squash", "merge", "rebase"])
+    ap.add_argument("--approved-head", help="the PR head the reviewer approved: decide readiness first (exit 5 behind and updated, 6 needs re-review)")
     ap.add_argument("--ticket", action="append", default=[], help="a ticket the PR must link; one it does not link is reported, not closed (repeatable)")
     ap.add_argument("--worktree", help="the worker's worktree to remove after the merge")
     ap.add_argument("--cwd", default=".", help="the repo (default: current directory)")
@@ -103,6 +177,10 @@ def main(argv=None) -> int:
     branch = v.get("headRefName") or ""
     state = v.get("state")
     head_oid = v.get("headRefOid") or ""
+    if args.approved_head and state == "OPEN":
+        code = readiness(cwd, pr, v, args.approved_head)
+        if code is not None:
+            return code
     deadline = time.monotonic() + args.timeout
     attempt = state == "OPEN"  # run the merge command only while the PR is open
     refused = None
