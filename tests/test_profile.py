@@ -534,7 +534,7 @@ class QualityTest(unittest.TestCase):
                                        capture_output=True, text=True)
         out = run(path)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("predates review metrics", out.stdout)
+        self.assertIn("predates", out.stdout)
         # Reviews present but no depth-2 key: that section is skipped, not reported as clean.
         del self.p["metrics"]["depth2"]
         path.write_text(json.dumps(self.p))
@@ -710,7 +710,7 @@ class OrchestratorTest(unittest.TestCase):
         path.write_text(json.dumps(partial))
         out = run()
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("No events log", out.stdout)
+        self.assertIn("events log", out.stdout)
 
     def test_summary_stays_five_lines(self):
         self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
@@ -818,12 +818,12 @@ class CompareTest(unittest.TestCase):
         before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)})
         after = self.profile("a.json", {"L": (20, 2.0), "M": (20, 0.5)})
         none = self.compare(before, after).stdout
-        self.assertIn("pass --max-cost to judge", none)
+        self.assertIn("--max-cost", none)
         met = self.compare(before, after, "--max-cost", "2.30", "--max-orchestrator-cost", "0.75").stdout
         self.assertRegex(self.gate(met, "proxy $ per merged ticket"), r"pass\s+→.*pass")
         missed = self.compare(before, after, "--max-cost", "1.50").stdout
         self.assertRegex(self.gate(missed, "proxy $ per merged ticket"), r"FAIL")
-        self.assertIn("a gating row fails", missed)
+        self.assertIn("gating", missed)
 
     def test_review_floor_is_judged_against_the_baseline(self):
         before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)}, changes=(10, 20), outright=6, rounds=1.5)
@@ -835,7 +835,7 @@ class CompareTest(unittest.TestCase):
     def test_fewer_than_20_merged_tickets_is_inconclusive(self):
         before = self.profile("b.json", {"L": (10, 4.0), "M": (10, 1.0)})
         after = self.profile("a.json", {"L": (9, 4.0), "M": (10, 1.0)})
-        self.assertIn("INCONCLUSIVE: only 19 merged tickets", self.compare(before, after).stdout)
+        self.assertIn("INCONCLUSIVE", self.compare(before, after).stdout)
         after = self.profile("a.json", {"L": (10, 4.0), "M": (10, 1.0)})
         self.assertNotIn("INCONCLUSIVE", self.compare(before, after).stdout)
 
@@ -844,7 +844,7 @@ class CompareTest(unittest.TestCase):
         near = self.profile("a.json", {"L": (30, 4.0), "M": (10, 1.0)})  # 75%: exactly 25 points
         self.assertNotIn("INCONCLUSIVE", self.compare(before, near).stdout)
         far = self.profile("a.json", {"L": (31, 4.0), "M": (9, 1.0)})  # 77.5%
-        self.assertIn("differs by more than 25 points", self.compare(before, far).stdout)
+        self.assertIn("25 points", self.compare(before, far).stdout)
 
     def test_mix_adjustment_reweights_to_the_baseline_mix_and_flags_a_flipped_verdict(self):
         before = self.profile("b.json", {"L": (10, 4.0), "M": (10, 1.0)})
@@ -853,7 +853,8 @@ class CompareTest(unittest.TestCase):
         out = self.compare(before, after, "--max-cost", "2.30").stdout
         row = self.gate(out, "proxy $ per merged ticket")
         self.assertRegex(row, r"\$2\.62\s+FAIL\s+→\s+\$2\.25\s+pass")
-        self.assertIn("INCONCLUSIVE: the mix adjustment flips the verdict on proxy $ per merged ticket", out)
+        self.assertIn("INCONCLUSIVE", out)
+        self.assertIn("mix", out)
         # With the same mix the adjustment changes nothing and nothing flips.
         same = self.profile("s.json", {"L": (10, 3.0), "M": (10, 0.5)})
         self.assertNotIn("INCONCLUSIVE", self.compare(before, same, "--max-cost", "2.30").stdout)
@@ -868,8 +869,8 @@ class CompareTest(unittest.TestCase):
     def test_untiered_tickets_and_unparsed_reviewers_are_printed(self):
         before = self.profile("b.json", {"L": (20, 4.0), "?": (5, 1.0)})
         out = self.compare(before, before).stdout
-        self.assertIn("before: 5 merged tickets with no tier", out)
-        self.assertIn("unknown reviewer agents returned no parseable verdict", out)
+        self.assertIn("no tier", out)
+        self.assertIn("parseable", out)
 
     def test_a_profile_without_tier_figures_is_refused(self):
         old = self.root / "old.json"

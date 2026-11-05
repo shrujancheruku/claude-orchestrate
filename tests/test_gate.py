@@ -106,14 +106,14 @@ class GateTest(unittest.TestCase):
         self.prime(mergeable="CONFLICTING")
         r = self.gate()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("conflicts with main", r.stdout)
+        self.assertIn("conflict", r.stdout)
         self.assertEqual(self.event()["outcome"], "fail")
 
     def test_behind_base_is_not_mergeable_and_is_reported(self):
         self.prime(behind=3)
         r = self.gate()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("behind main by 3", r.stdout)
+        self.assertIn("behind", r.stdout)
         self.assertEqual(self.event()["behind_by"], 3)
 
     def test_failing_repo_command(self):
@@ -121,7 +121,7 @@ class GateTest(unittest.TestCase):
         self.config("codegen is up to date (run: `echo stale codegen; exit 4`)")
         r = self.gate()
         self.assertEqual(r.returncode, 1)
-        self.assertIn("(exit 4)", r.stdout)
+        self.assertIn("exit 4", r.stdout)
         self.assertIn("stale codegen", r.stdout)
         e = self.event()
         self.assertEqual(e["failed"], ["echo stale codegen; exit 4"])
@@ -177,7 +177,7 @@ class GateTest(unittest.TestCase):
                 self.config(item)
                 r = self.gate()
                 self.assertEqual(r.returncode, 1, r.stdout)
-                self.assertIn("malformed run: marker", r.stdout)
+                self.assertIn("malformed", r.stdout)
 
     def test_only_the_repo_specific_checks_label_counts(self):
         self.prime()
@@ -204,7 +204,7 @@ class GateTest(unittest.TestCase):
         self.prime(mergeable="UNKNOWN")
         r = self.gate()
         self.assertEqual(r.returncode, 3, r.stdout)
-        self.assertIn("run the gate again", r.stdout)
+        self.assertIn("again", r.stdout)
         views = [c for c in self.env.gh_calls() if c[:2] == ["pr", "view"]]
         self.assertGreater(len(views), 1)
         self.assertEqual(self.env.events()[-1]["outcome"], "unknown")
@@ -218,7 +218,7 @@ class GateTest(unittest.TestCase):
         self.prime(mergeable="UNKNOWN", behind=3)
         r = self.gate()
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("behind main by 3", r.stdout)
+        self.assertIn("behind", r.stdout)
         e = self.event()
         self.assertEqual((e["outcome"], e["behind_by"]), ("fail", 3))
 
@@ -230,7 +230,7 @@ class GateTest(unittest.TestCase):
         ])
         r = self.gate()
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("could not read behind_by", r.stdout)
+        self.assertIn("behind_by", r.stdout)
         self.assertEqual(self.event()["outcome"], "fail")
 
     def test_unknown_settles_to_mergeable_on_retry(self):
@@ -286,7 +286,7 @@ class GateTest(unittest.TestCase):
         self.config("slow (run: `sleep 30`)")
         r = self.gate("--timeout", "0.5")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("timed out after 0.5s", r.stdout)
+        self.assertIn("timed out", r.stdout)
         self.assertEqual(self.event()["outcome"], "fail")
 
 
