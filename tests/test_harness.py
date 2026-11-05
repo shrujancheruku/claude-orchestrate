@@ -41,6 +41,7 @@ class HarnessSmoke(unittest.TestCase):
         d = self.env.repo.parent / "scripts"
         d.mkdir(exist_ok=True)
         shutil.copy(SCRIPTS / "common.py", d / "common.py")
+        shutil.copy(SCRIPTS / "runlog.py", d / "runlog.py")
         path = d / name
         path.write_text(source)
         return path

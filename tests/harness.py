@@ -1,6 +1,6 @@
 """Test seam for the plugin scripts: a temp git repo, a bare `origin`, and a fake `gh`.
 
-Scripts are driven only through their CLI. Assert on stdout, events.jsonl, the
+Scripts are driven only through their CLI. Assert on stdout, the run log (through runlog), the
 repo and remote state, and the calls the fake `gh` recorded.
 """
 
@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+import runlog  # noqa: E402
 
 # Stands in for `gh`: records every call, then replies with the first canned
 # response whose args are a prefix of the call (stdout, stderr, exit code). A response with a
@@ -107,7 +109,7 @@ class ScriptEnv:
         return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
 
     def events(self):
-        log = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
+        log = runlog.log_path(self.repo, runlog.EVENTS_LOG)
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
     def _tmp_empty(self):

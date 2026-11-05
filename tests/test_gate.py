@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv  # noqa: E402
+import runlog  # noqa: E402
 
 class GateTest(unittest.TestCase):
     def setUp(self):
@@ -65,7 +66,7 @@ class GateTest(unittest.TestCase):
         subprocess.run(["git", "worktree", "add", "-q", "-b", "w1", str(wt)], cwd=self.env.repo, check=True)
         self.assertEqual(self.run_from(wt).returncode, 0)
         self.event()
-        self.assertFalse((wt / ".claude" / "orchestrate-profiles").exists())
+        self.assertFalse((wt / runlog.PROFILES).exists())
 
     def test_title_convention_failure(self):
         self.prime(title="Add the thing")

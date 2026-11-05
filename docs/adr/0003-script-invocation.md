@@ -15,8 +15,8 @@ Without one rule, each script could grow its own call shape (inferred). Before `
 One rule, checked by `tests/test_invocation.py`:
 
 - **Found:** a skill calls a script as `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`. An agent never relies on `${CLAUDE_PLUGIN_ROOT}`; the brief hands it the absolute path.
-- **A CLI is an executable without an extension** (`gate`, `merge`, `verify`, ...) with a `#!/usr/bin/env python3` shebang, run by path with no interpreter and no `-I`. It may import siblings (`common`, `checks`, `replay`, `github`).
-- **A `.py` file is a library or a standalone script.** A library (`common.py`, `checks.py`, `replay.py`, `github.py`) is only imported. A standalone script (`scripts/profile.py`, and the hook `hooks/guard.py` via `hooks/hooks.json`) is run by path under `python3 -I`. `profile.py` imports `common`, so it appends its own directory to `sys.path` first: appended, never inserted, so the stdlib `profile` module is not shadowed (`scripts/profile.py:30-35`).
+- **A CLI is an executable without an extension** (`gate`, `merge`, `verify`, ...) with a `#!/usr/bin/env python3` shebang, run by path with no interpreter and no `-I`. It may import siblings (`common`, `checks`, `replay`, `github`, `runlog`).
+- **A `.py` file is a library or a standalone script.** A library (`common.py`, `checks.py`, `replay.py`, `github.py`, `runlog.py`) is only imported. A standalone script (`scripts/profile.py`, and the hook `hooks/guard.py` via `hooks/hooks.json`) is run by path under `python3 -I`. `profile.py` imports `common` and `runlog`, so it appends its own directory to `sys.path` first: appended, never inserted, so the stdlib `profile` module is not shadowed (`scripts/profile.py:30-35`).
 - **Never work around a failed import with `PYTHONPATH`.** Fix the script's kind to match the rules above (the README's convention before this ADR; the reason is inferred).
 
 ## Consequences

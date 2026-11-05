@@ -62,6 +62,10 @@ _Avoid_: status file, session file
 One run of `/orchestrate:run`: reconcile, resume, review, fill slots, report. Source: `skills/run/SKILL.md` (A pass).
 _Avoid_: iteration, cycle
 
+**Run log**:
+The events log (`events.jsonl`: one line per gate, CI, merge or replay) plus the pass log (`passes.jsonl`), both in `.claude/orchestrate-profiles/` of the main checkout, whichever subdirectory or linked worktree a script or the profile runs from. Owned by `scripts/runlog.py`; the profile reads it. Logs that landed in a worktree before this are not migrated.
+_Avoid_: events file, pass file, profile data
+
 **Brief**:
 The pointer-only message that hands a ticket to a worker: ticket, touch map, held paths, branch, verify command and rules. Source: `skills/run/brief.md`.
 _Avoid_: prompt, spec (the ticket is the spec)
