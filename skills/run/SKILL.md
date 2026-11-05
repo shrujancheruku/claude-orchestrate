@@ -2,7 +2,7 @@
 name: run
 description: One orchestration pass over the repo's backlog. Review and merge finished PRs, fill free slots with workers, escalate gates.
 disable-model-invocation: true
-argument-hint: "[status | <ticket> | <parent issue>] [--profile]"
+argument-hint: "[status | <ticket> | <parent issue>] [--greedy[=N]] [--profile]"
 ---
 
 You are the **orchestrator**. You hold the order of work and every judgement call; agents do the legwork. The **scout** finds facts, **workers** build tickets, **reviewers** check PRs. You write no feature code, and you hand any search bigger than a single lookup to the scout, so your context holds decisions, not file dumps. Plain `/orchestrate:run` is the only supported flow: you end your turn after a pass and wake only on worker and reviewer completions, on `watch-ci` lines and on its own usage-limit cron hops. Keep your context small: every Bash call you make returns bounded output (`--jq`, `tail -n`, `--name-only`), never a full diff or log. A wake ends with one line, or with nothing when nothing needs the user; the full table is for when a pass ends or something needs the user.
@@ -11,7 +11,7 @@ You are the **orchestrator**. You hold the order of work and every judgement cal
 
 Read `.claude/orchestration.md` (the **config**) in full. It is the repo's single source for the backlog, slots, verify commands, gates and merge rule, and it wins over anything here. If it's missing, stop and tell the user to run `/orchestrate:setup`. If it has a **Lanes** table, it predates 0.2: stop and tell the user to re-run `/orchestrate:setup`. If its **Post reviews** line says the orchestrator posts reviews, it predates the reviewer posting its own: stop and tell the user to re-run `/orchestrate:setup`.
 
-Read the config and the tracker docs in full on the first pass, and once more after each compaction summary (a summary may have dropped them); never otherwise. Later passes and wakes work from what you already hold.
+Read the config and the tracker docs in full on the first pass, and once more after each compaction summary (a summary may have dropped them); never otherwise. Later passes and wakes work from what you already hold. If a compaction summary shows this session running greedy (its reports start `Greedy · cap N`), keep running greedy at that cap.
 
 Then read the **tracker docs** the config's **Backlog** section points to, normally `docs/agents/issue-tracker.md` (how to list, read, claim, label, comment on and close tickets, and how blocking is expressed) and `docs/agents/triage-labels.md` (the label string for each triage role). Wherever this skill names a role (`ready-for-agent`, `ready-for-human`, `needs-info`), use that repo's label string for it, and do every tracker operation the way the tracker doc says. Only when the config says the backlog is defined in the config itself, use its **Backlog** section instead.
 
@@ -28,7 +28,7 @@ Takeable tickets go in **ascending issue number**: `to-tickets` publishes blocke
 
 ## State lives outside you
 
-Every pass rebuilds its picture from the tracker and the git host, so a pass can be rerun, interrupted, or started in a fresh session. A ticket is **claimed** when it's assigned to the user. The config's **slot** count caps how many claimed tickets are open at once; each free slot can take one ticket. A claimed ticket is in one state:
+Every pass rebuilds its picture from the tracker and the git host, so a pass can be rerun, interrupted, or started in a fresh session. A ticket is **claimed** when it's assigned to the user. The config's **slot** count caps how many claimed tickets are open at once (under `--greedy`, the greedy cap does; see [Greedy slots](#greedy-slots)); each free slot can take one ticket. A claimed ticket is in one state:
 
 - **building**: no PR yet, and a worker from this session is on it.
 - **paused**: its worker ended on an API or usage-limit error. See [Running out of usage](#running-out-of-usage).
@@ -42,7 +42,7 @@ The **state file**, `.claude/orchestrate-state.json` (gitignored), holds what th
 
 The **held paths** at any moment are the files in open PRs' diffs, the touch maps of building tickets, and the config's exclusive holds. A ticket may not change a path another ticket holds. Overlap compares file paths, with any `:line` stripped; a different section of the same file still overlaps.
 
-Arguments narrow a pass: `status` reconciles and reports without dispatching or merging; a ticket limits the pass to it; a parent issue (one with sub-issues) limits it to its sub-issues. `--profile` adds to any of them: the pass also records itself and saves a profile, as [Profiling](#profiling) says.
+Arguments narrow a pass: `status` reconciles and reports without dispatching or merging; a ticket limits the pass to it; a parent issue (one with sub-issues) limits it to its sub-issues. `--profile` adds to any of them: the pass also records itself and saves a profile, as [Profiling](#profiling) says. `--greedy[=N]` adds to a full or parent pass: it sizes the slot count from how many tickets can run at once, as [Greedy slots](#greedy-slots) says.
 
 ## A pass
 
@@ -50,11 +50,11 @@ Arguments narrow a pass: `status` reconciles and reports without dispatching or 
    ```sh
    "${CLAUDE_SKILL_DIR}/../../scripts/rebuild-state" ${CLAUDE_SESSION_ID} --repo .
    ```
-   If it fails, say so in one line and carry on without it: the tracker is enough to reconcile. One scout call, within the pass's scope: each claimed open ticket, its PR, and check states; for each ticket with no PR, its branch's last pushed commit and whether its worktree (the state file's path, else `.claude/worktrees/agent-<id>` for the worker's agent ID, else the one `git worktree list` shows for its branch: the PR's head if it has a PR, otherwise the remote branch starting `<number>-`, the brief's `<number>-<slug>` convention) holds uncommitted changes or unpushed commits; the first takeable tickets in order, a few more than the free slots; `ready-for-human` tickets; merged PRs whose tickets are still open; parents whose sub-issues are all closed. Done when every claimed ticket has a state.
+   If it fails, say so in one line and carry on without it: the tracker is enough to reconcile. One scout call, within the pass's scope: each claimed open ticket, its PR, and check states; for each ticket with no PR, its branch's last pushed commit and whether its worktree (the state file's path, else `.claude/worktrees/agent-<id>` for the worker's agent ID, else the one `git worktree list` shows for its branch: the PR's head if it has a PR, otherwise the remote branch starting `<number>-`, the brief's `<number>-<slug>` convention) holds uncommitted changes or unpushed commits; the first takeable tickets in order, a few more than the free slots (under greedy, two more); `ready-for-human` tickets; merged PRs whose tickets are still open; parents whose sub-issues are all closed. Done when every claimed ticket has a state.
 2. **Resume paused and stalled tickets**, as [Running out of usage](#running-out-of-usage) says.
 3. **Finish work in review**, ticket by ticket, with the loop below.
-4. **Fill free slots.** Skip this step if a usage limit was hit this pass. For each free slot, take the next takeable ticket that isn't held by a start gate. Check **overlap** before dispatch: the scout's touch map for the ticket, set against the held paths by file path, with any `:line` stripped (a different section of the same file still overlaps). An overlap outside the config's shared files holds the ticket until the other merges; take the next ticket instead. Assign the ticket to the user first, so another session skips it. Write its brief from [brief.md](brief.md), with the touch map (its `path:line` entries kept) and the held paths (each as a plain file path: strip any `:line` or line range before writing it, so a worker can't read a hold as covering only that line), and dispatch `orchestrate:worker` in the background, with the model [Choosing the worker model](#choosing-the-worker-model) gives (the Agent tool's `model` override) and the description `Build #<ticket>`, with the ticket number first, since the next rebuild joins the worker to the first `#<n>` in it; the next rebuild records it. Done when every slot is full or no ticket can be taken. If every slot is full, no usage limit was hit, and the pass isn't narrowed, ask the scout for the next takeable ticket's touch map, for the [slot suggestion](#suggesting-a-slot-count).
-5. **Report and yield.** A table: ticket, state, next step, who it waits on. If a usage limit was hit, say so first, with the reset time if the error gave one. Below it, any slot suggestion, then the `ready-for-human` tickets and any parent whose sub-issues have all closed; ask the user whether to close each such parent (never close one yourself). With `--profile`, record the pass and put the profile summary last. Then end your turn: worker and reviewer completions and `watch-ci` lines (see the review loop) wake you, and you schedule no other wake-up except as [Running out of usage](#running-out-of-usage) says while a limit holds. A pass that ends with nothing in flight (no building, paused, stalled or in-review ticket, and nothing takeable) says so in one line and stops.
+4. **Fill free slots.** Skip this step if a usage limit was hit this pass. For each free slot, take the next takeable ticket that isn't held by a start gate. Check **overlap** before dispatch: the scout's touch map for the ticket, set against the held paths by file path, with any `:line` stripped (a different section of the same file still overlaps). An overlap outside the config's shared files holds the ticket until the other merges; take the next ticket instead. A ticket dispatched this pass holds its touch map from then on, so later picks in the same pass are checked against it. Assign the ticket to the user first, so another session skips it. Write its brief from [brief.md](brief.md), with the touch map (its `path:line` entries kept) and the held paths (each as a plain file path: strip any `:line` or line range before writing it, so a worker can't read a hold as covering only that line), and dispatch `orchestrate:worker` in the background, with the model [Choosing the worker model](#choosing-the-worker-model) gives (the Agent tool's `model` override) and the description `Build #<ticket>`, with the ticket number first, since the next rebuild joins the worker to the first `#<n>` in it; the next rebuild records it. Done when every slot is full or no ticket can be taken. If every slot is full, no usage limit was hit, and the pass is neither narrowed nor greedy, ask the scout for the next takeable ticket's touch map, for the [slot suggestion](#suggesting-a-slot-count).
+5. **Report and yield.** A table: ticket, state, next step, who it waits on. On a greedy pass, start with `Greedy · cap N · running M` (M is the claimed tickets in flight). If a usage limit was hit, say so first, with the reset time if the error gave one. Below it, any slot suggestion, then the `ready-for-human` tickets and any parent whose sub-issues have all closed; ask the user whether to close each such parent (never close one yourself). With `--profile`, record the pass and put the profile summary last. Then end your turn: worker and reviewer completions and `watch-ci` lines (see the review loop) wake you, and you schedule no other wake-up except as [Running out of usage](#running-out-of-usage) says while a limit holds. A pass that ends with nothing in flight (no building, paused, stalled or in-review ticket, and nothing takeable) says so in one line and stops.
 
 The backlog is done when nothing in scope is takeable or claimed. Say so, list what's left as `ready-for-human` or `needs-info`, and stop.
 
@@ -124,9 +124,21 @@ Agents share the user's plan, so a usage limit usually reaches several workers a
 
 There is no way to see how much usage is left, so react to failures rather than predict them. The slot count is the throttle.
 
+## Greedy slots
+
+`--greedy[=N]` lets each pass size the slot count from how many tickets can run at once, up to a cap ([ADR-0007](../../docs/adr/0007-greedy-slots.md)):
+
+- **The cap** is N, 5 by default. Refuse N outside 1 to 8 in one line and run nothing. With N above 3, say once: "more slots means more reports and reviews through this session; expect earlier compaction."
+- **Fill to independence.** Free slots are the cap minus the claimed tickets, and step 4 fills them as usual: every takeable ticket whose touch map overlaps no held path is dispatched, up to the cap. Never stop an in-flight worker to shrink the count; it shrinks as tickets merge and fewer independent ones remain.
+- **The config is untouched.** Its **Slots** line stays the count for passes without `--greedy`; never edit it for greedy.
+- **For the session.** Greedy holds for every later wake (worker and reviewer completions, `watch-ci` lines, usage-limit cron hops) until the user runs `/orchestrate:run` without it.
+- **After a usage limit**, run at the config's count until the reset, then greedy again.
+- **Scope.** Greedy applies to a full pass and a parent. With `status` or a ticket, say in one line that greedy is ignored for this pass.
+- **No slot suggestion.** Greedy passes make none. If the cap was reached with independent tickets still waiting, say in one line: "cap N reached with M independent tickets waiting; `--greedy=<N>` raises it."
+
 ## Suggesting a slot count
 
-On a pass over the whole backlog (not `status`, a ticket or a parent), suggest changing the config's slot count by one, from what this pass saw ([ADR-0001](../../docs/adr/0001-slot-count.md)):
+On a pass over the whole backlog (not `status`, a ticket or a parent, and not greedy), suggest changing the config's slot count by one, from what this pass saw ([ADR-0001](../../docs/adr/0001-slot-count.md)):
 
 - **Lower** when a usage limit was hit, or a slot stayed free because every takeable ticket overlapped a held path.
 - **Raise** when every slot is full, no usage limit was hit, and the next takeable ticket overlaps no held path.

@@ -26,6 +26,10 @@ _Avoid_: queue, ready list
 One place in the config's cap on how many claimed tickets are open at once; a free slot can take one ticket. Source: `skills/run/SKILL.md` (State lives outside you), `docs/adr/0001-slot-count.md`.
 _Avoid_: lane, worker limit, concurrency
 
+**Greedy**:
+A session started with `/orchestrate:run --greedy[=N]`: each pass fills slots with every takeable ticket that overlaps no held path, up to the cap N (5 by default), without editing the config's slot count. Source: `skills/run/SKILL.md` (Greedy slots), `docs/adr/0007-greedy-slots.md`.
+_Avoid_: auto slots, unlimited, max parallelism
+
 **Claimed**:
 A ticket assigned to the user; it holds a slot until it merges or is handed back to the tracker. Source: `skills/run/SKILL.md`.
 _Avoid_: taken, locked, in progress

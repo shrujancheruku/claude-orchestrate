@@ -53,7 +53,7 @@ Each run is a **pass**: rebuild state from the tracker, review and merge finishe
 
 **Reviews sized to the change.** A ten-line fix gets a Haiku checklist. A change to auth gets a high-effort Sonnet review with risk notes for humans. Before any reviewer starts, a script gate checks mergeability, the PR title and your repo's own checks, so the cheap failures never cost a review.
 
-**The cheapest model that does the job well.** Searches and log reads stay in Haiku contexts. Review fixes go back to the worker that wrote the code, reusing its context. Briefs share a prompt-cache prefix. The slot count is your throttle, and every pass suggests whether to raise or lower it.
+**The cheapest model that does the job well.** Searches and log reads stay in Haiku contexts. Review fixes go back to the worker that wrote the code, reusing its context. Briefs share a prompt-cache prefix. The slot count is your throttle, and every pass suggests whether to raise or lower it; `--greedy` sizes it for you from how many tickets can run at once.
 
 **Guardrails.** A hook reads every shell command a plugin agent runs, with its own shell lexer, and refuses whatever that role must not do: scouts and reviewers can't write, workers can't merge or force-push. A command it can't parse is refused.
 
@@ -86,7 +86,7 @@ You need `git` 2.38+, `gh` (signed in) and `python3` 3.9+.
 
 - **[The full guide](docs/guide.md):** concepts, cost, slot counts, the guard hook, the merge sweep, sandboxed pushes, usage limits, profiling and development.
 - **[Glossary](GLOSSARY.md):** the shared vocabulary of the prompts, scripts and docs.
-- **[Architecture decisions](docs/adr/):** why slots default to 2, why the guard fails closed, who owns the merge sweep, and more.
+- **[Architecture decisions](docs/adr/):** why slots default to 2 and when `--greedy` sizes them, why the guard fails closed, who owns the merge sweep, and more.
 
 ## Development
 
