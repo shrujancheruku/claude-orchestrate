@@ -16,7 +16,6 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
-import json
 import re
 import sys
 import time
@@ -24,13 +23,10 @@ from pathlib import Path
 
 import checks
 import common
+import github
 
 TITLE_RE = re.compile(
     r"^(feat|fix|docs|refactor|test|chore|build|ci|perf|style|revert)(\([^()\s][^()]*\))?!?: \S")
-
-
-def gh(*args):
-    return common.run("gh", *args)
 
 
 def check(name, ok, why=""):
@@ -65,15 +61,12 @@ def pr_checks(pr, base_override, retries=4, delay=2.5):
     """The built-in checks: title convention, then mergeability (conflicts and behind_by)."""
     # GitHub computes mergeability lazily: UNKNOWN right after a push usually settles in seconds.
     for attempt in range(retries + 1):
-        code, out, err = gh("pr", "view", pr, "--json", "title,mergeable,baseRefName,headRefName")
-        if code != 0:
-            return None, f"gh pr view failed: {common.one_line(err)}"
         try:
-            view = json.loads(out)
-        except ValueError:
-            return None, "gh pr view returned malformed JSON"
-        if not isinstance(view, dict):
-            return None, "gh pr view returned malformed JSON"
+            view = github.pr_view(pr, "title,mergeable,baseRefName,headRefName")
+        except github.GhError as e:
+            if e.kind == github.MALFORMED:
+                return None, "gh pr view returned malformed JSON"
+            return None, f"gh pr view failed: {e.message}"
         if view.get("mergeable", "UNKNOWN") != "UNKNOWN" or attempt == retries:
             break
         time.sleep(delay)
@@ -81,10 +74,11 @@ def pr_checks(pr, base_override, retries=4, delay=2.5):
                      f"title: {view.get('title')!r}\nexpected: type(scope): description")]
     base = base_override or view.get("baseRefName") or "main"
     mergeable = view.get("mergeable", "UNKNOWN")
-    behind = None
-    code, out, err = gh("api", f"repos/{{owner}}/{{repo}}/compare/{base}...{view.get('headRefName')}", "--jq", ".behind_by")
-    if code == 0 and out.strip().isdigit():
-        behind = int(out.strip())
+    behind, why = None, ""
+    try:
+        behind = github.behind_by(base, view.get("headRefName"))
+    except github.GhError as e:
+        why = e.message
     problems = []
     if mergeable == "CONFLICTING":
         problems.append(f"conflicts with {base}")
@@ -95,7 +89,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5):
     elif mergeable != "MERGEABLE":
         problems.append(f"not mergeable ({mergeable})")
     if behind is None:
-        problems.append(f"could not read behind_by: {common.one_line(err)}; retry later")
+        problems.append(f"could not read behind_by: {why}; retry later")
     elif behind:
         problems.append(f"behind {base} by {behind} commit(s); rebase or merge {base}")
     label = f"mergeable with {base} (behind_by {behind if behind is not None else '?'})"

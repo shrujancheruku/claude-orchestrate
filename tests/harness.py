@@ -14,7 +14,8 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 # Stands in for `gh`: records every call, then replies with the first canned
-# response whose args are a prefix of the call (stdout, stderr, exit code).
+# response whose args are a prefix of the call (stdout, stderr, exit code). A response with a
+# "seq" list replies with its Nth step (the last repeats) on the Nth call it matches.
 FAKE_GH = '''#!/usr/bin/env python3
 import json, os, sys
 state = os.environ["FAKE_GH_STATE"]
@@ -24,8 +25,17 @@ with open(state + ".calls", "a") as f:
 if "-" in args:  # a body or payload on stdin (`--body-file -`, `--input -`): keep it, tests assert on it
     with open(state + ".stdin", "a") as f:
         f.write(json.dumps({"args": args, "stdin": sys.stdin.read()}) + "\\n")
-for r in json.load(open(state))["responses"]:
+for i, r in enumerate(json.load(open(state))["responses"]):
     if args[: len(r["args"])] == r["args"]:
+        if "seq" in r:
+            try:
+                counts = json.load(open(state + ".counts"))
+            except OSError:
+                counts = {}
+            n = counts.get(str(i), 0)
+            counts[str(i)] = n + 1
+            json.dump(counts, open(state + ".counts", "w"))
+            r = r["seq"][min(n, len(r["seq"]) - 1)]
         sys.stdout.write(r.get("stdout", ""))
         sys.stderr.write(r.get("stderr", ""))
         sys.exit(r.get("exit", 0))
@@ -75,7 +85,11 @@ class ScriptEnv:
         return git(self.repo, "rev-parse", "HEAD")
 
     def set_gh(self, responses):
-        """Canned replies: [{"args": ["pr", "view"], "stdout": "...", "exit": 0}, ...]; first prefix match wins."""
+        """Canned replies: [{"args": ["pr", "view"], "stdout": "...", "exit": 0}, ...]; first prefix match wins.
+
+        {"args": [...], "seq": [{"stdout": ...}, ...]} replies with one step per matching call instead.
+        """
+        Path(str(self.gh_state) + ".counts").unlink(missing_ok=True)
         self.gh_state.write_text(json.dumps({"responses": responses}))
 
     def gh_calls(self):
@@ -101,8 +115,8 @@ class ScriptEnv:
         empty.mkdir(exist_ok=True)
         return empty
 
-    def run(self, script, *args, check=True, no_gh=False):
-        """Run a CLI (absolute path, or a name under scripts/) in the repo with the fake gh first on PATH."""
+    def run(self, script, *args, check=True, no_gh=False, cwd=None):
+        """Run a CLI (absolute path, or a name under scripts/) in `cwd` (default: the repo) with the fake gh first on PATH."""
         path = Path(script)
         if not path.is_absolute():
             path = SCRIPTS / script
@@ -117,5 +131,5 @@ class ScriptEnv:
         )
         return subprocess.run(
             [sys.executable, str(path), *map(str, args)],
-            cwd=self.repo, env=env, capture_output=True, text=True, check=check,
+            cwd=cwd or self.repo, env=env, capture_output=True, text=True, check=check,
         )

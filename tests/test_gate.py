@@ -1,7 +1,6 @@
 """CLI tests for scripts/gate, driven through the harness with a fake gh."""
 
 import json
-import os
 import subprocess
 import sys
 import unittest
@@ -9,27 +8,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv  # noqa: E402
-
-# A fake `gh` whose n-th `pr view` reply is views[n] (the last one repeats); other calls use the canned
-# replies in the state file, as harness.FAKE_GH does. Records calls the same way, for gh_calls().
-SEQUENCED_GH = '''#!/usr/bin/env python3
-import json, os, sys
-state = os.environ["FAKE_GH_STATE"]
-args = sys.argv[1:]
-with open(state + ".calls", "a") as f:
-    f.write(json.dumps(args) + "\\n")
-if args[:2] == ["pr", "view"]:
-    views = __VIEWS__
-    n = sum(1 for l in open(state + ".calls") if json.loads(l)[:2] == ["pr", "view"]) - 1
-    sys.stdout.write(views[min(n, len(views) - 1)])
-    sys.exit(0)
-for r in json.load(open(state))["responses"]:
-    if args[: len(r["args"])] == r["args"]:
-        sys.stdout.write(r.get("stdout", ""))
-        sys.exit(r.get("exit", 0))
-sys.exit(1)
-'''
-
 
 class GateTest(unittest.TestCase):
     def setUp(self):
@@ -71,10 +49,7 @@ class GateTest(unittest.TestCase):
         self.assertIn("repos/{owner}/{repo}/compare/main...br", self.env.gh_calls()[1])
 
     def run_from(self, cwd):
-        env = dict(os.environ, PATH=f"{self.env.bin}{os.pathsep}{os.environ['PATH']}", FAKE_GH_STATE=str(self.env.gh_state))
-        script = Path(__file__).resolve().parent.parent / "scripts" / "gate"
-        return subprocess.run([sys.executable, str(script), "7", "--retry-delay", "0"], cwd=cwd, env=env,
-                              capture_output=True, text=True)
+        return self.env.run("gate", "7", "--retry-delay", "0", cwd=cwd, check=False)
 
     def test_event_from_a_subdirectory_lands_in_the_checkout_log(self):
         self.prime()
@@ -222,6 +197,16 @@ class GateTest(unittest.TestCase):
         e = self.event()
         self.assertEqual((e["outcome"], e["behind_by"]), ("fail", 3))
 
+    def test_non_numeric_behind_by_is_a_failure_with_a_reason(self):
+        self.env.set_gh([
+            {"args": ["pr", "view"], "stdout": json.dumps(
+                {"title": "feat(x): add y", "mergeable": "MERGEABLE", "baseRefName": "main", "headRefName": "br"})},
+            {"args": ["api"], "stdout": "null\n"},
+        ])
+        r = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("could not read behind_by", r.stdout)
+
     def test_unknown_with_unreadable_behind_is_a_failure_not_a_rerun(self):
         self.env.set_gh([
             {"args": ["pr", "view"], "stdout": json.dumps(
@@ -234,13 +219,10 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.event()["outcome"], "fail")
 
     def test_unknown_settles_to_mergeable_on_retry(self):
-        # The canned-reply fake answers by args only, so this test swaps in a fake whose `pr view`
-        # replies follow a sequence: UNKNOWN on the first look, MERGEABLE after that.
-        self.env.set_gh([{"args": ["api"], "stdout": "0\n"}])
         views = [json.dumps({"title": "feat(x): add y", "mergeable": m, "baseRefName": "main", "headRefName": "br"})
                  for m in ("UNKNOWN", "MERGEABLE")]
-        fake = SEQUENCED_GH.replace("__VIEWS__", json.dumps(views))
-        (self.env.bin / "gh").write_text(fake)
+        self.env.set_gh([{"args": ["pr", "view"], "seq": [{"stdout": v} for v in views]},
+                         {"args": ["api"], "stdout": "0\n"}])
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(len([c for c in self.env.gh_calls() if c[:2] == ["pr", "view"]]), 2)

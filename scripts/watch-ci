@@ -11,11 +11,11 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
-import json
 import sys
 import time
 
 import common
+import github
 
 FIELDS = "statusCheckRollup,mergeStateStatus,headRefOid,state"
 BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
@@ -41,21 +41,15 @@ def judge(view: dict):
     return "fail" if any(r in BAD for r in results) else "pass"
 
 
-class GhMissing(Exception):
-    pass
-
-
 def view_pr(pr: str):
-    p = common.run("gh", "pr", "view", pr, "--json", FIELDS)
-    if p.code == common.NOT_FOUND:
-        # Retrying cannot fix a missing tool; say so instead of waiting forever.
-        raise GhMissing(common.one_line(p.stderr))
-    if p.code != 0:
-        print(f"watch-ci: gh failed for #{pr}: {common.one_line(p.stderr)}", file=sys.stderr, flush=True)
-        return None
+    """The PR's view, or None after a transient `gh` failure (retried next round). Raises GhError when
+    retrying cannot help: `gh` missing, or a reply that is not a PR object."""
     try:
-        return json.loads(p.stdout)
-    except ValueError:
+        return github.pr_view(pr, FIELDS)
+    except github.GhError as e:
+        if github.could_not_run(e):
+            raise
+        print(f"watch-ci: gh failed for #{pr}: {e.message}", file=sys.stderr, flush=True)
         return None
 
 
@@ -69,8 +63,8 @@ def main(argv=None) -> int:
         for pr in list(pending):
             try:
                 view = view_pr(pr)
-            except GhMissing as e:
-                print(f"watch-ci: cannot run gh: {e}", file=sys.stderr, flush=True)
+            except github.GhError as e:
+                print(f"watch-ci: cannot run gh: {e.message}", file=sys.stderr, flush=True)
                 return 2
             result = judge(view) if view else None
             if result is None:
