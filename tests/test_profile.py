@@ -749,11 +749,13 @@ class CommandTest(unittest.TestCase):
             r = self.run_profile("record", "--repo", repo, "--session", "s", bad)
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertIn("profile record", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
 
     def test_unknown_session_could_not_run(self):
         r = self.run_profile("no-such-session")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("no transcript", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
     def test_profile_by_session_id_saves_json_and_html(self):
         fx = Fixture(self.root)
