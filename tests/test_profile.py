@@ -15,6 +15,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import profile as prof  # noqa: E402
 import runlog  # noqa: E402
+from transcripts import write_jsonl  # noqa: E402
 
 T0 = datetime(2026, 11, 3, 16, 0, tzinfo=timezone.utc)
 SESSION = "sess-1"
@@ -41,11 +42,6 @@ def tool_use(use_id, name, **inp):
 def tool_result(minutes, use_id, text):
     return {"type": "user", "timestamp": at(minutes),
             "message": {"content": [{"type": "tool_result", "tool_use_id": use_id, "content": text}]}}
-
-
-def write_jsonl(path, records):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(r) + "\n" for r in records))
 
 
 MERGED_50 = {"ts": at(30), "session": SESSION, "kind": "merge", "ref": 50, "outcome": "merged"}
@@ -263,7 +259,7 @@ class ProfileTest(unittest.TestCase):
         path = Path(self.tmp.name) / "mystery.jsonl"
         write_jsonl(path, [assistant(21, "x1", "mystery-1", [])])
         t = prof.Transcript(path)
-        self.assertEqual(t.cost(), {"unpriced": 0.0})
+        self.assertEqual(prof.cost_of(t), {"unpriced": 0.0})
         self.assertEqual(prof.cost_metrics(t, [], 1)["unpriced_models"], ["mystery-1"])
 
     def test_unpriced_and_approximate_models_each_warn_once_in_the_profile(self):

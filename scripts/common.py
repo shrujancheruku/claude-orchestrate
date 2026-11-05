@@ -153,7 +153,8 @@ def blocks(record) -> list:
         return []
     msg = record.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
-    return content if isinstance(content, list) else []
+    # A stray string or number in the list is not a block; callers call .get on each one.
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
 
 
 def find_transcript(arg, projects_dir=None) -> Path | None:

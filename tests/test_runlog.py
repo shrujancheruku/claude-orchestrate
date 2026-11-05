@@ -53,6 +53,15 @@ class RunLogTest(unittest.TestCase):
             self.assertEqual([p["slots"] for p in runlog.read_passes(where, "s")], [2])
             self.assertEqual([e["ref"] for e in runlog.read_events(where, "s", *self.span)], [2])
 
+    def test_a_removed_worktree_still_resolves_to_the_main_checkout(self):
+        # The harness removes a worktree when its agent ends, but a transcript still names its path.
+        wt = self.worktree()
+        runlog.append_pass(wt, "s", {"slots": 2})
+        _vcs(self.repo, "worktree", "remove", str(wt))
+        self.assertFalse(wt.exists())
+        self.assertEqual(runlog.main_checkout(wt), self.repo)
+        self.assertEqual([p["slots"] for p in runlog.read_passes(wt, "s")], [2])
+
     def test_profile_built_for_a_worktree_session_finds_both_logs(self):
         wt = self.worktree()
         runlog.append_pass(wt, "sess", {"slots": 2})

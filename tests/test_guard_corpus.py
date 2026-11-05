@@ -23,12 +23,15 @@ import importlib.util
 import io
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
 import unittest.mock
 from collections import Counter
 from pathlib import Path
+
+import transcripts
 
 ROOT = Path(__file__).resolve().parent.parent
 GUARD = ROOT / "hooks" / "guard.py"
@@ -151,11 +154,15 @@ class Extract(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.dir = Path(self.tmp.name)
+        # A real checkout: the repo a call is normalised against is found by asking git, as the script does.
+        self.dir = Path(self.tmp.name).resolve()
+        self.repo = self.dir / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         self.out = self.dir / "corpus.jsonl"
         projects = self.dir / "projects" / "proj"
         (projects / "sess" / "subagents").mkdir(parents=True)
-        (projects / "sess.jsonl").write_text(json.dumps(self.call("rm -rf /Users/me/x", "/Users/me/repo")) + "\n")
+        transcripts.write_jsonl(projects / "sess.jsonl", [self.call("rm -rf /Users/me/x", str(self.repo))])
         self.sub = projects / "sess" / "subagents"
         self.projects = projects.parent
 
@@ -165,8 +172,9 @@ class Extract(unittest.TestCase):
                 "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": command}},
                                         {"type": "tool_use", "name": "Read", "input": {"file_path": "/Users/me/a"}}]}}
 
-    def add_agent(self, name, agent_type, commands, cwd="/Users/me/repo/.claude/worktrees/agent-abc"):
-        (self.sub / f"{name}.jsonl").write_text("\n".join(json.dumps(self.call(c, cwd)) for c in commands) + "\n")
+    def add_agent(self, name, agent_type, commands, cwd=None):
+        cwd = cwd or str(self.repo / ".claude" / "worktrees" / "agent-abc")
+        transcripts.write_jsonl(self.sub / f"{name}.jsonl", [self.call(c, cwd) for c in commands])
         (self.sub / f"{name}.meta.json").write_text(json.dumps({"agentType": agent_type}))
 
     def run_extract(self, *extra):
@@ -203,7 +211,7 @@ class Extract(unittest.TestCase):
     def test_normalises_paths_secrets_and_bodies(self):
         token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0" * 2
         self.add_agent("a1", "orchestrate:worker", [
-            "cd /Users/me/repo/.claude/worktrees/agent-abc && cat /Users/me/notes.md",
+            f"cd {self.repo}/.claude/worktrees/agent-abc && cat /Users/me/notes.md",
             f"curl -H 'Authorization: Bearer {token}' https://x.example/a me@corp.io",
             "gh pr create --title t --body-file - <<'EOF'\nprivate text\nEOF",
             'git commit -m "a long private message about the internals of some unreleased feature"',
@@ -274,12 +282,14 @@ class Extract(unittest.TestCase):
         self.assertIn("boom", err.getvalue())
         self.assertIn("git log", err.getvalue())
 
-    def test_non_dict_content_blocks_are_ignored(self):
-        extract = load_extract()
-        t = self.dir / "t.jsonl"
-        t.write_text(json.dumps({"type": "assistant", "cwd": "/x", "message": {"content": [
-            "text", 3, None, {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}}) + "\n")
-        self.assertEqual(list(extract.bash_commands(t)), [("ls", "/x")])
+    def test_stray_lines_and_non_dict_blocks_do_not_stop_the_extract(self):
+        # A `[]` line used to make the extract raise (common.read_jsonl skips it now); non-dict blocks are skipped too.
+        good = {"type": "assistant", "cwd": str(self.repo), "message": {"content": [
+            "text", 3, None, {"type": "tool_use", "name": "Bash", "input": {"command": "git log"}}]}}
+        transcripts.write_jsonl(self.sub / "a1.jsonl", ["[]", json.dumps(good), "3", "not json"])
+        (self.sub / "a1.meta.json").write_text(json.dumps({"agentType": "orchestrate:scout"}))
+        self.run_extract()
+        self.assertEqual(self.lines(), [{"role": "orchestrate:scout", "command": "git log", "expected": "allow"}])
 
     def test_dry_run_writes_nothing(self):
         self.add_agent("a1", "orchestrate:scout", ["git log"])
