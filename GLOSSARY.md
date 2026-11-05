@@ -83,7 +83,7 @@ _Avoid_: hot file, common file
 ### Merging
 
 **Sweep**:
-What `scripts/merge` does after a merge: updating every other open PR whose branch now conflicts with the default branch. Source: `README.md` (The guard hook), `skills/run/SKILL.md`.
+What `scripts/merge` does after a merge: updating every other open PR whose branch now conflicts with the default branch. Source: `docs/guide.md` (The guard hook), `skills/run/SKILL.md`.
 _Avoid_: refresh, rebase-all
 
 **Hand-back**:
