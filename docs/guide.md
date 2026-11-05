@@ -31,6 +31,7 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
    - `/orchestrate:run status` reports without dispatching or merging.
    - `/orchestrate:run <ticket>` narrows a pass to one ticket; `/orchestrate:run <parent issue>` to its sub-issues.
    - Plain `/orchestrate:run` is the only supported flow. After its pass the orchestrator ends its turn and wakes only on worker and reviewer completions, on `watch-ci` lines (CI settling) and on its own usage-limit cron hops. It reads the config and tracker docs once per session, and again after a compaction summary, keeps every command's output bounded, and ends a wake with one line, or nothing when nothing needs you. It shows the full table only when a pass ends or something needs you, and a pass that ends with nothing in flight says so and stops.
+   - Add `--greedy[=N]` to a full or parent pass to size the slot count from how many tickets can run at once, up to N (5 by default): see [Choosing a slot count](#choosing-a-slot-count).
    - Add `--profile` to any of these to profile the session as it runs: see [Profiling](#profiling).
 
 ### Concepts
@@ -56,6 +57,8 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
 Setup recommends 2. Each extra slot adds a worker's tokens and its reviews, raises the odds that a usage limit pauses several tickets at once, and adds reports and reviews to your main session, which handles them one at a time and is usually the first thing to saturate. The gain is wall-clock time, and only when the backlog's tickets are independent.
 
 Every full pass suggests a change of one slot, between 1 and 5: lower after a usage limit or when overlaps left a slot idle, higher when every slot is full and the next ticket wouldn't overlap. It changes the config only when you say yes. The reasoning is in [ADR-0001](adr/0001-slot-count.md).
+
+`/orchestrate:run --greedy[=N]` sizes the count for you instead. Each pass dispatches every takeable ticket whose touch map overlaps no held path, up to a cap of N (5 by default, 1 to 8), and never stops a worker in flight. It holds for the session, never edits the config, drops back to the config's count after a usage limit until the reset, and makes no per-pass suggestion. Each report starts `Greedy · cap N · running M`. The reasoning is in [ADR-0007](adr/0007-greedy-slots.md).
 
 ## The guard hook
 

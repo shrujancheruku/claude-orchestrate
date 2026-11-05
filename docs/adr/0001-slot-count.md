@@ -27,4 +27,5 @@ Wall-clock time is the only gain, and only when the backlog is wide and its tick
 - One pass is a noisy sample; the user is the filter, and declining costs nothing.
 - Narrowed passes (`status`, one ticket, one parent) see part of the backlog and suggest nothing.
 - `/orchestrate:run --profile` may recommend a change from a whole session's history. That stays advice beside the per-pass suggestion; neither changes the count without the user.
+- `/orchestrate:run --greedy` opts out of the fixed count for a session: [ADR-0007](0007-greedy-slots.md) partly supersedes this decision.
 - Reopen when trial data shows the rules suggesting the wrong way, or the orchestrator coping with more than 5.
