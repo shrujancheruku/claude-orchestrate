@@ -176,6 +176,16 @@ class Extract(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout
 
+    def test_find_session_by_id_by_path_and_missing(self):
+        extract = load_extract()
+        self.assertEqual(extract.find_session("sess", self.projects), self.projects / "proj" / "sess.jsonl")
+        path = self.projects / "proj" / "sess.jsonl"
+        self.assertEqual(extract.find_session(str(path), self.projects), path)
+        with self.assertRaises(SystemExit) as cm, unittest.mock.patch("sys.stderr", io.StringIO()) as err:
+            extract.find_session("nope", self.projects)
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("no transcript for session 'nope'", err.getvalue())
+
     def lines(self):
         return [json.loads(line) for line in self.out.read_text().splitlines()]
 

@@ -18,7 +18,7 @@ orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gate
 
 From a local clone, use the clone's path in place of `shrujancheruku/claude-orchestrate`. While developing, load it without installing: `claude --plugin-dir /path/to/claude-orchestrate`.
 
-Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge-tree --write-tree`; on older git it says so and skips the sweep), `gh` (signed in), and `python3` 3.9 or later for the guard hook. Run `/setup-matt-pocock-skills` in the repo first: orchestrate reads the tracker and domain docs it writes to `docs/agents/`. Without them, setup falls back to a backlog defined in the config.
+Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge-tree --write-tree`; on older git it says so and skips the sweep), `gh` (signed in), and `python3` 3.9 or later (plugin scripts and hooks: Python 3.9+, stdlib only). Run `/setup-matt-pocock-skills` in the repo first: orchestrate reads the tracker and domain docs it writes to `docs/agents/`. Without them, setup falls back to a backlog defined in the config.
 
 ## Use it in a repo
 
@@ -67,7 +67,7 @@ Every role also refuses `scripts/merge` (the orchestrator's merge script, which 
 
 After the cleanup, `scripts/merge` sweeps the other open PRs: each whose branch now conflicts with the default branch is updated and pushed to by the script itself (the orchestrator, not a worker, so the worker rule above doesn't apply). Under squash or merge it merges main into the branch with a plain push; under rebase it rebases and pushes with `--force-with-lease`. Conflicts in the files the config's **Shared files** bullet lists are resolved by replaying the PR's lines onto main (a word-level 3-way merge for a line changed on both sides); a conflicting file matching a glob under **Generated:** (nested bullets of the form `` - `glob`: `command` ``) takes main's side and the command is run in the sweep worktree against the PR's sources, its output committed; anything else, a failing or hanging command, a command that changes a file outside the generated globs, or overlapping words, is handed back: the branch is left untouched, the script prints `HANDBACK PR #n <branch>: <path> (<why>)` lines and exits 4, and the run skill resumes the worker with them. That sweep may rebase under the rebase method, but a worker never does: resumed with a conflict list, it always merges the default branch and pushes without force (`agents/worker.md`, Follow-ups). Each file's outcome (`line-replay`, `word-merge`, `regenerated`, `handed-back`) is logged as a `replay` event. A PR that is merely behind is not touched.
 
-It splits the command into shell words (quotes, escapes, `$(...)`, heredocs, `sh -c`), decides on those, and refuses a command it can't parse. It's a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top. Tests: `python3 -m unittest discover tests`.
+It splits the command into shell words (quotes, escapes, `$(...)`, heredocs, `sh -c`), decides on those, and refuses a command it can't parse. It's a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top.
 
 ## Push and fetch under the sandbox
 
@@ -153,15 +153,9 @@ Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
 - `1` a verdict: a check failed, or the action was refused (a worker is sent the output).
 - `2` could not run: a missing tool (`gh`, `git`), bad input or a missing directory, or output the script could not read. Nothing about the code under test was decided; fix the environment and run it again.
 
-A script may add its own codes above 2 for a specific state (`gate` 3 and `merge` 3/4 are documented in their docstrings). `common.run` reports a missing binary as code 127 instead of raising, and `gate`, `merge`, `watch-ci` and `verify` turn that into 2. `profile.py` (a standalone script) still exits 1 for unreadable input. Commands run by `verify` and `gate` get `--timeout` seconds (default 1800); one that outlives it is killed with its process group and fails with "timed out after Ns".
+A script may add its own codes above 2 for a specific state (`gate` 3 and `merge` 3/4 are documented in their docstrings). `common.run` reports a missing binary as code 127 instead of raising, and `gate`, `merge`, `watch-ci` and `verify` turn that into 2. `profile.py` still exits 1 for unreadable input. Commands run by `verify` and `gate` get `--timeout` seconds (default 1800); one that outlives it is killed with its process group and fails with "timed out after Ns".
 
-**How scripts under `scripts/` are found and run.** One rule, checked by `tests/test_invocation.py`:
-
-- **Found:** a skill uses `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`. An agent never relies on `${CLAUDE_PLUGIN_ROOT}` (it may be unset for subagents); the brief hands it the absolute path.
-- **A CLI is an executable without an extension** (`gate`, `merge`, `verify`, ...) with a `#!/usr/bin/env python3` shebang, run by path with no interpreter and no `-I`. It may import siblings (`common`, `checks`, `replay`): running a script by path puts its own directory first on `sys.path`, and `-I` would remove it. The current directory is not added, so a repo's own `common.py` cannot shadow the plugin's, so no repo Python is imported; the commands they run are the config's, by design. CLIs don't use `-I`, so they trust the caller's `PYTHON*` environment.
-- **Hooks follow the same rule.** `hooks/hooks.json` runs `guard.py` as `python3 -I "${CLAUDE_PLUGIN_ROOT}/hooks/guard.py"`, which is the standalone case.
-- **A `.py` file is a library or a standalone script.** A library (`common.py`, `checks.py`, `replay.py`) is only imported. A standalone script (`profile.py`) imports nothing from `scripts/` because it reads session transcripts, so it runs as `python3 -I <path>`.
-- Never work around a failed import with `PYTHONPATH`; fix the script's kind per the rules above.
+**How scripts under `scripts/` are found and run:** see [ADR-0003](docs/adr/0003-script-invocation.md), checked by `tests/test_invocation.py`.
 
 **Guard regression corpus.** `tests/fixtures/guard-corpus.jsonl` holds every distinct Bash call the plugin's subagents made in real sessions, one `{role, command, expected}` line each, and `tests/test_guard_corpus.py` runs `hooks/guard.py` over all of them, so a guard change that flips a decision shows up in the PR diff of the corpus. To add sessions (rerunnable, no duplicates, existing labels untouched), run the CLI from the repo root:
 

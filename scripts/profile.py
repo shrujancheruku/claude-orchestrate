@@ -27,11 +27,18 @@ from bisect import bisect_right
 from datetime import datetime, timezone
 from pathlib import Path
 
+# `python3 -I` leaves the script's directory off sys.path. Append it (never insert): this file is named
+# profile.py, so putting its directory first would shadow the stdlib `profile` module.
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.append(_HERE)
+import common  # noqa: E402
+
 SCHEMA = 2
-PLUGIN = "orchestrate:"
-PROFILES = Path(".claude") / "orchestrate-profiles"
+PLUGIN = common.PLUGIN
+PROFILES = common.PROFILES
 PASS_LOG = "passes.jsonl"
-EVENTS_LOG = "events.jsonl"  # the plugin scripts append here (common.append_event), beside the pass log
+EVENTS_LOG = common.EVENTS_LOG  # the plugin scripts append here (common.append_event), beside the pass log
 VIEWER = Path(__file__).resolve().parent.parent / "viewer" / "profile.html"
 # Activity in an agent's transcript further apart than this is two segments:
 # a worker waiting on review between them isn't building.
@@ -87,12 +94,8 @@ PRICES = {
 LIMIT_TEXT = re.compile(r"usage limit|rate limit|limit reached|resets? (?:at|in)", re.I)
 
 
-def claude_dir() -> Path:
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-
-
 def usage_log() -> Path:
-    return Path(os.environ.get("ORCHESTRATE_USAGE_LOG") or claude_dir() / "orchestrate" / "usage.jsonl")
+    return Path(os.environ.get("ORCHESTRATE_USAGE_LOG") or common.claude_dir() / "orchestrate" / "usage.jsonl")
 
 
 def price_key(model) -> str | None:
@@ -142,29 +145,6 @@ def iso(dt: datetime | None) -> str | None:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
 
 
-def read_jsonl(path: Path):
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(rec, dict):
-                    yield rec
-    except FileNotFoundError:
-        return
-
-
-def blocks(record) -> list:
-    # Other record types (api-request-blob) echo earlier turns' blocks; only conversation turns count.
-    if record.get("type") not in ("user", "assistant"):
-        return []
-    msg = record.get("message")
-    content = msg.get("content") if isinstance(msg, dict) else None
-    return content if isinstance(content, list) else []
-
-
 def text_of(block) -> str:
     content = block.get("content")
     if isinstance(content, str):
@@ -179,9 +159,8 @@ class Transcript:
 
     def __init__(self, path: Path):
         self.path = path
-        self.records = list(read_jsonl(path))
-        usage = {}
-        self.requests = {}  # message id -> (model, usage), each API request once
+        self.records = list(common.read_jsonl(path))
+        self.requests = {}  # message id -> (model, usage), each API request once: the one source of per-request usage
         self.models = []
         self.times = []
         for r in self.records:
@@ -191,13 +170,12 @@ class Transcript:
             msg = r.get("message")
             if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
                 # A response is logged once per content block, each with the same usage.
-                usage[msg.get("id") or id(r)] = msg["usage"]
                 self.requests[msg.get("id") or id(r)] = (msg.get("model"), msg["usage"])
                 if msg.get("model") and msg["model"] not in self.models:
                     self.models.append(msg["model"])
         self.times.sort()
         self.tokens = {v: 0 for v in TOKEN_KEYS.values()}
-        for u in usage.values():
+        for _, u in self.requests.values():
             for k, v in TOKEN_KEYS.items():
                 self.tokens[v] += u.get(k) or 0
 
@@ -221,14 +199,14 @@ class Transcript:
 
     def tool_uses(self, name: str):
         for r in self.records:
-            for b in blocks(r):
+            for b in common.blocks(r):
                 if b.get("type") == "tool_use" and b.get("name") == name:
                     yield parse_ts(r.get("timestamp")), b
 
     def tool_results(self) -> dict:
         out = {}
         for r in self.records:
-            for b in blocks(r):
+            for b in common.blocks(r):
                 if b.get("type") == "tool_result":
                     out[b.get("tool_use_id")] = text_of(b)
         return out
@@ -236,7 +214,7 @@ class Transcript:
     def api_errors(self):
         for r in self.records:
             if r.get("isApiErrorMessage"):
-                text = " ".join(text_of(b) for b in blocks(r))
+                text = " ".join(text_of(b) for b in common.blocks(r))
                 if LIMIT_TEXT.search(text):
                     yield parse_ts(r.get("timestamp")), text[:200]
 
@@ -276,7 +254,7 @@ class Transcript:
             if turn is None:
                 turn = by_id[key] = {"ts": parse_ts(r.get("timestamp")), "model": msg.get("model"), "usage": msg["usage"], "tools": [], "text": ""}
                 out.append(turn)
-            for b in blocks(r):
+            for b in common.blocks(r):
                 if b.get("type") == "tool_use":
                     turn["tools"].append((b.get("name") or "", b.get("input") or {}))
                 elif b.get("type") == "text":
@@ -285,13 +263,10 @@ class Transcript:
 
 
 def find_transcript(arg: str) -> Path:
-    p = Path(arg).expanduser()
-    if p.suffix == ".jsonl" and p.exists():
-        return p
-    hits = sorted((claude_dir() / "projects").glob(f"*/{arg}.jsonl"))
-    if not hits:
-        sys.exit(f"profile: no transcript for session {arg} under {claude_dir() / 'projects'}")
-    return hits[0]
+    found = common.find_transcript(arg)
+    if not found:
+        sys.exit(f"profile: no transcript for session {arg} under {common.claude_dir() / 'projects'}")
+    return found
 
 
 def repo_of(main: Transcript) -> Path | None:
@@ -304,11 +279,8 @@ def repo_of(main: Transcript) -> Path | None:
 def config_slots(repo: Path | None) -> int | None:
     if not repo:
         return None
-    try:
-        text = (repo / ".claude" / "orchestration.md").read_text()
-    except OSError:
-        return None
-    m = re.search(r"\*\*Slots:\*\*\s*(\d+)", text)
+    section = common.config_section(repo, "Slots")
+    m = re.search(r"\*\*Slots:\*\*\s*(\d+)", section or "")
     return int(m.group(1)) if m else None
 
 
@@ -332,14 +304,7 @@ def clip(intervals, start, end) -> list:
 
 def subagent_metas(main: Transcript) -> dict:
     """toolUseId -> (agent file stem, metadata) for every subagent the harness recorded for the session."""
-    by_tool_use = {}
-    for meta_path in (main.path.with_suffix("") / "subagents").glob("*.meta.json"):
-        try:
-            meta = json.loads(meta_path.read_text())
-        except ValueError:
-            continue
-        by_tool_use[meta.get("toolUseId")] = (meta_path.name[: -len(".meta.json")], meta)
-    return by_tool_use
+    return common.subagent_metas(main.path)
 
 
 def dispatched_round(text: str) -> int:
@@ -441,10 +406,9 @@ def build_tickets(agents: list, main: Transcript, end: datetime, events: list | 
     for a in agents:
         if a["role"] != "worker":
             continue
-        m = re.search(r"#(\d+)", a["description"])
-        if not m:
+        n = common.ticket_of(a["description"])
+        if n is None:
             continue
-        n = int(m.group(1))
         tk = tickets.setdefault(n, {"ticket": n, "pr": None, "workers": [], "dispatched": a["dispatched"]})
         tk["workers"].append(a)
         tk["pr"] = tk["pr"] or pr_opened(a["transcript"])
@@ -541,12 +505,12 @@ def slot_segments(passes: list, tickets: list, start: datetime, end: datetime, f
 def read_passes(repo: Path | None, session: str) -> list:
     if not repo:
         return []
-    return [p for p in read_jsonl(repo / PROFILES / PASS_LOG) if p.get("session") == session]
+    return [p for p in common.read_jsonl(repo / PROFILES / PASS_LOG) if p.get("session") == session]
 
 
 def read_usage(start: datetime, end: datetime) -> list:
     out = []
-    for u in read_jsonl(usage_log()):
+    for u in common.read_jsonl(usage_log()):
         ts = parse_ts(u.get("ts"))
         if ts and start <= ts <= end:
             out.append(u)
@@ -618,10 +582,10 @@ def review_body(text: str) -> str:
 
 
 def review_verdicts(t: Transcript | None, first_round: int) -> list:
-    """The verdicts a reviewer returned, in order, whether it posted (short hand-back) or not (full block).
+    """The verdicts a reviewer returned, in order, whether it posted (short report) or not (full block).
 
     Only the reviewer's own text counts, not the commands it ran, so a posted review isn't counted
-    twice. A hand-back names its round; a full verdict doesn't, so the dispatch's round numbers
+    twice. A report names its round; a full verdict doesn't, so the dispatch's round numbers
     the first verdict and each later one (the reviewer was continued) follows on."""
     out = []
     # A reviewer that ends with SubagentHandback returns its verdict in the call, not in a text block;
@@ -630,7 +594,7 @@ def review_verdicts(t: Transcript | None, first_round: int) -> list:
     for r in t.records if t else []:
         if r.get("type") != "assistant":
             continue
-        for b in blocks(r):
+        for b in common.blocks(r):
             if b.get("type") == "text":
                 texts.append(b.get("text") or "")
             elif b.get("type") == "tool_use" and b.get("name") == "SubagentHandback":
@@ -930,7 +894,7 @@ def orchestrator_metrics(main: Transcript, agents: list, passes: list, merged: i
         by_job[job] = {"turns": len(mine), "usd": usd, "turns_per_merged_ticket": per(len(mine)), "usd_per_merged_ticket": per(usd)}
     compactions = main.compaction_details()
     autos = [c["pre_tokens"] for c in compactions if c["trigger"] == "auto" and c["pre_tokens"]]
-    own_text = sum(len(b.get("text") or "") for r in main.records if r.get("type") == "assistant" for b in blocks(r) if b.get("type") == "text")
+    own_text = sum(len(b.get("text") or "") for r in main.records if r.get("type") == "assistant" for b in common.blocks(r) if b.get("type") == "text")
     results = main.tool_results()
     bash_out = sum(len(results.get(use.get("id"), "")) for _, use in main.tool_uses("Bash"))
     return {
@@ -956,7 +920,7 @@ def read_events(repo: Path | None, session: str, start: datetime, end: datetime)
     if not repo or not (repo / PROFILES / EVENTS_LOG).exists():
         return None
     out = []
-    for e in read_jsonl(repo / PROFILES / EVENTS_LOG):
+    for e in common.read_jsonl(repo / PROFILES / EVENTS_LOG):
         if not isinstance(e, dict):
             continue
         ts = parse_ts(e.get("ts"))
@@ -984,8 +948,8 @@ def event_metrics(events: list | None, review: dict) -> dict:
     for e in gate:
         for name in e.get("failed") or []:
             failed_checks[name] = failed_checks.get(name, 0) + 1
-    # The replay outcomes (line-replay, word-merge, regenerated, handed-back) are the ticket's names: nothing
-    # writes `replay` events yet (the replay script is #33), so until then the rate reads "–".
+    # The replay outcomes (line-replay, word-merge, regenerated, handed-back) are scripts/merge's `replay`
+    # events; with none logged the rate reads "–".
     handed = sum(1 for e in replay if e.get("outcome") == "handed-back")
     return {
         "available": True,
@@ -1196,10 +1160,6 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         },
         "recommendation": recommend(slots, occupancy, wins, limits),
     }
-
-
-def fmt_tokens(n: float) -> str:
-    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k"
 
 
 def fmt_dur(s: float) -> str:
