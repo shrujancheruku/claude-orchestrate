@@ -420,11 +420,13 @@ class SweepTest(unittest.TestCase):
         self.assertEqual(self.replays(), [("gen.txt", "regenerated")])
 
     def test_generated_commands_parse(self):
-        import replay
-        sec = "- **Shared files:**\n  - `A.md`: x\n- **Generated:**\n  - `gen/**`: `make gen`\n  - `b.txt`: `sh b.sh`\n"
-        self.assertEqual(replay.generated_commands(sec), [("gen/**", "make gen"), ("b.txt", "sh b.sh")])
-        self.assertEqual(replay.shared_patterns(sec), ["A.md"])
-        self.assertEqual(replay.generated_commands("- **Generated:** none\n"), [])
+        import config
+        cfg = config.Config.parse(
+            "## Shared files\n\n- **Shared files:**\n  - `A.md`: x\n- **Generated:**\n  - `gen/**`: `make gen`\n  - `b.txt`: `sh b.sh`\n")
+        self.assertEqual(cfg.shared_files, ("A.md",))
+        self.assertEqual(cfg.generated, (("gen/**", "make gen"), ("b.txt", "sh b.sh")))
+        none = config.Config.parse("## Shared files\n\n- **Generated:** none\n")
+        self.assertEqual(none.generated, ())
 
     def test_old_git_skips_the_sweep_with_one_line_and_leaves_prs_alone(self):
         self.pr_branch("pr-a", {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n"})

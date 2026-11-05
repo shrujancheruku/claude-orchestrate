@@ -30,6 +30,7 @@ import sys
 import time
 
 import common
+import config
 import github
 import replay
 
@@ -205,8 +206,7 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
     if default is None:
         say("sweep skipped: the default branch is unknown")
         return False
-    section = common.config_section(cwd, "Shared files")
-    rules = replay.Rules.from_section(section)
+    rules = replay.Rules.from_config(config.Config.load(cwd))
     try:
         prs = github.open_prs(default, cwd)
     except github.GhError as e:

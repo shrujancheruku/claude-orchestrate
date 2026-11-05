@@ -23,6 +23,7 @@ from pathlib import Path
 
 import checks
 import common
+import config
 import github
 import runlog
 
@@ -32,30 +33,6 @@ TITLE_RE = re.compile(
 
 def check(name, ok, why=""):
     return checks.Result(name, "pass" if ok else "fail", 0.0, None if ok else 1, why)
-
-
-LABEL_RE = re.compile(r"^\s*-\s+\*\*Repo-specific checks:?\*\*")
-MARKER_RE = re.compile(r"(?<![\w-])run:")
-COMMAND_RE = re.compile(r"(?<![\w-])run:\s*`([^`]+)`(?!`)")
-
-
-def repo_commands(cwd):
-    """(commands, malformed markers) from the `Repo-specific checks` item of the config's Review section.
-
-    A command is marked `run: `cmd``. Opt-in: plain backticked text (a file name, a flag) is prose and
-    never executed. A `run:` marker that yields no command (empty, nested or doubled backticks) is
-    counted as malformed, so it fails the gate instead of vanishing.
-    """
-    review = common.config_section(cwd, "Review")
-    commands, malformed, inside = [], 0, False
-    for line in (review or "").splitlines():
-        if not line.startswith((" ", "\t")) and line.strip():
-            inside = bool(LABEL_RE.match(line))
-        if inside:
-            found = [c.strip() for c in COMMAND_RE.findall(line) if c.strip()]
-            commands.extend(found)
-            malformed += max(0, len(MARKER_RE.findall(line)) - len(found))
-    return commands, malformed
 
 
 def pr_checks(pr, base_override, retries=4, delay=2.5):
@@ -120,11 +97,12 @@ def main(argv=None) -> int:
         print(f"gate: {extra}", file=sys.stderr)
         return 2
     behind, unknown = extra
-    commands, malformed = repo_commands(args.cwd)
-    results += checks.run_stages([commands], args.cwd, args.timeout)
+    cfg = config.Config.load(args.cwd)
+    malformed = cfg.problems_of(config.RUN)  # only a bad `run:` fails the gate; other problems are not its business
+    results += checks.run_stages([list(cfg.check_commands)], args.cwd, args.timeout)
     if malformed:
         results.append(check("repo-specific checks: malformed run: marker", False,
-                             f"{malformed} `run:` marker(s) without a single `backticked` command"))
+                             f"{len(malformed)} `run:` marker(s) without a single `backticked` command"))
     print(checks.format_results(results))
     failed = [r.command for r in results if r.status == "fail"]
     # An UNKNOWN mergeability that was the only failure is not a verdict: rerun, don't send to the worker.

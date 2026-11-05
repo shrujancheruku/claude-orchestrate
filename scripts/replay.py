@@ -40,38 +40,6 @@ MAX_REBASE_STEPS = 200
 REGENERATE_TIMEOUT = 300  # seconds a regenerate command may run before it is handed back
 
 
-def shared_patterns(section):
-    """Paths (or globs) listed under the `**Shared files:**` item of the config's Shared files section.
-
-    The item's nested bullets each start with the path in backticks: `- \\`CHANGELOG.md\\`: <rule>`.
-    """
-    patterns, inside = [], False
-    for line in (section or "").splitlines():
-        if line.strip() and not line.startswith((" ", "\t")):
-            inside = bool(re.match(r"-\s+\*\*Shared files:?\*\*", line))
-            continue
-        m = re.match(r"\s+[-*]\s+`([^`]+)`", line)
-        if inside and m:
-            patterns.append(m.group(1))
-    return patterns
-
-
-def generated_commands(section):
-    r"""(glob, regenerate command) pairs under the `**Generated:**` item of the Shared files section.
-
-    Each nested bullet is `- \`<glob>\`: \`<command>\``. `none` or free text after the item gives no pairs.
-    """
-    pairs, inside = [], False
-    for line in (section or "").splitlines():
-        if line.strip() and not line.startswith((" ", "\t")):
-            inside = bool(re.match(r"-\s+\*\*Generated:?\*\*", line))
-            continue
-        m = re.match(r"\s+[-*]\s+`([^`]+)`\s*:\s*`([^`]+)`", line)
-        if inside and m:
-            pairs.append((m.group(1), m.group(2)))
-    return pairs
-
-
 def is_shared(path, patterns):
     return any(fnmatch.fnmatchcase(path, p) for p in patterns)
 
@@ -344,13 +312,13 @@ def _conflicts_with(repo, base, branch):
 # ---- the sweep's entry point --------------------------------------------------------------------
 
 class Rules(NamedTuple):
-    """What the config's Shared files section says: which files replay may resolve, and how to rebuild generated ones."""
+    """What the config's Shared files section says (a config.Config): which files replay may resolve, and how to rebuild generated ones."""
     patterns: list
     generated: list  # (glob, regenerate command) pairs
 
     @classmethod
-    def from_section(cls, section):
-        return cls(shared_patterns(section), generated_commands(section))
+    def from_config(cls, cfg):
+        return cls(list(cfg.shared_files), list(cfg.generated))
 
 
 class SweepResult(NamedTuple):
