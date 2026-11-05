@@ -362,8 +362,8 @@ class SweepResult(NamedTuple):
     events: (path, outcome) pairs to log as `replay` events, also when the push failed.
     """
     status: str
-    events: list = []
-    conflicts: list = []  # (path, why)
+    events: tuple = ()
+    conflicts: tuple = ()  # (path, why)
     note: str = ""
 
     def handback_lines(self, label):

@@ -113,6 +113,18 @@ class SweepBranchTest(unittest.TestCase):
         self.land({"CHANGELOG.md": HEAD + "- main\n- old\n"})
         self.assertEqual(self.sweep().status, "clean")
 
+    def test_git_older_than_merge_tree_is_skipped_with_a_note(self):
+        real = replay._git_version
+        self.addCleanup(setattr, replay, "_git_version", real)
+        replay._git_version = lambda repo: (2, 37)
+        r = self.sweep()
+        self.assertEqual((r.status, r.events, r.conflicts), ("skipped", (), ()))
+        self.assertIn("needs git >= 2.38", r.note)
+        self.assertIn("this is git 2.37", r.note)
+
+    def test_the_results_defaults_are_not_shared_lists(self):
+        self.assertEqual(replay.SweepResult("clean").events, ())
+
     def test_a_generated_file_is_regenerated(self):
         rules = replay.Rules(["CHANGELOG.md"], [("gen.txt", "tr a-z A-Z < src.txt | paste -sd' ' - > gen.txt")])
         self.env.commit("src.txt", "one\ntwo\n", "chore: src")
