@@ -1,2 +1,4 @@
 .claude/worktrees/
 __pycache__/
+.claude/orchestrate-state.json
+.claude/orchestrate-profiles/
