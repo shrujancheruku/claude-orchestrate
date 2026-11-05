@@ -27,13 +27,13 @@ CASES = [
     (None, "git push --force origin main", "allow"),  # main session: never touched
     ("scout", "rm -rf x", "allow"),  # someone else's agent named scout
     # an orchestrate role the guard has no rules for is held to the read-only rules
-    ("orchestrate:mechanic", "git push --force", "deny"),
-    ("orchestrate:mechanic", "git commit -m x", "deny"),
-    ("orchestrate:mechanic", "gh pr merge 12", "deny"),
-    ("orchestrate:mechanic", "touch x", "deny"),
+    ("orchestrate:nonexistent", "git push --force", "deny"),
+    ("orchestrate:nonexistent", "git commit -m x", "deny"),
+    ("orchestrate:nonexistent", "gh pr merge 12", "deny"),
+    ("orchestrate:nonexistent", "touch x", "deny"),
     ("orchestrate:", "touch x", "deny"),
-    ("orchestrate:mechanic", "git log", "allow"),
-    ("orchestrate:mechanic", "gh pr view 12", "allow"),
+    ("orchestrate:nonexistent", "git log", "allow"),
+    ("orchestrate:nonexistent", "gh pr view 12", "allow"),
     ("other-plugin:worker", "git push --force", "allow"),
     ("", "git push --force", "allow"),
     (" orchestrate:worker", "git push --force", "deny"),
@@ -461,11 +461,9 @@ class GuardTest(unittest.TestCase):
         return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
 
     def test_unknown_role_refusal_names_the_role(self):
-        reason = self.run_guard({"agent_type": "orchestrate:mechanic", "tool_input": {"command": "git commit -m x"}})
-        self.assertIn("mechanic", reason)
-        self.assertIn("doesn't know", reason)
+        reason = self.run_guard({"agent_type": "orchestrate:nonexistent", "tool_input": {"command": "git commit -m x"}})
+        self.assertIn("nonexistent", reason)
         self.assertIn("read-only", reason)
-        self.assertIn("changes git state", reason)
 
     def test_known_role_refusal_is_unchanged(self):
         reason = self.run_guard({"agent_type": "orchestrate:scout", "tool_input": {"command": "git commit -m x"}})

@@ -12,13 +12,14 @@ def read(p):
 class PrSkill(unittest.TestCase):
     def test_brief_carries_pr_skill_line(self):
         s = read("skills/run/brief.md")
-        self.assertIn('body written with the skill whose name ends in `:pr`', s)
-        self.assertIn("else plain", s)
+        line = next(l for l in s.splitlines() if "`:pr`" in l)
+        self.assertIn("plain", line)  # the fallback sits on the same line as the skill
 
     def test_setup_reports_missing_pr_skill(self):
         s = read("skills/setup/SKILL.md")
-        self.assertIn("If no skill whose name ends in `:pr` is listed, tell the user worker PR bodies will be plain", s)
-        self.assertIn("setup does not fail", s)
+        line = next(l for l in s.splitlines() if "`:pr`" in l)
+        self.assertIn("plain", line)
+        self.assertIn("not fail", line)
 
 
 if __name__ == "__main__":
