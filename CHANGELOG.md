@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/shrujancheruku/claude-orchestrate/compare/v0.5.0...v0.6.0) (2026-11-05)
+
+
+### Features
+
+* **profile:** record greedy passes and measure occupancy against the cap ([#172](https://github.com/shrujancheruku/claude-orchestrate/issues/172)) ([51843c0](https://github.com/shrujancheruku/claude-orchestrate/commit/51843c0ffac7e6e10d748d6ceb6b6ca6088f2ad0))
+* **run:** add --greedy to size slots from independent tickets ([#171](https://github.com/shrujancheruku/claude-orchestrate/issues/171)) ([7ff07ea](https://github.com/shrujancheruku/claude-orchestrate/commit/7ff07eae99eae6e96102c16737798b69d11d20af))
+
 ## [0.5.0](https://github.com/shrujancheruku/claude-orchestrate/compare/v0.4.1...v0.5.0) (2026-11-05)
 
 
