@@ -28,6 +28,7 @@ class Config(NamedTuple):
     """What the config says. A missing or unreadable config is the empty Config, so callers degrade."""
     slots: int | None = None
     shared_files: tuple = ()  # paths or globs a PR may edit and replay resolves
+    exclusive_holds: tuple = ()  # backticked paths in the `Exclusive holds` item; a trailing `/` is a directory
     generated: tuple = ()  # (glob, regenerate command) pairs
     check_commands: tuple = ()  # the `run:` commands of the repo-specific checks, in order
     post_reviews: bool = False
@@ -66,11 +67,13 @@ class Config(NamedTuple):
         review = common.section_of(text, "Review")
         commands, run_problems = _check_commands(review)
         problems += run_problems
+        holds = tuple(re.findall(r"`([^`]+)`", _item_text(common.section_of(text, "Slots"), "Exclusive holds")))
         slots = re.search(r"\*\*Slots:\*\*\s*(\d+)", common.section_of(text, "Slots") or "")
         s_lines, s_files, l_lines = _tiers(review)
         return cls(
             slots=int(slots.group(1)) if slots else None,
             shared_files=tuple(paths),
+            exclusive_holds=holds,
             generated=tuple(generated),
             check_commands=tuple(commands),
             # Same pattern as hooks/guard.py's POST_FLAG, over the whole file as the guard reads it.

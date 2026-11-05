@@ -7,7 +7,7 @@ You are an orchestrate worker. Your instructions are your agent definition; this
 
 Ticket: <url>, "<title>". Read it in full, with every comment; it is the spec. An "## Agent Brief" comment, if there is one, overrides the body.
 Touch map: <the files the scout expects this ticket to change, each as `path:line` of its entry point, comma-separated; `none` if it changes no file>. A prediction, not a fence.
-Held paths: <files other tickets hold: open PRs' diffs, building tickets' touch maps, exclusive holds, each as a plain file path with no `:line` or line range, followed by its holder in brackets, e.g. `config.txt (held by open PR #9)` | none>. Changing one means stop and report.
+Held paths: <the held-path lines of `holds --touch-map`'s output, word for word, comma-separated (e.g. `config.txt (held by open PR #9)`) | none>. Changing one means stop and report.
 Branch: <number>-<slug>. If it exists on the remote, continue from it.
 Merged dependencies: <ticket → PR, one per line | none>
 Verify: "<the plugin's absolute scripts/verify path, from the skill's base directory>" <commands from the config>

@@ -25,12 +25,13 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("status: pr-opened | stopped", report)
         self.assertNotIn("changed:", report)
 
-    def test_held_path_rule_compares_by_file(self):
+    def test_held_path_rule_defers_to_the_brief(self):
         s = (ROOT / "agents/worker.md").read_text()
         stop = s[s.index("## Stop and report"):]
-        # The rule is two parts in one bullet: strip `:line`, and a shared file overlaps.
-        bullet = next(l for l in stop.splitlines() if ":line" in l)
-        self.assertIn("overlap", bullet)
+        # The overlap rule lives in scripts/holds (#166); the worker only stops on a file the brief lists.
+        bullet = next(l for l in stop.splitlines() if "Held paths" in l)
+        self.assertIn("listed under Held paths in the brief", bullet)
+        self.assertNotIn(":line", bullet)
 
     def test_worker_leaves_no_background_commands(self):
         s = (ROOT / "agents/worker.md").read_text()

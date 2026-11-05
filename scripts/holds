@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""holds (--touch-map PATH... --ticket N | --pr N) [--repo DIR] [--state FILE] : what is held, and does this overlap it.
+
+The one place the overlap rule lives. A path is held by an open PR (its diff, through `gh`), by a
+building ticket (its touch map in the state file) or by an exclusive hold (the config). Paths are compared
+as files: any `:line` or line range is stripped, so a different section of one file still overlaps.
+The ticket's own PR and touch map are left out: --ticket N leaves out the PR whose branch starts `N-`;
+--pr N leaves out PR N and the ticket its branch names.
+
+Output: one line per held path, `path (held by open PR #9, building #12, an exclusive hold)` (the form of the
+brief's `Held paths:` line), or `none`. Then `overlap: <path> (held by ...)` per counted overlap, `shared (not
+counted): ...` per overlap on a config shared file, or `overlap: none`. A missing state file means no building
+tickets. Exit codes: 0 nothing overlaps; 1 an overlap; 2 could not run (no `gh`, a failed `gh` call, an
+unreadable state file). Stdlib only, Python 3.9+.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import re
+import sys
+from pathlib import Path
+
+import common
+import config
+import github
+
+STATE = Path(".claude") / "orchestrate-state.json"
+LINE_SUFFIX = re.compile(r":\d+(?:[-–,]\d+)*$")
+
+
+def plain(entry: str) -> str:
+    """A touch-map entry as a file path: no `:line` or line range, no leading `./`."""
+    path = LINE_SUFFIX.sub("", entry.strip().strip("`"))
+    return path[2:] if path.startswith("./") else path
+
+
+def ticket_of_branch(branch) -> int | None:
+    m = re.match(r"(\d+)-", branch or "")
+    return int(m.group(1)) if m else None
+
+
+def building(state_file: Path, own) -> dict:
+    """{ticket: [paths]} for every ticket in the state file but `own`; {} when the file is missing."""
+    try:
+        data = json.loads(state_file.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise ValueError(f"unreadable state file {state_file}: {e}") from None
+    tickets = data.get("tickets") if isinstance(data, dict) else None
+    if not isinstance(tickets, dict):
+        raise ValueError(f"state file {state_file} has no tickets object")
+    out = {}
+    for n, t in tickets.items():
+        entries = t.get("touch_map") if isinstance(t, dict) else None
+        if str(n) != str(own) and isinstance(entries, list):
+            out[n] = [plain(e) for e in entries if isinstance(e, str) and plain(e)]
+    return out
+
+
+def covers(held: str, path: str) -> bool:
+    """A held entry covers a path when it is that file, or a directory (`db/`) containing it."""
+    return path == held or (held.endswith("/") and path.startswith(held))
+
+
+def held_paths(cfg, prs: dict, tickets: dict) -> dict:
+    """{path: [holder, ...]} in a stable order."""
+    held: dict = {}
+    for n, paths in sorted(prs.items()):
+        for p in paths:
+            held.setdefault(p, []).append(f"open PR #{n}")
+    for n, paths in sorted(tickets.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
+        for p in paths:
+            held.setdefault(p, []).append(f"building #{n}")
+    for p in cfg.exclusive_holds:
+        held.setdefault(plain(p), []).append("an exclusive hold")
+    return held
+
+
+def is_shared(cfg, path: str) -> bool:
+    return any(fnmatch.fnmatch(path, g) or path == g for g in cfg.shared_files)
+
+
+def report(held: dict, candidates: list, cfg) -> int:
+    for p, who in held.items():
+        print(f"{p} (held by {', '.join(who)})")
+    if not held:
+        print("none")
+    counted = 0
+    for c in candidates:
+        for p, who in held.items():
+            if covers(p, c):
+                shown = f"{c} (held by {', '.join(who)})"
+                if is_shared(cfg, c):
+                    print(f"shared (not counted): {shown}")
+                else:
+                    print(f"overlap: {shown}")
+                    counted += 1
+    if not counted:
+        print("overlap: none")
+    return 1 if counted else 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--touch-map", nargs="+", metavar="PATH", help="the ticket's touch-map entries (`path:line` is fine)")
+    ap.add_argument("--ticket", type=int, help="the ticket number, to leave out its own PR and touch map")
+    ap.add_argument("--pr", help="check this PR's diff against the others (the pre-merge check)")
+    ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
+    ap.add_argument("--state", help=f"the state file (default: <repo>/{STATE})")
+    args = ap.parse_args(argv)
+    if bool(args.pr) == bool(args.touch_map is not None):
+        ap.error("give --touch-map (with --ticket) or --pr, not both or neither")
+    if args.touch_map is not None and args.ticket is None:
+        ap.error("--touch-map needs --ticket")
+    repo = Path(args.repo)
+    cfg = config.Config.load(repo)
+    try:
+        base = github.default_branch(cwd=repo)
+        own_pr, own_ticket = None, args.ticket
+        if args.pr:
+            own_pr = common.pr_ref(args.pr)[0]
+            view = github.pr_view(own_pr, "headRefName", cwd=repo)
+            own_ticket = ticket_of_branch(view.get("headRefName"))
+            candidates = github.pr_files(own_pr, cwd=repo)
+        else:
+            candidates = [plain(e) for e in args.touch_map if plain(e) and plain(e).lower() != "none"]
+        prs = {}
+        for pr in github.open_prs(base, cwd=repo):
+            if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
+                raise github.GhError(github.MALFORMED, "gh returned a PR list entry without a number")
+            if str(pr["number"]) == str(own_pr) or (own_ticket is not None and ticket_of_branch(pr.get("headRefName")) == own_ticket):
+                continue
+            prs[pr["number"]] = github.pr_files(pr["number"], cwd=repo)
+        tickets = building(Path(args.state) if args.state else repo / STATE, own_ticket)
+    except github.GhError as e:
+        print(f"holds: gh: {e.message}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"holds: {e}", file=sys.stderr)
+        return 2
+    return report(held_paths(cfg, prs, tickets), candidates, cfg)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

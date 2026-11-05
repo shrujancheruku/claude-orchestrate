@@ -88,7 +88,7 @@ class Invocation(unittest.TestCase):
                             self.assertIn("-I", prefix, line.strip())
                         else:
                             self.assertEqual(prefix, "", line.strip())
-        self.assertTrue({"gate", "merge", "rebuild-state", "watch-ci", "profile.py"} <= seen)
+        self.assertTrue({"gate", "holds", "merge", "rebuild-state", "watch-ci", "profile.py"} <= seen)
 
 
 if __name__ == "__main__":

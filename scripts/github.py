@@ -110,3 +110,11 @@ def close_issue(issue, cwd=None) -> None:
 def open_prs(base: str, cwd=None) -> list:
     return call_json("pr", "list", "--state", "open", "--base", base, "--json",
                      "number,headRefName,isCrossRepository", shape=list, cwd=cwd)
+
+
+def pr_files(pr, cwd=None) -> list:
+    """The paths a PR's diff changes."""
+    files = pr_view(pr, "files", cwd=cwd).get("files")
+    if not isinstance(files, list) or not all(isinstance(f, dict) and isinstance(f.get("path"), str) for f in files):
+        raise GhError(MALFORMED, "gh returned no file list for the PR")
+    return [f["path"] for f in files]
