@@ -69,7 +69,7 @@ The files a ticket is expected to change, as a prediction rather than a fence. S
 _Avoid_: file list, change set
 
 **Held path**:
-A file that another ticket holds: in an open PR's diff, in a building ticket's touch map, or under an exclusive hold. A ticket may not change one; overlap compares file paths with any `:line` stripped. Source: `skills/run/SKILL.md`.
+A file that another ticket holds: in an open PR's diff, in a building ticket's touch map, or under an exclusive hold. A ticket may not change one; overlap compares file paths with any `:line` stripped, and the brief writes held paths as plain file paths. Source: `skills/run/SKILL.md`.
 _Avoid_: locked file, reserved path, blocked path
 
 **Exclusive hold**:
