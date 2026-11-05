@@ -25,7 +25,7 @@ branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
 Exit codes: 0 merged and cleaned up; 4 the same, but a swept branch was handed back (resume its worker
 with the printed conflict list); 5 behind the default branch, branch updated: wait for CI, then run
 again; 6 the change since --approved-head needs re-review (nothing merged); 1 the merge was refused, or the PR was closed unmerged (or the branch update for exit 5 failed; the output says why);
-2 the script could not run (`gh` is missing or cannot read the PR; the error goes to stderr); 3 still not MERGED at the timeout (run it
+2 the script could not run (`gh` is missing or cannot read the PR, or with --approved-head readiness could not be decided, e.g. a failed compare call: run it again; the error goes to stderr); 3 still not MERGED at the timeout (run it
 again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
 Stdlib only, Python 3.9+.
