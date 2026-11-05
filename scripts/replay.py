@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from typing import NamedTuple
 from pathlib import Path
 
 import checks
@@ -267,7 +268,7 @@ def _finish(wt, resolved):
         git(wt, "add", "--", *resolved)
 
 
-def update_branch(repo, base, branch, method, patterns, generated=()):
+def _update_branch(repo, base, branch, method, patterns, generated=()):
     """Bring origin/<branch> up to date with origin/<base> in a throwaway worktree and push it.
 
     Returns (status, conflicts, events): status "updated" or "handed-back"; conflicts is a list of
@@ -311,7 +312,8 @@ def update_branch(repo, base, branch, method, patterns, generated=()):
         force = [f"--force-with-lease=refs/heads/{branch}:{old}"] if method == "rebase" else []
         push = git(wt, "push", *force, "origin", f"HEAD:refs/heads/{branch}")
         if push.returncode != 0:
-            return "handed-back", [("(push)", common.one_line(push.stderr))], []
+            # The replays happened and are worth logging even though nothing reached the remote.
+            return "handed-back", [("(push)", common.one_line(push.stderr))], events
         return "updated", [], events
     finally:
         git(repo, "worktree", "remove", "--force", wt)
@@ -326,14 +328,65 @@ def _final(events):
 MERGE_TREE_GIT = (2, 38)  # `git merge-tree --write-tree` first shipped in git 2.38
 
 
-def git_version(repo):
+def _git_version(repo):
     """git's (major, minor) as a tuple, or None when it can't be read."""
     r = git(repo, "--version")
     m = re.search(r"(\d+)\.(\d+)", r.stdout) if r.returncode == 0 else None
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
-def conflicts_with(repo, base, branch):
+def _conflicts_with(repo, base, branch):
     """True when origin/<branch> no longer merges cleanly into origin/<base>; None when git can't say."""
     r = git(repo, "merge-tree", "--write-tree", f"origin/{base}", f"origin/{branch}")
     return {0: False, 1: True}.get(r.returncode)
+
+
+# ---- the sweep's entry point --------------------------------------------------------------------
+
+class Rules(NamedTuple):
+    """What the config's Shared files section says: which files replay may resolve, and how to rebuild generated ones."""
+    patterns: list
+    generated: list  # (glob, regenerate command) pairs
+
+    @classmethod
+    def from_section(cls, section):
+        return cls(shared_patterns(section), generated_commands(section))
+
+
+class SweepResult(NamedTuple):
+    """What sweep_branch did to one branch.
+
+    status: "updated" (pushed), "handed-back" (left as it was; `conflicts` says why), "clean" (does not
+    conflict, so left alone), "unchecked" (git could not say, left alone) or "skipped" (git is too old
+    to check; `note` says so, and no later branch can be checked either).
+    events: (path, outcome) pairs to log as `replay` events, also when the push failed.
+    """
+    status: str
+    events: tuple = ()
+    conflicts: tuple = ()  # (path, why)
+    note: str = ""
+
+    def handback_lines(self, label):
+        return [f"HANDBACK {label}: {path} ({why})" for path, why in self.conflicts]
+
+
+def sweep_branch(repo, base, branch, method, rules):
+    """Update origin/<branch> if it no longer merges cleanly into origin/<base>. Never raises.
+
+    Hides the git version gate, the conflict check, the throwaway worktree, the resolution order and
+    the push. The caller has fetched; `rules` is a Rules.
+    """
+    version = _git_version(repo)  # unreadable means try anyway
+    if version is not None and version < MERGE_TREE_GIT:
+        return SweepResult("skipped", note="sweep skipped: it needs git >= %d.%d (git merge-tree --write-tree); "
+                           "this is git %d.%d" % (MERGE_TREE_GIT + version))
+    state = _conflicts_with(repo, base, branch)
+    if state is None:
+        return SweepResult("unchecked")
+    if not state:
+        return SweepResult("clean")
+    try:
+        status, conflicts, events = _update_branch(repo, base, branch, method, rules.patterns, rules.generated)
+    except Exception as e:  # the merged PR is already in: one branch's failure must not lose the exit code
+        status, conflicts, events = "handed-back", [("(sweep)", f"{type(e).__name__}: {common.one_line(e)}")], []
+    return SweepResult(status, events, conflicts)
