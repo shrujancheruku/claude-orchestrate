@@ -24,10 +24,11 @@ PASS_LOG = "passes.jsonl"
 # Event kinds and the outcomes each may carry. scripts/replay.py owns the replay names
 # (tests/test_runlog.py checks they agree); gate, watch-ci and merge write the others.
 GATE, CI, MERGE, REPLAY = "gate", "ci", "merge", "replay"
+PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
-    GATE: ("pass", "fail", "unknown"),
-    CI: ("pass", "fail"),
-    MERGE: ("merged", "timeout", "closed"),
+    GATE: (PASS, FAIL, UNKNOWN),
+    CI: (PASS, FAIL),
+    MERGE: (MERGED, TIMEOUT, CLOSED),
     REPLAY: ("line-replay", "word-merge", "regenerated", "handed-back"),
 }
 EVENT_KINDS = tuple(OUTCOMES)
@@ -39,6 +40,10 @@ def main_checkout(repo) -> Path:
 
     A linked worktree shares the main checkout's common dir, so its parent is the one root every
     worktree agrees on. Outside a checkout (or with the VCS tool missing) `repo` itself is the root.
+
+    Known limits: a bare repository with linked worktrees has a common dir not named `.git`, so each
+    worktree is its own root there; a `repo` that no longer exists (a worktree removed before the
+    profile runs) resolves to that dead path, so its logs are not found.
     """
     repo = Path(repo)
     code, out, _ = common.run("git", "rev-parse", "--git-common-dir", cwd=repo)

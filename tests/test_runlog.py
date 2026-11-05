@@ -1,5 +1,6 @@
 """Unit tests for scripts/runlog.py: where both logs land, what they read back, and the vocabulary."""
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -47,19 +48,22 @@ class RunLogTest(unittest.TestCase):
         wt = self.worktree()
         runlog.append_pass(wt, "s", {"slots": 2})
         runlog.append_event(wt, "ci", "pass", ref=2, session="s")
-        self.assertFalse((wt / ".claude" / "orchestrate-profiles").exists())
+        self.assertFalse((wt / runlog.PROFILES).exists())
         for where in (self.repo, wt):
             self.assertEqual([p["slots"] for p in runlog.read_passes(where, "s")], [2])
             self.assertEqual([e["ref"] for e in runlog.read_events(where, "s", *self.span)], [2])
 
-    def test_profile_reads_both_logs_with_a_worktree_cwd(self):
+    def test_profile_built_for_a_worktree_session_finds_both_logs(self):
         wt = self.worktree()
-        runlog.append_pass(wt, "s", {"slots": 2})
-        runlog.append_event(wt, "gate", "pass", ref=1, session="s")
-        # profile() resolves the transcript's cwd (here the worktree) through runlog.
-        self.assertEqual(len(prof.runlog.read_passes(wt, "s")), 1)
-        events = prof.runlog.read_events(wt, "s", *self.span)
-        self.assertEqual(prof.event_metrics(events, {"rounds_total": 0})["gate"]["pass"], 1)
+        runlog.append_pass(wt, "sess", {"slots": 2})
+        runlog.append_event(wt, "gate", "pass", ref=1, session="sess")
+        transcript = self.repo.parent / "sess.jsonl"
+        ts = datetime.now(timezone.utc).isoformat()
+        transcript.write_text(json.dumps({"type": "user", "timestamp": ts, "cwd": str(wt), "message": {"content": "run"}}) + "\n")
+        p = prof.profile(transcript, None, None, 50.0, datetime.now(timezone.utc))
+        self.assertTrue(p["sources"]["pass_log"])
+        self.assertEqual(p["slots"], 2)
+        self.assertEqual(p["metrics"]["events"]["gate"]["pass"], 1)
 
     def test_outside_a_checkout_falls_back_to_the_given_directory(self):
         with tempfile.TemporaryDirectory() as d:

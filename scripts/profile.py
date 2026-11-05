@@ -384,7 +384,7 @@ def ticket_endings(main: Transcript, events: list | None = None) -> tuple:
     if events is not None:
         for e in events:
             ts = parse_ts(e.get("ts"))
-            if e.get("kind") == "merge" and e.get("outcome") == "merged" and ts and str(e.get("ref", "")).isdigit():
+            if e.get("kind") == runlog.MERGE and e.get("outcome") == runlog.MERGED and ts and str(e.get("ref", "")).isdigit():
                 merged.setdefault(int(e["ref"]), ts)
     for ts, use in main.tool_uses("Bash"):
         cmd = (use.get("input") or {}).get("command", "")
@@ -423,7 +423,7 @@ def build_tickets(agents: list, main: Transcript, end: datetime, events: list | 
     for n, tk in sorted(tickets.items()):
         start = tk["dispatched"] or min(s for w in tk["workers"] for s, _ in w["segments"])
         if tk["pr"] in merged:
-            ended, outcome = merged[tk["pr"]], "merged"
+            ended, outcome = merged[tk["pr"]], runlog.MERGED
         elif n in handed_back:
             ended, outcome = handed_back[n], "handed-back"
         else:
@@ -918,7 +918,7 @@ def event_metrics(events: list | None, review: dict) -> dict:
     if events is None:
         return {"available": False}
     of = lambda kind: [e for e in events if e.get("kind") == kind]
-    gate, replay = of("gate"), of("replay")
+    gate, replay = of(runlog.GATE), of(runlog.REPLAY)
     gate_out = count_by_outcome(gate)
     failed_checks = {}
     for e in gate:
@@ -930,12 +930,12 @@ def event_metrics(events: list | None, review: dict) -> dict:
     return {
         "available": True,
         # A gate failure goes back to the worker without a review round: counted here, never in `review`.
-        "gate": {"runs": len(gate), "pass": gate_out.get("pass", 0), "fail": gate_out.get("fail", 0), "unknown": gate_out.get("unknown", 0),
+        "gate": {"runs": len(gate), "pass": gate_out.get(runlog.PASS, 0), "fail": gate_out.get(runlog.FAIL, 0), "unknown": gate_out.get(runlog.UNKNOWN, 0),
                  "failed_checks": failed_checks, "review_rounds": review["rounds_total"]},
-        "ci": {"runs": len(of("ci")), "by_outcome": count_by_outcome(of("ci"))},
+        "ci": {"runs": len(of(runlog.CI)), "by_outcome": count_by_outcome(of(runlog.CI))},
         # scripts/merge writes merged|timeout|closed; only `merged` is a merge.
-        "merges": count_by_outcome(of("merge")).get("merged", 0),
-        "merges_by_outcome": count_by_outcome(of("merge")),
+        "merges": count_by_outcome(of(runlog.MERGE)).get(runlog.MERGED, 0),
+        "merges_by_outcome": count_by_outcome(of(runlog.MERGE)),
         "replay": {"events": len(replay), "by_outcome": count_by_outcome(replay), "handed_back": handed,
                    "handback_rate": handed / len(replay) if replay else None},
     }
@@ -1026,10 +1026,10 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     for tk in tickets:
         tk["tier"] = pr_tier.get(tk["ticket"])
     if events is not None:
-        gates = [e for e in events if e.get("kind") == "gate"]
+        gates = [e for e in events if e.get("kind") == runlog.GATE]
         for tk in tickets:
             mine = [e for e in gates if tk["pr"] and str(e.get("ref")) == str(tk["pr"])]
-            tk["gate_runs"], tk["gate_failed"] = len(mine), sum(1 for e in mine if e.get("outcome") == "fail")
+            tk["gate_runs"], tk["gate_failed"] = len(mine), sum(1 for e in mine if e.get("outcome") == runlog.FAIL)
     idle_total = max(capacity - occupied, 0.0)
     idle = idle_reasons(passes, end)
     idle["unknown"] = max(idle_total - sum(idle.values()), 0.0)
