@@ -40,7 +40,7 @@ class Config(NamedTuple):
     @classmethod
     def load(cls, repo) -> "Config":
         try:
-            text = (Path(repo) / common.CONFIG).read_text()
+            text = (Path(repo) / common.CONFIG).read_text(encoding="utf-8", errors="replace")  # as the guard reads it
         except OSError:
             return cls()
         return cls.parse(text)
@@ -48,7 +48,7 @@ class Config(NamedTuple):
     @classmethod
     def parse(cls, text: str) -> "Config":
         problems: list = []
-        shared = _nested(common.section_of(text, "Shared files"), "Shared files", _SHARED_ITEM)
+        shared = _nested(common.section_of(text, "Shared files"), _SHARED_ITEM)
         paths = []
         for line in shared:
             m = re.match(r"\s+[-*]\s+`([^`]+)`", line)
@@ -57,7 +57,7 @@ class Config(NamedTuple):
             else:
                 problems.append(Problem(SHARED, f"shared-file entry without a backticked path: {line.strip()}"))
         generated = []
-        for line in _nested(common.section_of(text, "Shared files"), "Generated", _GENERATED_ITEM):
+        for line in _nested(common.section_of(text, "Shared files"), _GENERATED_ITEM):
             m = re.match(r"\s+[-*]\s+`([^`]+)`\s*:\s*`([^`]+)`", line)
             if m:
                 generated.append((m.group(1), m.group(2)))
@@ -92,7 +92,7 @@ _POST_FLAG = re.compile(r"^[-*\s]*Post reviews[:*\s]*(yes|no)\b", re.IGNORECASE 
 _BULLET = re.compile(r"\s+[-*]\s+")
 
 
-def _nested(section, _name, item):
+def _nested(section, item):
     """The nested bullet lines under the top-level list item matching `item`."""
     out, inside = [], False
     for line in (section or "").splitlines():
