@@ -2,6 +2,14 @@
 """Run the brief's verify commands and keep their output small.
 
     verify [--cwd DIR] [--timeout SECONDS] CMD [CMD ...] [--then CMD [CMD ...]] ...
+    verify [--cwd DIR] [--timeout SECONDS] --config
+
+`--config` takes the commands from the repo's .claude/orchestration.md **Verify** section (found from --cwd
+or the current directory, searching upward) and runs each exactly as written there, so no caller's shell
+quotes or expands them. Give it instead of CMDs, never with them. Parsing rule (config.py, and the
+config template): a top-level bullet that opens with a backticked span is one command, and text after
+the span is a remark; every other line is prose. A bullet whose span is `--then` starts a dependent group,
+like the `--then` argument. A missing config, a missing section or one with no commands exits 2.
 
 Each CMD is one shell command. Commands in a group are independent, so all of
 them run. `--then` starts the next group, which depends on the one before: if
@@ -14,19 +22,24 @@ group and fails with "timed out after Ns". Exit codes: 0 every command passed; 1
 
 import os
 import sys
+from pathlib import Path
 
 import checks
 import common
+import config
 
 
 def parse(argv):
     cwd = None
     timeout = checks.DEFAULT_TIMEOUT
     stages = [[]]
+    from_config = False
     it = iter(argv)
     for arg in it:
         if arg == "--then":
             stages.append([])
+        elif arg == "--config":
+            from_config = True
         elif arg == "--cwd":
             cwd = next(it, None)
             if cwd is None:
@@ -41,15 +54,35 @@ def parse(argv):
                 common.die("verify: --timeout must be above 0")
         else:
             stages[-1].append(arg)
-    return cwd, timeout, [s for s in stages if s]
+    return cwd, timeout, [s for s in stages if s], from_config
+
+
+def config_stages(cwd):
+    """The Verify section's groups from the config at or above `cwd`; dies with one line if there are none."""
+    here = os.path.abspath(cwd or os.getcwd())
+    for d in [here, *Path(here).parents]:
+        if (d / common.CONFIG).is_file():
+            cfg = config.Config.load(d)
+            break
+    else:
+        common.die(f"verify: no {common.CONFIG} at or above {here}")
+    if not cfg.has_verify:
+        common.die(f"verify: {common.CONFIG} has no Verify section")
+    if not cfg.verify_groups:
+        common.die(f"verify: the Verify section of {common.CONFIG} has no backticked command bullets")
+    return [list(g) for g in cfg.verify_groups]
 
 
 def main(argv=None):
-    cwd, timeout, stages = parse(sys.argv[1:] if argv is None else argv)
-    if not stages:
-        common.die("usage: verify [--cwd DIR] [--timeout SECONDS] CMD [CMD ...] [--then CMD ...]")
+    cwd, timeout, stages, from_config = parse(sys.argv[1:] if argv is None else argv)
     if cwd is not None and not os.path.isdir(cwd):
         common.die(f"verify: --cwd {cwd} is not a directory")
+    if from_config:
+        if stages:
+            common.die("verify: --config takes the commands from the config; don't pass CMD arguments with it")
+        stages = config_stages(cwd)
+    if not stages:
+        common.die("usage: verify [--cwd DIR] [--timeout SECONDS] (CMD [CMD ...] [--then CMD ...] | --config)")
     results = checks.run_stages(stages, cwd, timeout)
     print(checks.format_results(results))
     return 0 if checks.ok(results) else 1

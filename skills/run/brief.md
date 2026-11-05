@@ -10,7 +10,7 @@ Touch map: <the files the scout expects this ticket to change, each as `path:lin
 Held paths: <the held-path lines of `holds --touch-map`'s output, word for word, comma-separated (e.g. `config.txt (held by open PR #9)`) | none>. Changing one means stop and report.
 Branch: <number>-<slug>. If it exists on the remote, continue from it.
 Merged dependencies: <ticket → PR, one per line | none>
-Verify: "<the plugin's absolute scripts/verify path, from the skill's base directory>" <commands from the config>
+Verify: '<the plugin's absolute scripts/verify path, from the skill's base directory>' --config
 Shared files: <the config's shared-file rules>
 Commits: <convention>. No attribution lines or trailers. Stage files by explicit path.
 PR: title <convention>; body includes "<closing reference>"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain; no attribution lines.

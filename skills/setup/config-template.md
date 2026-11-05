@@ -22,7 +22,9 @@ Tickets run in parallel only when their touch maps don't overlap outside the sha
 
 ## Verify
 
-<Commands every worker runs before opening a PR, per directory if they differ.>
+Commands every worker runs before opening a PR. `verify --config` reads them from here and runs each exactly as written, so nothing else restates them. Write each command as a top-level bullet that opens with one backticked span; text after the span is a remark, and any other line is prose. Commands in a group are independent. A bullet that is just `` `--then` `` starts a group that depends on the ones above it (codegen or a build first), skipped if one of them fails.
+
+- `<command>` <optional remark>
 
 ## Shared files
 

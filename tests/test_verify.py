@@ -79,5 +79,79 @@ class VerifyTest(unittest.TestCase):
         self.assertTrue((self.env.repo / "ran.txt").exists())
 
 
+class VerifyConfigTest(unittest.TestCase):
+    """`verify --config`: the commands come from the config, unexpanded by any caller's shell."""
+
+    def setUp(self):
+        self.env = ScriptEnv()
+        self.addCleanup(self.env.close)
+
+    def config(self, verify_section):
+        p = self.env.repo / ".claude" / "orchestration.md"
+        p.parent.mkdir(exist_ok=True)
+        p.write_text("# Config\n\n" + verify_section + "\n## Shared files\n\n- **Shared files:** none\n")
+
+    def verify(self, *args):
+        return self.env.run("verify", *args, check=False)
+
+    def test_command_with_substitution_and_quotes_runs_once_as_written(self):
+        # The $(...) prints a newline then a second command; run as one command it only feeds echo.
+        self.config("## Verify\n\n- `echo $(printf 'x\\ntouch planted.txt') > out.txt`\n")
+        r = self.verify("--config")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(r.stdout.splitlines()), 1)
+        self.assertFalse((self.env.repo / "planted.txt").exists())
+        self.assertEqual((self.env.repo / "out.txt").read_text().split(), ["x", "touch", "planted.txt"])
+
+    def test_this_repos_config_is_exactly_its_three_commands(self):
+        import config
+        root = Path(__file__).resolve().parent.parent
+        groups = config.Config.load(root).verify_groups
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0]), 3)
+        self.assertTrue(groups[0][0].startswith("python3 -m py_compile"))
+        self.assertEqual(groups[0][1:], ("python3 -m unittest discover tests", "claude plugin validate ."))
+
+    def test_prose_and_nested_bullets_are_not_commands(self):
+        self.config("## Verify\n\nFrom the repo root, run `rm -rf x`.\n\n- `true` (a remark with `rm -rf y`)\n"
+                    "  - `touch nested.txt`\n- Not a command: `touch prose.txt`\n\nNo lint step.\n")
+        r = self.verify("--config")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(len(r.stdout.splitlines()), 1)
+        self.assertFalse((self.env.repo / "nested.txt").exists())
+        self.assertFalse((self.env.repo / "prose.txt").exists())
+
+    def test_then_bullet_starts_a_dependent_group(self):
+        self.config("## Verify\n\n- `exit 1`\n- `--then`\n- `touch late.txt`\n")
+        r = self.verify("--config")
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse((self.env.repo / "late.txt").exists())
+        self.assertTrue(r.stdout.splitlines()[1].startswith("skip"))
+
+    def test_missing_config_exits_2(self):
+        r = self.verify("--config")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("orchestration.md", r.stderr)
+
+    def test_missing_section_exits_2(self):
+        self.config("## Slots\n\n- **Slots:** 2\n")
+        r = self.verify("--config")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no Verify section", r.stderr)
+
+    def test_empty_section_exits_2(self):
+        self.config("## Verify\n\nNothing to run here.\n")
+        r = self.verify("--config")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no backticked command", r.stderr)
+        self.assertEqual(r.stdout, "")
+
+    def test_config_with_commands_exits_2(self):
+        self.config("## Verify\n\n- `touch ran.txt`\n")
+        r = self.verify("--config", "true")
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse((self.env.repo / "ran.txt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
