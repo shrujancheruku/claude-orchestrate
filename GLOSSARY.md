@@ -94,6 +94,10 @@ _Avoid_: hot file, common file
 What `scripts/merge` does after a merge: updating every other open PR whose branch now conflicts with the default branch. Source: `docs/guide.md` (The guard hook), `skills/run/SKILL.md`.
 _Avoid_: refresh, rebase-all
 
+**Approved head**:
+The PR head commit the reviewer approved. `scripts/merge --approved-head` measures the worker's later change against it (the post-approval risk guard), ignoring merges of the default branch. Source: `scripts/merge`, `skills/run/SKILL.md`.
+_Avoid_: approved SHA, reviewed commit, last-reviewed head
+
 **Hand-back**:
 A swept branch the script could not update and left untouched, reported as a `HANDBACK PR #n <branch>: <path> (<why>)` line (merge exit 4). Not the same as handing a ticket back to the tracker, and not a reviewer's result. Source: `skills/run/SKILL.md`, `agents/worker.md`.
 _Avoid_: bounce, kick-back
