@@ -22,7 +22,6 @@ import json
 import os
 import re
 import stat
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -112,7 +111,7 @@ def main(argv):
     write_atomic(path, json.dumps(data, indent=2) + "\n")
 
     # check-ignore handles `.claude/`, `*.local.json` and negations; append only if not ignored.
-    ignored = subprocess.run(["git", "check-ignore", "-q", SETTINGS], cwd=repo).returncode == 0
+    ignored = common.run("git", "check-ignore", "-q", SETTINGS, cwd=repo).returncode == 0
     if not ignored:
         ignore = repo / ".gitignore"
         try:

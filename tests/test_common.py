@@ -17,6 +17,21 @@ class RunTest(unittest.TestCase):
         code, out, err = common.run(sys.executable, "-c", "import sys; print('o'); print('e', file=sys.stderr); sys.exit(3)")
         self.assertEqual((code, out, err), (3, "o\n", "e\n"))
 
+    def test_env_replaces_environment(self):
+        code, out, _ = common.run(sys.executable, "-c", "import os; print(os.environ.get('K_161'), 'PATH' in os.environ)",
+                                  env={"K_161": "v"})
+        self.assertEqual((code, out), (0, "v False\n"))
+
+    def test_input_feeds_stdin(self):
+        code, out, _ = common.run(sys.executable, "-c", "import sys; print(sys.stdin.read().upper())", input="héllo")
+        self.assertEqual((code, out), (0, "HÉLLO\n"))
+
+    def test_missing_tool_with_env_and_input(self):
+        for kw in ({"env": {"K": "v"}}, {"input": "x"}):
+            code, out, err = common.run("definitely-not-a-binary-xyz", **kw)
+            self.assertEqual((code, out), (127, ""))
+            self.assertIn("definitely-not-a-binary-xyz", err)
+
     def test_returncode_alias(self):
         self.assertEqual(common.run(sys.executable, "-c", "pass").returncode, 0)
 
