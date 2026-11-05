@@ -1,7 +1,7 @@
 """Prompts and the README must not name a plugin script or flag that doesn't exist (#134).
 
 Every `scripts/<name>` reference (including the `../../scripts/<name>` and
-`${CLAUDE_SKILL_DIR}/../../scripts/<name>` forms) in agents/*.md, skills/** and README.md
+`${CLAUDE_SKILL_DIR}/../../scripts/<name>` forms) in agents/*.md, skills/**, README.md and docs/guide.md
 must be a file in scripts/. Every `--flag` written after a reference, up to the end of its
 backtick span or line, must appear in that script's `--help`.
 
@@ -27,7 +27,7 @@ SUBCOMMANDS = {"profile.py": ("compare", "record")}
 
 def prompt_files():
     files = sorted((ROOT / "agents").glob("*.md")) + sorted((ROOT / "skills").rglob("*.md"))
-    return files + [ROOT / "README.md"]
+    return files + [ROOT / "README.md", ROOT / "docs/guide.md"]
 
 
 def references():

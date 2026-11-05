@@ -47,7 +47,7 @@ class WorkerTurnRules(unittest.TestCase):
         s = (ROOT / "skills/run/SKILL.md").read_text()
         # unlock must come before the plain remove
         self.assertLess(s.index("git worktree unlock <dir>"), s.index("git worktree remove <dir>"))
-        files = [ROOT / "README.md"]
+        files = [ROOT / "README.md", ROOT / "docs/guide.md"]
         for d in ("agents", "skills", "docs/agents"):
             files += [p for p in (ROOT / d).rglob("*.md")]
         for p in files:

@@ -2,7 +2,7 @@
 
 ## Context
 
-`hooks/guard.py` runs before every Bash call a plugin agent makes and refuses the commands that agent's role must leave to someone else, such as a scout or reviewer writing, or a worker merging. It decides from the command text, and a wrong allow lets a role do what the plugin says it can't (inferred). The role split is in the README's guard table.
+`hooks/guard.py` runs before every Bash call a plugin agent makes and refuses the commands that agent's role must leave to someone else, such as a scout or reviewer writing, or a worker merging. It decides from the command text, and a wrong allow lets a role do what the plugin says it can't (inferred). The role split is in the guard table in `docs/guide.md`.
 
 - **Text matching is not enough.** `gh pr "merge"`, `git $(echo push)`, `sh -c '...'`, and a heredoc body that merely mentions `git push` read differently to a regex than to the shell. Matching the raw string both misses real writes and refuses harmless searches (inferred; `guard.py:529-533` notes that a quoted script path is what a plain-word check misses, and `grep scripts/merge` must stay allowed).
 - **No parser is on hand.** The hook is one stdlib Python file that Claude Code starts per call (`hooks/hooks.json`, `python3 -I`). `shlex` splits words but knows nothing about `$(...)`, backticks, heredocs, line continuations or `sh -c`, and a third-party parser would add a dependency to every install (both inferred).

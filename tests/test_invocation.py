@@ -1,4 +1,4 @@
-"""Run every script under scripts/ exactly as its caller does (see README, Development).
+"""Run every script under scripts/ exactly as its caller does (see docs/guide.md, Development).
 
 CLIs (extensionless) run by path with no -I, reached through the skills' `${CLAUDE_SKILL_DIR}/../../scripts/`
 form, so a broken sibling import or a lost exec bit fails here. Standalone .py scripts run with `python3 -I`.
@@ -29,7 +29,7 @@ class Invocation(unittest.TestCase):
         self.assertEqual(
             sorted(p.name for p in SCRIPTS.glob("*.py")),
             sorted({n + ".py" for n in LIBRARIES} | STANDALONE),
-            "new .py file: declare it a library or a standalone script here and in the README",
+            "new .py file: declare it a library or a standalone script here and in docs/guide.md",
         )
 
     def test_clis_are_executable_with_shebang(self):
@@ -67,7 +67,7 @@ class Invocation(unittest.TestCase):
     def test_docs_follow_the_convention(self):
         # Every doc line that runs a script uses `python3 -I` for a standalone .py script and no interpreter otherwise.
         call = re.compile(r"(python3\s+(?:-I\s+)?)?[\"']?([^\s`\"']*/)?scripts/([\w-]+(?:\.py)?)")
-        docs = [*ROOT.glob("skills/*/*.md"), *ROOT.glob("agents/*.md"), ROOT / "README.md"]
+        docs = [*ROOT.glob("skills/*/*.md"), *ROOT.glob("agents/*.md"), ROOT / "README.md", ROOT / "docs/guide.md"]
         seen = set()
         for doc in docs:
             for n, line in enumerate(doc.read_text().splitlines(), 1):
