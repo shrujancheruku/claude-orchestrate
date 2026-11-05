@@ -1,43 +1,31 @@
 import json
 import unittest
 
-from harness import ScriptEnv
-
-
-def dispatch(tool_id, description, subagent="orchestrate:worker", model=None):
-    inp = {"description": description, "subagent_type": subagent, "prompt": "brief"}
-    if model:
-        inp["model"] = model
-    return {"type": "assistant", "timestamp": "2026-11-04T09:00:00.000Z", "sessionId": "sess-1",
-            "message": {"role": "assistant", "content": [
-                {"type": "tool_use", "id": tool_id, "name": "Agent", "input": inp}]}}
-
-
-def reply(ts, model=None):
-    msg = {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
-    if model:
-        msg["model"] = model
-    return {"type": "assistant", "timestamp": ts, "message": msg}
+from harness import ScriptEnv, git
+from transcripts import completion, dispatch, main_path, reply, write_session
 
 
 class RebuildState(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
-        self.main = self.env.repo.parent / "projects" / "sess-1.jsonl"
-        self.sub = self.main.with_suffix("") / "subagents"
-        self.sub.mkdir(parents=True)
+        self.main = main_path(self.env.repo.parent / "projects")
         self.main_records = []
+        self.agents = []
 
     def agent(self, agent_id, tool_id, records, meta=None):
-        (self.sub / f"agent-{agent_id}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
-        (self.sub / f"agent-{agent_id}.meta.json").write_text(json.dumps(
-            dict({"agentType": "orchestrate:worker", "toolUseId": tool_id}, **(meta or {}))))
+        self.agents.append({"id": agent_id, "tool_use": tool_id, "records": records, "meta": meta or {}})
 
     def rebuild(self):
-        self.main.write_text("".join(json.dumps(r) + "\n" for r in self.main_records))
+        write_session(self.main, self.main_records, self.agents)
         res = self.env.run("rebuild-state", self.main)
         return res, json.loads((self.env.repo / ".claude" / "orchestrate-state.json").read_text())
+
+    def harness_worktree(self, agent_id):
+        """A directory standing in for the harness's worktree of an agent, outside the repo."""
+        path = self.env.repo.parent / "harness" / f"agent-{agent_id}"
+        path.mkdir(parents=True)
+        return path
 
     def test_each_ticket_has_agent_worktree_model_and_last_report(self):
         self.main_records += [dispatch("t1", "Build #183"), dispatch("t2", "Build #12", model="sonnet")]
@@ -69,7 +57,9 @@ class RebuildState(unittest.TestCase):
         ]
         for i, tid in enumerate(("t1", "t2", "t4")):
             self.agent(f"ag{i}", tid, [reply("2026-11-04T09:01:00Z", "claude-haiku-5-5")])
-        (self.sub / "agent-broken.meta.json").write_text("{not json")
+        sub = self.main.with_suffix("") / "subagents"
+        sub.mkdir(parents=True, exist_ok=True)
+        (sub / "agent-broken.meta.json").write_text("{not json")
         _, state = self.rebuild()
         self.assertEqual(list(state["tickets"]), ["5"])
 
@@ -98,6 +88,48 @@ class RebuildState(unittest.TestCase):
         res, state = self.rebuild()
         self.assertIsNone(state["tickets"]["1"]["worktree"])
         self.assertTrue(state["tickets"]["2"]["worktree"].endswith("agent-here"))
+
+    def test_worktree_is_the_path_the_harness_reported_in_the_completion(self):
+        path = self.harness_worktree("c1")
+        self.main_records += [dispatch("t1", "Build #1"), completion("c1", str(path))]
+        self.agent("c1", "t1", [reply("2026-11-04T09:01:00Z")])
+        # The harness's own .claude/worktrees path also exists: the completion's path still wins.
+        (self.env.repo / ".claude" / "worktrees" / "agent-c1").mkdir(parents=True)
+        _, state = self.rebuild()
+        self.assertEqual(state["tickets"]["1"]["worktree"], str(path))
+
+    def test_a_completed_path_that_is_gone_falls_back_to_the_harness_path(self):
+        self.main_records += [dispatch("t1", "Build #1"),
+                              completion("c1", str(self.env.repo.parent / "removed" / "agent-c1"))]
+        self.agent("c1", "t1", [reply("2026-11-04T09:01:00Z")])
+        (self.env.repo / ".claude" / "worktrees" / "agent-c1").mkdir(parents=True)
+        _, state = self.rebuild()
+        self.assertEqual(state["tickets"]["1"]["worktree"], str(self.env.repo.resolve() / ".claude" / "worktrees" / "agent-c1"))
+
+    def test_worktree_falls_back_to_the_worktree_of_the_briefs_branch(self):
+        # The worker's own worktree is gone, but its ticket branch is checked out in another worktree.
+        branch_wt = self.env.repo.parent / "resumed"
+        git(self.env.repo, "worktree", "add", "-q", "-b", "5-slug", str(branch_wt))
+        self.main_records += [dispatch("t1", "Build #5", prompt="Branch: 5-slug. Build it.")]
+        self.agent("gone", "t1", [reply("2026-11-04T09:01:00Z")])
+        _, state = self.rebuild()
+        self.assertEqual(state["tickets"]["5"]["worktree"], str(branch_wt.resolve()))
+
+    def test_worktree_is_null_when_no_source_has_it(self):
+        self.main_records += [dispatch("t1", "Build #5", prompt="Branch: 5-slug. Build it.")]
+        self.agent("gone", "t1", [reply("2026-11-04T09:01:00Z")])
+        _, state = self.rebuild()
+        self.assertIsNone(state["tickets"]["5"]["worktree"])
+
+    def test_touch_map_is_read_from_the_brief_as_written(self):
+        brief = ("Build #5.\nTouch map: scripts/a.py:10, scripts/b.py:20 (the join). A prediction, not a fence.\n"
+                 "Branch: 5-slug. If it exists on the remote, continue from it.")
+        self.main_records += [dispatch("t1", "Build #5", prompt=brief), dispatch("t2", "Build #6", prompt="no brief")]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z")])
+        self.agent("a2", "t2", [reply("2026-11-04T09:01:00Z")])
+        _, state = self.rebuild()
+        self.assertEqual(state["tickets"]["5"]["touch_map"], ["scripts/a.py:10", "scripts/b.py:20 (the join)"])
+        self.assertEqual(state["tickets"]["6"]["touch_map"], [])
 
     def test_latest_dispatch_for_a_ticket_wins(self):
         self.main_records += [dispatch("t1", "Build #5"), dispatch("t2", "Build #5")]

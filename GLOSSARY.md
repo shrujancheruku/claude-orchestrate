@@ -55,7 +55,7 @@ A claimed ticket blocked on the user: a gate, a question or a third review round
 _Avoid_: blocked, on hold
 
 **State file**:
-`.claude/orchestrate-state.json`, gitignored: for each ticket this session dispatched a worker for, the agent ID, worktree path, worker model and time of its last report. Rebuilt by `scripts/rebuild-state`, never written by the orchestrator, and a cache that the tracker overrules. Source: `skills/run/SKILL.md`.
+`.claude/orchestrate-state.json`, gitignored: for each ticket this session dispatched a worker for, the agent ID, worktree path (null once gone), worker model, time of its last report and the brief's touch map. Rebuilt by `scripts/rebuild-state`, never written by the orchestrator, and a cache that the tracker overrules. Source: `skills/run/SKILL.md`.
 _Avoid_: status file, session file
 
 **Pass**:
