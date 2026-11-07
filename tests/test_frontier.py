@@ -90,7 +90,15 @@ class Frontier(unittest.TestCase):
         self.assertEqual(self.frontier("--ticket", "1").stdout, "#1 title 1\n")
         self.assertEqual(self.frontier("--ticket", "2").stdout, "#2 claimed\n")
         self.assertEqual(self.frontier("--ticket", "3").stdout, "#3 not ready-for-agent\n")
-        self.assertEqual(self.frontier("--ticket", "99").stdout, "")
+        self.assertEqual(self.frontier("--ticket", "99").stdout, "#99 not open\n")
+
+    def test_an_unreadable_triage_labels_doc_exits_2(self):
+        doc = self.env.repo / "docs" / "agents" / "triage-labels.md"
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.mkdir()  # reading a directory raises OSError other than "not found"
+        self.serve(page([node(1)]))
+        r = self.frontier(check=False)
+        self.assertEqual((r.returncode, r.stdout), (2, ""))
 
     def test_an_empty_frontier_exits_0_with_no_output(self):
         self.serve(page([node(1, claimed=True)]))

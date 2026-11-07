@@ -25,7 +25,8 @@ import tracker
 
 TRIAGE_LABELS = Path("docs/agents/triage-labels.md")
 DEFAULTS = {"ready": "ready-for-agent", "human": "ready-for-human", "lead": "lead"}
-ROLES = {"ready-for-agent": "ready", "ready-for-human": "human", "lead": "lead"}
+# The lead label stays fixed (as in scripts/claims): its table row has no role name in column one to match.
+ROLES = {"ready-for-agent": "ready", "ready-for-human": "human"}
 
 
 def label_strings(root: Path) -> dict:
@@ -33,8 +34,10 @@ def label_strings(root: Path) -> dict:
     labels = dict(DEFAULTS)
     try:
         text = (root / TRIAGE_LABELS).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except FileNotFoundError:
         return labels
+    except OSError as e:  # present but unreadable: the label strings would be a guess
+        common.die(f"frontier: cannot run: cannot read {TRIAGE_LABELS}: {e.strerror or e}")
     for line in text.splitlines():
         cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
         if len(cells) >= 2 and cells[0] in ROLES and re.fullmatch(r"[\w:./-]+", cells[1]):
@@ -89,6 +92,8 @@ def main(argv=None) -> int:
         common.die(f"frontier: cannot run: malformed reply from gh ({e!r})")
     scope = tracker.scoped(issues, args.parent, args.ticket)
     lines = render(issues, scope, labels, args.all)
+    if args.ticket is not None and not scope:
+        lines.insert(0, f"#{args.ticket} not open")
     if args.ticket is not None and not args.all and scope and not lines:
         # A named ticket always answers: its line, or the reason it is not takeable.
         reason = tracker.why_not(scope[0], labels, issues) if labels["ready"] in scope[0]["labels"] else None

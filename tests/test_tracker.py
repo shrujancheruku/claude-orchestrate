@@ -86,6 +86,13 @@ class Drift(unittest.TestCase):
     def test_a_body_blocker_the_tracker_has_is_ignored(self):
         self.assertEqual(tracker.drift([issue(1, blockers=[2], body="Blocked by: #2"), issue(2)]), [])
 
+    def test_prose_starting_blocked_by_is_not_a_blocker(self):
+        self.assertEqual(tracker.body_blockers(issue(1, body="Blocked by the outage, see #12")), [])
+        self.assertEqual(tracker.body_blockers(issue(1, body="**Blocked by** #12\nBlocked by #13")), [12, 13])
+
+    def test_a_self_reference_is_not_drift(self):
+        self.assertEqual(tracker.drift([issue(1, body="Blocked by: #1")]), [])
+
     def test_only_a_blocked_by_line_counts(self):
         self.assertEqual(tracker.drift([issue(1, body="See #2 for context"), issue(2)]), [])
 

@@ -12,8 +12,9 @@ from __future__ import annotations
 import re
 
 WAYFINDER_PREFIX = "wayfinder:"
-# The tracker doc's fallback form: a `Blocked by: #1, #2` line (a bold or quoted lead-in and a missing colon allowed).
-BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*:?(.*)$", re.I)
+# The tracker doc's fallback form: a `Blocked by: #1, #2` line (a bold or quoted lead-in allowed). The colon, or a `#`
+# right after, is required so prose like "Blocked by the outage, see #12" is not a blocker.
+BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*(?::|(?=\s*#))(.*)$", re.I)
 ISSUE_REF = re.compile(r"#(\d+)")
 
 
@@ -49,7 +50,7 @@ def body_blockers(issue) -> list:
 def drift(issues) -> list:
     """(issue, n): the body says blocked by open issue n, and the tracker has no such edge."""
     open_numbers = {i["number"] for i in issues}
-    return [(i, n) for i in issues for n in body_blockers(i) if n in open_numbers and n not in i["blockers"]]
+    return [(i, n) for i in issues for n in body_blockers(i) if n in open_numbers and n not in i["blockers"] and n != i["number"]]
 
 
 def open_blockers(issue, open_numbers) -> list:
