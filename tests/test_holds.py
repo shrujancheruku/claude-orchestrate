@@ -1,9 +1,17 @@
 """scripts/holds: held paths and overlap, through the CLI with a fake `gh`."""
 
 import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
+from datetime import timedelta, timezone
+from pathlib import Path
 
-from harness import ScriptEnv
+from harness import ScriptEnv, git
+
+import common
 
 CONFIG = """## Slots
 
@@ -17,14 +25,32 @@ CONFIG = """## Slots
 """
 
 
+def live_reason(pid=None, shift=0):
+    """A harness-format lock reason for a running process: its pid and its start time in UTC, shifted by `shift` seconds."""
+    pid = pid or os.getpid()
+    start = common.process_start(pid)
+    assert start is not None
+    shown = (start + timedelta(seconds=shift)).astimezone(timezone.utc).strftime("%a %b %e %H:%M:%S %Y")
+    return f"claude agent agent-abc (pid {pid} start {shown})"
+
+
+def dead_pid():
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
 class Holds(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
+        self.wt_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.wt_dir.cleanup)
 
-    def gh(self, prs=None, branches=None, issues=None, merged=()):
+    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=()):
         """prs: {number: [paths]}; branches: {number: head branch}; issues: {ticket: state} (OPEN for
-        any other ticket in the state file); merged: head branches of merged PRs."""
+        any other ticket in the state file); merged: head branches of merged PRs; unclaimed: tickets with no
+        assignee (every other issue is assigned to the user)."""
         prs, branches = prs or {}, branches or {}
         listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": False} for n in prs]
         responses = [
@@ -36,9 +62,12 @@ class Holds(unittest.TestCase):
                               "stdout": json.dumps({"files": [{"path": p} for p in files]})})
             responses.append({"args": ["pr", "view", str(n), "--json", "headRefName"],
                               "stdout": json.dumps({"headRefName": branches.get(n, f"b{n}")})})
-        for n, st in (issues or {}).items():
-            responses.append({"args": ["issue", "view", str(n)], "stdout": json.dumps({"state": st})})
-        responses.append({"args": ["issue", "view"], "stdout": json.dumps({"state": "OPEN"})})
+        for n in set(issues or {}) | set(unclaimed):
+            st = (issues or {}).get(n, "OPEN")
+            assignees = [] if n in unclaimed else [{"login": "shrujancheruku"}]
+            responses.append({"args": ["issue", "view", str(n)],
+                              "stdout": json.dumps({"state": st, "assignees": assignees})})
+        responses.append({"args": ["issue", "view"], "stdout": json.dumps({"state": "OPEN", "assignees": [{"login": "x"}]})})
         responses.append({"args": ["pr", "list", "--state", "merged"],
                           "stdout": json.dumps([{"number": 1, "headRefName": b} for b in merged])})
         self.env.set_gh(responses)
@@ -168,6 +197,111 @@ class Holds(unittest.TestCase):
     def test_usage(self):
         self.assertEqual(self.holds().returncode, 2)
         self.assertEqual(self.holds("--touch-map", "a.py").returncode, 2)
+
+    # Elsewhere: a live worker in another session holds the changes in its worktree (ADR 0009). Real worktrees
+    # and real `git worktree lock`, with `gh` stubbed.
+
+    def worktree(self, branch, reason=None):
+        """A worktree on a new branch off main, locked with `reason` when given. Returns its path."""
+        path = Path(self.wt_dir.name) / branch
+        git(self.env.repo, "worktree", "add", "-b", branch, str(path))
+        if reason is not None:
+            git(self.env.repo, "worktree", "lock", "--reason", reason, str(path))
+        return path
+
+    def dirty(self, path):
+        """A committed change never pushed, an unstaged edit to a tracked file, and an untracked file."""
+        (path / "a.py").write_text("x\n")
+        git(path, "add", "a.py")
+        git(path, "commit", "-m", "feat: a")
+        (path / "README.md").write_text("changed\n")
+        (path / "c.txt").write_text("new\n")
+
+    def test_live_elsewhere_holds_committed_unstaged_and_untracked(self):
+        self.gh()
+        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "README.md (held by elsewhere #12)", "a.py (held by elsewhere #12)", "c.txt (held by elsewhere #12)",
+            "overlap: a.py (held by elsewhere #12)"])
+
+    def test_dead_lock_holds_nothing(self):
+        self.gh()
+        reason = live_reason().replace(f"pid {os.getpid()}", f"pid {dead_pid()}")
+        self.dirty(self.worktree("12-widget", reason=reason))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_reused_pid_lock_holds_nothing(self):
+        self.gh()
+        self.dirty(self.worktree("12-widget", reason=live_reason(shift=-3600)))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_no_lock_holds_nothing(self):
+        self.gh()
+        self.dirty(self.worktree("12-widget"))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_unparseable_lock_holds_the_changed_paths(self):
+        self.gh()
+        self.dirty(self.worktree("12-widget", reason="held by hand"))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("a.py (held by elsewhere #12)", r.stdout.splitlines())
+
+    def test_live_worktree_with_no_changes_holds_nothing(self):
+        self.gh()
+        self.worktree("12-widget", reason=live_reason())
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_open_pr_ticket_is_held_only_through_its_pr(self):
+        self.gh({9: ["src/x.py"]}, branches={9: "12-the-fix"})
+        self.dirty(self.worktree("12-the-fix", reason=live_reason()))
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "src/x.py (held by open PR #9)", "overlap: src/x.py (held by open PR #9)"])
+
+    def test_building_ticket_is_not_held_twice(self):
+        self.gh()
+        self.state({12: ["src/x.py"]})
+        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertEqual(r.stdout.splitlines(), [
+            "src/x.py (held by building #12)", "overlap: src/x.py (held by building #12)"])
+
+    def test_own_ticket_worktree_is_left_out(self):
+        self.gh()
+        self.dirty(self.worktree("7-mine", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_unclaimed_ticket_holds_nothing(self):
+        self.gh(unclaimed=[12])
+        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_closed_ticket_holds_nothing(self):
+        self.gh(issues={12: "CLOSED"})
+        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_claim_check_gh_failure_could_not_run(self):
+        self.env.set_gh([
+            {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": "main"}})},
+            {"args": ["pr", "list"], "stdout": "[]"},
+            {"args": ["issue", "view", "12"], "stderr": "HTTP 502\n", "exit": 1},
+            {"args": ["issue", "view"], "stdout": json.dumps({"state": "OPEN", "assignees": []})}])
+        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("holds: gh:", r.stderr)
 
 
 if __name__ == "__main__":
