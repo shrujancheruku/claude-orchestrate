@@ -28,7 +28,6 @@ import session
 from repo import STATE
 
 
-
 def find_transcript(arg: str) -> Path:
     found = common.find_transcript(arg)
     if not found:
