@@ -88,5 +88,25 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("outside a conflict list", run)
 
 
+class HandBackRules(unittest.TestCase):
+    """#229: a worker's hand-back is trustworthy, and the run skill copes when it isn't."""
+
+    def test_worker_waits_for_a_backgrounded_verify_and_never_stops_on_mechanical_steps(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        verify = s[s.index("3. **Verify.**"):s.index("4. **Ship.**")]
+        self.assertIn("Monitor", verify)
+        self.assertIn("never hand back while it runs", verify)
+        stop = s[s.index("## Stop and report"):s.index("## Discovered work")]
+        self.assertRegex(stop, r"Uncommitted changes, an unpushed branch or an unopened PR are never a reason to stop")
+
+    def test_run_skill_has_the_interim_and_backstop_rules(self):
+        s = (ROOT / "skills/run/SKILL.md").read_text()
+        reports = s[s.index("## Worker reports"):s.index("## Choosing the worker model")]
+        self.assertRegex(reports, r"no `status:` line is interim")
+        self.assertIn("Wait for that worker's next completion", reports)
+        self.assertIn("unfinished commit, push or open-the-PR steps", reports)
+        self.assertIn("A second such stop from the same worker on the same ticket is a normal stop", reports)
+
+
 if __name__ == "__main__":
     unittest.main()
