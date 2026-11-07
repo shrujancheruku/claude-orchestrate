@@ -77,7 +77,9 @@ def claimed_paths(found: dict, own, base: str) -> tuple:
             paths = [plain(e) for e in entries if isinstance(e, str) and plain(e)] if isinstance(entries, list) else []
             if paths:
                 tickets[n] = paths
-        elif c.state == "elsewhere":
+        elif c.state == "elsewhere" or (c.state == "with-lead" and c.lock and c.lock[0] == "live" and c.worktree):
+            # A `lead` ticket with a live worker's worktree still holds its uncommitted changes, as it did before the
+            # claims module: the claims state says with-lead, but a live lock means someone is still writing there.
             paths = worktree_changes(c.worktree, base)
             if paths:
                 others[n] = paths

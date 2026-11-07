@@ -53,14 +53,16 @@ class Holds(unittest.TestCase):
         self.wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.wt_dir.cleanup)
 
-    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=()):
+    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=()):
         """prs: {number: [paths]}; branches: {number: head branch}; issues: {ticket: state}, where CLOSED leaves the
         ticket out of the open issues and OPEN lists it; merged: head branches of merged PRs; unclaimed: open tickets with
-        no assignee; open_tickets: open tickets assigned to the user (as is every other open ticket listed here)."""
+        no assignee; open_tickets: open tickets assigned to the user (as is every other open ticket listed here);
+        lead: open tickets labelled `lead`."""
         prs, branches = prs or {}, branches or {}
         listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": False} for n in prs]
-        open_nums = set(open_tickets) | set(unclaimed) | {n for n, st in (issues or {}).items() if st == "OPEN"}
-        nodes = [{"number": n, "labels": {"nodes": []}, "assignees": {"totalCount": 0 if n in unclaimed else 1}}
+        open_nums = set(open_tickets) | set(unclaimed) | set(lead) | {n for n, st in (issues or {}).items() if st == "OPEN"}
+        nodes = [{"number": n, "labels": {"nodes": [{"name": "lead"}] if n in lead else []},
+                  "assignees": {"totalCount": 0 if n in unclaimed else 1}}
                  for n in sorted(open_nums)]
         responses = [
             gh_repo_view(),
@@ -297,6 +299,25 @@ class Holds(unittest.TestCase):
         self.dirty(self.worktree("12-widget", reason=live_reason()))
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    # Behaviour decided by the claims rules (#262), pinned so a change to either is a visible test edit: an unclaimed
+    # state-file ticket is not Building.
+
+    def test_unclaimed_building_record_holds_nothing(self):
+        self.gh(unclaimed=[12])
+        self.state({12: ["src/x.py"]})
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_lead_ticket_with_live_worktree_holds_its_changes(self):
+        # Kept from before the claims module: a `lead` ticket is with-lead in claims, but its live worktree still holds.
+        self.gh(open_tickets=[12], lead=[12])
+        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "README.md (held by elsewhere #12)", "a.py (held by elsewhere #12)", "c.txt (held by elsewhere #12)",
+            "overlap: a.py (held by elsewhere #12)"])
 
     def test_closed_ticket_holds_nothing_elsewhere(self):
         self.gh(issues={12: "CLOSED"})
