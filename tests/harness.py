@@ -117,7 +117,7 @@ class ScriptEnv:
         empty.mkdir(exist_ok=True)
         return empty
 
-    def run(self, script, *args, check=True, no_gh=False, cwd=None, input_=None):
+    def run(self, script, *args, check=True, no_gh=False, cwd=None):
         """Run a CLI (absolute path, or a name under scripts/) in `cwd` (default: the repo) with the fake gh first on PATH."""
         path = Path(script)
         if not path.is_absolute():
@@ -133,5 +133,5 @@ class ScriptEnv:
         )
         return subprocess.run(
             [sys.executable, str(path), *map(str, args)],
-            cwd=cwd or self.repo, env=env, capture_output=True, text=True, check=check, input=input_,
+            cwd=cwd or self.repo, env=env, capture_output=True, text=True, check=check,
         )

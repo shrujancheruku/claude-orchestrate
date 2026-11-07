@@ -2,8 +2,11 @@
 
 import json
 import re
+import os
 import stat
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,8 +31,18 @@ class WorkerReport(unittest.TestCase):
         self.addCleanup(self.env.close)
         self.env.set_gh(prs((12, BRANCH, HEAD)))
 
-    def report(self, text, ticket="260", **kw):
-        return self.env.run("worker-report", ticket, "--branch", BRANCH, "--repo", ".", input_=text, **kw)
+    def report(self, text, ticket="260", check=True, no_gh=False):
+        # ScriptEnv.run has no stdin: run the CLI the way it does (fake gh first on PATH), with the completion piped in.
+        if no_gh:
+            empty = tempfile.mkdtemp()
+            self.addCleanup(os.rmdir, empty)
+            path = empty
+        else:
+            path = f"{self.env.bin}{os.pathsep}{os.environ['PATH']}"
+        env = dict(os.environ, PATH=path, FAKE_GH_STATE=str(self.env.gh_state))
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "worker-report"), ticket, "--branch", BRANCH, "--repo", "."],
+            cwd=self.env.repo, env=env, input=text, capture_output=True, text=True, check=check)
 
     def verdict(self, text, **kw):
         r = self.report(text, **kw)
