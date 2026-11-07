@@ -123,6 +123,12 @@ def open_prs(base: str, cwd=None) -> list:
                      "number,headRefName,isCrossRepository", shape=list, cwd=cwd)
 
 
+def merged_prs(base: str, cwd=None) -> list:
+    # The newest 200 only: an older merged PR is still caught by its closed issue (`Closes #n`).
+    return call_json("pr", "list", "--state", "merged", "--base", base, "--limit", "200", "--json",
+                     "number,headRefName", shape=list, cwd=cwd)
+
+
 def pr_files(pr, cwd=None) -> list:
     """The paths a PR's diff changes."""
     files = pr_view(pr, "files", cwd=cwd).get("files")

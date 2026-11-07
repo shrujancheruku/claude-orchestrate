@@ -61,6 +61,26 @@ def building(state_file: Path, own) -> dict:
     return out
 
 
+def still_building(tickets: dict, with_open_pr: set, base: str, repo: Path) -> dict:
+    """Keep the state-file tickets that are Building: issue open and no PR yet.
+
+    The state file is a cache and the tracker wins (rebuild-state keeps every worker the session
+    dispatched, merged ones too). A ticket with an open PR is already held through that PR's diff.
+    """
+    out, merged = {}, None
+    for n, paths in tickets.items():
+        # rebuild-state keys tickets by number; a key that is not one cannot be checked against the tracker.
+        if not str(n).isdigit() or int(n) in with_open_pr:
+            continue
+        if github.issue_state(n, cwd=repo).upper() != "OPEN":
+            continue
+        if merged is None:  # one lookup, only when an open issue remains
+            merged = {ticket_of_branch(p.get("headRefName")) for p in github.merged_prs(base, cwd=repo) if isinstance(p, dict)}
+        if int(n) not in merged:
+            out[n] = paths
+    return out
+
+
 def covers(held: str, path: str) -> bool:
     """A held entry covers a path when it is that file, or a directory (`db/`) containing it."""
     return path == held or (held.endswith("/") and path.startswith(held))
@@ -128,14 +148,16 @@ def main(argv=None) -> int:
             candidates = github.pr_files(own_pr, cwd=repo)
         else:
             candidates = [plain(e) for e in args.touch_map if plain(e) and plain(e).lower() != "none"]
-        prs = {}
+        prs, open_heads = {}, []
         for pr in github.open_prs(base, cwd=repo):
             if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
                 raise github.GhError(github.MALFORMED, "gh returned a PR list entry without a number")
+            open_heads.append(pr.get("headRefName"))
             if str(pr["number"]) == str(own_pr) or (own_ticket is not None and ticket_of_branch(pr.get("headRefName")) == own_ticket):
                 continue
             prs[pr["number"]] = github.pr_files(pr["number"], cwd=repo)
-        tickets = building(Path(args.state) if args.state else repo / STATE, own_ticket)
+        tickets = still_building(building(Path(args.state) if args.state else repo / STATE, own_ticket),
+                                 {ticket_of_branch(h) for h in open_heads}, base, repo)
     except github.GhError as e:
         print(f"holds: gh: {e.message}", file=sys.stderr)
         return 2
