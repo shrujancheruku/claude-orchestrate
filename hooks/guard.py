@@ -1118,12 +1118,13 @@ VERIFY_WRAPPERS = {"env", "nohup", "time", "exec", "command", "timeout", "bash",
 VERIFY_TIMEOUT_MS = 600000
 
 
-def script_call(parsed: "Parsed", script: "re.Pattern") -> tuple | None:
+def script_call(parsed: "Parsed", script: "re.Pattern", dynamic_ok: bool = False) -> tuple | None:
     """(the command, the words after the script's path) of the first simple command that runs a script
-    matching `script`, or None."""
+    matching `script`, or None. With `dynamic_ok`, a command word holding an expansion whose text still
+    ends in the script's path (`$ROOT/scripts/threads`) counts as the script, so the caller can refuse it."""
     for cmd in parsed.cmds:
         for k, w in enumerate(cmd.words):
-            if w.dynamic:
+            if w.dynamic and not (dynamic_ok and script.search(w.text)):
                 break
             if re.fullmatch(r"\w+=.*|-.*|\d+[smhd]?", w.text) or basename(w) in VERIFY_WRAPPERS:
                 continue
@@ -1166,7 +1167,7 @@ def threads_refusal(role: str, parsed: "Parsed") -> str | None:
     """Why a scout's or reviewer's call of scripts/threads is refused, or None. Not a threads call, or a
     worker's (every form), is None. Like the review post: an optional leading `cd <path> &&`, nothing else
     chained, no word with an expansion."""
-    found = script_call(parsed, THREADS_SCRIPT)
+    found = script_call(parsed, THREADS_SCRIPT, dynamic_ok=True)
     if found is None or role not in THREADS_FORMS:
         return None
     cmd, args = found

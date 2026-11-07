@@ -483,6 +483,10 @@ THREADS_CASES = [
     ("reviewer", f"{T} 12 && {T} 12 resolve ID --left x", "deny"),
     ("reviewer", f"{T} 12 $(echo --all)", "deny"),
     ("reviewer", f"{T} 12 > out", "deny"),
+    ("reviewer", "$CLAUDE_PLUGIN_ROOT/scripts/threads 12 resolve ID --left x", "deny"),
+    ("reviewer", '"${P}/scripts/threads" 12 resolve ID --left x', "deny"),
+    ("scout", "$CLAUDE_PLUGIN_ROOT/scripts/threads 12 resolve ID --left x", "deny"),
+    ("orchestrate-unknown", f"{T} 12 resolve ID --left x", "deny"),
     ("scout", f"{T} 12", "allow"),
     ("scout", f"{T} 12 --all", "allow"),
     ("scout", f"{T} 12 resolve ID --left x", "deny"),
@@ -762,7 +766,10 @@ class GuardTest(unittest.TestCase):
     def test_threads_by_role(self):
         for role, command, expected in THREADS_CASES:
             with self.subTest(role=role, command=command):
-                self.assertEqual(decide("orchestrate:" + role, command, timeout=600000), expected)
+                agent = role if role.startswith("orchestrate") else "orchestrate:" + role
+                if role == "orchestrate-unknown":
+                    agent = "orchestrate:retired"  # a role the guard doesn't know is judged as a scout
+                self.assertEqual(decide(agent, command, timeout=600000), expected)
 
     def test_threads_refusal_names_the_allowed_forms(self):
         for role, command, text in [
