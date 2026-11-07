@@ -24,13 +24,15 @@ PASS_LOG = "passes.jsonl"
 
 # Event kinds and the outcomes each may carry. scripts/replay.py owns the replay names
 # (tests/test_runlog.py checks they agree); gate, watch-ci and merge write the others.
-GATE, CI, MERGE, REPLAY = "gate", "ci", "merge", "replay"
+GATE, CI, MERGE, REPLAY, WORKER_REPORT = "gate", "ci", "merge", "replay", "worker-report"
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
     CI: (PASS, FAIL),
     MERGE: (MERGED, TIMEOUT, CLOSED),
     REPLAY: ("line-replay", "word-merge", "regenerated", "handed-back"),
+    # scripts/worker-report: the first word of its verdict line.
+    WORKER_REPORT: ("valid", "interim", "not-a-stop", "not-a-pr-opened", "duplicate", "missing-report", "limit", "error"),
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"
@@ -73,6 +75,16 @@ def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = 
     event.update(extra)
     _append(repo, EVENTS_LOG, event)
     return event
+
+
+def latest_event(repo, kind: str, ref, skip_outcomes=()) -> dict | None:
+    """The newest event of `kind` for `ref` (compared as text, so `#7`'s 7 and "7" match), across sessions
+    (a resumed orchestrator is a new session); events whose outcome is in `skip_outcomes` are passed over."""
+    found = None
+    for e in common.read_jsonl(log_path(repo, EVENTS_LOG)):
+        if e.get("kind") == kind and str(e.get("ref")) == str(ref) and e.get("outcome") not in skip_outcomes:
+            found = e
+    return found
 
 
 def read_events(repo, session: str, start: datetime, end: datetime) -> list | None:

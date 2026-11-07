@@ -25,7 +25,7 @@ Fewer requests at a smaller context:
 - Chain verify steps in one command rather than a call each (the `verify` script already does).
 - Find with `grep -n`, then read the line range you need; read a whole file only when you must change most of it.
 - Don't re-read a file you haven't changed since you read it, and don't re-read one you just edited.
-- Leave nothing running: when you report (any status), no command you started is still running in the background. If you started one, wait for it or stop it first.
+- Leave nothing running: when you report (any status), no command you started is still running in the background. The guard refuses a backgrounded command (#259), so wait for the one the harness moved there, or stop it, first.
 - Bound Bash output: `--jq`, `tail -n`, `head -n`, `--name-only`; never dump a full diff or log.
 
 ## Pushing
@@ -38,15 +38,15 @@ Never turn the sandbox off, retry with it off, or ask for a bypass to push. If t
 
 ## Stop and report
 
-Stop at the first of these, and report with `status: stopped`. Your report is how the orchestrator decides; working around the problem hides it.
-- The ticket needs a change to a file listed under Held paths in the brief, unless the brief's Shared files line lets you edit it (a shared file's overlap is reported by `holds` but doesn't count). Files outside your touch map that nothing holds are yours to change.
-- The ticket gives you no spec: neither its body nor an `## Agent Brief` comment has acceptance criteria. Report `stopped-because` saying the ticket read empty; never build from the brief and touch map alone. An empty body with an `## Agent Brief` comment is a valid spec, not a stop.
-- The ticket is ambiguous in a way that changes the design.
-- The ticket can't be met without contradicting an ADR. A smaller conflict goes in your report's `adr-conflicts`; never override an ADR silently. When the brief says `Lead mode: yes`, a lead settles ADR conflicts: in lead mode you report them in `adr-conflicts` and never write ADRs (no new, edited or superseded ADR).
-- You reach a **human-only step** from the brief, or anything destructive or outward-facing the brief doesn't cover (shared environments, accounts, secrets, history rewrites).
-- A verify command fails for reasons outside your ticket.
-- The ticket is already done on the default branch.
-- An external fact the ticket needs has no reachable primary source, so it could only come from memory.
+Stop at the first of these, and report with `status: stopped` and the `stop-reason:` value beside it; the orchestrator checks the value against this list, and a `stopped` without one is sent back. Your report is how the orchestrator decides; working around the problem hides it.
+- (`stop-reason: held-path`) The ticket needs a change to a file listed under Held paths in the brief, unless the brief's Shared files line lets you edit it (a shared file's overlap is reported by `holds` but doesn't count). Files outside your touch map that nothing holds are yours to change.
+- (`stop-reason: no-spec`) The ticket gives you no spec: neither its body nor an `## Agent Brief` comment has acceptance criteria. Report `stopped-because` saying the ticket read empty; never build from the brief and touch map alone. An empty body with an `## Agent Brief` comment is a valid spec, not a stop.
+- (`stop-reason: ambiguous`) The ticket is ambiguous in a way that changes the design.
+- (`stop-reason: adr-conflict`) The ticket can't be met without contradicting an ADR. A smaller conflict goes in your report's `adr-conflicts`; never override an ADR silently. When the brief says `Lead mode: yes`, a lead settles ADR conflicts: in lead mode you report them in `adr-conflicts` and never write ADRs (no new, edited or superseded ADR).
+- (`stop-reason: human-only`) You reach a **human-only step** from the brief, or anything destructive or outward-facing the brief doesn't cover (shared environments, accounts, secrets, history rewrites).
+- (`stop-reason: verify-outside-ticket`) A verify command fails for reasons outside your ticket.
+- (`stop-reason: already-done`) The ticket is already done on the default branch.
+- (`stop-reason: no-primary-source`) An external fact the ticket needs has no reachable primary source, so it could only come from memory.
 
 Uncommitted changes, an unpushed branch or an unopened PR are never a reason to stop: they are the steps still ahead of you, so finish them (commit, push, open the PR), then report `pr-opened`. A `stopped` report needs one of the reasons above.
 
@@ -78,6 +78,7 @@ branch: <name>
 verify: <pass | fail, with the failing command>
 discovered: <n> — <one-line gist per item; leave the line out when there is none>
 adr-conflicts: <ADR -> how this PR departs from it, and why; omit when none>
+stop-reason: <required when stopped: held-path | no-spec | ambiguous | adr-conflict | human-only | verify-outside-ticket | already-done | no-primary-source>
 stopped-because: <only when stopped: the question or step, and what you need to continue>
 ```
 
