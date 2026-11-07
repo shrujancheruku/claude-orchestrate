@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, git  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_view, git  # noqa: E402
 from test_worker_live import own_start_reason  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -67,9 +67,9 @@ class LeadRoute(unittest.TestCase):
             graphql = {"args": ["api", "graphql"], "seq": [{"stdout": json.dumps(body)}, {"stdout": json.dumps(closed)}]}
         prs = [{"headRefName": b, "headRefOid": (heads or {}).get(b, HEAD), "number": 100 + i}
                for i, b in enumerate(open_branches)]
-        self.responses = [{"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
+        self.responses = [gh_repo_view(),
                           graphql,
-                          {"args": ["pr", "list"], "stdout": json.dumps(prs)}]
+                          gh_pr_list(prs)]
         self.env.set_gh(self.responses)
 
     def state(self, tickets):
