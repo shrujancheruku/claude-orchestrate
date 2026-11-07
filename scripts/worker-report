@@ -126,7 +126,7 @@ def runlog_dup(repo, ticket, words, fields) -> bool:
     """True when the newest earlier verdict for this ticket (a duplicate does not count) matches this one."""
     last = runlog.latest_event(repo, runlog.WORKER_REPORT, ticket, skip_outcomes=("duplicate",))
     return bool(last) and last.get("outcome") == words[0] and all(
-        last.get(k) == fields.get(k) for k in ("status", "head", "stop_reason"))
+        last.get(k) == fields.get(k) for k in ("status", "head", "stop_reason", "denied_command"))
 
 
 if __name__ == "__main__":

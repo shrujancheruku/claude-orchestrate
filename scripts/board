@@ -8,6 +8,7 @@ rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a s
     Needs lead       labelled `needs-lead`
     Waiting on you   labelled `ready-for-human` or `needs-info`, or claimed with no PR while the newest
                      `worker-report` in the run log for it is a `permission-denied` stop (the user must act)
+                     (it stays there after the user allows the command, until the PR exists)
     Done             the ticket's PR merged; the card is archived a day after the merge
 A card is added when its ticket is first claimed; a ticket that is merely labelled gets no card of its own.
 The column is the custom single-select field `Stage`, created on first sync: GitHub's built-in `Status` options
