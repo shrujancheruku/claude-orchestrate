@@ -34,7 +34,7 @@ Every pass rebuilds its picture from the tracker and the git host, so a pass can
 
 - **building**: no PR yet, and a worker from this session is on it.
 - **paused**: its worker ended on an API or usage-limit error. See [Running out of usage](#running-out-of-usage).
-- **stalled**: no PR yet, and no worker this session knows of. Report its branch's last pushed commit and whether its old worktree still holds uncommitted changes or unpushed commits.
+- **stalled**: no PR yet, and no worker this session knows of (never a `lead` ticket, which is **with the lead** below). Report its branch's last pushed commit and whether its old worktree still holds uncommitted changes or unpushed commits.
 - **in review**: its PR is open.
 - **waiting**: blocked on the user (a gate, a question, a third review round).
 - **with the lead**: a claimed `lead` ticket, the lead's own work. No PR yet: not stalled, and no slot. Its PR open: in review, as [Lead PRs](#lead-prs) says.
