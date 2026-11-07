@@ -374,8 +374,9 @@ class PromptSide(unittest.TestCase):
         text = SKILL.read_text()
         for verb in ("LEAD-TICKET", "LEAD-PR", "RESEND"):
             self.assertIn(verb, text)
+        # A lead ticket is never dispatched because scripts/frontier excludes it, not a prompt clause.
         step4 = text[text.index("4. **Fill free slots.**"):text.index("5. **Report and yield.**")]
-        self.assertIn("`lead`", step4, "step 4 must skip tickets labelled `lead`")
+        self.assertIn("`frontier`", step4)
 
     def test_run_redispatches_through_the_rescue_and_skips_elsewhere_tickets(self):
         text = SKILL.read_text()
