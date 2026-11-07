@@ -33,6 +33,18 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("listed under Held paths in the brief", bullet)
         self.assertNotIn(":line", bullet)
 
+    def test_report_block_carries_the_eight_stop_reasons_and_rules_name_the_guard(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        report = s[s.index("## Report"):]
+        line = next(l for l in report.splitlines() if l.startswith("stop-reason:"))
+        reasons = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
+                   "verify-outside-ticket", "already-done", "no-primary-source")
+        for r in reasons:
+            self.assertIn(r, line)
+            self.assertIn(f"`stop-reason: {r}`", s[s.index("## Stop and report"):s.index("## Discovered work")])
+        rules = s[s.index("## Turn rules"):s.index("## Pushing")]
+        self.assertIn("The guard refuses a backgrounded command", rules)
+
     def test_worker_leaves_no_background_commands(self):
         s = (ROOT / "agents/worker.md").read_text()
         # Step 3 (Verify) says foreground and finish before pushing or reporting;
@@ -100,13 +112,12 @@ class HandBackRules(unittest.TestCase):
         stop = s[s.index("## Stop and report"):s.index("## Discovered work")]
         self.assertRegex(stop, r"Uncommitted changes, an unpushed branch or an unopened PR are never a reason to stop")
 
-    def test_run_skill_has_the_interim_and_backstop_rules(self):
+    def test_run_skill_defers_the_interim_and_backstop_rules_to_worker_report(self):
+        # #260: scripts/worker-report owns them; the prompt keeps what to do with each verdict.
         s = (ROOT / "skills/run/SKILL.md").read_text()
         reports = s[s.index("## Worker reports"):s.index("## Choosing the worker model")]
-        self.assertRegex(reports, r"no `status:` line is interim")
-        self.assertIn("Wait for that worker's next completion", reports)
-        self.assertIn("unfinished commit, push or open-the-PR steps", reports)
-        self.assertIn("A second such stop from the same worker on the same ticket is a normal stop", reports)
+        self.assertIn("scripts/worker-report", reports)
+        self.assertIn("a second `not-a-stop` from the same worker is a normal stop", reports)
 
 
 if __name__ == "__main__":
