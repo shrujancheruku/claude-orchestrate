@@ -16,6 +16,19 @@ READY_CONFIG = ("## Review\n\n- **Risk paths** (any PR touching them is reviewed
 GREEN = [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"},
          {"context": "lint", "state": "SUCCESS"}]
 
+THREADS_NONE = {"stdout": json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
+    "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}})}
+
+
+def threads_reply(*nodes):
+    """A reviewThreads reply: each node is (isResolved, isOutdated, author, url)."""
+    return {"stdout": json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": [{"id": f"T{i}", "isResolved": r, "isOutdated": o, "path": "a.py", "line": 1,
+                   "comments": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [{"author": {"login": a}, "body": "[blocking] x", "url": u}]}}
+                  for i, (r, o, a, u) in enumerate(nodes)]}}}}})}
+
 
 class ReadinessTest(unittest.TestCase):
     """--approved-head: behind leads to exit 5, a change since the approved head needing re-review to exit 6."""
@@ -40,14 +53,15 @@ class ReadinessTest(unittest.TestCase):
         return sha
 
     def merge(self, head, behind="0", update=None, approved="", flag=True, checks=GREEN, blockers="0\n",
-              branch="feat-br", closing=(), ticket=9):
+              branch="feat-br", closing=(), ticket=9, threads=None):
         pr_json = {"state": "OPEN", "headRefName": branch, "headRefOid": head, "statusCheckRollup": checks,
                    "isCrossRepository": False, "closingIssuesReferences": [{"number": n} for n in closing]}
         view = {"stdout": json.dumps(pr_json)}
         merged = {"stdout": json.dumps(dict(pr_json, state="MERGED"))}
         self.env.set_gh([
             {"args": ["pr", "view"], "seq": [view, merged]},
-            {"args": ["repo", "view"], "stdout": '{"defaultBranchRef":{"name":"main"}}'},
+            {"args": ["repo", "view"], "stdout": '{"defaultBranchRef":{"name":"main"},"owner":{"login":"o"},"name":"r"}'},
+            {"args": ["api", "graphql"], **(threads if threads is not None else THREADS_NONE)},
             {"args": ["api", f"repos/{{owner}}/{{repo}}/compare/main...{branch}", "--jq", ".behind_by"],
              "stdout": behind + "\n"},
             {"args": ["api", f"repos/{{owner}}/{{repo}}/issues/{ticket}", "--jq", ".issue_dependencies_summary.blocked_by"],
@@ -198,6 +212,42 @@ class ReadinessTest(unittest.TestCase):
     def test_without_the_flag_ci_is_not_checked(self):
         head = self.push({"b.txt": "x\n"})
         self.assertEqual(self.merge(head, checks=[], flag=False).returncode, 0)
+
+    def test_unresolved_thread_refuses_with_count_author_and_url(self):
+        p = self.merge(self.approved, threads=threads_reply((False, False, "rev", "https://x/1"), (True, False, "z", "https://x/2")))
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.splitlines(), ["PR #7 is not ready: 1 unresolved review thread(s)", "  rev https://x/1"])
+        self.assertEqual(self.called(["pr", "merge"]), [])
+
+    def test_outdated_unresolved_thread_refuses(self):
+        p = self.merge(self.approved, threads=threads_reply((False, True, "rev", "https://x/1")))
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("1 unresolved review thread(s)", p.stdout)
+
+    def test_a_humans_thread_refuses_like_a_reviewers(self):
+        p = self.merge(self.approved, threads=threads_reply((False, False, "shrujan", "https://x/9"), (False, False, "rev", "https://x/8")))
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("2 unresolved", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[1:], ["  shrujan https://x/9", "  rev https://x/8"])
+
+    def test_all_resolved_passes(self):
+        p = self.merge(self.approved, threads=threads_reply((True, False, "rev", "u"), (True, True, "rev", "u")))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(len(self.called(["pr", "merge"])), 1)
+
+    def test_no_threads_passes(self):
+        self.assertEqual(self.merge(self.approved).returncode, 0)
+
+    def test_failed_threads_read_exits_2_and_merges_nothing(self):
+        p = self.merge(self.approved, threads={"exit": 1, "stderr": "boom"})
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("could not read the review threads of PR #7", p.stdout + p.stderr)
+        self.assertEqual(self.called(["pr", "merge"]), [])
+
+    def test_without_the_flag_threads_are_not_read(self):
+        p = self.merge(self.approved, flag=False, threads=threads_reply((False, False, "rev", "u")))
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(self.called(["api", "graphql"]), [])
 
 
 if __name__ == "__main__":
