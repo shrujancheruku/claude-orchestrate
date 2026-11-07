@@ -526,7 +526,7 @@ class GuardTest(unittest.TestCase):
     def test_cases(self):
         for agent_type, command, expected in CASES:
             with self.subTest(agent=agent_type, command=command):
-                self.assertEqual(decide(agent_type, command), expected)
+                self.assertEqual(decide(agent_type, command, timeout=600000), expected)
 
     def test_verify_in_the_background_is_refused_for_workers_only(self):
         quoted = "'/home/u/.claude/plugins/cache/x/orchestrate/0.7.0/scripts/verify' --config"
