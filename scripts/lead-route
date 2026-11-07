@@ -3,13 +3,16 @@
 
 Decides, and prints one verdict per line; it writes nothing to the tracker or the state file. Run it once
 per pass, after reconcile, and the orchestrator applies each line word for word. Reads the open issues
-(newest 100 by update, one `gh api graphql`) and the state file; the stop comment is the newest comment
-whose first line is the marker `> *Stopped for the lead.*`. Verdicts, in ticket order:
+(newest 100 by update, one `gh api graphql`), the open and merged PRs and the claims (scripts/claims.py, which reads
+the state file and the worktrees); the stop comment is the newest comment whose first line is the marker
+`> *Stopped for the lead.*`. Verdicts, in ticket order:
     RESUME #<n> <agent-id>   claimed, no needs-lead, a worker in the state file, stop comment newer than its last report
     ESCALATE #<n>            a RESUME on a haiku worker, where the body or an `## Agent Brief` comment changed after the stop
-    REDISPATCH #<n>          a claimed ticket with a stop comment, no worker in the state file, no open PR, and no live worker elsewhere
-    ELSEWHERE #<n> pid <p>   what would be a REDISPATCH, but the worktree on the ticket's branch is locked by a live session
-                             (pid <p>; `?` when the lock reason doesn't parse): another session's worker is still building.
+    REDISPATCH #<n>          a claimed ticket with a stop comment, in the claims state `stalled`: no worker, no PR, no live lock
+    ELSEWHERE #<n> pid <p> <worktree>
+                             what would be a REDISPATCH, but the claims state is `elsewhere`: the worktree on the ticket's
+                             branch is locked by a live session, and another session's worker is still building. `?` stands
+                             for <p> when the lock reason doesn't parse, and the line then ends ` (lock: <reason>)`.
                              Do nothing; the ticket still counts against the cap (ADR 0009)
     FALLBACK #<n>            needs-lead with --lead none: the lead is gone; the ticket is handed back
     UNCAP #<n>               needs-lead, claimed, live lead, stop comment more than 30 minutes old
@@ -34,15 +37,15 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
-import json
 import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import claims
 import common
 import github
-from repo import STATE, first_line, parse_ts, ticket_branch, ticket_of_branch
+from repo import STATE, first_line, parse_ts, ticket_of_branch
 
 STOP_MARKER = "> *Stopped for the lead.*"  # the first line of every stop comment; run posts it verbatim
 ADR_MARKER = "> *ADR conflict held for the lead.*"  # the first line of an ADR-conflict comment; run posts it verbatim
@@ -109,31 +112,15 @@ def load_issues(root, repo):
     return issues
 
 
-def load_open_pr_tickets(root):
-    """{ticket number: {"number": PR number, "head": head commit}} for each open PR whose branch names a ticket. A worker
-    with a PR is not missing: its PR is the record."""
-    prs = github.call_json("pr", "list", "--state", "open", "--limit", "200",
-                           "--json", "headRefName,headRefOid,number", shape=list, cwd=root)
+def open_pr_heads(prs):
+    """{ticket number: {"number": PR number, "head": head commit}} for each open PR whose branch names a ticket. Every
+    open PR, claimed ticket or not: a needs-lead ticket's hold needs its PR even when no one holds the claim."""
     found = {}
     for pr in prs:
         n = ticket_of_branch((pr or {}).get("headRefName"))
         if n is not None:
-            found[n] = {"number": (pr or {}).get("number"), "head": str((pr or {}).get("headRefOid") or "")}
+            found.setdefault(n, {"number": (pr or {}).get("number"), "head": str((pr or {}).get("headRefOid") or "")})
     return found
-
-
-def load_state(path):
-    """{ticket number as str: worker record}; a missing file is no workers, an unreadable one is could-not-run."""
-    try:
-        data = json.loads(path.read_text())
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError) as e:
-        common.die(f"lead-route: cannot run: unreadable state file {path}: {e}")
-    tickets = data.get("tickets") if isinstance(data, dict) else None
-    if not isinstance(tickets, dict):
-        common.die(f"lead-route: cannot run: state file {path} has no tickets object")
-    return tickets
 
 
 def stop_of(issue):
@@ -176,10 +163,19 @@ def resend_due(issue, head) -> bool:
     return not any(first_line(c["body"]) == RESENT_MARKER and head_of(c) == head for c in issue["comments"])
 
 
-def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset(), liveness=None):
-    """The verdict lines, then the counted line. open_prs: {ticket: {"number", "head"}} for open PRs.
-    liveness: ticket number -> (state, pid) with state live | dead | none, for the worktree on the ticket's branch."""
-    open_prs = open_prs or {}
+def elsewhere_line(n, claim) -> str:
+    """ELSEWHERE for a claim whose worktree is locked by a live session; the lock reason rides along when the pid is
+    unknown, because that is the only place the user sees why the lock did not parse."""
+    pid = claim.lock[1]
+    if pid is None:
+        return f"ELSEWHERE #{n} pid ? {claim.worktree} (lock: {claim.lock[2]})"
+    return f"ELSEWHERE #{n} pid {pid} {claim.worktree}"
+
+
+def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
+    """The verdict lines, then the counted line. found: {ticket: claims.Claim} from scripts/claims.py, which decides each
+    claimed ticket's state (worker, PR, lock). prs: {ticket: {"number", "head"}} for every open PR (open_pr_heads)."""
+    prs = prs or {}
     lines, claimed, freed = [], set(), set()
     for n in sorted(abandoned):
         lines.append(f"ABANDON #{n}")
@@ -188,7 +184,7 @@ def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset(), l
         if LEAD_LABEL in issue["labels"]:
             # The lead's own ticket: no worker is ever dispatched for it, so it never holds a slot and is never stalled.
             # Its PR, once open, is the pipeline's: CI, gate, review and merge run on it like any other PR.
-            pr = open_prs.get(n)
+            pr = prs.get(n)
             if issue["claimed"] and pr:
                 lines.append(f"LEAD-PR #{n} {pr['number']}")
                 if lead == "live" and resend_due(issue, pr["head"]):
@@ -205,7 +201,7 @@ def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset(), l
         stop = stop_of(issue)
         since = stop["created"] if stop else None
         if NEEDS_LEAD in issue["labels"]:
-            pr = open_prs.get(n)
+            pr = prs.get(n)
             if pr and adr_hold_of(issue):
                 # An ADR conflict waits on the lead for as long as it takes: no UNCAP, no FALLBACK.
                 lines.append(f"{'HOLD-PR' if lead == 'live' else 'ASK-DEV'} #{n} {pr['number']}")
@@ -219,17 +215,16 @@ def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset(), l
             continue
         if not issue["claimed"] or since is None:
             continue
-        worker = state.get(str(n))
+        claim = found[n]
+        worker = claim.worker
         if not isinstance(worker, dict) or not worker.get("agent_id"):
-            # A state file is per session, so an earlier session's finished worker is missing from it. Its open
-            # PR shows it did its work; redispatching would start a second worker on that branch.
-            if n not in open_prs:
-                alive, pid = (liveness or (lambda _n: ("none", None)))(n)
-                if alive == "live":
-                    # Another session's worker is still building (ADR 0009): a second worker would share its branch.
-                    lines.append(f"ELSEWHERE #{n} pid {pid if pid is not None else '?'}")
-                else:
-                    lines.append(f"REDISPATCH #{n}")
+            # Only `stalled` redispatches: a state file is per session, so an earlier session's finished worker is
+            # missing from it, and its open PR (claims state in-review) shows it did its work. `elsewhere` is another
+            # session's live worker (ADR 0009): a second worker would share its branch.
+            if claim.state == "elsewhere":
+                lines.append(elsewhere_line(n, claim))
+            elif claim.state == "stalled":
+                lines.append(f"REDISPATCH #{n}")
             continue
         last = parse_ts(worker.get("last_report"))
         if last is None or since <= last:
@@ -257,20 +252,25 @@ def main(argv=None) -> int:
         common.die(f"lead-route: cannot run: --now is not an ISO time: {args.now}")
     root = Path(args.repo).resolve()
     state_path = Path(args.state) if args.state else root / STATE
-    state = load_state(state_path)
     try:
         repo = load_repo(root)
+        base = (repo.get("defaultBranchRef") or {}).get("name")
+        if not isinstance(base, str):
+            raise github.GhError(github.MALFORMED, "gh returned no default branch")
         issues = load_issues(root, repo)
-        open_prs = load_open_pr_tickets(root)
         abandoned = load_abandoned(root, repo)
+        prs = github.open_prs_with_heads(cwd=root)
+        merged = github.merged_prs(base, cwd=root)
+        # The claims are read once here (the state file, the worktrees, the PRs); `changes` is a no-op because routing
+        # never needs the dirty and unpushed counts, and a git failure there would stop a pass that never needed them.
+        # So Claim.changes is None here: route() must never read claim.changes.
+        found = claims.claims(root, state_path, issues, prs, merged, changes=lambda path, branch: None)
     except github.GhError as e:
         common.die(f"lead-route: cannot run: gh failed: {e.message}")
-    def liveness(n):
-        branch = ticket_branch(root, n)
-        state, pid, _wt, _reason = common.worker_liveness(root, branch) if branch else ("none", None, None, None)
-        return state, pid
+    except (KeyError, TypeError, ValueError) as e:
+        common.die(f"lead-route: cannot run: {e}")
 
-    for line in route(issues, state, args.lead, args.cap, now, open_prs, abandoned, liveness):
+    for line in route(issues, found, args.lead, args.cap, now, open_pr_heads(prs), abandoned):
         print(line)
     return 0
 

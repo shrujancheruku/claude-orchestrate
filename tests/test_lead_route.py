@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, gh_pr_list, gh_repo_view, git  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, git  # noqa: E402
 from test_claims import own_start_reason  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -57,7 +57,7 @@ class LeadRoute(unittest.TestCase):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def serve(self, issues=(), gh_exit=0, open_branches=(), wontfix=(), heads=None):
+    def serve(self, issues=(), gh_exit=0, open_branches=(), wontfix=(), heads=None, merged_branches=()):
         if gh_exit:
             graphql = {"args": ["api", "graphql"], "stderr": "HTTP 500", "exit": gh_exit}
         else:
@@ -67,9 +67,12 @@ class LeadRoute(unittest.TestCase):
             graphql = {"args": ["api", "graphql"], "seq": [{"stdout": json.dumps(body)}, {"stdout": json.dumps(closed)}]}
         prs = [{"headRefName": b, "headRefOid": (heads or {}).get(b, HEAD), "number": 100 + i}
                for i, b in enumerate(open_branches)]
-        self.responses = [gh_repo_view(),
+        merged = [{"headRefName": b, "number": 200 + i} for i, b in enumerate(merged_branches)]
+        repo = {"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}}
+        self.responses = [{"args": ["repo", "view"], "stdout": json.dumps(repo)},
                           graphql,
-                          gh_pr_list(prs)]
+                          gh_pr_list(prs, "--state", "open"),
+                          gh_pr_list(merged, "--state", "merged")]
         self.env.set_gh(self.responses)
 
     def state(self, tickets):
@@ -131,24 +134,39 @@ class LeadRoute(unittest.TestCase):
         self.assertEqual(self.route(), (0, ["REDISPATCH #1", "counted: 1 of 2"]))
 
     def lock_worktree(self, reason, branch="1-widget"):
-        """A real worktree on `branch`, locked with `reason`: another session's worker, as the harness leaves it."""
+        """A real worktree on `branch`, locked with `reason`: another session's worker, as the harness leaves it.
+        Returns its path, as `git worktree list` names it."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = Path(tmp.name) / branch
         git(self.env.repo, "worktree", "add", "-b", branch, str(path))
         git(self.env.repo, "worktree", "lock", "--reason", reason, str(path))
+        return os.path.realpath(path)
 
     def test_elsewhere_when_another_sessions_worker_is_live_and_it_still_counts(self):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
         self.state({})
-        self.lock_worktree(own_start_reason())
-        self.assertEqual(self.route(), (0, [f"ELSEWHERE #1 pid {os.getpid()}", "counted: 1 of 2"]))
+        wt = self.lock_worktree(own_start_reason())
+        self.assertEqual(self.route(), (0, [f"ELSEWHERE #1 pid {os.getpid()} {wt}", "counted: 1 of 2"]))
 
-    def test_elsewhere_for_a_lock_that_does_not_parse(self):
+    def test_elsewhere_for_a_lock_that_does_not_parse_names_the_reason(self):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
         self.state({})
-        self.lock_worktree("held by hand")
-        self.assertEqual(self.route(), (0, ["ELSEWHERE #1 pid ?", "counted: 1 of 2"]))
+        wt = self.lock_worktree("held by hand")
+        self.assertEqual(self.route(), (0, [f"ELSEWHERE #1 pid ? {wt} (lock: held by hand)", "counted: 1 of 2"]))
+
+    def test_no_redispatch_when_the_branch_has_a_merged_pr(self):
+        # claims: the ticket is done once its branch's PR merged, so there is nothing to redispatch.
+        self.serve([issue(1, claimed=True, comments=[stop(10)])], merged_branches=["1-widget"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["counted: 1 of 2"]))
+
+    def test_an_unclaimed_adr_hold_still_holds_its_open_pr(self):
+        # The claim is gone, but the PR is still open and its merge must wait on the lead.
+        self.serve([issue(3, labels=["needs-lead"], comments=[comment(0, ADR_MARKER + "\n\nPR 103")])],
+                   open_branches=["3-z"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["HOLD-PR #3 100", "counted: 0 of 2"]))
 
     def test_redispatch_when_the_lock_is_dead_or_there_is_none(self):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
@@ -277,9 +295,51 @@ class LeadRoute(unittest.TestCase):
         self.assertEqual(r.stdout, "")
         self.assertIn("cannot run", r.stderr)
 
+    def test_exit_2_when_the_state_file_is_unreadable(self):
+        # claims reads the state file: its ValueError is still could-not-run here.
+        self.serve([issue(1, claimed=True, comments=[stop(10)])])
+        path = self.env.repo / ".claude" / "orchestrate-state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json")
+        r = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0), check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("unreadable state file", r.stderr)
+
     def test_exit_2_when_gh_is_missing(self):
         r = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0), check=False, no_gh=True)
         self.assertEqual(r.returncode, 2)
+
+
+class RouteFromClaims(unittest.TestCase):
+    """route() on claims.Claim objects directly, no CLI, no gh and no worktree: the claims state is the input."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("lead_route_mod", str(ROOT / "scripts" / "lead-route"))
+        spec = importlib.util.spec_from_loader("lead_route_mod", loader)
+        cls.mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.mod)
+
+    def claim(self, n, state, **kw):
+        import claims as claims_mod
+        return claims_mod.Claim(n, state, **kw)
+
+    def test_stalled_claim_with_a_stop_redispatches(self):
+        issues = [{"number": 1, "claimed": True, "labels": set(), "blockers": [], "body_edits": [],
+                   "comments": [{"body": MARKER, "created": T0, "edits": []}]}]
+        found = {1: self.claim(1, "stalled")}
+        self.assertEqual(self.mod.route(issues, found, "live", 2, T0 + timedelta(minutes=60)),
+                         ["REDISPATCH #1", "counted: 1 of 2"])
+
+    def test_elsewhere_claim_prints_pid_worktree_and_reason_when_unparsed(self):
+        issues = [{"number": 1, "claimed": True, "labels": set(), "blockers": [], "body_edits": [],
+                   "comments": [{"body": MARKER, "created": T0, "edits": []}]}]
+        found = {1: self.claim(1, "elsewhere", worktree="/wt/1-x", lock=("live", None, "held by hand"))}
+        self.assertEqual(self.mod.route(issues, found, "live", 2, T0 + timedelta(minutes=60)),
+                         ["ELSEWHERE #1 pid ? /wt/1-x (lock: held by hand)", "counted: 1 of 2"])
 
 
 class PromptSide(unittest.TestCase):
