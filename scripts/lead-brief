@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""lead-brief [--repo PATH] [--now ISO] [--checkpoint <pr>] : the lead's whole start-up index, in one call.
+
+With no arguments it prints these sections, in this fixed order, each under a `== <name> ==` line:
+    config       the repo's `.claude/orchestration.md`, whole
+    tracker      `docs/agents/issue-tracker.md`, whole
+    glossary     `GLOSSARY.md`, whole
+    adrs         one line per `docs/adr/NNNN-*.md`: number, title, status
+    tickets      open `needs-lead` tickets, then open `lead` tickets: title, link, age
+    roadmap      open `wayfinder:map` issues and open parent issues, with sub-issues open/closed
+    merges       the PRs merged since the watermark, one line each: title, ticket, tier, `discovered:` count
+Each L-tier merge line is followed by its risk notes word for word (PR title and link, ticket, review link, then
+each `path:line-range — what to look at`), from the posted review, else from the fallback comment `run` posts
+(first line `> *Risk notes (review not posted).*`). A section it cannot read prints `unavailable: <why>` and the
+rest still prints. The watermark is `.claude/orchestrate-lead.json`, written only by `--checkpoint <pr>` (last
+absorbed PR, merged-at time, merge count). A missing or unreadable watermark falls back to the last 7 days of
+merges, at most 20, and says so in one line. Reads only: the tracker is never written.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import common
+import github
+import session
+
+RISK_MARKER = "> *Risk notes (review not posted).*"  # the first line of the fallback comment; run posts it verbatim
+WATERMARK = Path(".claude") / "orchestrate-lead.json"
+FALLBACK_DAYS = 7
+FALLBACK_CAP = 20
+MERGED_LIMIT = 100  # the newest merged PRs by update, one `gh api graphql`
+ROADMAP_LIMIT = 200
+RISK_LINE = re.compile(r"^\s*[-*]?\s*(\S+:\d+(?:-\d+)?\s+—\s+\S.*)$")
+TIER = re.compile(r"\btier:\s*([SML])\b")
+CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.I)
+
+MERGED_QUERY = """query($owner: String!, $name: String!, $limit: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: MERGED, last: $limit, orderBy: {field: UPDATED_AT, direction: ASC}) {
+      totalCount
+      nodes { number title url body mergedAt
+        labels(first: 20) { nodes { name } }
+        closingIssuesReferences(first: 1) { nodes { number } }
+        reviews(last: 30) { nodes { url body } }
+        comments(last: 50) { nodes { url body } } } } } }"""
+
+ROADMAP_QUERY = """query($owner: String!, $name: String!, $limit: Int!) {
+  repository(owner: $owner, name: $name) {
+    issues(states: OPEN, last: $limit, orderBy: {field: UPDATED_AT, direction: ASC}) {
+      nodes { number title url labels(first: 30) { nodes { name } } subIssuesSummary { total completed } } } } }"""
+
+
+class Unavailable(Exception):
+    pass
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").rstrip("\n")
+    except OSError as e:
+        raise Unavailable(f"cannot read {path}: {e.strerror or e}")
+
+
+def gh_json(root, *args, shape=dict):
+    try:
+        return github.call_json(*args, shape=shape, cwd=root)
+    except github.GhError as e:
+        raise Unavailable(f"gh failed: {e.message}")
+
+
+def repo_vars(root) -> list:
+    repo = gh_json(root, "repo", "view", "--json", "owner,name")
+    try:
+        return ["-F", f"owner={repo['owner']['login']}", "-F", f"name={repo['name']}"]
+    except (KeyError, TypeError):
+        raise Unavailable("gh returned an unexpected reply (repo)")
+
+
+def graphql(root, query, limit, repo):
+    return gh_json(root, "api", "graphql", "-F", f"limit={limit}", *repo, "-f", f"query={query}")
+
+
+def nodes_of(data, key, *path):
+    try:
+        node = data["data"]["repository"][key]
+        for p in path:
+            node = node[p]
+        return node
+    except (KeyError, TypeError):
+        raise Unavailable("gh returned an unexpected reply")
+
+
+def age(created, now) -> str:
+    t = session.parse_ts(created)
+    if t is None:
+        return "age unknown"
+    secs = max(0, int((now - t).total_seconds()))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{secs // size}{unit}"
+    return "0m"
+
+
+def section_adrs(root) -> list:
+    files = sorted((root / "docs" / "adr").glob("[0-9][0-9][0-9][0-9]-*.md"))
+    if not files:
+        raise Unavailable("no ADRs under docs/adr")
+    lines = []
+    for f in files:
+        text = read_text(f)
+        title = next((m.group(1) for m in re.finditer(r"^#\s+(.+?)\s*$", text, re.M)), f.stem)
+        m = re.search(r"^\**Status:?\**:?\s*(.+?)\s*$", text, re.M | re.I)
+        if m is None:
+            m = re.search(r"^##\s+Status\s*\n+\s*(.+?)\s*$", text, re.M | re.I)
+        lines.append(f"{f.name[:4]} {title} [{m.group(1) if m else 'status not stated'}]")
+    return lines
+
+
+def section_tickets(root, now) -> list:
+    lines = []
+    for label in ("needs-lead", "lead"):
+        issues = gh_json(root, "issue", "list", "--state", "open", "--label", label, "--limit", "100",
+                         "--json", "number,title,url,createdAt", shape=list)
+        for i in sorted(issues, key=lambda i: i.get("number", 0)):
+            try:
+                lines.append(f"[{label}] #{i['number']} {i['title']} {i['url']} ({age(i.get('createdAt'), now)})")
+            except KeyError:
+                raise Unavailable("gh returned an unexpected reply (issues)")
+    return lines or ["none"]
+
+
+def section_roadmap(root, repo) -> list:
+    issues = nodes_of(graphql(root, ROADMAP_QUERY, ROADMAP_LIMIT, repo), "issues", "nodes")
+    lines = []
+    for i in sorted(issues, key=lambda i: i.get("number", 0)):
+        labels = {x["name"] for x in (i.get("labels") or {}).get("nodes") or []}
+        summary = i.get("subIssuesSummary") or {}
+        total, done = int(summary.get("total") or 0), int(summary.get("completed") or 0)
+        if "wayfinder:map" in labels or total:
+            kind = "map" if "wayfinder:map" in labels else "parent"
+            lines.append(f"[{kind}] #{i['number']} {i['title']} {i['url']} — {total - done} open, {done} closed")
+    return lines or ["none"]
+
+
+def pr_of(node) -> dict:
+    """One merged PR as a plain dict."""
+    refs = ((node.get("closingIssuesReferences") or {}).get("nodes")) or []
+    body = node.get("body") or ""
+    ticket = refs[0]["number"] if refs else (int(CLOSES.search(body).group(1)) if CLOSES.search(body) else None)
+    return {"number": int(node["number"]), "title": node.get("title") or "", "url": node.get("url") or "",
+            "body": body, "merged": session.parse_ts(node.get("mergedAt")), "ticket": ticket,
+            "labels": {x["name"] for x in (node.get("labels") or {}).get("nodes") or []},
+            "reviews": [r for r in (node.get("reviews") or {}).get("nodes") or [] if r.get("body")],
+            "comments": (node.get("comments") or {}).get("nodes") or []}
+
+
+def load_merged(root, repo):
+    data = graphql(root, MERGED_QUERY, MERGED_LIMIT, repo)
+    prs = [pr_of(n) for n in nodes_of(data, "pullRequests", "nodes")]
+    prs = sorted((p for p in prs if p["merged"]), key=lambda p: (p["merged"], p["number"]))
+    return prs, int(nodes_of(data, "pullRequests", "totalCount"))
+
+
+def first_line(text) -> str:
+    return (text or "").lstrip().split("\n", 1)[0].strip()
+
+
+def section_lines(body, heading="## Discovered work") -> list:
+    """Non-blank lines under the heading, up to the next `## ` heading."""
+    out, inside = [], False
+    for line in (body or "").splitlines():
+        if line.startswith("## "):
+            inside = line.strip().lower() == heading.lower()
+        elif inside and line.strip():
+            out.append(line)
+    return out
+
+
+def risk_lines(text) -> list:
+    return [m.group(1).strip() for m in map(RISK_LINE.match, (text or "").splitlines()) if m]
+
+
+def tier_and_notes(pr):
+    """(tier, risk-note lines, link of the review or comment they came from). A posted review states the tier;
+    with an L review that holds no notes, or none posted, the fallback comment is the L-tier record."""
+    for r in reversed(pr["reviews"]):
+        m = TIER.search(first_line(r["body"]))
+        if m:
+            notes = risk_lines(r["body"])
+            if m.group(1) != "L":
+                return m.group(1), [], None
+            if notes:
+                return "L", notes, r.get("url") or "no link"
+            break
+    fallbacks = [c for c in pr["comments"] if first_line(c.get("body")) == RISK_MARKER]
+    if fallbacks:
+        c = fallbacks[-1]
+        return "L", risk_lines(c["body"].split("\n", 1)[-1]), c.get("url") or "no link"
+    label = next((x[5:] for x in pr["labels"] if re.fullmatch(r"size:[SML]", x)), None)
+    return label or "?", [], None
+
+
+def discovered_count(pr) -> int:
+    """Items under `## Discovered work` in the PR body, plus those in the newest review that has the section."""
+    def items(text):  # risk notes may follow the section without a heading of their own
+        return [l for l in section_lines(text) if not RISK_LINE.match(l)]
+    n = len(items(pr["body"]))
+    for r in reversed(pr["reviews"]):
+        found = items(r["body"])
+        if found:
+            return n + len(found)
+    return n
+
+
+def read_watermark(root):
+    """The watermark as a dict, or None when missing or unreadable."""
+    try:
+        data = json.loads((root / WATERMARK).read_text())
+        merged = session.parse_ts(data["merged_at"])
+        return {"pr": int(data["pr"]), "merged": merged, "merges": int(data["merges"])} if merged else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def section_merges(root, repo, now) -> list:
+    prs, _ = load_merged(root, repo)
+    mark = read_watermark(root)
+    lines = []
+    if mark:
+        shown = [p for p in prs if p["merged"] > mark["merged"]]
+        lines.append(f"since PR #{mark['pr']} ({mark['merges']} merges absorbed)")
+    else:
+        since = now - timedelta(days=FALLBACK_DAYS)
+        shown = [p for p in prs if p["merged"] >= since][-FALLBACK_CAP:]
+        lines.append(f"no readable watermark: showing merges from the last {FALLBACK_DAYS} days, at most {FALLBACK_CAP}")
+    for p in shown:
+        tier, notes, link = tier_and_notes(p)
+        ticket = f"#{p['ticket']}" if p["ticket"] else "no ticket"
+        lines.append(f"{p['title']} {p['url']} · {ticket} · tier {tier} · discovered: {discovered_count(p)}")
+        if tier == "L":
+            lines.append(f"  risk notes: {p['title']} {p['url']} · ticket {ticket} · review {link or 'none'}")
+            lines.extend(f"    {n}" for n in notes or ["none found in the review or the fallback comment"])
+    if not shown:
+        lines.append("none")
+    return lines
+
+
+def checkpoint(root, number) -> int:
+    try:
+        prs, total = load_merged(root, repo_vars(root))
+    except Unavailable as e:
+        common.die(f"lead-brief: cannot checkpoint: {e}")
+    pr = next((p for p in prs if p["number"] == number), None)
+    if pr is None:
+        common.die(f"lead-brief: cannot checkpoint: PR #{number} is not among the newest {MERGED_LIMIT} merged PRs")
+    merges = total - sum(1 for p in prs if p["merged"] > pr["merged"])
+    path = root / WATERMARK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".orchestrate-lead-")
+    with os.fdopen(fd, "w") as f:
+        json.dump({"pr": number, "merged_at": pr["merged"].strftime("%Y-%m-%dT%H:%M:%SZ"), "merges": merges}, f)
+    os.replace(tmp, path)
+    print(f"checkpoint: PR #{number}, {merges} merges")
+    return 0
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--repo", default=".", help="repo root; gh runs there and the files are read under it")
+    ap.add_argument("--now", default=None, help="the time now, as ISO 8601 (tests; default: the current time)")
+    ap.add_argument("--checkpoint", type=int, metavar="PR", help="write the watermark: PR is the last one absorbed")
+    args = ap.parse_args(argv)
+    now = datetime.now(timezone.utc) if args.now is None else session.parse_ts(args.now)
+    if now is None:
+        common.die(f"lead-brief: cannot run: --now is not an ISO time: {args.now}")
+    root = Path(args.repo).resolve()
+    if args.checkpoint is not None:
+        return checkpoint(root, args.checkpoint)
+    repo = []
+
+    def with_repo():
+        if not repo:
+            repo.extend(repo_vars(root))
+        return repo
+
+    sections = [
+        ("config", lambda: read_text(root / common.CONFIG).splitlines()),
+        ("tracker", lambda: read_text(root / "docs" / "agents" / "issue-tracker.md").splitlines()),
+        ("glossary", lambda: read_text(root / "GLOSSARY.md").splitlines()),
+        ("adrs", lambda: section_adrs(root)),
+        ("tickets", lambda: section_tickets(root, now)),
+        ("roadmap", lambda: section_roadmap(root, with_repo())),
+        ("merges", lambda: section_merges(root, with_repo(), now)),
+    ]
+    for name, build in sections:
+        print(f"== {name} ==")
+        try:
+            lines = build()
+        except Unavailable as e:
+            lines = [f"unavailable: {e}"]
+        except (KeyError, TypeError, ValueError) as e:
+            lines = [f"unavailable: unexpected reply ({e.__class__.__name__})"]
+        for line in lines:
+            print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -117,13 +117,16 @@ A lead session can sit above the orchestrator to answer its questions and triage
 - **ADR conflicts.** A worker in lead mode reports an ADR conflict and never writes ADRs. The ticket gets `needs-lead` with a comment holding the conflict and the PR link, and the PR is held before merge while CI, gate and review still run, with no time limit. When the lead removes `needs-lead`, the PR merges. With no lead, the hold becomes a question to you in the pass report.
 - **Discovered work.** The orchestrator forwards each `discovered:` line from a worker or reviewer report to the lead, with the PR URL and gists, and creates, labels and dedupes nothing itself.
 - **Lead tickets and PRs.** A ticket labelled `lead` is the lead's own work: `run` never dispatches it, and it holds no slot. Once the lead opens the PR that closes it, that PR goes through the same pipeline as any other: CI, gate, review and merge, merged by the orchestrator. A failure on it (CI, gate, review or a hand-back) goes to the lead. If the lead can't be reached, the ticket shows as waiting on the lead (not delivered), and the next pass sends the failure again, once per head commit.
+- **Risk notes.** An L-tier review puts its risk notes (`path:line-range — what to look at`) in the posted review. When the review wasn't posted, `run` posts them as one PR comment starting `> *Risk notes (review not posted).*` before the merge, lead mode or not; with no lead, the end-of-run summary lists them too.
+- **Start-up index.** `scripts/lead-brief` prints, in one call and in fixed order: the config, the tracker docs, the full glossary, an ADR index, open `needs-lead` then `lead` tickets, the roadmap (open `wayfinder:map` issues and open parents, with sub-issue counts) and the PRs merged since the watermark, each L-tier merge followed by its risk notes word for word. A section it can't read prints `unavailable: <why>` and the rest still prints. `--checkpoint <pr>` writes the watermark (`.claude/orchestrate-lead.json`, written by this script only), so a new or compacted lead resumes there; with no readable watermark it shows the last 7 days of merges, at most 20, and says so.
 - **Questions for you.** Third review rounds and `ready-for-human` tickets reach you through the lead, which relays them without deciding them.
 
 ```
 scripts/lead-route --lead live|none --cap <n> [--repo .] [--state FILE] [--now ISO]
+scripts/lead-brief [--repo .] [--now ISO] [--checkpoint <pr>]
 ```
 
-It is run by the orchestrator each pass. Its `--now` is for tests.
+`lead-route` is run by the orchestrator each pass, `lead-brief` by the lead at start-up and after a compaction. Their `--now` is for tests.
 
 ## Profiling
 
