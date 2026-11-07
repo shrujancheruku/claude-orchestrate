@@ -527,10 +527,14 @@ def graphql_refusal(args: list) -> str | None:
     text = q.text[len("query="):]
     if q.dynamic:
         return "writes through the GitHub API (graphql query the guard can't read: it holds an expansion)"
+    if any(f.text.partition("=")[2].startswith("@") for f in scan.fields):  # -F name=@file sends a local file
+        return "writes through the GitHub API (graphql field read from a file or stdin)"
     if text.startswith("@"):
         return "writes through the GitHub API (graphql query read from a file or stdin)"
     bare = "\n".join(line.split("#", 1)[0] for line in text.splitlines()).strip()
-    if re.search(r"\b(mutation|subscription)\b", bare):
+    # Search the unstripped text: a `#` inside a string literal isn't a comment, and stripping it would hide
+    # a later `mutation` (picked by operationName). A comment naming the word is refused too, on purpose.
+    if re.search(r"\b(mutation|subscription)\b", text):
         return "writes through the GitHub API (graphql mutation or subscription)"
     if not (bare.startswith("{") or re.match(r"query\b", bare)):
         return "writes through the GitHub API (graphql query the guard can't read as a query)"

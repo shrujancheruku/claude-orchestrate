@@ -537,3 +537,6 @@
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query=\"$Q\"", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query=\"query { $(cat x) }\"", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -F owner=o", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a(s: \"#\") } mutation { x }' -f operationName=B", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a(s: \"\"\"#\"\"\") } mutation { x }'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a }' -F x=@/etc/passwd", "expected": "deny", "source": "hand"}
