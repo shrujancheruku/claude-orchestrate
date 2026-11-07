@@ -4,14 +4,18 @@ Also the prompt side: setup offers the board and writes the `Board:` line, and `
 """
 
 import json
+import os
 import re
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, git  # noqa: E402
+
+import common  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 URL = "https://github.com/orgs/acme/projects/7"
@@ -38,6 +42,13 @@ def card(n, stage=None, item="I"):
 
 def out(data):
     return {"stdout": json.dumps(data)}
+
+
+def live_reason():
+    """A harness-format lock reason for this running process (its pid and start time), so the lock is live."""
+    start = common.process_start(os.getpid())
+    shown = start.astimezone(timezone.utc).strftime("%a %b %e %H:%M:%S %Y")
+    return f"claude agent agent-abc (pid {os.getpid()} start {shown})"
 
 
 class Board(unittest.TestCase):
@@ -87,7 +98,7 @@ class Board(unittest.TestCase):
         self.config()
         self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True), ticket(3, ["needs-lead"], True),
                          ticket(4, ["ready-for-human"]), ticket(5, ["needs-info"], True), ticket(6)],
-                prs=[{"headRefName": "2-thing", "state": "OPEN", "mergedAt": None}],
+                prs=[{"number": 12, "headRefName": "2-thing", "state": "OPEN", "mergedAt": None}],
                 cards=[card(1), card(2), card(3), card(4), card(5)])
         r = self.env.run("board", check=False)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
@@ -102,10 +113,22 @@ class Board(unittest.TestCase):
         self.assertEqual([c[c.index("--url") + 1] for c in adds], ["https://github.com/acme/r/issues/1"])
         self.assertEqual(self.edits(), {"NEW": "Building"})
 
+    def test_an_elsewhere_claim_and_a_stalled_claim_both_stage_as_building(self):
+        self.config()
+        wt_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(wt_dir.cleanup)
+        path = Path(wt_dir.name) / "5-widget"
+        git(self.env.repo, "worktree", "add", "-b", "5-widget", str(path))
+        git(self.env.repo, "worktree", "lock", "--reason", live_reason(), str(path))  # live lock: elsewhere
+        self.gh(tickets=[ticket(5, claimed=True), ticket(6, claimed=True)],
+                cards=[card(5, "In review"), card(6, "In review")])  # no record, no PR: 6 is stalled
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual(self.edits(), {"I5": "Building", "I6": "Building"})
+
     def test_a_second_run_changes_nothing(self):
         self.config()
         self.gh(tickets=[ticket(1, claimed=True), ticket(3, ["needs-lead"], True)],
-                prs=[{"headRefName": "1-x", "state": "OPEN", "mergedAt": None}],
+                prs=[{"number": 11, "headRefName": "1-x", "state": "OPEN", "mergedAt": None}],
                 cards=[card(1, "In review"), card(3, "Needs lead"), card(9, "Done")])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
         self.assertEqual(self.writes(), [])
