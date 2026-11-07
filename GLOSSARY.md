@@ -54,6 +54,10 @@ _Avoid_: stuck, orphaned, abandoned
 A claimed ticket with no PR whose worker belongs to another live session. This session doesn't resume, rescue or redispatch it. Source: `skills/run/SKILL.md`.
 _Avoid_: foreign, orphaned
 
+**Rescue**:
+Saving a worktree's work to its branch and removing the worktree, so nothing is lost when its worker is replaced or stopped: a **Stalled** ticket before a new worker continues the branch, or a worker this session stopped. It refuses an **Elsewhere** ticket's worktree, and a held path among the saved changes holds the redispatch, never the save. `scripts/rescue` is the one source. Source: `scripts/rescue`, `skills/run/SKILL.md`.
+_Avoid_: cleanup, salvage, sweep (that is the merge's)
+
 **In review**:
 A claimed ticket whose PR is open. Source: `skills/run/SKILL.md`.
 _Avoid_: under review, open
