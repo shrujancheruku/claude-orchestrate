@@ -152,7 +152,9 @@ CI_PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUES
 def ci_verdict(checks) -> tuple:
     """("pass" | "pending" | "failed", [names of the checks that decide it]) from a statusCheckRollup list.
 
-    A PR with no checks at all is pending, as `watch-ci` counts it. A failed check outranks a pending one."""
+    A PR with no checks at all is pending, as `watch-ci` counts it (so a repo with no CI never passes). Unlike
+    `watch-ci`, which waits while any check is pending, a failed check outranks a pending one here, so a
+    refusal names the real reason."""
     if not checks:
         return "pending", []
     bad, pending = [], []

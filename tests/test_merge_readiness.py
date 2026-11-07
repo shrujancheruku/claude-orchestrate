@@ -48,7 +48,7 @@ class ReadinessTest(unittest.TestCase):
         self.env.set_gh([
             {"args": ["pr", "view"], "seq": [view, merged]},
             {"args": ["repo", "view"], "stdout": '{"defaultBranchRef":{"name":"main"}}'},
-            {"args": ["api", "repos/{owner}/{repo}/compare/main...feat-br", "--jq", ".behind_by"],
+            {"args": ["api", f"repos/{{owner}}/{{repo}}/compare/main...{branch}", "--jq", ".behind_by"],
              "stdout": behind + "\n"},
             {"args": ["api", f"repos/{{owner}}/{{repo}}/issues/{ticket}", "--jq", ".issue_dependencies_summary.blocked_by"],
              "stdout": blockers},
@@ -161,10 +161,28 @@ class ReadinessTest(unittest.TestCase):
                           {"name": "n", "status": "COMPLETED", "conclusion": "NEUTRAL"}]
         self.assertEqual(self.merge(head, checks=checks).returncode, 0)
 
-    def test_open_blocker_on_the_branch_ticket_refuses(self):
+    def test_open_blocker_on_the_closing_reference_refuses(self):
         head = self.push({"b.txt": "x\n"})
-        p = self.merge(head, branch="feat-br", closing=[9], blockers="2\n")
+        p = self.merge(head, closing=[9], blockers="2\n")
         self.refused(p, "ticket #9 has 2 open blocker(s)")
+
+    def test_open_blocker_on_the_branch_number_refuses(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, branch="9-feat", blockers="1\n")
+        self.refused(p, "ticket #9 has 1 open blocker(s)")
+
+    def test_branch_number_wins_over_a_closing_reference(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, branch="9-feat", closing=[4], blockers="1\n")
+        self.refused(p, "ticket #9")
+        self.assertEqual([c for c in self.env.gh_calls() if "issues/4" in " ".join(c)], [])
+
+    def test_unreadable_blockers_exit_2_and_merge_nothing(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, closing=[9], blockers="lots\n")
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("blockers of #9", p.stdout + p.stderr)
+        self.assertEqual(self.called(["pr", "merge"]), [])
 
     def test_closed_blockers_pass(self):
         head = self.push({"b.txt": "x\n"})
