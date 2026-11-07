@@ -536,10 +536,29 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(decide("orchestrate:worker", command), "allow")
                 self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
                 self.assertEqual(decide(None, command, background=True), "allow")
+
+    def test_any_worker_command_in_the_background_is_refused(self):
+        # #259: a worker has no command that needs the background; a left-over job wakes it to hand back again.
         for command in ("scripts/watch-ci 12", "sleep 5", "python3 scripts/verify.py", "grep -n x scripts/verify",
-                        "git commit -m 'tweak scripts/verify'"):
+                        "gh run watch 123", "ls"):
             with self.subTest(command=command):
-                self.assertEqual(decide("orchestrate:worker", command, background=True), "allow")
+                self.assertEqual(decide("orchestrate:worker", command, background=True), "deny")
+                self.assertEqual(decide("orchestrate:worker", command, background=False), "allow")
+                self.assertEqual(decide("orchestrate:worker", command), "allow")
+                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
+                self.assertEqual(decide("orchestrate:scout", command, background=True), "allow")
+                self.assertEqual(decide(None, command, background=True), "allow")
+
+    def test_other_worker_rules_still_apply_in_the_foreground_and_background(self):
+        self.assertEqual(decide("orchestrate:worker", "gh pr merge 5", background=False), "deny")
+        self.assertEqual(decide("orchestrate:worker", "gh pr merge 5", background=True), "deny")
+
+    def test_background_refusal_says_foreground_and_wait(self):
+        reason = self.run_guard({"agent_type": "orchestrate:worker",
+                                 "tool_input": {"command": "gh run watch 1", "run_in_background": True}})
+        self.assertIn("foreground", reason)
+        self.assertIn("wait", reason)
+        self.assertNotIn("verify", reason)
 
     def test_verify_refusal_says_foreground_and_wait(self):
         reason = self.run_guard({"agent_type": "orchestrate:worker",
