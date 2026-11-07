@@ -9,7 +9,7 @@ import unittest
 from datetime import timedelta, timezone
 from pathlib import Path
 
-from harness import ScriptEnv, git
+from harness import ScriptEnv, gh_default_branch, gh_pr_list, git
 
 import common
 
@@ -54,8 +54,8 @@ class Holds(unittest.TestCase):
         prs, branches = prs or {}, branches or {}
         listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": False} for n in prs]
         responses = [
-            {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": "main"}})},
-            {"args": ["pr", "list", "--state", "open"], "stdout": json.dumps(listing)},
+            gh_default_branch(),
+            gh_pr_list(listing, "--state", "open"),
         ]
         for n, files in prs.items():
             responses.append({"args": ["pr", "view", str(n), "--json", "files"],
@@ -165,7 +165,7 @@ class Holds(unittest.TestCase):
     def test_ticket_check_gh_failure_could_not_run(self):
         self.state({12: ["a.py"]})
         self.env.set_gh([
-            {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": "main"}})},
+            gh_default_branch(),
             {"args": ["pr", "list"], "stdout": "[]"},
             {"args": ["issue", "view"], "stderr": "HTTP 502\n", "exit": 1}])
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
@@ -294,7 +294,7 @@ class Holds(unittest.TestCase):
 
     def test_claim_check_gh_failure_could_not_run(self):
         self.env.set_gh([
-            {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": "main"}})},
+            gh_default_branch(),
             {"args": ["pr", "list"], "stdout": "[]"},
             {"args": ["issue", "view", "12"], "stderr": "HTTP 502\n", "exit": 1},
             {"args": ["issue", "view"], "stdout": json.dumps({"state": "OPEN", "assignees": []})}])
