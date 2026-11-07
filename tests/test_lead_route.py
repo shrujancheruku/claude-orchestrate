@@ -44,14 +44,16 @@ class LeadRoute(unittest.TestCase):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def serve(self, issues=(), gh_exit=0):
+    def serve(self, issues=(), gh_exit=0, open_branches=()):
         if gh_exit:
             graphql = {"args": ["api", "graphql"], "stderr": "HTTP 500", "exit": gh_exit}
         else:
             body = {"data": {"repository": {"issues": {"nodes": list(issues)}}}}
             graphql = {"args": ["api", "graphql"], "stdout": json.dumps(body)}
+        prs = [{"headRefName": b} for b in open_branches]
         self.env.set_gh([{"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
-                         graphql])
+                         graphql,
+                         {"args": ["pr", "list"], "stdout": json.dumps(prs)}])
 
     def state(self, tickets):
         path = self.env.repo / ".claude" / "orchestrate-state.json"
@@ -109,6 +111,15 @@ class LeadRoute(unittest.TestCase):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
         self.state({})
         self.assertEqual(self.route(), (0, ["REDISPATCH #1", "counted: 1 of 2"]))
+
+    def test_no_redispatch_when_the_ticket_already_has_an_open_pr(self):
+        # A finished worker from an earlier session is not in this session's state file, but its PR is open.
+        self.serve([issue(1, claimed=True, comments=[stop(10)])], open_branches=["1-widget"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["counted: 1 of 2"]))
+        self.serve([issue(1, claimed=True, comments=[stop(10)])], open_branches=["10-other"])
+        self.state({})
+        self.assertEqual(self.route()[1][0], "REDISPATCH #1")
 
     def test_fallback_hands_a_needs_lead_ticket_back_when_the_lead_is_gone(self):
         self.serve([issue(1, labels=["needs-lead", "ready-for-agent"], claimed=True, comments=[stop(10)])])

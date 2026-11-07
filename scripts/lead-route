@@ -7,7 +7,7 @@ per pass, after reconcile, and the orchestrator applies each line word for word.
 whose first line is the marker `> *Stopped for the lead.*`. Verdicts, in ticket order:
     RESUME #<n> <agent-id>   claimed, no needs-lead, a worker in the state file, stop comment newer than its last report
     ESCALATE #<n>            a RESUME on a haiku worker, where the body or an `## Agent Brief` comment changed after the stop
-    REDISPATCH #<n>          a claimed ticket with a stop comment and no worker in the state file
+    REDISPATCH #<n>          a claimed ticket with a stop comment, no worker in the state file, and no open PR
     FALLBACK #<n>            needs-lead with --lead none: the lead is gone; the ticket is handed back
     UNCAP #<n>               needs-lead, claimed, live lead, stop comment more than 30 minutes old
 Last line, always: `counted: <k> of <cap>`, where k is the claimed open tickets that still hold a slot
@@ -20,6 +20,7 @@ Stdlib only, Python 3.9+.
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -82,6 +83,21 @@ def load_issues(root):
     return issues
 
 
+BRANCH_TICKET = re.compile(r"(\d+)-")  # the branch convention `<number>-<slug>`
+
+
+def load_open_pr_tickets(root):
+    """Ticket numbers that an open PR's branch names. A worker with a PR is not missing: its PR is the record."""
+    prs = github.call_json("pr", "list", "--state", "open", "--limit", "200", "--json", "headRefName",
+                           shape=list, cwd=root)
+    found = set()
+    for pr in prs:
+        m = BRANCH_TICKET.match(str((pr or {}).get("headRefName") or ""))
+        if m:
+            found.add(int(m.group(1)))
+    return found
+
+
 def load_state(path):
     """{ticket number as str: worker record}; a missing file is no workers, an unreadable one is could-not-run."""
     try:
@@ -109,7 +125,7 @@ def changed_after(issue, since) -> bool:
                and (c["created"] > since or any(t > since for t in c["edits"])) for c in issue["comments"])
 
 
-def route(issues, state, lead, cap, now):
+def route(issues, state, lead, cap, now, open_prs=frozenset()):
     """The verdict lines, then the counted line."""
     lines, claimed, freed = [], set(), set()
     for issue in sorted(issues, key=lambda i: i["number"]):
@@ -130,7 +146,10 @@ def route(issues, state, lead, cap, now):
             continue
         worker = state.get(str(n))
         if not isinstance(worker, dict) or not worker.get("agent_id"):
-            lines.append(f"REDISPATCH #{n}")
+            # A state file is per session, so an earlier session's finished worker is missing from it. Its open
+            # PR shows it did its work; redispatching would start a second worker on that branch.
+            if n not in open_prs:
+                lines.append(f"REDISPATCH #{n}")
             continue
         last = session.parse_ts(worker.get("last_report"))
         if last is None or since <= last:
@@ -161,9 +180,10 @@ def main(argv=None) -> int:
     state = load_state(state_path)
     try:
         issues = load_issues(root)
+        open_prs = load_open_pr_tickets(root)
     except github.GhError as e:
         common.die(f"lead-route: cannot run: gh failed: {e.message}")
-    for line in route(issues, state, args.lead, args.cap, now):
+    for line in route(issues, state, args.lead, args.cap, now, open_prs):
         print(line)
     return 0
 

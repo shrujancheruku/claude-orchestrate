@@ -182,6 +182,6 @@ Put these to the user and wait; they are theirs to decide:
 - A PR that contradicts an ADR without saying why the ADR is being reopened.
 - A third review round.
 - A parent whose sub-issues have all closed.
+- Anything destructive or outward-facing the config doesn't already authorise.
 
 In lead mode, a direct ask to the developer (a third review round, a `ready-for-human` ticket, a gate from the config) goes to the lead by SendMessage, which relays it without deciding it; the developer still decides. A held or refused message is not delivered: put the ask to the developer yourself.
-- Anything destructive or outward-facing the config doesn't already authorise.
