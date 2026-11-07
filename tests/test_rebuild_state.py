@@ -122,13 +122,13 @@ class RebuildState(unittest.TestCase):
         self.assertIsNone(state["tickets"]["5"]["worktree"])
 
     def test_touch_map_is_read_from_the_brief_as_written(self):
-        brief = ("Build #5.\nTouch map: scripts/a.py:10, scripts/b.py:20 (the join). A prediction, not a fence.\n"
+        brief = ("Build #5.\nTouch map: scripts/a.py:10, scripts/b.py:20 (the join, twice). A prediction, not a fence.\n"
                  "Branch: 5-slug. If it exists on the remote, continue from it.")
         self.main_records += [dispatch("t1", "Build #5", prompt=brief), dispatch("t2", "Build #6", prompt="no brief")]
         self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z")])
         self.agent("a2", "t2", [reply("2026-11-04T09:01:00Z")])
         _, state = self.rebuild()
-        self.assertEqual(state["tickets"]["5"]["touch_map"], ["scripts/a.py:10", "scripts/b.py:20 (the join)"])
+        self.assertEqual(state["tickets"]["5"]["touch_map"], ["scripts/a.py:10", "scripts/b.py:20 (the join, twice)"])
         self.assertEqual(state["tickets"]["6"]["touch_map"], [])
 
     def test_latest_dispatch_for_a_ticket_wins(self):
