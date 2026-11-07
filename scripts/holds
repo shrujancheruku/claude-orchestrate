@@ -30,12 +30,13 @@ import config
 import github
 from repo import STATE, ticket_of_branch, worktree_changes
 
+NOTE_SUFFIX = re.compile(r"\s*\([^()]*\)$")
 LINE_SUFFIX = re.compile(r":\d+(?:[-–,]\d+)*$")
 
 
 def plain(entry: str) -> str:
-    """A touch-map entry as a file path: no `:line` or line range, no leading `./`."""
-    path = LINE_SUFFIX.sub("", entry.strip().strip("`"))
+    """A touch-map entry as a file path: no trailing `(note)`, no `:line` or line range, no leading `./`."""
+    path = LINE_SUFFIX.sub("", NOTE_SUFFIX.sub("", entry.strip().strip("`")))
     return path[2:] if path.startswith("./") else path
 
 

@@ -250,7 +250,17 @@ def branch_of(prompt) -> str | None:
 
 
 def touch_map(prompt) -> list:
-    """The entries of a brief's `Touch map:` line as written, split on commas or semicolons; [] when there is none or it says `none`."""
+    """The entries of a brief's `Touch map:` line as written, split on commas or semicolons outside parentheses; [] when there is none or it says `none`."""
     value = brief_field(prompt, "Touch map")
-    entries = [entry.strip() for entry in re.split(r"[,;]", value or "")]
+    # Split only at separators outside parentheses: a note like `(main, new checks)` stays in its entry.
+    entries, depth, current = [], 0, ""
+    for ch in value or "":
+        if ch in ",;" and depth == 0:
+            entries.append(current)
+            current = ""
+            continue
+        depth = max(0, depth + (ch == "(") - (ch == ")"))
+        current += ch
+    entries.append(current)
+    entries = [entry.strip() for entry in entries]
     return [entry for entry in entries if entry and entry.lower() != "none"]
