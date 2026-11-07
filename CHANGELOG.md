@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.8.0](https://github.com/shrujancheruku/claude-orchestrate/compare/v0.7.0...v0.8.0) (2026-11-07)
+
+
+### Features
+
+* **board:** opt-in Projects board made by setup and synced every pass ([#244](https://github.com/shrujancheruku/claude-orchestrate/issues/244)) ([4986dff](https://github.com/shrujancheruku/claude-orchestrate/commit/4986dff5323fee971aca4439bc49c2f144eded58))
+* **ci-times:** measure CI wait on merged PRs with an over-limit verdict ([#221](https://github.com/shrujancheruku/claude-orchestrate/issues/221)) ([d808984](https://github.com/shrujancheruku/claude-orchestrate/commit/d808984a9648f14ed41394a595b0ef747abcffe8))
+* **gate:** the gate is the one check before review: overlap, dependencies, secrets and lockfiles, on a named head ([#306](https://github.com/shrujancheruku/claude-orchestrate/issues/306)) ([ece7fd0](https://github.com/shrujancheruku/claude-orchestrate/commit/ece7fd0243d3a88b503939ded8a141d54569e6c6))
+* **lead-brief:** risk-note fallback comment and the lead's start-up index ([#233](https://github.com/shrujancheruku/claude-orchestrate/issues/233)) ([1c7dd3d](https://github.com/shrujancheruku/claude-orchestrate/commit/1c7dd3d631afdef6706c92f67b41f5c746d5dc73))
+* **lead:** lead skill moves for stops, triage, risk notes, CI, publishing and decision PRs ([#245](https://github.com/shrujancheruku/claude-orchestrate/issues/245)) ([918492c](https://github.com/shrujancheruku/claude-orchestrate/commit/918492cd7ce1e775552c885aedb2e529ada67ffe))
+* **lead:** lead skill start-up finds, launches or resumes the orchestrator ([#242](https://github.com/shrujancheruku/claude-orchestrate/issues/242)) ([d777440](https://github.com/shrujancheruku/claude-orchestrate/commit/d777440f44cc6e5050b4892f0271d7af71df36cd))
+* **lead:** needs-lead and lead labels, glossary, lead ADR and Orchestrator model row ([#218](https://github.com/shrujancheruku/claude-orchestrate/issues/218)) ([49ec072](https://github.com/shrujancheruku/claude-orchestrate/commit/49ec07228880841163c39d41f40487052357b23d))
+* **run:** a claims script decides each claimed ticket's state, and worker-live goes ([#302](https://github.com/shrujancheruku/claude-orchestrate/issues/302)) ([f44bd38](https://github.com/shrujancheruku/claude-orchestrate/commit/f44bd38925480197cb979715f7777f8a3c095d6b))
+* **run:** a frontier script decides the takeable tickets from one paginated tracker snapshot ([#310](https://github.com/shrujancheruku/claude-orchestrate/issues/310)) ([f07136f](https://github.com/shrujancheruku/claude-orchestrate/commit/f07136f92b9edd3f9d3ae250f4b90052a705ac62))
+* **run:** detect a live lead and route stops through lead-route ([#223](https://github.com/shrujancheruku/claude-orchestrate/issues/223)) ([c55a678](https://github.com/shrujancheruku/claude-orchestrate/commit/c55a6785636e6709cb25c7ca3897104e65e85a06))
+* **run:** lead tickets and lead PRs join the pipeline ([#228](https://github.com/shrujancheruku/claude-orchestrate/issues/228)) ([ff650cc](https://github.com/shrujancheruku/claude-orchestrate/commit/ff650cc6927f3717a045b6da2818e8961be1d62f))
+* **run:** lead-route hands back split tickets, abandons wontfix, holds ADR-conflict PRs ([#225](https://github.com/shrujancheruku/claude-orchestrate/issues/225)) ([3467740](https://github.com/shrujancheruku/claude-orchestrate/commit/3467740a6a7054333fb76bd27f6f7d02def66b14))
+* **run:** worker-report classifies every worker completion before the orchestrator acts ([#295](https://github.com/shrujancheruku/claude-orchestrate/issues/295)) ([3f38738](https://github.com/shrujancheruku/claude-orchestrate/commit/3f38738bfa9ebb6db650c7ef6083cc89006f497f))
+* **worker,reviewer:** record discovered work on PRs and reviews ([#222](https://github.com/shrujancheruku/claude-orchestrate/issues/222)) ([6a239a1](https://github.com/shrujancheruku/claude-orchestrate/commit/6a239a108eb56c586689a599a64f9ad15ba2e66a))
+
+
+### Bug Fixes
+
+* **gate:** pass a branch that is behind but mergeable, leaving the update to merge ([#251](https://github.com/shrujancheruku/claude-orchestrate/issues/251)) ([67c1895](https://github.com/shrujancheruku/claude-orchestrate/commit/67c18959fbeb982cb9e0b45391e52f80e89cdcb7))
+* **guard:** a worker may not background any Bash command ([#300](https://github.com/shrujancheruku/claude-orchestrate/issues/300)) ([971f348](https://github.com/shrujancheruku/claude-orchestrate/commit/971f348b54008afbec7fcb76248c9434c334da00))
+* **guard:** allow read-only gh api graphql queries, refuse mutations ([#290](https://github.com/shrujancheruku/claude-orchestrate/issues/290)) ([a083811](https://github.com/shrujancheruku/claude-orchestrate/commit/a083811acf46f20d00aad422d0791dcde3c477fc))
+* **holds:** a merged or closed ticket's touch map no longer counts as building ([#234](https://github.com/shrujancheruku/claude-orchestrate/issues/234)) ([46d0f97](https://github.com/shrujancheruku/claude-orchestrate/commit/46d0f970c803935c403f79e1615332dabc6f1303))
+* **holds:** hold the changes of an Elsewhere ticket's live worktree ([#252](https://github.com/shrujancheruku/claude-orchestrate/issues/252)) ([03dbce4](https://github.com/shrujancheruku/claude-orchestrate/commit/03dbce4c0cc392a2eab43ccceddaf245e7f9febc))
+* **lead-route:** hold REDISPATCH while another session's worker is live, and rescue the old worktree first ([#249](https://github.com/shrujancheruku/claude-orchestrate/issues/249)) ([95ba98e](https://github.com/shrujancheruku/claude-orchestrate/commit/95ba98e1021f5b7d34bd998be3996b8dd6c4f0a0))
+* **merge:** unlock and remove a harness-locked worktree after the merge ([#254](https://github.com/shrujancheruku/claude-orchestrate/issues/254)) ([c26220a](https://github.com/shrujancheruku/claude-orchestrate/commit/c26220a207007f122a94c60e1cd2c74b22392220))
+* **profile:** a pass logged after the last record sets the slot count ([#232](https://github.com/shrujancheruku/claude-orchestrate/issues/232)) ([708bd57](https://github.com/shrujancheruku/claude-orchestrate/commit/708bd57fc735a35b5c75453cc36419a830b96bdf))
+* **worker:** refuse backgrounded verify, treat status-less hand-backs as interim ([#246](https://github.com/shrujancheruku/claude-orchestrate/issues/246)) ([3df0247](https://github.com/shrujancheruku/claude-orchestrate/commit/3df0247a0ed69d1b94f6891f2719a61f3f6fca17))
+
+
+### Performance Improvements
+
+* **tests:** copy a per-process ScriptEnv template and add canned gh reply helpers ([#297](https://github.com/shrujancheruku/claude-orchestrate/issues/297)) ([282a0ed](https://github.com/shrujancheruku/claude-orchestrate/commit/282a0ed9f02191f8d67f45b1a0ce59167076e2ed))
+* **tests:** guard tests call the rules in-process, with one subprocess test for the entry point ([#296](https://github.com/shrujancheruku/claude-orchestrate/issues/296)) ([334767e](https://github.com/shrujancheruku/claude-orchestrate/commit/334767e6425c3be6d23ad51458652029749d73f9))
+* **tests:** split test_merge into four modules so no one module bounds the parallel run ([#298](https://github.com/shrujancheruku/claude-orchestrate/issues/298)) ([6608342](https://github.com/shrujancheruku/claude-orchestrate/commit/6608342b0f29105c00d93a30c3de47d16e794009))
+* **verify:** run test modules in parallel with a stdlib runner ([#291](https://github.com/shrujancheruku/claude-orchestrate/issues/291)) ([325026a](https://github.com/shrujancheruku/claude-orchestrate/commit/325026a999a7cedb51dc1dd18a4d07a79eadb4f2))
+
 ## [0.7.0](https://github.com/shrujancheruku/claude-orchestrate/compare/v0.6.0...v0.7.0) (2026-11-05)
 
 
