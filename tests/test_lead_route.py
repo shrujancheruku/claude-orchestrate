@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "run" / "SKILL.md"
 T0 = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
 MARKER = "> *Stopped for the lead.*"
+ADR_MARKER = "> *ADR conflict held for the lead.*"
 
 
 def iso(minutes):
@@ -27,8 +28,9 @@ def comment(minutes, body, edits=()):
     return {"body": body, "createdAt": iso(minutes), "userContentEdits": {"nodes": [{"editedAt": iso(e)} for e in edits]}}
 
 
-def issue(number, labels=(), claimed=False, comments=(), body_edits=()):
+def issue(number, labels=(), claimed=False, comments=(), body_edits=(), blocked_by=()):
     return {"number": number,
+            "blockedBy": {"nodes": [{"number": b, "state": st} for b, st in blocked_by]},
             "labels": {"nodes": [{"name": name} for name in labels]},
             "assignees": {"totalCount": 1 if claimed else 0},
             "userContentEdits": {"nodes": [{"editedAt": iso(e)} for e in body_edits]},
@@ -44,16 +46,19 @@ class LeadRoute(unittest.TestCase):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def serve(self, issues=(), gh_exit=0, open_branches=()):
+    def serve(self, issues=(), gh_exit=0, open_branches=(), wontfix=()):
         if gh_exit:
             graphql = {"args": ["api", "graphql"], "stderr": "HTTP 500", "exit": gh_exit}
         else:
             body = {"data": {"repository": {"issues": {"nodes": list(issues)}}}}
-            graphql = {"args": ["api", "graphql"], "stdout": json.dumps(body)}
-        prs = [{"headRefName": b} for b in open_branches]
-        self.env.set_gh([{"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
-                         graphql,
-                         {"args": ["pr", "list"], "stdout": json.dumps(prs)}])
+            closed = {"data": {"repository": {"issues": {"nodes": [
+                {"number": n, "assignees": {"totalCount": a}} for n, a in wontfix]}}}}
+            graphql = {"args": ["api", "graphql"], "seq": [{"stdout": json.dumps(body)}, {"stdout": json.dumps(closed)}]}
+        prs = [{"headRefName": b, "number": 100 + i} for i, b in enumerate(open_branches)]
+        self.responses = [{"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
+                          graphql,
+                          {"args": ["pr", "list"], "stdout": json.dumps(prs)}]
+        self.env.set_gh(self.responses)
 
     def state(self, tickets):
         path = self.env.repo / ".claude" / "orchestrate-state.json"
@@ -64,6 +69,7 @@ class LeadRoute(unittest.TestCase):
         return {"agent_id": agent, "worktree": None, "model": model, "last_report": iso(last), "touch_map": []}
 
     def route(self, lead="live", cap=2, now=60):
+        self.env.set_gh(self.responses)  # the graphql reply is a sequence: start it over for each run
         r = self.env.run("lead-route", "--lead", lead, "--cap", str(cap), "--now", iso(now), check=False)
         return r.returncode, r.stdout.splitlines()
 
@@ -142,6 +148,39 @@ class LeadRoute(unittest.TestCase):
         self.state({})
         self.assertEqual(self.route(), (0, ["counted: 0 of 2"]))
 
+    def test_handback_a_claimed_ticket_with_an_open_blocker(self):
+        self.serve([issue(1, claimed=True, blocked_by=[(7, "OPEN"), (8, "CLOSED")]), issue(2, claimed=True)])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["HANDBACK #1 blocked-by #7", "counted: 1 of 2"]))
+
+    def test_no_handback_when_every_blocker_is_closed(self):
+        self.serve([issue(1, claimed=True, blocked_by=[(8, "CLOSED")])])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["counted: 1 of 2"]))
+
+    def test_abandon_a_wontfix_close_that_is_still_assigned(self):
+        self.serve([], wontfix=[(4, 1), (5, 0)])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["ABANDON #4", "counted: 0 of 2"]))
+
+    def test_hold_pr_for_an_adr_conflict_with_a_live_lead_at_any_age(self):
+        self.serve([issue(3, labels=["needs-lead"], claimed=True, comments=[comment(0, ADR_MARKER + "\n\nPR 103")])],
+                   open_branches=["1-x", "2-y", "3-z"])
+        self.state({"3": self.worker(last=5)})
+        self.assertEqual(self.route(now=600), (0, ["HOLD-PR #3 102", "counted: 1 of 2"]))
+
+    def test_ask_dev_for_an_adr_conflict_with_no_lead(self):
+        self.serve([issue(3, labels=["needs-lead"], claimed=True, comments=[comment(0, ADR_MARKER)])],
+                   open_branches=["3-z"])
+        self.state({})
+        self.assertEqual(self.route(lead="none"), (0, ["ASK-DEV #3 100", "counted: 1 of 2"]))
+
+    def test_the_hold_ends_when_needs_lead_is_removed(self):
+        self.serve([issue(3, labels=["ready-for-agent"], claimed=True, comments=[comment(0, ADR_MARKER)])],
+                   open_branches=["3-z"])
+        self.state({"3": self.worker(last=5)})
+        self.assertEqual(self.route(), (0, ["counted: 1 of 2"]))
+
     def test_lead_none_with_nothing_to_route_prints_only_the_summary(self):
         self.serve([issue(1, labels=["lead"], comments=[])])
         self.state({})
@@ -180,6 +219,12 @@ class PromptSide(unittest.TestCase):
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
         self.assertIn(mod.STOP_MARKER, SKILL.read_text())
+        self.assertIn(mod.ADR_MARKER, SKILL.read_text())
+
+    def test_the_worker_reports_adr_conflicts_and_never_writes_adrs_in_lead_mode(self):
+        text = (ROOT / "agents" / "worker.md").read_text()
+        self.assertRegex(text, r"(?i)lead mode[^\n]*never writes? (an )?ADR")
+        self.assertRegex(text, r"(?i)lead mode[^\n]*adr-conflicts")
 
 
 if __name__ == "__main__":
