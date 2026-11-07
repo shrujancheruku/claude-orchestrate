@@ -82,10 +82,11 @@ You need `git` 2.38+, `gh` (signed in) and `python3` 3.9+.
 1. **Write tickets.** orchestrate works the GitHub issues labelled `ready-for-agent`. It pairs with [Matt Pocock's skills](https://github.com/mattpocock/skills): `to-spec` and `to-tickets` write the backlog, `triage` labels it, and `/setup-matt-pocock-skills` writes the tracker and domain docs orchestrate reads.
 2. **`/orchestrate:setup`** scouts the repo (tracker, commands, layout, conventions, files that would collide across worktrees) and asks you in one round: slots, gates, who merges, models, review tiers. It writes `.claude/orchestration.md`.
 3. **`/orchestrate:run`** starts working. `/orchestrate:run status` reports without acting; `/orchestrate:run <issue>` narrows to one ticket or one parent's sub-issues. Add `--greedy` to run every ticket that doesn't collide with another (up to 5 at once) instead of the config's slot count, and `--profile` to save what the session cost and how busy its slots were ([guide](docs/guide.md#choosing-a-slot-count)).
+4. **The lead (optional).** `claude --name lead "/orchestrate:lead"` starts the whole system in one command: it finds or launches the orchestrator, then answers its stops, triages discovered work and records decisions. It never builds, merges or dispatches workers. Without it, those questions come to you in the pass report. The [lead section](docs/guide.md#lead-mode) of the guide covers the two-terminal start and each fallback.
 
 ## Documentation
 
-- **[The full guide](docs/guide.md):** concepts, cost, slot counts, the guard hook, the merge sweep, sandboxed pushes, usage limits, profiling and development.
+- **[The full guide](docs/guide.md):** concepts, cost, slot counts, the guard hook, the merge sweep, the lead, CI times, the Projects board, sandboxed pushes, usage limits, profiling and development.
 - **[Glossary](GLOSSARY.md):** the shared vocabulary of the prompts, scripts and docs.
 - **[Architecture decisions](docs/adr/):** why slots default to 2 and when `--greedy` sizes them, why the guard fails closed, who owns the merge sweep, and more.
 

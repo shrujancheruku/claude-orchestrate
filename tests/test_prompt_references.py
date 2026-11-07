@@ -93,5 +93,55 @@ class PromptReferences(unittest.TestCase):
                     self.assertIn(flag, text, f"{path}:{n} passes {flag} to {name}, but its --help doesn't list it")
 
 
+GUIDE = ROOT / "docs/guide.md"
+
+
+def anchor(title):
+    """GitHub's heading anchor: lowercase, punctuation dropped, spaces to hyphens."""
+    return re.sub(r"\s", "-", re.sub(r"[^\w\s-]", "", title.strip().lower()))
+
+
+def guide_anchors():
+    return {anchor(m.group(1)) for m in re.finditer(r"^#{2,4} (.+)$", GUIDE.read_text(), re.M)}
+
+
+def lead_section():
+    """The guide's Lead mode section, up to the next level-2 heading."""
+    text = GUIDE.read_text()
+    start = text.index("## Lead mode")
+    return text[start:text.index("\n## ", start + 1)]
+
+
+class LeadDocs(unittest.TestCase):
+    """The README and guide explain the lead: both starts, what it degrades to, ci-times and the board (#216)."""
+
+    def test_readme_starts_the_lead_in_one_command_and_links_the_guide(self):
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn('claude --name lead "/orchestrate:lead"', readme)
+        self.assertIn("docs/guide.md#lead-mode", readme)
+
+    def test_every_readme_link_into_the_guide_resolves(self):
+        readme = (ROOT / "README.md").read_text()
+        anchors = guide_anchors()
+        for m in re.finditer(r"docs/guide\.md#([\w-]+)", readme):
+            with self.subTest(anchor=m.group(1)):
+                self.assertIn(m.group(1), anchors)
+
+    def test_guide_covers_both_starts_and_the_fallbacks(self):
+        section = lead_section()
+        self.assertIn('claude --name lead "/orchestrate:lead"', section)
+        self.assertIn('claude --name orchestrator "/orchestrate:run --greedy"', section)
+        # Without a lead, each part falls back: stops to needs-info, discovered work and risk notes to the summary.
+        self.assertIn("Without a lead", section)
+        self.assertIn("needs-info", section)
+        self.assertIn("discovered", section)
+        self.assertIn("risk notes", section)
+
+    def test_guide_has_ci_times_and_board_sections(self):
+        anchors = guide_anchors()
+        self.assertIn("measuring-ci-wait", anchors)
+        self.assertIn("projects-board", anchors)
+
+
 if __name__ == "__main__":
     unittest.main()
