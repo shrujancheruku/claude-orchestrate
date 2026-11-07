@@ -38,6 +38,14 @@ class LeadSkill(unittest.TestCase):
     def test_staying_current(self):
         self.check(["needs-lead", "watermark", "outcomes only"])
 
+    def test_moves(self):
+        self.check(["scripts/ci-times", "--checkpoint", "scripts/lead-brief",
+                    "`lead` label", "`needs-lead`", "You never merge anything", "ADR 0004",
+                    "## Agent Brief", "wontfix", "blocking edges", "needs-triage",
+                    "`Source:` line", "over: yes", "every 10 merges", "PR ready",
+                    ":grilling", ":domain-modeling", "Never invoke `wayfinder`",
+                    "Relaying"])
+
 
 if __name__ == "__main__":
     unittest.main()

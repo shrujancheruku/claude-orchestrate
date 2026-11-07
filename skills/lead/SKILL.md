@@ -26,3 +26,55 @@ The two-terminal start also works: the developer runs `claude --name orchestrato
 - **After a compaction**, re-run `"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief" --repo .`: the same index, with merges from the watermark only.
 - **Between compactions**, a nudge that names a ticket or PR means read only that item. A merge that touched ADRs or the glossary refreshes only that ADR line or the glossary.
 - Read outcomes only. A search bigger than one lookup goes to the scout.
+
+## Moves
+
+The part of this skill the developer talks to. You decide with them, then act through the tracker; the orchestrator does the building.
+
+### Settling a stop
+
+A stop is an open `needs-lead` ticket (or a nudge naming one).
+1. Answer with a ticket comment, remove `needs-lead`, then nudge the orchestrator.
+2. If the answer changes the spec, edit the ticket body or add an `## Agent Brief` comment first, so the worker reads the new spec.
+3. Pick the outcome:
+   - **Narrow or reword:** the worker continues on the same branch.
+   - **Split, new work lands first:** create the new tickets and add blocking edges onto this one; `run` hands it back.
+   - **Split, extra work can come after:** file follow-ups and narrow this ticket.
+   - **Obsolete:** close it `wontfix`.
+
+### Settling an ADR conflict
+
+Decide, then remove `needs-lead` (the held PR then merges), or file the follow-up ticket.
+
+### Discovered work
+
+Dedupe against the backlog; turn what is real into tickets (see Publishing).
+
+### Risk notes
+
+Each risk note gets one outcome: take it in, send a scout to check one point, or file a follow-up ticket. Move the watermark past an L-tier PR with `"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief" --repo . --checkpoint <pr>` only when every note on that PR has an outcome.
+
+### CI times
+
+Run `"${CLAUDE_SKILL_DIR}/../../scripts/ci-times"` every 10 merges (counted from the watermark) and whenever the developer asks. On `over: yes`, optionally send a scout for the cause, then draft a CI-speed ticket with the numbers and findings. Raise no repeat alarm while a CI-speed ticket is open; later runs are measured with `"${CLAUDE_SKILL_DIR}/../../scripts/ci-times" --since <its merge PR>`. An approved CI-speed ticket takes its normal frontier order unless the developer calls it urgent.
+
+### Publishing
+
+- `ready-for-agent` only after triaging or grilling with the developer live. When they are away, file drafts as `needs-triage` + `lead`.
+- Load listed skills whose names end in `:grilling` and `:domain-modeling` when present; otherwise ask a plain numbered round with a recommended answer for each.
+- Copy the shape of the repo's latest few `ready-for-agent` tickets (open or closed); with none, write what to build plus acceptance criteria. End with a `Source:` line linking the stop or PR it came from.
+- Urgency only through blocking edges.
+- For large planning, suggest `/wayfinder` or `/to-spec` in a separate session. `/to-tickets` on a settled spec is allowed in your own session. Never invoke `wayfinder`, `to-spec`, `to-tickets` or `triage` yourself, and never read their skill files.
+- On the next poll, read the tickets `/to-tickets` published and check them against the roadmap and what is being built. Add blocking edges for urgent ones and raise clashes with the developer. Do not relabel, rewrite or re-grill them.
+
+### Decision PRs
+
+- Each settled decision lands as one PR (the ADR plus that decision's glossary terms) that closes a ticket you filed and claimed with the `lead` label, followed by a "PR ready" nudge to the orchestrator.
+- You are the only ADR writer while live; number each ADR from main plus your own open PRs.
+- Config edits you propose need the developer's yes and ride in a lead PR.
+- Fix the failures the orchestrator sends back on your PRs.
+- You never merge anything (ADR 0004).
+
+### Relaying
+
+Pass the orchestrator's developer asks on to the developer without deciding them.
