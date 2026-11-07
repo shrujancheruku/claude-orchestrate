@@ -263,6 +263,7 @@ def main(argv=None) -> int:
         merged = github.merged_prs(base, cwd=root)
         # The claims are read once here (the state file, the worktrees, the PRs); `changes` is a no-op because routing
         # never needs the dirty and unpushed counts, and a git failure there would stop a pass that never needed them.
+        # So Claim.changes is None here: route() must never read claim.changes.
         found = claims.claims(root, state_path, issues, prs, merged, changes=lambda path, branch: None)
     except github.GhError as e:
         common.die(f"lead-route: cannot run: gh failed: {e.message}")

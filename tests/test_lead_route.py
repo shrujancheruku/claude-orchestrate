@@ -311,6 +311,37 @@ class LeadRoute(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+class RouteFromClaims(unittest.TestCase):
+    """route() on claims.Claim objects directly, no CLI, no gh and no worktree: the claims state is the input."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("lead_route_mod", str(ROOT / "scripts" / "lead-route"))
+        spec = importlib.util.spec_from_loader("lead_route_mod", loader)
+        cls.mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.mod)
+
+    def claim(self, n, state, **kw):
+        import claims as claims_mod
+        return claims_mod.Claim(n, state, **kw)
+
+    def test_stalled_claim_with_a_stop_redispatches(self):
+        issues = [{"number": 1, "claimed": True, "labels": set(), "blockers": [], "body_edits": [],
+                   "comments": [{"body": MARKER, "created": T0, "edits": []}]}]
+        found = {1: self.claim(1, "stalled")}
+        self.assertEqual(self.mod.route(issues, found, "live", 2, T0 + timedelta(minutes=60)),
+                         ["REDISPATCH #1", "counted: 1 of 2"])
+
+    def test_elsewhere_claim_prints_pid_worktree_and_reason_when_unparsed(self):
+        issues = [{"number": 1, "claimed": True, "labels": set(), "blockers": [], "body_edits": [],
+                   "comments": [{"body": MARKER, "created": T0, "edits": []}]}]
+        found = {1: self.claim(1, "elsewhere", worktree="/wt/1-x", lock=("live", None, "held by hand"))}
+        self.assertEqual(self.mod.route(issues, found, "live", 2, T0 + timedelta(minutes=60)),
+                         ["ELSEWHERE #1 pid ? /wt/1-x (lock: held by hand)", "counted: 1 of 2"])
+
+
 class PromptSide(unittest.TestCase):
     def test_run_calls_lead_route_and_does_not_restate_its_rules(self):
         text = SKILL.read_text()
