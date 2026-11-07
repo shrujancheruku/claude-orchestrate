@@ -9,7 +9,7 @@ You write the repo's **config**, `.claude/orchestration.md`, which `/orchestrate
 ## Steps
 
 1. **Gather facts.** Send `orchestrate:scout` these questions in parallel calls:
-   - The tracker docs from `/setup-matt-pocock-skills`: whether `docs/agents/issue-tracker.md`, `docs/agents/triage-labels.md` and `docs/agents/domain.md` exist, the tracker each names, and whether every label string in `triage-labels.md` (including `needs-lead` and `lead`) exists on the tracker. Only if the docs are missing: which host, how tickets block each other, how a ticket gets claimed, and where an ordered backlog lives or could live.
+   - The tracker docs from `/setup-matt-pocock-skills`: whether `docs/agents/issue-tracker.md`, `docs/agents/triage-labels.md` and `docs/agents/domain.md` exist, the tracker each names (a doc naming GitLab, local or any other non-GitHub host stops setup with one line pointing at `docs/adr/0010-github-is-the-tracker-the-scripts-read.md`, since the scripts read only GitHub), and whether every label string in `triage-labels.md` (including `needs-lead` and `lead`) exists on the tracker. Only if the docs are missing: which host, how tickets block each other, how a ticket gets claimed, and where an ordered backlog lives or could live.
    - The build, test, lint and codegen commands (Makefile, package scripts, CI workflows), and which CI checks gate merges.
    - The top-level layout by directory and ownership: candidate exclusive holds, and the paths where a wrong change is costly (candidate risk paths).
    - Conventions in the instruction files (`CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING`): commit and PR format, docs every change must update, files many changes touch.
