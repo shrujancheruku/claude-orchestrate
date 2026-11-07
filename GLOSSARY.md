@@ -137,7 +137,7 @@ The mechanical checks a PR passes before any reviewer reads it: mergeability wit
 _Avoid_: pre-merge check, pre-flight, gate (bare, for the script)
 
 **Merge readiness**:
-Whether an approved PR may merge now, decided at merge time: CI green on the head, every dependency merged, branch up to date, and nothing since the **Approved head** that needs re-review. Source: `scripts/merge`.
+Whether an approved PR may merge now, decided at merge time: CI green on the head, every dependency merged, branch up to date, every **Review thread** resolved, and nothing since the **Approved head** that needs re-review. Source: `scripts/merge`.
 _Avoid_: merge check, merge rule
 
 **Tier**:
