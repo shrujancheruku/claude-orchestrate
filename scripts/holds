@@ -69,6 +69,7 @@ def still_building(tickets: dict, with_open_pr: set, base: str, repo: Path) -> d
     """
     out, merged = {}, None
     for n, paths in tickets.items():
+        # rebuild-state keys tickets by number; a key that is not one cannot be checked against the tracker.
         if not str(n).isdigit() or int(n) in with_open_pr:
             continue
         if github.issue_state(n, cwd=repo).upper() != "OPEN":
