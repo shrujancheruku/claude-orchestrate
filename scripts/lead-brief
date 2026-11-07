@@ -28,7 +28,7 @@ from pathlib import Path
 
 import common
 import github
-import session
+from repo import first_line, parse_ts
 
 RISK_MARKER = "> *Risk notes (review not posted).*"  # the first line of the fallback comment; run posts it verbatim
 WATERMARK = Path(".claude") / "orchestrate-lead.json"
@@ -100,7 +100,7 @@ def nodes_of(data, key, *path):
 
 
 def age(created, now) -> str:
-    t = session.parse_ts(created)
+    t = parse_ts(created)
     if t is None:
         return "age unknown"
     secs = max(0, int((now - t).total_seconds()))
@@ -164,7 +164,7 @@ def pr_of(node) -> dict:
     body = node.get("body") or ""
     ticket = refs[0]["number"] if refs else (int(CLOSES.search(body).group(1)) if CLOSES.search(body) else None)
     return {"number": int(node["number"]), "title": node.get("title") or "", "url": node.get("url") or "",
-            "body": body, "merged": session.parse_ts(node.get("mergedAt")), "ticket": ticket,
+            "body": body, "merged": parse_ts(node.get("mergedAt")), "ticket": ticket,
             "labels": {x["name"] for x in (node.get("labels") or {}).get("nodes") or []},
             "reviews": [r for r in (node.get("reviews") or {}).get("nodes") or [] if r.get("body")],
             "comments": (node.get("comments") or {}).get("nodes") or []}
@@ -175,10 +175,6 @@ def load_merged(root, repo):
     prs = [pr_of(n) for n in nodes_of(data, "pullRequests", "nodes")]
     prs = sorted((p for p in prs if p["merged"]), key=lambda p: (p["merged"], p["number"]))
     return prs, int(nodes_of(data, "pullRequests", "totalCount"))
-
-
-def first_line(text) -> str:
-    return (text or "").lstrip().split("\n", 1)[0].strip()
 
 
 def section_lines(body, heading="## Discovered work") -> list:
@@ -235,7 +231,7 @@ def read_watermark(root):
     """The watermark as a dict, or None when missing or unreadable."""
     try:
         data = json.loads((root / WATERMARK).read_text())
-        merged = session.parse_ts(data["merged_at"])
+        merged = parse_ts(data["merged_at"])
         return {"pr": int(data["pr"]), "merged": merged, "merges": int(data["merges"])} if merged else None
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -289,7 +285,7 @@ def main(argv=None) -> int:
     ap.add_argument("--now", default=None, help="the time now, as ISO 8601 (tests; default: the current time)")
     ap.add_argument("--checkpoint", type=int, metavar="PR", help="write the watermark: PR is the last one absorbed")
     args = ap.parse_args(argv)
-    now = datetime.now(timezone.utc) if args.now is None else session.parse_ts(args.now)
+    now = datetime.now(timezone.utc) if args.now is None else parse_ts(args.now)
     if now is None:
         common.die(f"lead-brief: cannot run: --now is not an ISO time: {args.now}")
     root = Path(args.repo).resolve()

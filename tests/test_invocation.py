@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 CLIS = sorted(p.name for p in SCRIPTS.iterdir() if p.suffix == "" and p.is_file())
-LIBRARIES = {"common", "checks", "replay", "github", "runlog", "session", "config"}
+LIBRARIES = {"common", "checks", "replay", "github", "runlog", "session", "config", "repo"}
 STANDALONE = {"profile.py"}
 
 
@@ -59,6 +59,7 @@ class Invocation(unittest.TestCase):
                 shutil.copy(SCRIPTS / name, d)
                 shutil.copy(SCRIPTS / "common.py", d)
                 shutil.copy(SCRIPTS / "runlog.py", d)
+                shutil.copy(SCRIPTS / "repo.py", d)
                 shutil.copy(SCRIPTS / "session.py", d)
                 shutil.copy(SCRIPTS / "config.py", d)
                 argv = [sys.executable, "-I", str(Path(d) / name)]

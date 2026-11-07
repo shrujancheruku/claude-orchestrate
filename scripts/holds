@@ -27,8 +27,8 @@ from pathlib import Path
 import common
 import config
 import github
+from repo import STATE, ticket_of_branch
 
-STATE = Path(".claude") / "orchestrate-state.json"
 LINE_SUFFIX = re.compile(r":\d+(?:[-–,]\d+)*$")
 
 
@@ -36,11 +36,6 @@ def plain(entry: str) -> str:
     """A touch-map entry as a file path: no `:line` or line range, no leading `./`."""
     path = LINE_SUFFIX.sub("", entry.strip().strip("`"))
     return path[2:] if path.startswith("./") else path
-
-
-def ticket_of_branch(branch) -> int | None:
-    m = re.match(r"(\d+)-", branch or "")
-    return int(m.group(1)) if m else None
 
 
 def building(state_file: Path, own) -> dict:

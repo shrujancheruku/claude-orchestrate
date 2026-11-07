@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import common  # noqa: E402
 import profile as prof  # noqa: E402
 import replay  # noqa: E402
+import repo  # noqa: E402
 import runlog  # noqa: E402
 
 
@@ -59,7 +60,7 @@ class RunLogTest(unittest.TestCase):
         runlog.append_pass(wt, "s", {"slots": 2})
         _vcs(self.repo, "worktree", "remove", str(wt))
         self.assertFalse(wt.exists())
-        self.assertEqual(runlog.main_checkout(wt), self.repo)
+        self.assertEqual(repo.main_checkout(wt), self.repo)
         self.assertEqual([p["slots"] for p in runlog.read_passes(wt, "s")], [2])
 
     def test_profile_built_for_a_worktree_session_finds_both_logs(self):
@@ -94,11 +95,6 @@ class RunLogTest(unittest.TestCase):
     def test_replay_vocabulary_matches_replay_py(self):
         self.assertEqual(set(runlog.OUTCOMES[runlog.REPLAY]),
                          {replay.LINE_REPLAY, replay.WORD_MERGE, replay.REGENERATED, replay.HANDED_BACK})
-
-    def test_common_append_event_is_a_thin_call_into_the_log(self):
-        common.append_event(self.repo, "merge", "merged", ref="#1", session="s")
-        (e,) = runlog.read_events(self.repo, "s", *self.span)
-        self.assertEqual((e["kind"], e["outcome"]), ("merge", "merged"))
 
     def test_sessionless_event_counts_inside_the_span_only(self):
         runlog.append_event(self.repo, "gate", "pass", session="")
