@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""lead-route --lead live|none --cap <n> [--repo PATH] [--state FILE] [--now ISO] : route the lead's stops.
+
+Decides, and prints one verdict per line; it writes nothing to the tracker or the state file. Run it once
+per pass, after reconcile, and the orchestrator applies each line word for word. Reads the open issues
+(newest 100 by update, one `gh api graphql`) and the state file; the stop comment is the newest comment
+whose first line is the marker `> *Stopped for the lead.*`. Verdicts, in ticket order:
+    RESUME #<n> <agent-id>   claimed, no needs-lead, a worker in the state file, stop comment newer than its last report
+    ESCALATE #<n>            a RESUME on a haiku worker, where the body or an `## Agent Brief` comment changed after the stop
+    REDISPATCH #<n>          a claimed ticket with a stop comment, no worker in the state file, and no open PR
+    FALLBACK #<n>            needs-lead with --lead none: the lead is gone; the ticket is handed back
+    UNCAP #<n>               needs-lead, claimed, live lead, stop comment more than 30 minutes old
+Last line, always: `counted: <k> of <cap>`, where k is the claimed open tickets that still hold a slot
+(not UNCAP, not FALLBACK). With --lead none and nothing to route, only that line prints.
+--now (an ISO time) is for tests; the default is the current time.
+Exit codes: 0 routed; 2 could not run (no `gh`, gh failed, no repository, an unreadable state file or
+--now), one line on stderr; the orchestrator then treats lead mode as off for that pass.
+Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import json
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import common
+import github
+import session
+
+STOP_MARKER = "> *Stopped for the lead.*"  # the first line of every stop comment; run posts it verbatim
+BRIEF_HEADING = "## Agent Brief"
+NEEDS_LEAD = "needs-lead"
+UNCAP_AFTER = timedelta(minutes=30)
+STATE = Path(".claude") / "orchestrate-state.json"
+
+ISSUES_QUERY = """query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 100, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        labels(first: 20) { nodes { name } }
+        assignees(first: 1) { totalCount }
+        userContentEdits(first: 20) { nodes { editedAt } }
+        comments(last: 100) { nodes { body createdAt userContentEdits(first: 20) { nodes { editedAt } } } }
+      }
+    }
+  }
+}"""
+
+
+def first_line(text) -> str:
+    return (text or "").lstrip().split("\n", 1)[0].strip()
+
+
+def edit_times(node) -> list:
+    nodes = ((node or {}).get("userContentEdits") or {}).get("nodes") or []
+    return [t for t in (session.parse_ts(n.get("editedAt")) for n in nodes) if t]
+
+
+def malformed(what):
+    common.die(f"lead-route: cannot run: gh returned an unexpected reply ({what})")
+
+
+def load_issues(root):
+    """Open issues as plain dicts: number, claimed, labels, body_edits, comments (body, created, edits)."""
+    repo = github.call_json("repo", "view", "--json", "owner,name", cwd=root)
+    data = github.call_json("api", "graphql", "-f", f"query={ISSUES_QUERY}",
+                            "-F", f"owner={repo['owner']['login']}", "-F", f"name={repo['name']}", cwd=root)
+    try:
+        nodes = data["data"]["repository"]["issues"]["nodes"]
+        issues = []
+        for node in nodes:
+            comments = [{"body": c.get("body") or "", "created": session.parse_ts(c.get("createdAt")),
+                         "edits": edit_times(c)} for c in (node.get("comments") or {}).get("nodes") or []]
+            issues.append({"number": int(node["number"]),
+                           "claimed": ((node.get("assignees") or {}).get("totalCount") or 0) > 0,
+                           "labels": {x["name"] for x in (node.get("labels") or {}).get("nodes") or []},
+                           "body_edits": edit_times(node), "comments": comments})
+    except (KeyError, TypeError, ValueError):
+        malformed("issues")
+    return issues
+
+
+BRANCH_TICKET = re.compile(r"(\d+)-")  # the branch convention `<number>-<slug>`
+
+
+def load_open_pr_tickets(root):
+    """Ticket numbers that an open PR's branch names. A worker with a PR is not missing: its PR is the record."""
+    prs = github.call_json("pr", "list", "--state", "open", "--limit", "200", "--json", "headRefName",
+                           shape=list, cwd=root)
+    found = set()
+    for pr in prs:
+        m = BRANCH_TICKET.match(str((pr or {}).get("headRefName") or ""))
+        if m:
+            found.add(int(m.group(1)))
+    return found
+
+
+def load_state(path):
+    """{ticket number as str: worker record}; a missing file is no workers, an unreadable one is could-not-run."""
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        common.die(f"lead-route: cannot run: unreadable state file {path}: {e}")
+    tickets = data.get("tickets") if isinstance(data, dict) else None
+    if not isinstance(tickets, dict):
+        common.die(f"lead-route: cannot run: state file {path} has no tickets object")
+    return tickets
+
+
+def stop_of(issue):
+    stops = [c for c in issue["comments"] if c["created"] and first_line(c["body"]) == STOP_MARKER]
+    return max(stops, key=lambda c: c["created"]) if stops else None
+
+
+def changed_after(issue, since) -> bool:
+    """The body, or an `## Agent Brief` comment, was added or edited after `since`."""
+    if any(t > since for t in issue["body_edits"]):
+        return True
+    return any(c["created"] and first_line(c["body"]) == BRIEF_HEADING
+               and (c["created"] > since or any(t > since for t in c["edits"])) for c in issue["comments"])
+
+
+def route(issues, state, lead, cap, now, open_prs=frozenset()):
+    """The verdict lines, then the counted line."""
+    lines, claimed, freed = [], set(), set()
+    for issue in sorted(issues, key=lambda i: i["number"]):
+        n = issue["number"]
+        if issue["claimed"]:
+            claimed.add(n)
+        stop = stop_of(issue)
+        since = stop["created"] if stop else None
+        if NEEDS_LEAD in issue["labels"]:
+            if lead == "none":
+                lines.append(f"FALLBACK #{n}")
+                freed.add(n)
+            elif issue["claimed"] and since and now - since > UNCAP_AFTER:
+                lines.append(f"UNCAP #{n}")
+                freed.add(n)
+            continue
+        if not issue["claimed"] or since is None:
+            continue
+        worker = state.get(str(n))
+        if not isinstance(worker, dict) or not worker.get("agent_id"):
+            # A state file is per session, so an earlier session's finished worker is missing from it. Its open
+            # PR shows it did its work; redispatching would start a second worker on that branch.
+            if n not in open_prs:
+                lines.append(f"REDISPATCH #{n}")
+            continue
+        last = session.parse_ts(worker.get("last_report"))
+        if last is None or since <= last:
+            continue  # the worker has reported since the stop: nothing to answer
+        if "haiku" in str(worker.get("model") or "") and changed_after(issue, since):
+            lines.append(f"ESCALATE #{n}")
+        else:
+            lines.append(f"RESUME #{n} {worker['agent_id']}")
+    lines.append(f"counted: {len(claimed - freed)} of {cap}")
+    return lines
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--lead", required=True, choices=["live", "none"], help="whether a live lead session exists")
+    ap.add_argument("--cap", required=True, type=int, help="the slot cap in force (config slots, or the greedy cap)")
+    ap.add_argument("--repo", default=".", help="repo root; gh runs there and the state file is read under it")
+    ap.add_argument("--state", default=None, help="state file (default: <repo>/.claude/orchestrate-state.json)")
+    ap.add_argument("--now", default=None, help="the time now, as ISO 8601 (tests; default: the current time)")
+    args = ap.parse_args(argv)
+    if args.cap < 1:
+        ap.error("--cap must be at least 1")
+    now = datetime.now(timezone.utc) if args.now is None else session.parse_ts(args.now)
+    if now is None:
+        common.die(f"lead-route: cannot run: --now is not an ISO time: {args.now}")
+    root = Path(args.repo).resolve()
+    state_path = Path(args.state) if args.state else root / STATE
+    state = load_state(state_path)
+    try:
+        issues = load_issues(root)
+        open_prs = load_open_pr_tickets(root)
+    except github.GhError as e:
+        common.die(f"lead-route: cannot run: gh failed: {e.message}")
+    for line in route(issues, state, args.lead, args.cap, now, open_prs):
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
