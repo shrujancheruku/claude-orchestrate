@@ -74,10 +74,12 @@ class Decider:
         spec.loader.exec_module(self.module)
         self.cwd = cwd
 
-    def __call__(self, role, command, background=False):
+    def __call__(self, role, command, background=False, timeout=None):
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.cwd}
         if background:
             payload["tool_input"]["run_in_background"] = True
+        if timeout is not None:
+            payload["tool_input"]["timeout"] = timeout
         if role:
             payload["agent_type"] = role
         stdin, stdout = sys.stdin, sys.stdout
@@ -106,7 +108,7 @@ class GuardCorpus(unittest.TestCase):
         self.assertGreater(len(self.rows), 400)
         for n, row in enumerate(self.rows, 1):
             with self.subTest(line=n):
-                self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source", "background"})
+                self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source", "background", "timeout"})
                 self.assertTrue(row["role"].startswith("orchestrate:"), row["role"])
                 self.assertTrue(row["command"].strip())
                 self.assertIn(row["expected"], ("allow", "deny"))
@@ -117,7 +119,7 @@ class GuardCorpus(unittest.TestCase):
 
     def test_guard_decides_every_line_as_labelled(self):
         for n, row in enumerate(self.rows, 1):
-            actual = self.decide(row["role"], row["command"], row.get("background", False))
+            actual = self.decide(row["role"], row["command"], row.get("background", False), row.get("timeout"))
             label = f"line {n} ({row['role']}): {row['command'][:100]!r}"
             with self.subTest(label):
                 if "gap" in row:

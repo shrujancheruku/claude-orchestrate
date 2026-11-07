@@ -47,10 +47,12 @@ def reason_of(out):
     return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
 
 
-def decide(agent_type, command, cwd=None, background=None):
+def decide(agent_type, command, cwd=None, background=None, timeout=None):
     payload = {"tool_name": "Bash", "tool_input": {"command": command}}
     if background is not None:
         payload["tool_input"]["run_in_background"] = background
+    if timeout is not None:
+        payload["tool_input"]["timeout"] = timeout
     if agent_type is not None:
         payload["agent_type"] = agent_type
     if cwd is not None:
@@ -524,7 +526,7 @@ class GuardTest(unittest.TestCase):
     def test_cases(self):
         for agent_type, command, expected in CASES:
             with self.subTest(agent=agent_type, command=command):
-                self.assertEqual(decide(agent_type, command), expected)
+                self.assertEqual(decide(agent_type, command, timeout=600000), expected)
 
     def test_verify_in_the_background_is_refused_for_workers_only(self):
         quoted = "'/home/u/.claude/plugins/cache/x/orchestrate/0.7.0/scripts/verify' --config"
@@ -532,10 +534,27 @@ class GuardTest(unittest.TestCase):
                         "cd x && VAR=1 timeout 300 '/p/scripts/verify' --config"):
             with self.subTest(command=command):
                 self.assertEqual(decide("orchestrate:worker", command, background=True), "deny")
-                self.assertEqual(decide("orchestrate:worker", command, background=False), "allow")
-                self.assertEqual(decide("orchestrate:worker", command), "allow")
+                self.assertEqual(decide("orchestrate:worker", command, background=False, timeout=600000), "allow")
+                self.assertEqual(decide("orchestrate:worker", command, timeout=600000), "allow")
                 self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
                 self.assertEqual(decide(None, command, background=True), "allow")
+
+    def test_worker_verify_needs_a_bash_timeout_of_600000(self):
+        # #301: without one the harness moves a verify past 180s to the background, unseen by the guard.
+        quoted = "'/p/orchestrate/0.7.0/scripts/verify' --config"
+        for timeout in (None, 300000, 599999, 0, "600000", True, [600000], float("nan")):
+            with self.subTest(timeout=timeout):
+                self.assertEqual(decide("orchestrate:worker", quoted, timeout=timeout), "deny")
+        for timeout in (600000, 600001, 600000.0):
+            with self.subTest(timeout=timeout):
+                self.assertEqual(decide("orchestrate:worker", quoted, timeout=timeout), "allow")
+        # only a worker's verify call: other commands and other roles are as before
+        self.assertEqual(decide("orchestrate:worker", "ls"), "allow")
+        self.assertEqual(decide("orchestrate:worker", "grep -n x scripts/verify"), "allow")
+        for role in ("orchestrate:reviewer", "orchestrate:scout", None, "other:worker"):
+            self.assertEqual(decide(role, quoted), "allow")
+        reason = self.run_guard({"agent_type": "orchestrate:worker", "tool_input": {"command": quoted}})
+        self.assertIn("timeout of 600000", reason)
 
     def test_any_worker_command_in_the_background_is_refused(self):
         # #259: a worker has no command that needs the background; a left-over job wakes it to hand back again.

@@ -1095,6 +1095,12 @@ VERIFY_SCRIPT = re.compile(r"(?:^|/)scripts/verify$")
 VERIFY_WRAPPERS = {"env", "nohup", "time", "exec", "command", "timeout", "bash", "sh", "zsh", "python", "python3"}
 
 
+# The Bash timeout a worker's verify call must carry, in ms (the tool's ceiling). Without one the harness
+# moves a call that runs past 180s to the background on its own, which the `run_in_background` check can't
+# see (#301). agents/worker.md and the refusal message state this same number.
+VERIFY_TIMEOUT_MS = 600000
+
+
 def runs_verify(parsed: "Parsed") -> bool:
     for cmd in parsed.cmds:
         for w in cmd.words:
@@ -1108,13 +1114,15 @@ def runs_verify(parsed: "Parsed") -> bool:
     return False
 
 
-def verdict(role: str, command: str, cwd: str, background: bool = False) -> str | None:
+def verdict(role: str, command: str, cwd: str, background: bool = False, timeout: object = None) -> str | None:
     """The reason to deny this command for this role, or None to let it run.
 
     `background` is the call's `run_in_background`: a worker that leaves a command in the background is
     woken by each completion and hands back again (#229, #255, #259), and has no command that needs it,
     so every backgrounded worker call is refused. This only sees the flag the worker set; when the harness
-    itself moves a long foreground call to the background, the worker waits for it (see agents/worker.md)."""
+    itself moves a long foreground call to the background, the worker waits for it (see agents/worker.md).
+    `timeout` is the call's Bash `timeout`: a worker's verify call must carry one of VERIFY_TIMEOUT_MS or more
+    so the harness keeps it in the foreground (#301). Anything but a real number fails closed."""
     who, role = role_label(role), rules_role(role)
     try:
         parsed = Parsed(parse(command))
@@ -1128,6 +1136,11 @@ def verdict(role: str, command: str, cwd: str, background: bool = False) -> str 
                     "after a few minutes, wait for it to exit (a Monitor) before you go on.")
         return (f"{who} can't run a command in the background (each time it reports, the worker is woken "
                 "and hands back again). Run it in the foreground and wait for it to finish.")
+    if role == "worker" and runs_verify(parsed) and not (
+            isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout >= VERIFY_TIMEOUT_MS):
+        return (f"{who} must run verify with a Bash timeout (the harness moves a call without one to the "
+                f"background after 180s, and verify would hand back before it finishes). Run it again in the "
+                f"foreground and pass a Bash timeout of {VERIFY_TIMEOUT_MS}.")
     if role == "reviewer":
         problem = review_post(parsed)
         if problem == "":
@@ -1162,7 +1175,8 @@ def main() -> None:
     try:
         if not isinstance(command, str):
             raise TypeError("command is not a string")
-        reason = verdict(role, command, data.get("cwd") or "", tool_input.get("run_in_background") is True)
+        reason = verdict(role, command, data.get("cwd") or "", tool_input.get("run_in_background") is True,
+                         tool_input.get("timeout"))
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
                   f"Rewrite it more simply. {NEXT_STEP[rules_role(role)]}")
