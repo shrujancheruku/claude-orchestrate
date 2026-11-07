@@ -135,7 +135,7 @@ Defined by `agents/scout.md`. It runs on Haiku at low effort with a turn cap, is
 
 - **Reconcile:** one line per claimed ticket with its PR, check states, last pushed commit and whether its worktree is dirty, then the takeable tickets in order, the `ready-for-human` ones and the parents whose sub-issues have all closed.
 - **Touch map:** the files a ticket will most likely change, each as `path:line` of its entry point. A prediction, not a fence.
-- **Pre-merge check:** five numbered items, each `pass`, `fail` or `pending`: CI, dependencies merged, no secrets or unexplained lockfile churn, title convention, shared files changed only as allowed.
+- **CI and PRs:** each check's state by name, the failing step of a failed run, how far a branch is behind its base, and unresolved review comments.
 - **Environment:** build and test commands, tool versions, anything that would collide across parallel worktrees.
 
 It reports what is true, with the command or `path:line` that shows it, and leaves recommendations out.
@@ -160,24 +160,24 @@ What happens to one ticket, from the moment it is takeable to the moment its PR 
 
 ### State lives outside the session
 
-A ticket is **takeable** when it is open, labelled `ready-for-agent`, unassigned, has every blocker closed, carries no `wayfinder:` label and has no open sub-issues. Takeable tickets go in ascending issue number, because `to-tickets` publishes blockers first. A ticket is **claimed** when it is assigned to the user, and the config's **slot** count caps how many claimed tickets are open at once. Each claimed ticket is in one state: **building**, **paused** (its worker hit a usage limit), **stalled** (no PR and no live worker anywhere), **Elsewhere** (another live session's worker is on it), **in review**, **waiting** (on you or the lead), or **with the lead**.
+A ticket is **takeable** when it is open, labelled `ready-for-agent`, unassigned, has every blocker closed, carries no `wayfinder:` label and has no open sub-issues. Takeable tickets go in ascending issue number, because `to-tickets` publishes blockers first. A ticket is **claimed** when it is assigned to the user, and the config's **slot** count caps how many claimed tickets are open at once. Each claimed ticket is in one state: **building**, **stalled** (no PR and no live worker anywhere), **Elsewhere** (another live session's worker is on it), **in review**, **with the lead**, or **done**. The orchestrator layers three states of its own on top from what it saw this session: **paused** (its worker hit a usage limit), **waiting** (on you or the lead) and waiting on a lead that could not be reached.
 
 The one thing the tracker cannot hold is which agent built what. `scripts/rebuild-state` rebuilds `.claude/orchestrate-state.json` at the start of every pass from the session's own transcripts, joining each worker to its ticket by the `#<n>` in its dispatch description, and recording its agent ID, worktree, model, last report and touch map. The orchestrator never writes this file, so it cannot drift from what ran, and the tracker overrules it whenever they disagree.
 
-Liveness across sessions comes from the worktree lock. `scripts/worker-live <branch>` finds the branch's worktree and reads the harness's lock, which names the session's process ID. A live process means the ticket is Elsewhere and this session leaves it alone. A dead one means the ticket is stalled and can be rescued.
+`scripts/claims` is the one place that decides a claimed ticket's state. With one tracker read it prints a line per claimed ticket: state, branch, PR, the worker and model the state file records, the worktree, its lock and whether it holds uncommitted or unpushed work. Liveness across sessions comes from that worktree lock, which the harness writes with the session's process ID. A live process means the ticket is Elsewhere and this session leaves it alone. A dead one means the ticket is stalled and can be rescued. The orchestrator never reads the state file or compares locks by hand; it reads the claims line.
 
 ### A pass, step by step
 
 ```mermaid
 flowchart LR
-    A["1 Reconcile<br/>rebuild-state · scout · lead-route"] --> B["2 Resume<br/>paused and stalled tickets"]
+    A["1 Reconcile<br/>rebuild-state · claims · scout · lead-route"] --> B["2 Resume<br/>paused and stalled tickets"]
     B --> C["3 Review loop<br/>per ticket in review"]
     C --> D["4 Fill slots<br/>holds · brief · dispatch"]
     D --> E["5 Report<br/>table · board · yield"]
     E -. "wake on worker, reviewer, CI" .-> C
 ```
 
-1. **Reconcile.** Rebuild the state file. One scout call returns the state of every claimed ticket, the next few takeable tickets, the `ready-for-human` ones, merged PRs whose tickets are still open, and parents with all sub-issues closed. Lead mode is detected from the live sessions. Then `scripts/lead-route` reads the tracker and the state file and prints one routing verdict per ticket that needs one: `RESUME` a worker whose stop was answered, `REDISPATCH` one that is gone, `FALLBACK` a `needs-lead` ticket to `needs-info` because the lead left, `UNCAP` one that has waited over thirty minutes so it stops holding a slot, `HANDBACK` one the lead split so it now has an open blocker, `ABANDON` one closed `wontfix`, `HOLD-PR` one whose ADR conflict is unsettled, `LEAD-PR` the lead's own PR, and a final `counted: k of cap`. The orchestrator applies each line word for word.
+1. **Reconcile.** Rebuild the state file, then read `scripts/claims` for the state of every claimed ticket. One scout call returns the check states of their PRs, the next few takeable tickets, the `ready-for-human` ones, merged PRs whose tickets are still open, and parents with all sub-issues closed. Lead mode is detected from the live sessions. Then `scripts/lead-route` reads the tracker and the state file and prints one routing verdict per ticket that needs one: `RESUME` a worker whose stop was answered, `REDISPATCH` one that is gone, `FALLBACK` a `needs-lead` ticket to `needs-info` because the lead left, `UNCAP` one that has waited over thirty minutes so it stops holding a slot, `HANDBACK` one the lead split so it now has an open blocker, `ABANDON` one closed `wontfix`, `HOLD-PR` one whose ADR conflict is unsettled, `LEAD-PR` the lead's own PR, and a final `counted: k of cap`. The orchestrator applies each line word for word.
 2. **Resume.** A paused worker is continued with a message once the limit has lifted. A stalled ticket's old worktree is rescued first: anything uncommitted is committed as `chore(wip): …`, pushed, and the worktree removed, unless that work touches a path another ticket holds, which goes to you. Then a fresh worker continues the branch.
 3. **The review loop**, for each ticket with an open PR. Described below.
 4. **Fill free slots.** For each free slot, take the next takeable ticket that no start gate holds. Assign it to the user first, so another session skips it. Then run `scripts/holds --touch-map <files> --ticket <n>`. It is the one place the overlap rule lives: a path is held by an open PR's diff, a building ticket's touch map, the changed files of an Elsewhere ticket's live worktree, or an exclusive hold in the config. Exit 1 is an overlap outside the config's shared files and the ticket waits; the next ticket is tried instead. Otherwise the orchestrator writes the brief from `skills/run/brief.md`, pointers only with a fixed preamble so workers share a prompt-cache prefix, picks the model, and dispatches `orchestrate:worker` in the background with the description `Build #<n>`.
@@ -187,7 +187,7 @@ flowchart LR
 
 One size scale sets both the worker model and the review tier. A ticket whose title or body says "investigate" or "design" goes to Sonnet whatever its size. A `size:S` label routes to Haiku; `size:M` and `size:L` to Sonnet. An unlabelled ticket goes to Haiku when its touch map names at most the config's S file limit (3 by default) and touches no risk path.
 
-A Haiku worker escalates once, to a fresh Sonnet worker on the same branch and PR, on any of: a stop that is not your decision and cannot be answered in one message, a second CI failure, or "changes" again in review round 2. The orchestrator reads the recorded model from the state file, never from memory, so this survives a compaction. Before the hand-over it checks liveness, makes sure the old worker's work is pushed, and only then dispatches the new one. A Sonnet worker is never escalated again.
+A Haiku worker escalates once, to a fresh Sonnet worker on the same branch and PR, on any of: a stop that is not your decision and cannot be answered in one message, a second CI failure, or "changes" again in review round 2. The orchestrator reads the recorded model from the ticket's claims line, never from memory, so this survives a compaction. Before the hand-over it checks that line for a live lock, makes sure the old worker's work is pushed, and only then dispatches the new one. A Sonnet worker is never escalated again.
 
 ### Inside the worker
 
@@ -195,9 +195,11 @@ The worker's steps are **orient, build, verify, ship, report**. It reads the tic
 
 It builds test-first, with the `tdd` skill when one is listed. Every external fact is fetched from a primary source and its URL kept for the PR's evidence. It commits as it goes with no attribution lines or trailers, and pushes after each commit whose verify passes. Under the sandbox it pushes with plain `git push`; if SSH is refused, it falls back once to HTTPS through `gh`'s credential helper, inline, and never turns the sandbox off.
 
-Verify is `scripts/verify --config`, run once, in the foreground. The script reads the commands from the config's **Verify** section, runs each exactly as written, independently so every failure shows in one run, with a `--then` group skipped when something above it fails. It prints one pass, fail or skip line per command and the last forty lines of a failure. The guard refuses running it in the background, because a worker that backgrounds verify would hand back before it finished.
+Verify is `scripts/verify --config`, run once, in the foreground. The script reads the commands from the config's **Verify** section, runs each exactly as written, independently so every failure shows in one run, with a `--then` group skipped when something above it fails. It prints one pass, fail or skip line per command and the last forty lines of a failure. The guard refuses any backgrounded command from a worker, because a worker that backgrounds verify would hand back before it finished.
 
-To ship, it stages files by explicit path, commits with the repo's convention, pushes, and opens the PR with the `:pr` skill when one is listed. The body carries the closing reference, an evidence list for each external fact and a `## Discovered work` section for anything the backlog is missing. It never merges or rebases the default branch into its branch on its own. Then it reports, and the orchestrator reads only the `status:` line to decide: a report with no such line is interim and ignored.
+To ship, it stages files by explicit path, commits with the repo's convention, pushes, and opens the PR with the `:pr` skill when one is listed. The body carries the closing reference, an evidence list for each external fact and a `## Discovered work` section for anything the backlog is missing. It never merges or rebases the default branch into its branch on its own. Then it reports with a `status:` line and, on a stop, a `stop-reason:` from a fixed list: `held-path`, `no-spec`, `ambiguous`, `adr-conflict`, `human-only`, `verify-outside-ticket`, `already-done` or `no-primary-source`.
+
+The orchestrator never reads that report by eye. It pipes the whole completion to `scripts/worker-report <ticket> --branch <branch>`, which prints one verdict and logs it: `valid pr-opened` with the PR and head taken from the host, `valid stopped` with its reason, `interim` for a progress note with no status, `duplicate` for a repeat of the last verdict, `not-a-stop` for a stop with no listed reason (the worker is told once to finish and report), `not-a-pr-opened` for a claimed PR that does not exist, `missing-report` for a bare completion notice, and `limit` or `error` for a worker that ended on a usage limit or API error.
 
 ### The review loop
 
@@ -210,14 +212,17 @@ sequenceDiagram
     participant R as Reviewer
     participant M as merge
     W->>O: status pr-opened
-    O->>O: holds --pr · scout pre-merge check
-    O->>CI: Monitor until checks settle
-    CI-->>O: PR n pass · head sha
-    O->>G: gate pr --cwd worktree
+    O->>O: worker-report: valid pr-opened
+    par on every new head
+        O->>CI: Monitor until checks settle
+        CI-->>O: PR n pass · head sha
+    and
+        O->>G: gate pr --cwd worktree
+        G-->>O: PR n head sha · one line per check
+    end
     alt gate fails
-        G-->>O: exit 1 + output
         O->>W: fix this (no review round spent)
-    else gate passes
+    else CI green on a head whose gate passed
         O->>R: round 1 · tier · post?
         R-->>O: verdict · counts · review URL
         alt changes
@@ -231,9 +236,9 @@ sequenceDiagram
     end
 ```
 
-1. **Pre-merge check.** `scripts/holds --pr <n>` checks the PR's diff against every other hold. The scout runs its five-item checklist. For every PR whose checks are pending, one Monitor runs `scripts/watch-ci <pr>…`, which prints one line per PR as its checks settle and wakes the orchestrator. The orchestrator never sleeps or polls.
+1. **Gate and CI, in parallel, on every new head.** `scripts/gate <pr> --cwd <worktree>` is the one mechanical check before any reviewer. It prints the PR's head commit first, then one line per check: the title against Conventional Commits, mergeability with the base (a conflict fails; a branch that is merely behind passes and is updated at merge time), no overlap with held paths (it runs `scripts/holds --pr` itself), dependencies merged, no secrets added to the diff, a changed lockfile with its changed manifest, and each command the config's **Repo-specific checks** mark with `run:`. It appends a `gate` event to the run log. Exit 1 goes straight to the worker without waiting for CI and costs no review round. Exit 3 means GitHub still reports mergeability as unknown, so the gate is run again once CI settles. Meanwhile, for every PR whose checks are pending, one Monitor runs `scripts/watch-ci <pr>…`, which prints one line per PR as its checks settle, with the head commit, and wakes the orchestrator. The orchestrator never sleeps or polls.
 2. **CI failed.** The failing step goes to the worker by message. A second CI failure on a Haiku worker's PR escalates instead.
-3. **The script gate.** With CI green, `scripts/gate <pr> --cwd <worktree>` runs before any reviewer. It checks the PR's mergeability with its base (a conflict fails; a branch that is merely behind passes and is updated at merge time), its title against Conventional Commits, and each command the config's **Repo-specific checks** mark with `run:`. It prints one line per check and the tail of any failure, and appends a `gate` event to the run log. Exit 1 goes straight back to the worker and costs no review round. Exit 3 means GitHub still reports mergeability as unknown, so the gate is run again later. Only exit 0 leads to a review.
+3. **Ready for review** when CI is green on a head whose gate passed: the `watch-ci` line and the `gate` line carry the same head. A new head means both run again. After a compaction, the run log's last `gate` event for the PR says whether its head passed.
 4. **Review.** The tier comes from the PR's diff and the config's thresholds, or a `size:` label on the ticket. Round 1 is dispatched with a pointer brief only: ticket, PR, round, tier, whether to post. Round 2 onwards continues the same reviewer by message. A posted review comes back as verdict, counts and URL; the findings never pass through the orchestrator's context.
 5. **Changes requested.** The worker is told "address review `<url>`" and reads the findings from the PR itself. After three rounds the ticket waits for you. An approve with minors tells the worker to take or leave them, with CI alone gating the merge and no re-review. A push after approval needs no decision from the orchestrator: the merge script decides.
 6. **Merge.** If a merge gate applies or the config says the orchestrator doesn't merge, the ticket waits for you. Otherwise, for a large PR whose review wasn't posted, the risk notes go on the PR as one comment first. Then `scripts/merge <pr> --method <squash|merge|rebase> --approved-head <sha> --worktree <dir>`:
@@ -253,7 +258,7 @@ The lead's own PRs, those closing a `lead` ticket, run the same loop with no wor
 
 ### The guard
 
-`hooks/guard.py` runs as a `PreToolUse` hook on every Bash call and acts only on this plugin's agents, by their `orchestrate:<role>` agent type. It splits the command into shell words with its own lexer, following quotes, escapes, `$(...)`, heredocs and `sh -c`, decides on those words, and refuses a command it cannot parse. Scouts and reviewers are refused git writes, `gh` writes, file writes, redirects, builds and installs; the reviewer alone may post one comment review in the shapes its definition shows, and only when the config says `Post reviews: yes`. Workers are refused `gh pr merge`, `scripts/merge`, force-pushes, pushes to `main` or `master`, and `scripts/verify` in the background. A role the guard does not know is treated as read-only. It is a guardrail against mistakes, not a sandbox: your permission mode and sandbox settings still apply on top. Every distinct command the agents ran in real sessions lives in `tests/fixtures/guard-corpus.jsonl`, so a guard change that flips a decision shows up in a PR diff.
+`hooks/guard.py` runs as a `PreToolUse` hook on every Bash call and acts only on this plugin's agents, by their `orchestrate:<role>` agent type. It splits the command into shell words with its own lexer, following quotes, escapes, `$(...)`, heredocs and `sh -c`, decides on those words, and refuses a command it cannot parse. Scouts and reviewers are refused git writes, `gh` writes, file writes, redirects, builds and installs; a GraphQL query is allowed and a mutation refused; the reviewer alone may post one comment review in the shapes its definition shows, and only when the config says `Post reviews: yes`. Workers are refused `gh pr merge`, `scripts/merge`, force-pushes, pushes to `main` or `master`, and any command run in the background. A role the guard does not know is treated as read-only. It is a guardrail against mistakes, not a sandbox: your permission mode and sandbox settings still apply on top. Every distinct command the agents ran in real sessions lives in `tests/fixtures/guard-corpus.jsonl`, so a guard change that flips a decision shows up in a PR diff.
 
 ### Usage limits
 
@@ -266,12 +271,13 @@ Every mechanical rule the prompts once restated is a script under `scripts/`, fo
 | Script | Run by | What it does |
 |---|---|---|
 | `rebuild-state` | orchestrator, each pass | Rebuilds the state file from the session's transcripts |
-| `worker-live` | orchestrator | Reads a branch's worktree lock to say whether another session's worker is live on it |
+| `claims` | orchestrator, each pass | The state of every claimed ticket: branch, PR, worker, worktree, lock and unpushed work |
 | `lead-route` | orchestrator, each pass | Prints one routing verdict per ticket that needs one, from the tracker and the state file |
-| `holds` | orchestrator | Decides what is held and whether a ticket or PR overlaps it |
+| `holds` | orchestrator and `gate` | Decides what is held and whether a ticket or PR overlaps it |
+| `worker-report` | orchestrator, on each worker completion | Classifies the completion text into one verdict and logs it |
 | `verify` | worker | Runs the config's verify commands, one line per result |
-| `watch-ci` | orchestrator, via a Monitor | Prints one line per PR as its checks settle |
-| `gate` | orchestrator, before review | Mergeability, title convention and the config's `run:` checks |
+| `watch-ci` | orchestrator, via a Monitor | Prints one line per PR as its checks settle, with the head commit |
+| `gate` | orchestrator, before review | Title, mergeability, held paths, dependencies, secrets, lockfiles and the config's `run:` checks |
 | `merge` | orchestrator, after approval | Readiness, merge, re-check, cleanup, then the sweep with shared-file replay |
 | `board` | orchestrator, each pass | Syncs the optional GitHub Projects board |
 | `lead-brief` | lead, at start-up | The lead's index, and the watermark it resumes from |
@@ -280,7 +286,7 @@ Every mechanical rule the prompts once restated is a script under `scripts/`, fo
 | `sandbox-git` | setup, with your yes | Lets `git fetch`, `pull` and `push` run outside the sandbox over SSH |
 | `guard-corpus` | you, in development | Adds real sessions' commands to the guard's regression corpus |
 
-`gate`, `watch-ci`, `merge` and the sweep each append an event to `.claude/orchestrate-profiles/events.jsonl`, and `--profile` records each pass beside it. The profile reads both with the session's transcripts to report cost per merged ticket by model and role, slot utilisation and why idle slots were idle, review rounds and round-1 approval rate, workers by model and escalations, and the orchestrator's context size at each turn with its compactions.
+`gate`, `watch-ci`, `worker-report`, `merge` and the sweep each append an event to `.claude/orchestrate-profiles/events.jsonl`, and `--profile` records each pass beside it. The profile reads both with the session's transcripts to report cost per merged ticket by model and role, slot utilisation and why idle slots were idle, review rounds and round-1 approval rate, workers by model and escalations, and the orchestrator's context size at each turn with its compactions.
 
 ## Documentation
 
