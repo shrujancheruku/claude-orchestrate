@@ -38,7 +38,7 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
 
 ### Concepts
 
-- **Ticket:** a GitHub issue that is open, `ready-for-agent`, unassigned and unblocked, with no open sub-issues. Tickets are taken in ascending issue number, the order `to-tickets` publishes them in. The tracker operations and label strings come from `docs/agents/`. A ticket a worker can't finish goes back to the tracker as `ready-for-human` or `needs-info`.
+- **Ticket:** a GitHub issue `scripts/frontier` lists as takeable: open, `ready-for-agent`, unassigned, unblocked, not a parent (no sub-issues, open or closed) and not the lead's. Taken in ascending issue number, the order `to-tickets` publishes them in. The tracker operations and label strings come from `docs/agents/`. A ticket a worker can't finish goes back to the tracker as `ready-for-human` or `needs-info`.
 - **Slot:** one ticket in flight. The config sets how many. Two tickets run at once only when their **touch maps** (the files the scout expects each to change) don't overlap outside the shared files; an **exclusive hold** keeps a path to one ticket until it merges. A ticket another session's live worker is building holds the files that worker has changed so far, committed or not, so this session won't start an overlapping ticket beside it.
 - **Domain docs:** workers and reviewers follow the glossary and ADRs that `docs/agents/domain.md` points to. A PR that contradicts an ADR without saying why is a blocking finding.
 - **Gate:** a ticket, label or path that waits for your go-ahead to start or to merge.
