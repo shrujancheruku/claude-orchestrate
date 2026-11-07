@@ -46,7 +46,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 - **Commits:** <convention>
 - **PR title:** <convention>. **Body:** <closing reference, e.g. "Closes #<n>">
 - **Method:** <squash | merge | rebase>
-- **Orchestrator merges:** <yes | no>. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date, reviewer approved.
+- **Orchestrator merges:** <yes | no>. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date, review threads resolved, reviewer approved.
 
 ## Gates
 

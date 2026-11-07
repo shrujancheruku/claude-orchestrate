@@ -42,7 +42,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 - **Commits:** Conventional Commits (`type(scope): description`, `!` or a `BREAKING CHANGE:` footer for breaking changes). No attribution lines or trailers.
 - **PR title:** Conventional Commits, same as commits (checked by `scripts/gate`). **Body:** `Closes #<n>`; no attribution lines.
 - **Method:** squash, deleting the branch in the merge command (the repo doesn't delete merged branches on its own)
-- **Orchestrator merges:** yes. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date, reviewer approved. `main` has no branch protection, so this rule is the only gate: never merge with CI pending or red.
+- **Orchestrator merges:** yes. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date, review threads resolved, reviewer approved. `main` has no branch protection, so this rule is the only gate: never merge with CI pending or red.
 
 ## Gates
 

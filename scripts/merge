@@ -4,7 +4,8 @@
 With --approved-head (the PR head the reviewer approved; the orchestrator always passes it) the script
 first decides readiness and merges nothing unless the PR is ready: CI not green on the head (a check
 pending, failed, cancelled or missing, or no checks at all) or an open blocker on the PR's ticket (the
-branch's `<number>-` prefix, else the PR's closing reference) is a refusal (exit 1, the clause named); a PR behind the default branch is
+branch's `<number>-` prefix, else the PR's closing reference), or an unresolved review thread (outdated or not, any author; the count line, then one
+`  <author> <url>` line each), is a refusal (exit 1, the clause named); a PR behind the default branch is
 updated with `gh pr update-branch` (exit 5); the worker's own change since the approved head, not counting
 what merges of the default branch brought in, that touches a config risk path or exceeds the S thresholds
 needs re-review (exit 6). Without the flag it merges as before.
@@ -32,7 +33,7 @@ unapproved PR, or one pushed to since its approval, is left alone. None of this 
 Exit codes: 0 merged and cleaned up; 4 the same, but a swept branch was handed back (resume its worker
 with the printed conflict list); 5 behind the default branch, branch updated: wait for CI, then run
 again; 6 the change since --approved-head needs re-review (nothing merged); 1 the merge was refused, or the PR was closed unmerged (or the branch update for exit 5 failed; the output says why);
-2 the script could not run (`gh` is missing or cannot read the PR, or with --approved-head readiness could not be decided, e.g. a failed compare call: run it again; the error goes to stderr); 3 still not MERGED at the timeout (run it
+2 the script could not run (`gh` is missing or cannot read the PR, or with --approved-head readiness could not be decided, e.g. a failed compare call or review-threads read: run it again; the error goes to stderr); 3 still not MERGED at the timeout (run it
 again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
 Stdlib only, Python 3.9+.
@@ -151,6 +152,24 @@ def merge_rule(cwd, pr, v, head):
     return None
 
 
+def threads_rule(cwd, pr):
+    """Exit code 1 (or 2: could not read) when the PR has an unresolved review thread, else None.
+    Outdated threads and any author count; top-level PR comments are not threads."""
+    try:
+        threads = github.review_threads(pr, cwd=cwd)
+    except github.GhError as e:
+        say(f"merge: could not read the review threads of PR #{pr}: {e.message}")
+        return 2
+    unresolved = [t for t in threads if not t["resolved"]]
+    if not unresolved:
+        return None
+    say(f"PR #{pr} is not ready: {len(unresolved)} unresolved review thread(s)")
+    for t in unresolved:
+        first = t["comments"][0] if t["comments"] else {}
+        say(f"  {first.get('author') or 'ghost'} {first.get('url') or '?'}")
+    return 1
+
+
 def readiness(cwd, pr, v, approved):
     """Exit code 1, 2, 5 or 6 when the PR is not ready to merge against `approved`, else None (ready)."""
     default = default_branch(cwd)
@@ -159,6 +178,9 @@ def readiness(cwd, pr, v, approved):
         say(f"merge: cannot decide readiness for PR #{pr}: the default branch or head is unknown")
         return 2
     refusal = merge_rule(cwd, pr, v, head)
+    if refusal is not None:
+        return refusal
+    refusal = threads_rule(cwd, pr)
     if refusal is not None:
         return refusal
     try:
