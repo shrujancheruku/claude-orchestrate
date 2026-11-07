@@ -56,21 +56,6 @@ NEEDS_LEAD = "needs-lead"
 LEAD_LABEL = "lead"  # a ticket the lead owns: its PR is the pipeline's, and no worker is dispatched for it
 UNCAP_AFTER = timedelta(minutes=30)
 
-ISSUES_QUERY = """query($owner: String!, $name: String!) {
-  repository(owner: $owner, name: $name) {
-    issues(first: 100, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
-      nodes {
-        number
-        labels(first: 20) { nodes { name } }
-        assignees(first: 1) { totalCount }
-        blockedBy(first: 20) { nodes { number state } }
-        userContentEdits(first: 20) { nodes { editedAt } }
-        comments(last: 100) { nodes { body createdAt userContentEdits(first: 20) { nodes { editedAt } } } }
-      }
-    }
-  }
-}"""
-
 # Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
 ABANDON_QUERY = """query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -91,7 +76,7 @@ def malformed(what):
 
 
 def load_repo(root):
-    return github.call_json("repo", "view", "--json", "owner,name", cwd=root)
+    return github.repo_info(root)
 
 
 def load_abandoned(root, repo):
@@ -107,10 +92,8 @@ def load_abandoned(root, repo):
 
 def load_issues(root, repo):
     """Open issues as plain dicts: number, claimed, labels, blockers, body_edits, comments (body, created, edits)."""
-    data = github.call_json("api", "graphql", "-f", f"query={ISSUES_QUERY}",
-                            "-F", f"owner={repo['owner']['login']}", "-F", f"name={repo['name']}", cwd=root)
+    nodes = github.open_issues(repo, cwd=root)
     try:
-        nodes = data["data"]["repository"]["issues"]["nodes"]
         issues = []
         for node in nodes:
             comments = [{"body": c.get("body") or "", "created": parse_ts(c.get("createdAt")),

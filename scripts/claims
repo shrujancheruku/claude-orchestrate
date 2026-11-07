@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""claims [<ticket>] [--repo DIR] [--state FILE] : what state is each claimed ticket in?
+
+One line per claimed ticket in ascending ticket order, or the one named (the rules are in scripts/claims.py):
+    #<n> <state> <branch | no-branch> pr <num | none> worker <agent-id> <model> | none worktree <path | gone> lock <lock> [<changes>]
+state: with-lead | in-review | done | building | elsewhere | stalled (`paused` and `waiting` are the orchestrator's own).
+lock:  `live <pid>`; `live ?` (the line then ends ` (lock: <reason>)`: the reason doesn't parse, which counts as live;
+       unlock the worktree if it is stale); `dead <pid>` (unlock it, then rescue it); `none` (no lock or no worktree).
+changes (only with a worktree and no PR): `clean`, `dirty <k>`, `unpushed <k>` or `dirty <k> unpushed <j>`.
+`claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line.
+Reads the open issues (one `gh api graphql`), the open and merged PRs, the state file (a missing one means no workers) and
+`git worktree list`. Exit codes: 0 printed; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository, an
+unreadable state file), one line on stderr. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import claims
+import common
+import github
+from repo import STATE
+
+
+def line(c) -> str:
+    worker = "none" if not c.worker else f"{c.worker.get('agent_id') or '?'} {c.worker.get('model') or '?'}"
+    lock = "none" if c.lock is None else f"{c.lock[0]} {c.lock[1] if c.lock[1] is not None else '?'}"
+    out = (f"#{c.ticket} {c.state} {c.branch or 'no-branch'} pr {c.pr if c.pr is not None else 'none'} "
+           f"worker {worker} worktree {c.worktree or 'gone'} lock {lock}")
+    if c.changes is not None:
+        dirty, unpushed = c.changes
+        parts = ([f"dirty {dirty}"] if dirty else []) + ([f"unpushed {unpushed}"] if unpushed else [])
+        out += " " + " ".join(parts or ["clean"])
+    if c.lock and len(c.lock) == 3:
+        out += f" (lock: {c.lock[2]})"
+    return out
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("ticket", nargs="?", type=int, help="print only this ticket")
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    ap.add_argument("--state", default=None, help="state file (default: <repo>/.claude/orchestrate-state.json)")
+    args = ap.parse_args(argv)
+    root = Path(args.repo).resolve()
+    if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
+        common.die(f"claims: cannot run: {args.repo} is not in a git repository")
+    state_file = Path(args.state) if args.state else root / STATE
+    try:
+        info = github.repo_info(root)
+        base = (info.get("defaultBranchRef") or {}).get("name")
+        if not isinstance(base, str):
+            raise github.GhError(github.MALFORMED, "gh returned no default branch")
+        nodes = github.open_issues(info, cwd=root)
+        issues = [{"number": int(n["number"]),
+                   "claimed": ((n.get("assignees") or {}).get("totalCount") or 0) > 0,
+                   "labels": {x["name"] for x in (n.get("labels") or {}).get("nodes") or []}} for n in nodes]
+        prs = github.open_prs_with_heads(cwd=root)
+        merged = github.merged_prs(base, cwd=root)
+        found = claims.claims(root, state_file, issues, prs, merged)
+    except github.GhError as e:
+        common.die(f"claims: cannot run: gh failed: {e.message}")
+    except (KeyError, TypeError, ValueError) as e:
+        common.die(f"claims: cannot run: {e}")
+    if args.ticket is not None:
+        found = {args.ticket: found[args.ticket]} if args.ticket in found else {}
+        if not found:
+            print(f"#{args.ticket} not claimed")
+    for n in sorted(found):
+        print(line(found[n]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

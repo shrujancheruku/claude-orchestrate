@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv, gh_pr_list, gh_repo_view, git  # noqa: E402
-from test_worker_live import own_start_reason  # noqa: E402
+from test_claims import own_start_reason  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "run" / "SKILL.md"
@@ -324,10 +324,10 @@ class PromptSide(unittest.TestCase):
         self.assertRegex(verdicts, r"REDISPATCH #<n>`: resume the ticket as stalled, so the rescue .* runs first")
         rescue = text[text.index("- **Resume a stalled ticket**"):text.index("- **While a limit holds**")]
         self.assertIn("skip an Elsewhere ticket", rescue)
-        self.assertIn("found by branch with `git worktree list` when the state file has none", rescue)
+        self.assertIn("the `worktree` field of `claims <ticket>`", rescue)
         handover = text[text.index("2. Hand over cleanly."):text.index("3. Dispatch the new worker")]
         self.assertIn("skip an Elsewhere ticket", handover)
-        self.assertIn("scripts/worker-live", text)
+        self.assertIn("scripts/claims", text)
 
     def test_the_worker_reports_adr_conflicts_and_never_writes_adrs_in_lead_mode(self):
         text = (ROOT / "agents" / "worker.md").read_text()
