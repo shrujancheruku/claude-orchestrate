@@ -43,8 +43,12 @@ A claimed ticket whose worker ended on an API or usage-limit error. Source: `ski
 _Avoid_: suspended, rate-limited
 
 **Stalled**:
-A claimed ticket with no PR and no worker this session knows of. Source: `skills/run/SKILL.md`.
+A claimed ticket with no PR and no live worker in any session: none this session knows of, and none that is **Elsewhere**. Source: `skills/run/SKILL.md`.
 _Avoid_: stuck, orphaned, abandoned
+
+**Elsewhere**:
+A claimed ticket with no PR whose worker belongs to another live session. This session doesn't resume, rescue or redispatch it. Source: `skills/run/SKILL.md`.
+_Avoid_: foreign, orphaned
 
 **In review**:
 A claimed ticket whose PR is open. Source: `skills/run/SKILL.md`.
