@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""frontier [--parent <n> | --ticket <n>] [--all] [--repo DIR] : which tickets are takeable now?
+
+Default: one line per takeable ticket, `#<n> <title>`, ascending, nothing else (an empty frontier prints nothing).
+--all appends four sections, each `<name>:` then one line per item, or `none`:
+    not-takeable:    `#<n> <reason>` for every other `ready-for-agent` ticket (claimed, blocked-by #<m>..., parent, lead, wayfinder)
+    ready-for-human: `#<n> <title>`
+    parents-closed:  `#<n> <title>`, open parents whose sub-issues are all closed
+    drift:           `#<n> body says blocked by #<m>, tracker does not`
+--parent <n> limits every section to that parent's sub-issues, --ticket <n> to one ticket (its line, or its reason).
+The rules are in scripts/tracker.py. Reads the open issues (every page of one `gh api graphql` query) and the label
+strings from docs/agents/triage-labels.md (the defaults when it is missing). Exit codes: 0 ran; 2 could not run
+(no `gh`, a failed `gh` call, a malformed reply), one line on stderr and no partial output. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+import common
+import github
+import runlog
+import tracker
+
+TRIAGE_LABELS = Path("docs/agents/triage-labels.md")
+DEFAULTS = {"ready": "ready-for-agent", "human": "ready-for-human", "lead": "lead"}
+# The lead label stays fixed (as in scripts/claims): its table row has no role name in column one to match.
+ROLES = {"ready-for-agent": "ready", "ready-for-human": "human"}
+
+
+def label_strings(root: Path) -> dict:
+    """The repo's label strings: the mapping table's second column, by role (first column); a default for a missing row."""
+    labels = dict(DEFAULTS)
+    try:
+        text = (root / TRIAGE_LABELS).read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return labels
+    except OSError as e:  # present but unreadable: the label strings would be a guess
+        common.die(f"frontier: cannot run: cannot read {TRIAGE_LABELS}: {e.strerror or e}")
+    for line in text.splitlines():
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] in ROLES and re.fullmatch(r"[\w:./-]+", cells[1]):
+            labels[ROLES[cells[0]]] = cells[1]
+    return labels
+
+
+def titled(i) -> str:
+    return f"#{i['number']} {i['title']}"
+
+
+def section(name, lines) -> list:
+    return [f"{name}:", *(lines or ["none"])]
+
+
+def render(issues, scope, labels, show_all) -> list:
+    """The output lines; `issues` is the whole snapshot (blockers are judged against it), `scope` the part to print."""
+    scope = sorted(scope, key=lambda i: i["number"])
+    ready = [i for i in scope if labels["ready"] in i["labels"]]
+    taken = {i["number"] for i in tracker.takeable(issues, labels)}
+    out = [titled(i) for i in ready if i["number"] in taken]
+    if not show_all:
+        return out
+    in_scope = {i["number"] for i in scope}
+    out += section("not-takeable", [f"#{i['number']} {tracker.why_not(i, labels, issues)}"
+                                    for i in ready if i["number"] not in taken])
+    out += section("ready-for-human", [titled(i) for i in scope if labels["human"] in i["labels"]])
+    out += section("parents-closed", [titled(i) for i in tracker.closed_parents(scope)])
+    out += section("drift", [f"#{i['number']} body says blocked by #{n}, tracker does not"
+                             for i, n in tracker.drift(issues) if i["number"] in in_scope])
+    return out
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    which = ap.add_mutually_exclusive_group()
+    which.add_argument("--parent", type=int, help="only this parent's sub-issues")
+    which.add_argument("--ticket", type=int, help="only this ticket")
+    ap.add_argument("--all", action="store_true",
+                    help="add the not-takeable, ready-for-human, parents-closed and drift sections")
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    args = ap.parse_args(argv)
+    root = Path(args.repo).resolve()
+    if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
+        common.die(f"frontier: cannot run: {args.repo} is not in a git repository")
+    labels = label_strings(root)
+    try:
+        issues = tracker.from_nodes(github.open_issues(github.repo_info(root), cwd=root))
+    except github.GhError as e:
+        common.die(f"frontier: cannot run: gh failed: {e.message}")
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        common.die(f"frontier: cannot run: malformed reply from gh ({e!r})")
+    scope = tracker.scoped(issues, args.parent, args.ticket)
+    lines = render(issues, scope, labels, args.all)
+    if args.ticket is not None and not scope:
+        lines.insert(0, f"#{args.ticket} not open")
+    if args.ticket is not None and not args.all and scope and not lines:
+        # A named ticket always answers: its line, or the reason it is not takeable.
+        reason = tracker.why_not(scope[0], labels, issues) if labels["ready"] in scope[0]["labels"] else None
+        lines = [f"#{args.ticket} {reason or 'not ' + labels['ready']}"]
+    for line in lines:
+        print(line)
+    runlog.append_event(root, "frontier", "ran", takeable=len(tracker.takeable(issues, labels)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

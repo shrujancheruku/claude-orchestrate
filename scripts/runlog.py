@@ -24,7 +24,7 @@ PASS_LOG = "passes.jsonl"
 
 # Event kinds and the outcomes each may carry. scripts/replay.py owns the replay names
 # (tests/test_runlog.py checks they agree); gate, watch-ci and merge write the others.
-GATE, CI, MERGE, REPLAY, WORKER_REPORT = "gate", "ci", "merge", "replay", "worker-report"
+GATE, CI, MERGE, REPLAY, WORKER_REPORT, FRONTIER = "gate", "ci", "merge", "replay", "worker-report", "frontier"
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
@@ -33,6 +33,7 @@ OUTCOMES = {
     REPLAY: ("line-replay", "word-merge", "regenerated", "handed-back"),
     # scripts/worker-report: the first word of its verdict line.
     WORKER_REPORT: ("valid", "interim", "not-a-stop", "not-a-pr-opened", "duplicate", "missing-report", "limit", "error"),
+    FRONTIER: ("ran",),  # scripts/frontier: the takeable count rides as an extra field
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"
