@@ -144,6 +144,33 @@ def open_blockers(issue, cwd=None) -> int:
     return int(out.strip())
 
 
+# Check results that block a merge: failed ones, and ones still going (a missing result counts as going).
+CI_BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
+CI_PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+
+
+def ci_verdict(checks) -> tuple:
+    """("pass" | "pending" | "failed", [names of the checks that decide it]) from a statusCheckRollup list.
+
+    A PR with no checks at all is pending, as `watch-ci` counts it (so a repo with no CI never passes). Unlike
+    `watch-ci`, which waits while any check is pending, a failed check outranks a pending one here, so a
+    refusal names the real reason."""
+    if not checks:
+        return "pending", []
+    bad, pending = [], []
+    for c in checks:
+        name = str(c.get("name") or c.get("context") or "?")
+        # A CheckRun has status+conclusion; a commit StatusContext has only state.
+        r = (c.get("conclusion") or c.get("state") or "").upper()
+        if ("status" in c and c.get("status") != "COMPLETED") or r in CI_PENDING or not r:
+            pending.append(name)
+        elif r in CI_BAD:
+            bad.append(name)
+    if bad:
+        return "failed", bad
+    return ("pending", pending) if pending else ("pass", [])
+
+
 def issue_claim(issue, cwd=None) -> tuple:
     """(state, claimed) of an issue: claimed when it has an assignee (the claim, as the tracker doc says)."""
     data = call_json("issue", "view", str(issue), "--json", "state,assignees", cwd=cwd)
