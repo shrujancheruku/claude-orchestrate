@@ -28,7 +28,8 @@ class LeadSkill(unittest.TestCase):
         self.check(["claude agents --json --all", "SendMessage", "pid: null",
                     "claude --resume <sessionId> --bg", "Never resume a live row",
                     "claude --bg --name orchestrator --permission-mode",
-                    '"/orchestrate:run --greedy"', "Orchestrator"])
+                    '"/orchestrate:run --greedy"', "**Orchestrator** row", "**Models**",
+                    "a live row wins"])
 
     def test_model_not_found_only_fallback(self):
         self.check(["model_not_found", 'state: "failed"', "`error` field", "exactly once",
