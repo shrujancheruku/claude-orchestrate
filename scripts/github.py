@@ -27,6 +27,21 @@ GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exis
 NO_REPO = re.compile(r"not a git repository|unable to read current working directory|"
                      r"cannot determine current working directory|getcwd", re.I)
 
+ISSUES_QUERY = """query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 100, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number
+        labels(first: 20) { nodes { name } }
+        assignees(first: 1) { totalCount }
+        blockedBy(first: 20) { nodes { number state } }
+        userContentEdits(first: 20) { nodes { editedAt } }
+        comments(last: 100) { nodes { body createdAt userContentEdits(first: 20) { nodes { editedAt } } } }
+      }
+    }
+  }
+}"""
+
 
 class GhError(Exception):
     def __init__(self, kind: str, message: str):
@@ -147,3 +162,26 @@ def pr_files(pr, cwd=None) -> list:
     if not isinstance(files, list) or not all(isinstance(f, dict) and isinstance(f.get("path"), str) for f in files):
         raise GhError(MALFORMED, "gh returned no file list for the PR")
     return [f["path"] for f in files]
+
+
+def repo_info(cwd=None) -> dict:
+    """The repository's `owner`, `name` and `defaultBranchRef`, from one `gh repo view`."""
+    return call_json("repo", "view", "--json", "owner,name,defaultBranchRef", cwd=cwd)
+
+
+def open_issues(repo: dict, cwd=None) -> list:
+    """The newest 100 open issues (by update) as raw GraphQL nodes, the one home of the issues query: number, labels,
+    assignees (count), blockers, edits and comments. `repo` is `repo_info`'s (or `gh repo view`'s) owner/name dict."""
+    try:
+        owner, name = repo["owner"]["login"], repo["name"]
+    except (KeyError, TypeError):
+        raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
+    data = call_json("api", "graphql", "-f", f"query={ISSUES_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}",
+                     cwd=cwd)
+    try:
+        nodes = data["data"]["repository"]["issues"]["nodes"]
+    except (KeyError, TypeError):
+        raise GhError(MALFORMED, "gh returned an unexpected reply (issues)") from None
+    if not isinstance(nodes, list):
+        raise GhError(MALFORMED, "gh returned an unexpected reply (issues)")
+    return nodes

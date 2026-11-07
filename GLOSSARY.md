@@ -43,7 +43,7 @@ A claimed ticket together with what decides its state: its branch, worktree and 
 _Avoid_: ticket record, worker state, claim state
 
 **Building**:
-A claimed ticket with no PR yet and a worker from this session on it. Source: `skills/run/SKILL.md`.
+A claimed ticket with no PR yet and a worker from this session on it. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: running, active
 
 **Paused**:
@@ -51,11 +51,11 @@ A claimed ticket whose worker ended on an API or usage-limit error. Source: `ski
 _Avoid_: suspended, rate-limited
 
 **Stalled**:
-A claimed ticket with no PR and no live worker in any session: none this session knows of, and none that is **Elsewhere**. Source: `skills/run/SKILL.md`.
+A claimed ticket with no PR and no live worker in any session: none this session knows of, and none that is **Elsewhere**. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: stuck, orphaned, abandoned
 
 **Elsewhere**:
-A claimed ticket with no PR whose worker belongs to another live session. This session doesn't resume, rescue or redispatch it. Source: `skills/run/SKILL.md`.
+A claimed ticket with no PR whose worker belongs to another live session. This session doesn't resume, rescue or redispatch it. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: foreign, orphaned
 
 **Rescue**:
@@ -63,7 +63,7 @@ Saving a worktree's work to its branch and removing the worktree, so nothing is 
 _Avoid_: cleanup, salvage, sweep (that is the merge's)
 
 **In review**:
-A claimed ticket whose PR is open. Source: `skills/run/SKILL.md`.
+A claimed ticket whose PR is open. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: under review, open
 
 **Waiting**:
@@ -71,7 +71,7 @@ A claimed ticket blocked on the user: a gate, a question or a third review round
 _Avoid_: blocked, on hold
 
 **State file**:
-`.claude/orchestrate-state.json`, gitignored: for each ticket this session dispatched a worker for, the agent ID, worktree path (null once gone), worker model, time of its last report and the brief's touch map. Rebuilt by `scripts/rebuild-state`, never written by the orchestrator, and a cache that the tracker overrules. Source: `skills/run/SKILL.md`.
+`.claude/orchestrate-state.json`, gitignored: for each ticket this session dispatched a worker for, the agent ID, worktree path (null once gone), worker model, time of its last report and the brief's touch map. Rebuilt by `scripts/rebuild-state`, never written by the orchestrator, and a cache that the tracker overrules. `scripts/claims` is its one reader. Source: `scripts/rebuild-state`, `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: status file, session file
 
 **Pass**:
