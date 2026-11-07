@@ -6,6 +6,8 @@ repo and remote state, and the calls the fake `gh` recorded.
 
 import json
 import os
+import atexit
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +54,52 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
 
 
+_TEMPLATE = None
+
+
+def _template():
+    """A repo with one pushed commit and its bare origin, built once per process and copied per test.
+
+    Building it (two `git init`s, a commit, a push) cost more than most tests; a copy is a few files.
+    """
+    global _TEMPLATE
+    if _TEMPLATE is None:
+        tmp = tempfile.TemporaryDirectory()
+        atexit.register(tmp.cleanup)
+        root = Path(tmp.name)
+        origin, repo = root / "origin.git", root / "repo"
+        git(root, "init", "--bare", "-b", "main", str(origin))
+        git(root, "init", "-b", "main", str(repo))
+        for k, v in (("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")):
+            git(repo, "config", k, v)
+        git(repo, "remote", "add", "origin", str(origin))
+        (repo / "README.md").write_text("hello\n")
+        git(repo, "add", "README.md")
+        git(repo, "commit", "-m", "chore: init")
+        git(repo, "push", "-u", "origin", "main")
+        for d in (origin, repo / ".git"):  # sample hooks: dozens of files copied per test, never run
+            shutil.rmtree(d / "hooks", ignore_errors=True)
+            (d / "hooks").mkdir()  # tests install their own hooks here
+        _TEMPLATE = root
+    return _TEMPLATE
+
+
+# Named canned `gh` replies, for ScriptEnv.set_gh.
+def gh_repo_view(owner="o", name="r"):
+    """`gh repo view --json owner,name`."""
+    return {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": owner}, "name": name})}
+
+
+def gh_default_branch(name="main"):
+    """`gh repo view --json defaultBranchRef`."""
+    return {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": name}})}
+
+
+def gh_pr_list(prs, *prefix):
+    """`gh pr list` (optionally only calls starting with `prefix`, e.g. "--state", "open") replying with `prs`."""
+    return {"args": ["pr", "list", *prefix], "stdout": json.dumps(prs)}
+
+
 class ScriptEnv:
     """Use as `env = ScriptEnv(); self.addCleanup(env.close)`."""
 
@@ -62,13 +110,12 @@ class ScriptEnv:
         self.repo = root / "repo"
         self.bin = root / "bin"
         self.gh_state = root / "gh-state.json"
-        git(root, "init", "--bare", "-b", "main", str(self.origin))
-        git(root, "init", "-b", "main", str(self.repo))
-        for k, v in (("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")):
-            git(self.repo, "config", k, v)
-        git(self.repo, "remote", "add", "origin", str(self.origin))
-        self.commit("README.md", "hello\n", "chore: init")
-        git(self.repo, "push", "-u", "origin", "main")
+        template = _template()
+        shutil.copytree(template / "origin.git", self.origin, symlinks=True)
+        shutil.copytree(template / "repo", self.repo, symlinks=True)
+        # The clone's config names the template's origin by absolute path: point it at this copy.
+        cfg = self.repo / ".git" / "config"
+        cfg.write_text(cfg.read_text().replace(str(template / "origin.git"), str(self.origin)))
         self.bin.mkdir()
         gh = self.bin / "gh"
         gh.write_text(FAKE_GH)
