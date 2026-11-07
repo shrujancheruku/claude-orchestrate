@@ -17,7 +17,7 @@ The plugin's behaviour lives in two kinds of module: prompts (skills and agent d
 - **Judgement stays in the prompts:** predicting a touch map, deciding whether a stop is the user's decision, reviewing a diff, choosing what to tell a worker.
 - **New scripts follow ADR-0003** for kind and invocation.
 
-The first applications are the held-path script (`scripts/holds`), merge readiness moving into `scripts/merge`, and the state file carrying each worker's resolved worktree and touch map (the architecture review of 2026-11-05).
+The first applications are the held-path script (`scripts/holds`), merge readiness moving into `scripts/merge`, and the state file carrying each worker's resolved worktree and touch map (the architecture review of 2026-11-05), then `scripts/worker-report`, which classifies every worker completion before the orchestrator acts (#260). A mechanical check of a stop needs a machine-readable stop list, so the worker's report carries `stop-reason`.
 
 ## Consequences
 
