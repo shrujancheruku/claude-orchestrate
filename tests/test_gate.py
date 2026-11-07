@@ -85,12 +85,13 @@ class GateTest(unittest.TestCase):
         self.assertIn("conflict", r.stdout)
         self.assertEqual(self.event()["outcome"], "fail")
 
-    def test_behind_base_is_not_mergeable_and_is_reported(self):
+    def test_behind_but_mergeable_passes_and_reports_behind_by(self):
         self.prime(behind=3)
         r = self.gate()
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("behind", r.stdout)
-        self.assertEqual(self.event()["behind_by"], 3)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("behind_by 3", r.stdout)
+        e = self.event()
+        self.assertEqual((e["outcome"], e["behind_by"]), ("pass", 3))
 
     def test_failing_repo_command(self):
         self.prime()
@@ -189,35 +190,33 @@ class GateTest(unittest.TestCase):
         self.prime(title="bad title", mergeable="UNKNOWN")
         self.assertEqual(self.gate().returncode, 1)
 
-    def test_unknown_behind_base_is_a_failure_not_a_rerun(self):
-        # UNKNOWN does not hide a real problem: a PR behind its base is sent back to the worker.
+    def test_unknown_behind_base_alone_exits_3(self):
         self.prime(mergeable="UNKNOWN", behind=3)
         r = self.gate()
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("behind", r.stdout)
+        self.assertEqual(r.returncode, 3, r.stdout)
         e = self.event()
-        self.assertEqual((e["outcome"], e["behind_by"]), ("fail", 3))
+        self.assertEqual((e["outcome"], e["behind_by"]), ("unknown", 3))
 
-    def test_non_numeric_behind_by_is_a_failure_with_a_reason(self):
+    def test_unreadable_behind_by_on_mergeable_passes_with_null(self):
         self.env.set_gh([
             {"args": ["pr", "view"], "stdout": json.dumps(
                 {"title": "feat(x): add y", "mergeable": "MERGEABLE", "baseRefName": "main", "headRefName": "br"})},
             {"args": ["api"], "stdout": "null\n"},
         ])
         r = self.gate()
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("could not read behind_by", r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("behind_by ?", r.stdout)
+        self.assertIsNone(self.event()["behind_by"])
 
-    def test_unknown_with_unreadable_behind_is_a_failure_not_a_rerun(self):
+    def test_unknown_with_unreadable_behind_alone_exits_3(self):
         self.env.set_gh([
             {"args": ["pr", "view"], "stdout": json.dumps(
                 {"title": "feat(x): add y", "mergeable": "UNKNOWN", "baseRefName": "main", "headRefName": "br"})},
             {"args": ["api"], "stderr": "HTTP 502", "exit": 1},
         ])
         r = self.gate()
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("behind_by", r.stdout)
-        self.assertEqual(self.event()["outcome"], "fail")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertEqual(self.event()["outcome"], "unknown")
 
     def test_unknown_settles_to_mergeable_on_retry(self):
         views = [json.dumps({"title": "feat(x): add y", "mergeable": m, "baseRefName": "main", "headRefName": "br"})
