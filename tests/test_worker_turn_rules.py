@@ -54,7 +54,7 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("listed under Held paths in the brief", bullet)
         self.assertNotIn(":line", bullet)
 
-    def test_report_block_carries_the_nine_stop_reasons_and_rules_name_the_guard(self):
+    def test_report_block_carries_the_stop_reasons_and_rules_name_the_guard(self):
         s = (ROOT / "agents/worker.md").read_text()
         report = s[s.index("## Report"):]
         line = next(l for l in report.splitlines() if l.startswith("stop-reason:"))
