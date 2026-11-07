@@ -129,6 +129,14 @@ def issue_state(issue, cwd=None) -> str:
     return str(call_json("issue", "view", str(issue), "--json", "state", cwd=cwd).get("state"))
 
 
+def open_blockers(issue, cwd=None) -> int:
+    """How many open issues block `issue` (the tracker's own dependency summary)."""
+    out = call("api", f"repos/{{owner}}/{{repo}}/issues/{issue}", "--jq", ".issue_dependencies_summary.blocked_by", cwd=cwd)
+    if not out.strip().isdigit():
+        raise GhError(MALFORMED, f"blocked_by is not a number: {common.one_line(out) or 'empty reply'}")
+    return int(out.strip())
+
+
 def issue_claim(issue, cwd=None) -> tuple:
     """(state, claimed) of an issue: claimed when it has an assignee (the claim, as the tracker doc says)."""
     data = call_json("issue", "view", str(issue), "--json", "state,assignees", cwd=cwd)

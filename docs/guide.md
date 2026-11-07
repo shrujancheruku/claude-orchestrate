@@ -10,7 +10,7 @@ A Claude Code plugin that works through a backlog of GitHub issues in parallel, 
 orchestrator (your session, e.g. Opus)     order, briefs, verdicts, merges, gates
  ├─ worker        Sonnet, own worktree      one ticket → one PR
  ├─ reviewer      Haiku (S) / Sonnet (M, L high effort) one PR against its ticket, read-only, posts its review
- └─ scout         Haiku, read-only          tracker, CI and pre-merge checks
+ └─ scout         Haiku, read-only          tracker and CI facts
 ```
 
 ## Install
@@ -50,7 +50,7 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
 - Each role runs on the cheapest model that does it well. Set them per repo in the config's **Models** table.
 - Searches and log reads run in Haiku contexts, so the orchestrator's and workers' contexts stay small.
 - **Worker report check:** on every worker completion the orchestrator pipes the completion text to `scripts/worker-report <ticket> --branch <branch>`, which prints one verdict (`valid pr-opened`, `valid stopped`, `interim`, `duplicate`, `not-a-stop`, `not-a-pr-opened`, `missing-report`, `limit` or `error`) and appends a `worker-report` event to the run log. A stopped worker's report carries a `stop-reason:` line from a fixed list; the PR number and head come from the host, never from the report.
-- **Script gate:** before any reviewer is dispatched, `scripts/gate <pr>` checks the PR's mergeability with its base (conflicts only: a branch that is merely behind passes, and `merge` updates it at merge time, exit 5), its title against Conventional Commits, and each command a **Repo-specific check** in the config marks with ``run: `cmd` `` (plain backticked text is never run). It prints one line per check like `verify`, appends a `gate` event, and a failure goes straight back to the worker without counting as a review round.
+- **Script gate:** before any reviewer is dispatched, `scripts/gate <pr>` prints the PR's head commit first (the join key with `watch-ci`'s line, so review starts only when CI is green on a head whose gate passed), then checks the PR's mergeability with its base (conflicts only: a branch that is merely behind passes, and `merge` updates it at merge time, exit 5), its title against Conventional Commits, overlap with held paths (it runs `holds --pr`), dependencies merged (the PR's ticket has no open blocker and the PR is based on the default branch), no secrets added (env, key and credential files, private-key and token lines in the diff) and that a changed lockfile has a changed manifest, all built in, and each command a **Repo-specific check** in the config marks with ``run: `cmd` `` (plain backticked text is never run). It prints one line per check like `verify`, appends a `gate` event, and a failure goes straight back to the worker without counting as a review round.
 - Review fixes go back to the worker that wrote the PR, so its context is reused instead of a new agent starting.
 - Briefs share a fixed preamble, so workers share a prompt-cache prefix.
 - Parallel agents multiply token use. Fewer slots cost less; the slot count is your throttle. See [Choosing a slot count](#choosing-a-slot-count).

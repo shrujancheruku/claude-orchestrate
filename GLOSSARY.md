@@ -133,7 +133,7 @@ A point where the user decides: a start gate holds a ticket before a worker star
 _Avoid_: approval, checkpoint, hold
 
 **Script gate**:
-The mechanical checks a PR passes before any reviewer reads it: mergeability with its base, its title against Conventional Commits, overlap with held paths, dependencies merged, no secrets, lockfiles with their manifests, and the config's repo-specific `run:` commands. Everything in it is something the worker alone can fix. Not a **Gate**: it asks nobody. Source: `scripts/gate` (mergeability, title, `run:` commands), `scripts/holds` (held paths), `agents/scout.md` (the checklist: dependencies, secrets, lockfiles), `skills/run/SKILL.md` (The review loop).
+The mechanical checks a PR passes before any reviewer reads it: mergeability with its base, its title against Conventional Commits, overlap with held paths, dependencies merged, no secrets, lockfiles with their manifests, and the config's repo-specific `run:` commands. Everything in it is something the worker alone can fix. Not a **Gate**: it asks nobody. Source: `scripts/gate` (every check, calling `scripts/holds` for held paths), `skills/run/SKILL.md` (The review loop).
 _Avoid_: pre-merge check, pre-flight, gate (bare, for the script)
 
 **Merge readiness**:
