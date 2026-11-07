@@ -226,3 +226,4 @@ It reads `<session>.jsonl` and `<session>/subagents/*.jsonl` and writes nothing 
 - Workers branch from the default branch (Claude Code's worktree default), so a ticket starts only after its dependencies have merged.
 - Agents from a plugin ignore `permissionMode`, so workers follow your session's permission mode.
 - The orchestrator stops for anything destructive or outward-facing the config doesn't authorise.
+- The guard is a guardrail against mistakes, not a sandbox. Your permission mode and sandbox settings still apply on top ([the guard hook](#the-guard-hook)).
