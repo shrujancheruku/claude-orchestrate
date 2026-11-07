@@ -34,6 +34,10 @@ _Avoid_: auto slots, unlimited, max parallelism
 A ticket assigned to the user; it holds a slot until it merges or is handed back to the tracker. On a claimed stop it may carry `needs-lead` beside `ready-for-agent`. Source: `skills/run/SKILL.md`, `docs/agents/triage-labels.md`.
 _Avoid_: taken, locked, in progress
 
+**Claim**:
+A claimed ticket together with what decides its state: its branch, worktree and lock, its PR, and the worker the state file records for it. The state is one of **Building**, **Stalled**, **Elsewhere**, **In review**, with the lead, or done. `scripts/claims` is the one source: it reports each claim, and the pass table and every script that needs a claimed ticket's state read it. Source: `scripts/claims`, `skills/run/SKILL.md`.
+_Avoid_: ticket record, worker state, claim state
+
 **Building**:
 A claimed ticket with no PR yet and a worker from this session on it. Source: `skills/run/SKILL.md`.
 _Avoid_: running, active
