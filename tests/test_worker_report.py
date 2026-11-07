@@ -20,9 +20,9 @@ BRANCH = "260-worker-report"
 NOTICE = "<task-id>a1</task-id>\n<status>completed</status>\n<summary>Agent completed</summary>\n"
 
 
-def prs(*items):
+def prs(*items, draft=()):
     return [{"args": ["pr", "list"], "stdout": json.dumps(
-        [{"number": n, "headRefName": b, "headRefOid": h} for n, b, h in items])}]
+        [{"number": n, "headRefName": b, "headRefOid": h, "isDraft": n in draft} for n, b, h in items])}]
 
 
 class WorkerReport(unittest.TestCase):
@@ -90,6 +90,14 @@ class WorkerReport(unittest.TestCase):
 
     def test_no_status_line_is_interim(self):
         self.assertEqual(self.verdict(NOTICE + "Verify is running in the background; waiting.\n"), "interim")
+
+    def test_a_draft_is_not_a_pr_opened_and_a_ready_one_beside_it_is(self):
+        self.env.set_gh(prs((12, BRANCH, HEAD), draft={12}))
+        self.assertEqual(self.verdict("status: pr-opened\npr: https://github.com/o/r/pull/12\n"), "not-a-pr-opened")
+        self.assertEqual(self.verdict(NOTICE), "missing-report none")
+        self.env.set_gh(prs((12, BRANCH, HEAD), (13, "other", "e" * 40), draft={12}))
+        self.assertEqual(self.verdict("status: pr-opened\npr: https://github.com/o/r/pull/13\n"),
+                         f"valid pr-opened 13 {'e' * 40}")
 
     def test_bare_notice_finds_the_branch_pr_or_none(self):
         self.assertEqual(self.verdict(NOTICE), f"missing-report pr 12 {HEAD}")

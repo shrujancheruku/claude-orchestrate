@@ -6,7 +6,9 @@ state file once and `git worktree list` once.
 
 The state, decided in this order:
   with-lead   open, claimed, labelled `lead`, no open PR
-  in-review   an open PR on the ticket's branch (a `lead` ticket's too)
+  in-review   an open, non-draft PR on the ticket's branch (a `lead` ticket's too). A draft PR is the worker's
+              progress marker, not a review request: it counts as no PR here (ADR 0011), so the ticket is
+              building (or stalled, or elsewhere) and `Claim.pr` still names the draft to link it
   done        the ticket's branch has a merged PR, or the ticket is in the state file but not among the open issues
   building    a worker record from this session in the state file
   elsewhere   no record, and the worktree on its branch is locked by a live session (ADR 0009)
@@ -33,9 +35,10 @@ class Claim:
     branch: str | None = None      # the `<ticket>-` branch some worktree has checked out, else the PR's head branch
     worktree: str | None = None    # path of the worktree on that branch
     lock: tuple | None = None      # ("live", pid) | ("live", None, reason) | ("dead", pid) | None
-    pr: int | None = None          # the open PR's number
+    pr: int | None = None          # the open PR's number: the ready one, else the draft
     worker: dict | None = None     # the state-file record: agent id, model, last report, touch map
     changes: tuple | None = None   # (dirty paths, unpushed commits) for a claim with a worktree and no PR
+    draft: bool = False            # `pr` is a draft: the ticket is building, not in review
 
 
 def read_state(path) -> dict:
@@ -94,8 +97,9 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     open_pr = {}
     for pr in prs:
         n = ticket_of_branch((pr or {}).get("headRefName"))
-        if n is not None:
-            open_pr.setdefault(n, pr)
+        # A ready PR wins over a draft on the same ticket.
+        if n is not None and (n not in open_pr or (open_pr[n].get("isDraft") and not pr.get("isDraft"))):
+            open_pr[n] = pr
     merged_branch = {}
     for pr in merged:
         n = ticket_of_branch((pr or {}).get("headRefName"))
@@ -110,10 +114,13 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     tickets = sorted({n for n, i in open_issues.items() if i.get("claimed")} | (set(records) - set(open_issues)))
     out = {}
     for n in tickets:
-        wt, pr = on_branch.get(n), open_pr.get(n)
+        wt, shown = on_branch.get(n), open_pr.get(n)
+        draft = bool(shown and shown.get("isDraft"))
+        pr = None if draft else shown  # the PR that decides the state: a draft decides nothing
         record = records.get(n) if isinstance(records.get(n), dict) else None
-        branch = wt["branch"] if wt else (pr["headRefName"] if pr else merged_branch.get(n))
-        claim = Claim(n, "", branch, wt["path"] if wt else None, _lock(wt), pr["number"] if pr else None, record)
+        branch = wt["branch"] if wt else (shown["headRefName"] if shown else merged_branch.get(n))
+        claim = Claim(n, "", branch, wt["path"] if wt else None, _lock(wt), shown["number"] if shown else None, record,
+                      draft=draft)
         labels = set((open_issues.get(n) or {}).get("labels") or ())
         if n in open_issues and LEAD_LABEL in labels and pr is None:
             claim.state = "with-lead"

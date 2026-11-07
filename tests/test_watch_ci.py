@@ -9,12 +9,13 @@ import unittest
 
 from harness import SCRIPTS, ScriptEnv
 
-def view(result, merge="CLEAN", head="abcdef1234567", state="OPEN"):
+def view(result, merge="CLEAN", head="abcdef1234567", state="OPEN", draft=False):
     if result is None:
         checks = [{"status": "IN_PROGRESS", "conclusion": ""}]
     else:
         checks = [{"status": "COMPLETED", "conclusion": result}]
-    return {"statusCheckRollup": checks, "mergeStateStatus": merge, "headRefOid": head, "state": state}
+    return {"statusCheckRollup": checks, "mergeStateStatus": merge, "headRefOid": head, "state": state,
+            "isDraft": draft}
 
 
 class WatchCi(unittest.TestCase):
@@ -63,6 +64,14 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(len(self.env.events()), 2)
         self.assertFalse((sub / ".claude").exists())
         self.assertFalse((wt / ".claude" / "orchestrate-profiles").exists())
+
+    def test_a_draft_never_settles_until_it_is_marked_ready(self):
+        # PR 1 is green but still a draft (building): it settles only on the first ready view. PR 2 is ready and settles.
+        self.seq({"1": [view("SUCCESS", draft=True), view("SUCCESS", draft=True), view("SUCCESS", head="1111111aaa")],
+                  "2": [view("SUCCESS", head="2222222bbb")]})
+        r = self.watch("1", "2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines(), ["PR #2 pass CLEAN 2222222", "PR #1 pass CLEAN 1111111"])
 
     def test_empty_rollup_is_pending_until_checks_appear(self):
         empty = {"statusCheckRollup": [], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}

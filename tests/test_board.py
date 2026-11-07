@@ -105,6 +105,16 @@ class Board(unittest.TestCase):
         self.assertEqual(self.edits(), {"I1": "Building", "I2": "In review", "I3": "Needs lead",
                                         "I4": "Waiting on you", "I5": "Waiting on you"})
 
+    def test_a_draft_pr_stages_as_building_beside_a_ready_one_in_review(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)],
+                prs=[{"number": 11, "headRefName": "1-thing", "state": "OPEN", "mergedAt": None, "isDraft": True},
+                     {"number": 12, "headRefName": "2-thing", "state": "OPEN", "mergedAt": None, "isDraft": False}],
+                cards=[card(1, "In review"), card(2)])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(self.edits(), {"I1": "Building", "I2": "In review"})
+
     def test_a_permission_denied_ticket_waits_on_you_until_a_pr_exists(self):
         import runlog
         self.config()

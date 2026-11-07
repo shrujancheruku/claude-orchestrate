@@ -53,13 +53,14 @@ class Holds(unittest.TestCase):
         self.wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.wt_dir.cleanup)
 
-    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=()):
+    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=()):
         """prs: {number: [paths]}; branches: {number: head branch}; issues: {ticket: state}, where CLOSED leaves the
         ticket out of the open issues and OPEN lists it; merged: head branches of merged PRs; unclaimed: open tickets with
         no assignee; open_tickets: open tickets assigned to the user (as is every other open ticket listed here);
         lead: open tickets labelled `lead`."""
         prs, branches = prs or {}, branches or {}
-        listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": False} for n in prs]
+        listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": False,
+                    "isDraft": n in drafts} for n in prs]
         open_nums = set(open_tickets) | set(unclaimed) | set(lead) | {n for n, st in (issues or {}).items() if st == "OPEN"}
         nodes = [{"number": n, "labels": {"nodes": [{"name": "lead"}] if n in lead else []},
                   "assignees": {"totalCount": 0 if n in unclaimed else 1}}
@@ -181,6 +182,15 @@ class Holds(unittest.TestCase):
         r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
         self.assertEqual(r.stdout.splitlines(), [
             "src/x.py (held by open PR #9)", "overlap: src/x.py (held by open PR #9)"])
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_building_ticket_with_a_draft_holds_its_touch_map_and_the_drafts_diff(self):
+        self.gh({9: ["src/drafted.py"]}, branches={9: "12-the-fix"}, open_tickets=[12], drafts={9})
+        self.state({12: ["src/x.py"]})
+        r = self.holds("--touch-map", "src/x.py", "src/drafted.py", "--ticket", "7")
+        self.assertEqual(r.stdout.splitlines(), [
+            "src/drafted.py (held by open PR #9)", "src/x.py (held by building #12)",
+            "overlap: src/x.py (held by building #12)", "overlap: src/drafted.py (held by open PR #9)"])
         self.assertEqual(r.returncode, 1)
 
     def test_ticket_check_gh_failure_could_not_run(self):

@@ -3,8 +3,8 @@
 
 Reads the config's `- **Board:** <project URL>` line; with none it does nothing (exit 0, silent). Otherwise it
 rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a second run changes nothing:
-    Building         claimed, and `claims` says building, elsewhere, stalled or with-lead
-    In review        claimed, and `claims` says in-review
+    Building         claimed, and `claims` says building, elsewhere, stalled or with-lead (a draft PR is building)
+    In review        claimed, and `claims` says in-review (a ready PR)
     Needs lead       labelled `needs-lead`
     Waiting on you   labelled `ready-for-human` or `needs-info`, or claimed with no PR while the newest
                      `worker-report` in the run log for it is a `permission-denied` stop (the user must act)
@@ -90,7 +90,7 @@ def sync(owner, number, repo):
     issues = github.call_json("issue", "list", "--state", "open", "--limit", "200",
                               "--json", "number,url,labels,assignees", shape=list, cwd=repo)
     prs = github.call_json("pr", "list", "--state", "all", "--limit", "100",
-                           "--json", "number,headRefName,state,mergedAt", shape=list, cwd=repo)
+                           "--json", "number,headRefName,state,mergedAt,isDraft", shape=list, cwd=repo)
     # One PR read serves both claims (open and merged PRs) and the archive below.
     root = Path(repo).resolve()
     try:

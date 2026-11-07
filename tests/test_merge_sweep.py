@@ -64,6 +64,16 @@ class SweepTest(SweepMixin, unittest.TestCase):
         self.assertEqual(self.pushes(), [])
         self.assertEqual(self.replays(), [])  # the abandoned replay isn't logged
 
+    def test_a_draft_is_skipped_and_a_ready_pr_beside_it_is_still_swept(self):
+        conflicting = {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n", "src.txt": "one\nPR\n"}
+        self.pr_branch("pr-a", conflicting)
+        self.pr_branch("pr-b", {"other.txt": "x\n", "src.txt": "one\nPR-B\n"})
+        self.land({"CHANGELOG.md": "# Changes\n## Unreleased\n- main item\n- old\n", "src.txt": "one\nMAIN\n"})
+        p = self.sweep(branches=("pr-a", "pr-b"), drafts=("pr-a",))
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertNotIn("pr-a", p.stdout)
+        self.assertIn("HANDBACK PR #9 pr-b: src.txt (not a shared file)", p.stdout)
+
     def sweep_with(self, method):
         self.pr_branch("pr-a", {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n"})
         self.land({"CHANGELOG.md": "# Changes\n## Unreleased\n- main item\n- old\n"})

@@ -26,7 +26,7 @@ from repo import STATE
 def line(c) -> str:
     worker = "none" if not c.worker else f"{c.worker.get('agent_id') or '?'} {c.worker.get('model') or '?'}"
     lock = "none" if c.lock is None else f"{c.lock[0]} {c.lock[1] if c.lock[1] is not None else '?'}"
-    out = (f"#{c.ticket} {c.state} {c.branch or 'no-branch'} pr {c.pr if c.pr is not None else 'none'} "
+    out = (f"#{c.ticket} {c.state} {c.branch or 'no-branch'} pr {c.pr if c.pr is not None else 'none'}{' draft' if c.draft else ''} "
            f"worker {worker} worktree {c.worktree or 'gone'} lock {lock}")
     if c.changes is not None:
         dirty, unpushed = c.changes

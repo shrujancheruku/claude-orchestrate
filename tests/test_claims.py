@@ -68,6 +68,28 @@ class Decide(unittest.TestCase):
         c = self.decide([issue(2)], prs=[self.pr(2, "2-x")], state={"2": WORKER})[2]
         self.assertEqual(c.state, "in-review")
 
+    def test_a_draft_pr_is_building_not_in_review_and_is_still_linked(self):
+        draft = dict(self.pr(2, "2-x"), isDraft=True)
+        c = self.decide([issue(2)], prs=[draft], state={"2": WORKER})[2]
+        self.assertEqual((c.state, c.pr, c.draft), ("building", 102, True))
+
+    def test_a_draft_pr_does_not_stop_a_ticket_being_stalled_and_gets_its_changes_read(self):
+        wt = {"path": self.tmp.name, "branch": "3-x", "locked": None}
+        draft = dict(self.pr(3, "3-x"), isDraft=True)
+        c = self.decide([issue(3)], prs=[draft], worktrees=[wt], changes=lambda p, b: (2, 1))[3]
+        self.assertEqual((c.state, c.pr, c.draft, c.changes), ("stalled", 103, True, (2, 1)))
+
+    def test_a_ready_pr_wins_over_a_draft_on_the_same_ticket(self):
+        draft = dict(self.pr(4, "4-x"), isDraft=True)
+        ready = dict(self.pr(4, "4-y"), number=900, isDraft=False)
+        for prs in ([draft, ready], [ready, draft]):
+            c = self.decide([issue(4)], prs=prs)[4]
+            self.assertEqual((c.state, c.pr, c.draft), ("in-review", 900, False))
+
+    def test_a_draft_beside_a_ready_ticket_leaves_the_ready_one_in_review(self):
+        found = self.decide([issue(5), issue(6)], prs=[dict(self.pr(5, "5-x"), isDraft=True), self.pr(6, "6-x")])
+        self.assertEqual((found[5].state, found[6].state), ("stalled", "in-review"))
+
     def test_merged_pr_on_an_open_issue_is_done(self):
         c = self.decide([issue(3)], merged=[{"headRefName": "3-x"}])[3]
         self.assertEqual((c.state, c.branch), ("done", "3-x"))

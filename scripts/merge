@@ -384,6 +384,8 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
         if str(n) == str(merged_pr) or b == merged_branch or not b or b in PROTECTED or b == default \
                 or r.get("isCrossRepository"):
             continue
+        if r.get("isDraft"):
+            continue  # a draft is still being built: its worker is pushing, and it enters review when marked ready
         result = replay.sweep_branch(cwd, default, b, method, rules)
         if result.status == "skipped":
             say(result.note)
