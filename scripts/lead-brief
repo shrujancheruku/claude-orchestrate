@@ -35,7 +35,7 @@ WATERMARK = Path(".claude") / "orchestrate-lead.json"
 FALLBACK_DAYS = 7
 FALLBACK_CAP = 20
 MERGED_LIMIT = 100  # the newest merged PRs by update, one `gh api graphql`
-ROADMAP_LIMIT = 200
+ROADMAP_PAGE = 100  # GitHub caps `first`/`last` at 100 records a page
 RISK_LINE = re.compile(r"^\s*[-*]?\s*(\S+:\d+(?:-\d+)?\s+—\s+\S.*)$")
 TIER = re.compile(r"\btier:\s*([SML])\b")
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.I)
@@ -50,9 +50,10 @@ MERGED_QUERY = """query($owner: String!, $name: String!, $limit: Int!) {
         reviews(last: 30) { nodes { url body } }
         comments(last: 50) { nodes { url body } } } } } }"""
 
-ROADMAP_QUERY = """query($owner: String!, $name: String!, $limit: Int!) {
+ROADMAP_QUERY = """query($owner: String!, $name: String!, $limit: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
-    issues(states: OPEN, last: $limit, orderBy: {field: UPDATED_AT, direction: ASC}) {
+    issues(states: OPEN, first: $limit, after: $after) {
+      pageInfo { hasNextPage endCursor }
       nodes { number title url labels(first: 30) { nodes { name } } subIssuesSummary { total completed } } } } }"""
 
 
@@ -82,8 +83,11 @@ def repo_vars(root) -> list:
         raise Unavailable("gh returned an unexpected reply (repo)")
 
 
-def graphql(root, query, limit, repo):
-    return gh_json(root, "api", "graphql", "-F", f"limit={limit}", *repo, "-f", f"query={query}")
+def graphql(root, which, query, limit, repo, after=None):
+    """One `gh api graphql` call; `which` names the query in the argument list (and so in a test's fake gh)."""
+    cursor = ["-f", f"after={after}"] if after else []
+    return gh_json(root, "api", "graphql", "-F", f"which={which}", "-F", f"limit={limit}", *repo, *cursor,
+                   "-f", f"query={query}")
 
 
 def nodes_of(data, key, *path):
@@ -136,7 +140,14 @@ def section_tickets(root, now) -> list:
 
 
 def section_roadmap(root, repo) -> list:
-    issues = nodes_of(graphql(root, ROADMAP_QUERY, ROADMAP_LIMIT, repo), "issues", "nodes")
+    issues, after = [], None
+    for _ in range(100):  # pages of 100: every open issue is read, not just the newest
+        data = graphql(root, "roadmap", ROADMAP_QUERY, ROADMAP_PAGE, repo, after)
+        issues += nodes_of(data, "issues", "nodes")
+        info = nodes_of(data, "issues", "pageInfo")
+        after = info.get("endCursor")
+        if not info.get("hasNextPage") or not after:
+            break
     lines = []
     for i in sorted(issues, key=lambda i: i.get("number", 0)):
         labels = {x["name"] for x in (i.get("labels") or {}).get("nodes") or []}
@@ -161,7 +172,7 @@ def pr_of(node) -> dict:
 
 
 def load_merged(root, repo):
-    data = graphql(root, MERGED_QUERY, MERGED_LIMIT, repo)
+    data = graphql(root, "merged", MERGED_QUERY, MERGED_LIMIT, repo)
     prs = [pr_of(n) for n in nodes_of(data, "pullRequests", "nodes")]
     prs = sorted((p for p in prs if p["merged"]), key=lambda p: (p["merged"], p["number"]))
     return prs, int(nodes_of(data, "pullRequests", "totalCount"))
@@ -189,19 +200,22 @@ def risk_lines(text) -> list:
 def tier_and_notes(pr):
     """(tier, risk-note lines, link of the review or comment they came from). A posted review states the tier;
     with an L review that holds no notes, or none posted, the fallback comment is the L-tier record."""
+    is_l = False
     for r in reversed(pr["reviews"]):
         m = TIER.search(first_line(r["body"]))
         if m:
-            notes = risk_lines(r["body"])
-            if m.group(1) != "L":
+            if m.group(1) != "L" and not is_l:
                 return m.group(1), [], None
+            is_l = True
+            notes = risk_lines(r["body"])
             if notes:
                 return "L", notes, r.get("url") or "no link"
-            break
     fallbacks = [c for c in pr["comments"] if first_line(c.get("body")) == RISK_MARKER]
     if fallbacks:
         c = fallbacks[-1]
         return "L", risk_lines(c["body"].split("\n", 1)[-1]), c.get("url") or "no link"
+    if is_l:
+        return "L", [], None
     label = next((x[5:] for x in pr["labels"] if re.fullmatch(r"size:[SML]", x)), None)
     return label or "?", [], None
 

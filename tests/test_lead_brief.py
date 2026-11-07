@@ -54,7 +54,7 @@ class LeadBrief(unittest.TestCase):
         merged = list(merged)
         mbody = {"data": {"repository": {"pullRequests": {"totalCount": len(merged) if total is None else total,
                                                           "nodes": merged}}}}
-        rbody = {"data": {"repository": {"issues": {"nodes": roadmap if roadmap is not None else [
+        rbody = {"data": {"repository": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": roadmap if roadmap is not None else [
             {"number": 5, "title": "Map", "url": "https://x/issues/5", "labels": {"nodes": [{"name": "wayfinder:map"}]},
              "subIssuesSummary": {"total": 4, "completed": 1}},
             {"number": 6, "title": "Parent", "url": "https://x/issues/6", "labels": {"nodes": []},
@@ -62,13 +62,13 @@ class LeadBrief(unittest.TestCase):
             {"number": 8, "title": "Plain", "url": "https://x/issues/8", "labels": {"nodes": []},
              "subIssuesSummary": {"total": 0, "completed": 0}}]}}}}
         issues = issues or {}
-        merged_resp = ({"args": ["api", "graphql", "-F", "limit=100"], "stderr": "HTTP 500", "exit": merged_exit}
+        merged_resp = ({"args": ["api", "graphql", "-F", "which=merged"], "stderr": "HTTP 500", "exit": merged_exit}
                        if merged_exit else
-                       {"args": ["api", "graphql", "-F", "limit=100"], "stdout": json.dumps(mbody)})
+                       {"args": ["api", "graphql", "-F", "which=merged"], "stdout": json.dumps(mbody)})
         self.env.set_gh([
             {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
             merged_resp,
-            {"args": ["api", "graphql", "-F", "limit=200"], "stdout": json.dumps(rbody)},
+            {"args": ["api", "graphql", "-F", "which=roadmap"], "stdout": json.dumps(rbody)},
             {"args": ["issue", "list", "--state", "open", "--label", "needs-lead"],
              "stdout": json.dumps(issues.get("needs-lead", [{"number": 3, "title": "Q", "url": "https://x/issues/3",
                                                              "createdAt": iso(2)}]))},
@@ -102,6 +102,38 @@ class LeadBrief(unittest.TestCase):
         self.assertIn("[map] #5 Map https://x/issues/5 — 3 open, 1 closed", out)
         self.assertIn("[parent] #6 Parent https://x/issues/6 — 0 open, 2 closed", out)
         self.assertNotIn("Plain", out)
+
+    def test_the_roadmap_reads_every_page_of_100(self):
+        self.serve()
+        page = lambda nodes, more: json.dumps({"data": {"repository": {"issues": {  # noqa: E731
+            "pageInfo": {"hasNextPage": more, "endCursor": "c1" if more else None}, "nodes": nodes}}}})
+        item = lambda n: {"number": n, "title": f"M{n}", "url": f"https://x/issues/{n}",  # noqa: E731
+                          "labels": {"nodes": [{"name": "wayfinder:map"}]}, "subIssuesSummary": {"total": 1, "completed": 0}}
+        responses = json.loads(self.env.gh_state.read_text())["responses"]
+        for r in responses:
+            if r["args"][-1] == "which=roadmap":
+                r.pop("stdout")
+                r["seq"] = [{"stdout": page([item(n) for n in range(1, 101)], True)},
+                            {"stdout": page([item(101)], False)}]
+        self.env.set_gh(responses)
+        _, out, _ = self.brief()
+        self.assertIn("[map] #1 M1", out)
+        self.assertIn("[map] #101 M101", out)
+        calls = [c for c in self.env.gh_calls() if "which=roadmap" in c]
+        self.assertEqual(len(calls), 2)
+        self.assertIn("after=c1", calls[1])
+        self.assertTrue(all("limit=100" in c for c in calls))
+
+    def test_an_l_review_without_note_lines_still_shows_tier_l_and_says_none_found(self):
+        self.serve([pr(10, 1, reviews=["Round 1 · verdict: approve · tier: L\n\nok"])])
+        _, out, _ = self.brief()
+        self.assertIn("tier L", out)
+        self.assertIn("none found in the review or the fallback comment", out)
+
+    def test_a_round_two_l_review_without_notes_keeps_round_ones_notes(self):
+        self.serve([pr(10, 1, reviews=[L_REVIEW, "Round 2 · verdict: approve · tier: L\n\nfine"])])
+        _, out, _ = self.brief()
+        self.assertIn("scripts/merge:10-20 — the rebase path", out)
 
     def test_an_l_merge_prints_risk_notes_from_the_posted_review_word_for_word(self):
         self.serve([pr(10, 1, body="Closes #7\n\n## Discovered work\n- one\n", reviews=[L_REVIEW])])
