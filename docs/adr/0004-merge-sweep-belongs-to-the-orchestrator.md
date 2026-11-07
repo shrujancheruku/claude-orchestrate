@@ -23,4 +23,5 @@ Several tickets are in flight at once, so every merge can leave other open PRs c
 - Under `Method: rebase`, a worker's pushed commits can change under it. It resets to or merges `origin/<branch>`, and never rebases.
 - A conflict outside shared and generated files is handed back (`scripts/replay.py` docstring), which costs a worker turn.
 - Rejected: workers rebasing or merging main themselves (inferred: it would race the sweep and invite force-pushes; issue #128 fixed the rule as merge, never force); the orchestrator resolving every conflict by hand (inferred); handing back every conflict (inferred).
-- Reopen when hand-backs on shared files show the replay rules wrong (inferred).
+- A branch that is merely behind passes the `gate` script and is updated by `merge` at merge time (exit 5), at the cost of one extra CI run (#230).
+- Reopen when hand-backs on shared files show the replay rules wrong (inferred), or when the run log shows the CI runs after `merge` exits 5 to be a real cost (#230).

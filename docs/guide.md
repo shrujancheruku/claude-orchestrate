@@ -49,7 +49,7 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
 
 - Each role runs on the cheapest model that does it well. Set them per repo in the config's **Models** table.
 - Searches and log reads run in Haiku contexts, so the orchestrator's and workers' contexts stay small.
-- **Script gate:** before any reviewer is dispatched, `scripts/gate <pr>` checks the PR's mergeability with its base (conflicts and how far behind it is), its title against Conventional Commits, and each command a **Repo-specific check** in the config marks with ``run: `cmd` `` (plain backticked text is never run). It prints one line per check like `verify`, appends a `gate` event, and a failure goes straight back to the worker without counting as a review round.
+- **Script gate:** before any reviewer is dispatched, `scripts/gate <pr>` checks the PR's mergeability with its base (conflicts only: a branch that is merely behind passes, and `merge` updates it at merge time, exit 5), its title against Conventional Commits, and each command a **Repo-specific check** in the config marks with ``run: `cmd` `` (plain backticked text is never run). It prints one line per check like `verify`, appends a `gate` event, and a failure goes straight back to the worker without counting as a review round.
 - Review fixes go back to the worker that wrote the PR, so its context is reused instead of a new agent starting.
 - Briefs share a fixed preamble, so workers share a prompt-cache prefix.
 - Parallel agents multiply token use. Fewer slots cost less; the slot count is your throttle. See [Choosing a slot count](#choosing-a-slot-count).

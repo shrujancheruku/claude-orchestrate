@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 r"""gate <pr> [--cwd DIR] [--base BRANCH] : the mechanical checks that run before any reviewer.
 
-Checks a PR's mergeability with its base (conflicts, and how far it is behind), its title against
+Checks a PR's mergeability with its base (conflicts; a branch that is merely behind passes, and `merge` updates it, exit 5), its title against
 Conventional Commits, and each command the config's `Repo-specific checks` entry carries (a
 `run: \`cmd\``-marked span). Prints one line per check, with the last ~40 lines of a failure's output, in
 the same format as `verify`. Appends one `gate` event (ref = the PR number, outcome pass|fail,
 failed = the names of the failed checks). Exit codes: 0 every check passed; 1 a check failed (send the
 output to the worker); 2 the gate could not run (bad --cwd, `gh` missing or failed, unreadable `gh` output); 3 GitHub still reports the
-PR's mergeability as UNKNOWN after retries, behind_by reads 0, and nothing else failed (run the gate again;
-not the worker's fault); UNKNOWN with behind_by above 0 or unreadable exits 1. A marker is `run: \`cmd\``;
+PR's mergeability as UNKNOWN after retries and nothing else failed (run the gate again; not the worker's
+fault); UNKNOWN with another failure exits 1. behind_by is shown and logged (null when unreadable) but never fails. A marker is `run: \`cmd\``;
 one that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's
 worktree, so they see the PR's code); default is the current directory. Each runs for at most
 --timeout seconds (default 1800); one that outlives it is killed and fails with "timed out after Ns".
@@ -36,7 +36,7 @@ def check(name, ok, why=""):
 
 
 def pr_checks(pr, base_override, retries=4, delay=2.5):
-    """The built-in checks: title convention, then mergeability (conflicts and behind_by)."""
+    """The built-in checks: title convention, then mergeability (conflicts; behind_by is informational)."""
     # GitHub computes mergeability lazily: UNKNOWN right after a push usually settles in seconds.
     for attempt in range(retries + 1):
         try:
@@ -52,24 +52,19 @@ def pr_checks(pr, base_override, retries=4, delay=2.5):
                      f"title: {view.get('title')!r}\nexpected: type(scope): description")]
     base = base_override or view.get("baseRefName") or "main"
     mergeable = view.get("mergeable", "UNKNOWN")
-    behind, why = None, ""
+    behind = None
     try:
         behind = github.behind_by(base, view.get("headRefName"))
-    except github.GhError as e:
-        why = e.message
+    except github.GhError:
+        pass  # shown as ? and logged as null
     problems = []
     if mergeable == "CONFLICTING":
         problems.append(f"conflicts with {base}")
     elif mergeable == "UNKNOWN":
-        # Rerun advice only when behind_by reads 0; otherwise it would hide the real problem.
-        rerun = "; run the gate again (not the worker's fault)" if behind == 0 else ""
-        problems.append(f"GitHub still reports mergeability as UNKNOWN{rerun}")
+        problems.append("GitHub still reports mergeability as UNKNOWN; run the gate again (not the worker's fault)")
     elif mergeable != "MERGEABLE":
         problems.append(f"not mergeable ({mergeable})")
-    if behind is None:
-        problems.append(f"could not read behind_by: {why}; retry later")
-    elif behind:
-        problems.append(f"behind {base} by {behind} commit(s); rebase or merge {base}")
+    # Being behind is not a failure: `merge --approved-head` updates the branch (exit 5) and CI reruns (#230).
     label = f"mergeable with {base} (behind_by {behind if behind is not None else '?'})"
     results.append(check(label, not problems, "\n".join(problems)))
     return results, (behind, mergeable == "UNKNOWN")
@@ -106,8 +101,7 @@ def main(argv=None) -> int:
     print(checks.format_results(results))
     failed = [r.command for r in results if r.status == "fail"]
     # An UNKNOWN mergeability that was the only failure is not a verdict: rerun, don't send to the worker.
-    # Only when behind_by is a readable 0; behind above 0 or unreadable is a real failure to report.
-    undecided = unknown and behind == 0 and len(failed) == 1
+    undecided = unknown and len(failed) == 1
     outcome = "unknown" if undecided else "fail" if failed else "pass"
     # The event lands in the main checkout's run log, beside the pass log.
     runlog.append_event(args.cwd, "gate", outcome, ref=ref, failed=failed, behind_by=behind)
