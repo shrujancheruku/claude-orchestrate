@@ -1,0 +1,114 @@
+"""scripts/tracker.py: the takeable rule, why_not, closed_parents, drift and scoped on plain issue dicts."""
+
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+import tracker  # noqa: E402
+
+LABELS = {"ready": "ready-for-agent", "lead": "lead"}
+
+
+def issue(n, labels=("ready-for-agent",), claimed=False, blockers=(), body="", total=0, completed=0, parent=None):
+    return {"number": n, "title": f"t{n}", "url": "", "body": body, "labels": set(labels), "claimed": claimed,
+            "blockers": list(blockers), "sub_issues": {"total": total, "completed": completed}, "parent": parent}
+
+
+def numbers(issues):
+    return [i["number"] for i in tracker.takeable(issues, LABELS)]
+
+
+class Takeable(unittest.TestCase):
+    def test_a_plain_ready_ticket_is_takeable_in_ascending_order(self):
+        self.assertEqual(numbers([issue(9), issue(3), issue(5)]), [3, 5, 9])
+
+    def test_each_clause_alone_makes_a_ticket_not_takeable(self):
+        cases = {
+            "no ready label": issue(1, labels=()),
+            "claimed": issue(1, claimed=True),
+            "native blocker": issue(1, blockers=[2]),
+            "lead": issue(1, labels=("ready-for-agent", "lead")),
+            "wayfinder": issue(1, labels=("ready-for-agent", "wayfinder:map")),
+            "parent": issue(1, total=2, completed=0),
+        }
+        for name, i in cases.items():
+            with self.subTest(name):
+                self.assertEqual(numbers([i, issue(2, labels=("other",))]), [])
+
+    def test_a_parent_is_never_a_ticket_even_with_every_sub_issue_closed(self):
+        self.assertEqual(numbers([issue(205, total=3, completed=3)]), [])
+
+    def test_a_body_only_open_blocker_blocks(self):
+        self.assertEqual(numbers([issue(1, body="Blocked by: #2"), issue(2, labels=())]), [])
+
+    def test_a_body_line_naming_a_closed_issue_does_not_block(self):
+        self.assertEqual(numbers([issue(1, body="Blocked by: #2")]), [1])
+
+    def test_a_native_edge_plus_a_different_body_only_blocker_is_still_blocked(self):
+        issues = [issue(1, blockers=[2], body="Blocked by #3"), issue(3, labels=())]
+        self.assertEqual(numbers(issues), [])
+        self.assertEqual(tracker.why_not(issues[0], LABELS, issues), "blocked-by #2 #3 (body)")
+
+
+class WhyNot(unittest.TestCase):
+    def test_takeable_has_no_reason(self):
+        self.assertIsNone(tracker.why_not(issue(1), LABELS, [issue(1)]))
+
+    def test_the_order_is_claimed_blocked_parent_lead_wayfinder(self):
+        everything = issue(1, labels=("ready-for-agent", "lead", "wayfinder:map"), claimed=True, blockers=[2],
+                           total=1)
+        # Each step removes the reason just asserted, so the next one shows.
+        order = [("claimed", {"claimed": False}), ("blocked-by #2", {"blockers": []}),
+                 ("parent", {"sub_issues": {"total": 0, "completed": 0}}),
+                 ("lead", {"labels": {"wayfinder:map"}}), ("wayfinder", {})]
+        for reason, change in order:
+            with self.subTest(reason):
+                self.assertEqual(tracker.why_not(everything, LABELS, [everything]), reason)
+                everything.update(change)
+
+    def test_a_body_only_blocker_is_flagged_body(self):
+        issues = [issue(1, body="Blocked by: #2"), issue(2, labels=())]
+        self.assertEqual(tracker.why_not(issues[0], LABELS, issues), "blocked-by #2 (body)")
+
+    def test_a_parent_with_all_sub_issues_closed_is_parent_and_closed(self):
+        done = issue(7, total=2, completed=2)
+        self.assertEqual(tracker.why_not(done, LABELS, [done]), "parent")
+        self.assertEqual(tracker.closed_parents([done, issue(8, total=2, completed=1), issue(9)]), [done])
+
+
+class Drift(unittest.TestCase):
+    def test_a_body_blocker_the_tracker_lacks_is_drift(self):
+        a, b = issue(1, body="Blocked by: #2, #3"), issue(2, labels=())
+        self.assertEqual(tracker.drift([a, b]), [(a, 2)])  # #3 is not open: no drift
+
+    def test_a_body_blocker_the_tracker_has_is_ignored(self):
+        self.assertEqual(tracker.drift([issue(1, blockers=[2], body="Blocked by: #2"), issue(2)]), [])
+
+    def test_only_a_blocked_by_line_counts(self):
+        self.assertEqual(tracker.drift([issue(1, body="See #2 for context"), issue(2)]), [])
+
+
+class Scoped(unittest.TestCase):
+    def test_by_parent_by_ticket_and_unscoped(self):
+        issues = [issue(1, total=2), issue(2, parent=1), issue(3, parent=1), issue(4)]
+        self.assertEqual([i["number"] for i in tracker.scoped(issues, parent=1)], [2, 3])
+        self.assertEqual([i["number"] for i in tracker.scoped(issues, ticket=4)], [4])
+        self.assertEqual(len(tracker.scoped(issues)), 4)
+
+
+class FromNodes(unittest.TestCase):
+    def test_a_node_becomes_a_plain_dict_and_a_closed_blocker_is_dropped(self):
+        node = {"number": 5, "title": "T", "url": "u", "body": "b", "parent": {"number": 2},
+                "subIssuesSummary": {"total": 3, "completed": 1},
+                "labels": {"nodes": [{"name": "x"}]}, "assignees": {"totalCount": 1},
+                "blockedBy": {"nodes": [{"number": 8, "state": "OPEN"}, {"number": 9, "state": "CLOSED"}]}}
+        got = tracker.from_nodes([node])[0]
+        self.assertEqual((got["parent"], got["blockers"], got["claimed"], got["sub_issues"]),
+                         (2, [8], True, {"total": 3, "completed": 1}))
+        self.assertIsNone(tracker.from_nodes([{"number": 1}])[0]["parent"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -27,11 +27,17 @@ GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exis
 NO_REPO = re.compile(r"not a git repository|unable to read current working directory|"
                      r"cannot determine current working directory|getcwd", re.I)
 
-ISSUES_QUERY = """query($owner: String!, $name: String!) {
+ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    issues(first: 100, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    issues(first: 100, after: $after, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
       nodes {
         number
+        title
+        url
+        body
+        parent { number }
+        subIssuesSummary { total completed }
         labels(first: 20) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
@@ -178,18 +184,31 @@ def repo_info(cwd=None) -> dict:
 
 
 def open_issues(repo: dict, cwd=None) -> list:
-    """The newest 100 open issues (by update) as raw GraphQL nodes, the one home of the issues query: number, labels,
-    assignees (count), blockers, edits and comments. `repo` is `repo_info`'s (or `gh repo view`'s) owner/name dict."""
+    """Every open issue (all pages, newest update first) as raw GraphQL nodes, the one home of the issues query:
+    number, title, url, body, parent, sub-issue summary, labels, assignees (count), blockers, edits and comments.
+    `repo` is `repo_info`'s (or `gh repo view`'s) owner/name dict."""
     try:
         owner, name = repo["owner"]["login"], repo["name"]
     except (KeyError, TypeError):
         raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
-    data = call_json("api", "graphql", "-f", f"query={ISSUES_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}",
-                     cwd=cwd)
-    try:
-        nodes = data["data"]["repository"]["issues"]["nodes"]
-    except (KeyError, TypeError):
-        raise GhError(MALFORMED, "gh returned an unexpected reply (issues)") from None
-    if not isinstance(nodes, list):
-        raise GhError(MALFORMED, "gh returned an unexpected reply (issues)")
-    return nodes
+    nodes, after, seen = [], None, set()
+    while True:
+        args = ["api", "graphql", "-f", f"query={ISSUES_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}"]
+        if after:
+            args += ["-f", f"after={after}"]  # -f: a raw string, never coerced
+        data = call_json(*args, cwd=cwd)
+        try:
+            issues = data["data"]["repository"]["issues"]
+            page = issues["nodes"]
+        except (KeyError, TypeError):
+            raise GhError(MALFORMED, "gh returned an unexpected reply (issues)") from None
+        if not isinstance(page, list):
+            raise GhError(MALFORMED, "gh returned an unexpected reply (issues)")
+        nodes += page
+        info = issues.get("pageInfo") or {}
+        after = info.get("endCursor") if isinstance(info, dict) else None
+        if not (isinstance(info, dict) and info.get("hasNextPage") and after):
+            return nodes
+        if after in seen:  # a cursor that does not advance would loop for ever
+            raise GhError(MALFORMED, "gh returned a repeated page cursor (issues)")
+        seen.add(after)
