@@ -34,6 +34,10 @@ _Avoid_: auto slots, unlimited, max parallelism
 A ticket assigned to the user; it holds a slot until it merges or is handed back to the tracker. On a claimed stop it may carry `needs-lead` beside `ready-for-agent`. Source: `skills/run/SKILL.md`, `docs/agents/triage-labels.md`.
 _Avoid_: taken, locked, in progress
 
+**Claim**:
+A claimed ticket together with what decides its state: its branch, worktree and lock, its PR, and the worker the state file records for it. The state is one of **Building**, **Stalled**, **Elsewhere**, **In review**, with the lead, or done. `scripts/claims` is the one source: it reports each claim, and the pass table and every script that needs a claimed ticket's state read it. Source: `scripts/claims`, `skills/run/SKILL.md`.
+_Avoid_: ticket record, worker state, claim state
+
 **Building**:
 A claimed ticket with no PR yet and a worker from this session on it. Source: `skills/run/SKILL.md`.
 _Avoid_: running, active
@@ -49,6 +53,10 @@ _Avoid_: stuck, orphaned, abandoned
 **Elsewhere**:
 A claimed ticket with no PR whose worker belongs to another live session. This session doesn't resume, rescue or redispatch it. Source: `skills/run/SKILL.md`.
 _Avoid_: foreign, orphaned
+
+**Rescue**:
+Saving a worktree's work to its branch and removing the worktree, so nothing is lost when its worker is replaced or stopped: a **Stalled** ticket before a new worker continues the branch, or a worker this session stopped. It refuses an **Elsewhere** ticket's worktree, and a held path among the saved changes holds the redispatch, never the save. `scripts/rescue` is the one source. Source: `scripts/rescue`, `skills/run/SKILL.md`.
+_Avoid_: cleanup, salvage, sweep (that is the merge's)
 
 **In review**:
 A claimed ticket whose PR is open. Source: `skills/run/SKILL.md`.
@@ -117,12 +125,16 @@ _Avoid_: conflict report
 ### Control points
 
 **Gate**:
-A point where the user decides: a start gate holds a ticket before a worker starts, a merge gate holds an approved PR before it merges. Both come from the config. Source: `skills/setup/config-template.md`, `skills/run/SKILL.md`.
+A point where the user decides: a start gate holds a ticket before a worker starts, a merge gate holds an approved PR before it merges. Both come from the config. The **Script gate** and **Merge readiness** are mechanical checks that ask nobody, so they are not gates. Source: `skills/setup/config-template.md`, `skills/run/SKILL.md`.
 _Avoid_: approval, checkpoint, hold
 
-**Pre-merge check**:
-The scout's numbered checklist on a PR (CI, held paths, dependencies, title, shared-file rules), reported pass, fail or pending. Not a gate: it asks nobody. The `gate` script is a separate check that runs before review. Source: `agents/scout.md`, `skills/run/SKILL.md` (The review loop).
-_Avoid_: merge gate, pre-flight
+**Script gate**:
+The mechanical checks a PR passes before any reviewer reads it: mergeability with its base, its title against Conventional Commits, overlap with held paths, dependencies merged, no secrets, lockfiles with their manifests, and the config's repo-specific `run:` commands. Everything in it is something the worker alone can fix. Not a **Gate**: it asks nobody. Source: `scripts/gate` (mergeability, title, `run:` commands), `scripts/holds` (held paths), `agents/scout.md` (the checklist: dependencies, secrets, lockfiles), `skills/run/SKILL.md` (The review loop).
+_Avoid_: pre-merge check, pre-flight, gate (bare, for the script)
+
+**Merge readiness**:
+Whether an approved PR may merge now, decided at merge time: CI green on the head, every dependency merged, branch up to date, and nothing since the **Approved head** that needs re-review. Source: `scripts/merge`.
+_Avoid_: merge check, merge rule
 
 **Tier**:
 The size class of a PR, S, M or L, from its diff and the config's thresholds (or a `size:` label); it sets the review depth and, with the ticket's size, the worker and reviewer models. Source: `agents/reviewer.md`, `skills/setup/config-template.md`.
