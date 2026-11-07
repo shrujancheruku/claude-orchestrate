@@ -138,6 +138,10 @@ _Avoid_: lead flag, lead setting
 A problem a worker or reviewer finds outside its ticket's scope, filed as a draft ticket (`needs-triage` + `lead`) for the lead to triage. Not a finding, which is a reviewer's comment on the PR under review. Source: `docs/adr/0008-lead-above-orchestrator.md`, `agents/reviewer.md`.
 _Avoid_: follow-up, spin-off, finding
 
+**Stop comment**:
+The comment a worker's question is posted as when its stop goes to the lead: its first line is `> *Stopped for the lead.*`, and `scripts/lead-route` reads it for the stop's time. Source: `scripts/lead-route`, `skills/run/SKILL.md`.
+_Avoid_: stop note, question comment
+
 **Lead watermark**:
 `.claude/orchestrate-lead.json`, gitignored: how far the lead has read the tracker, so a restarted lead resumes there. Source: `docs/adr/0008-lead-above-orchestrator.md`.
 _Avoid_: checkpoint, cursor, lead state

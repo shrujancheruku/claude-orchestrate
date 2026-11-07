@@ -106,6 +106,22 @@ While a limit holds and the orchestrator can still run, it schedules a one-shot 
 
 For unattended runs, turn on **Continue automatically at usage limit** in `/config` (`autoContinueAtUsageLimit`). Without it, a session whose own turn hits the limit ends after one retry about 20 minutes later; run `/orchestrate:run` again and the pass picks up where things stopped. A fallback model doesn't help: rate-limit errors never trigger one, and the orchestrator never switches models on its own.
 
+## Lead mode
+
+A lead session can sit above the orchestrator to answer its questions and triage discovered work ([ADR-0008](adr/0008-lead-above-orchestrator.md)). Lead mode is detected, never configured: a live session named `lead` turns it on, and every pass report starts with `Lead: live` or `Lead: none`.
+
+- **Names.** Start the orchestrator session and name it `orchestrator` (`/rename orchestrator`); `/orchestrate:run` asks once if the name is wrong, and stops if another live session already has it. Name the lead `lead`.
+- **Stops.** With a live lead, a worker's question on an ambiguity goes to the lead: the ticket gets `needs-lead`, keeps its claim and its slot, and a stop comment starting with `> *Stopped for the lead.*` carries the question. The lead answers on the ticket and removes `needs-lead`; the next pass resumes the worker with a pointer to the answer. Without a lead, the stop goes to you as before (`needs-info`).
+- **Routing.** `scripts/lead-route` prints each pass's routing decisions from the tracker and the state file, and prints no tracker writes. After 30 minutes with no answer, a `needs-lead` ticket stops counting against the slot cap while its worker waits. If the lead goes away, a `needs-lead` ticket falls back to `needs-info` and you get it back.
+- **Discovered work.** The orchestrator forwards each `discovered:` line from a worker or reviewer report to the lead, with the PR URL and gists, and creates, labels and dedupes nothing itself.
+- **Questions for you.** Third review rounds and `ready-for-human` tickets reach you through the lead, which relays them without deciding them.
+
+```
+scripts/lead-route --lead live|none --cap <n> [--repo .] [--state FILE] [--now ISO]
+```
+
+It is run by the orchestrator each pass. Its `--now` is for tests.
+
 ## Profiling
 
 `/orchestrate:run --profile` runs normal passes, and at the end of each one records the pass and saves a profile of the session so far. Each pass also records why free slots stayed idle (`overlap`, `gate`, `empty` for nothing takeable, `limit`), so with `--greedy` the profile shows whether a higher cap would have run more, or whether overlap and an empty backlog were what held it back:
