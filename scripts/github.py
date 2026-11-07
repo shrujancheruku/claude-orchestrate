@@ -56,7 +56,7 @@ THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!, $after:
       reviewThreads(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id isResolved isOutdated path line
+          id isResolved isOutdated path line originalLine
           comments(first: 50) {
             pageInfo { hasNextPage endCursor }
             nodes { author { login } body url }
@@ -309,7 +309,7 @@ def _comment(c: dict) -> dict:
 
 def review_threads(pr, cwd=None) -> list:
     """Every review thread of a PR, past 100 threads and past 50 comments in a thread:
-    [{id, resolved, outdated, path, line (None on a file-level thread), comments: [{author, body, url}]}].
+    [{id, resolved, outdated, path, line (the diff line, else the original one for an outdated thread; None on a file-level thread), comments: [{author, body, url}]}].
     The one home of the threads read (`threads` and `merge` both use it)."""
     info = repo_info(cwd=cwd)
     try:
@@ -331,7 +331,7 @@ def review_threads(pr, cwd=None) -> list:
             comments += _connection(THREAD_COMMENTS_QUERY, {"id": tid}, ("node", "comments"),
                                     after=page["endCursor"], cwd=cwd)
         out.append({"id": tid, "resolved": bool(n.get("isResolved")), "outdated": bool(n.get("isOutdated")),
-                    "path": n.get("path") or "", "line": n.get("line"),
+                    "path": n.get("path") or "", "line": n.get("line") or n.get("originalLine"),
                     "comments": [_comment(c) for c in comments if isinstance(c, dict)]})
     return out
 

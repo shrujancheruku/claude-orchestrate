@@ -45,6 +45,12 @@ class WorkerTurnRules(unittest.TestCase):
         rules = s[s.index("## Turn rules"):s.index("## Pushing")]
         self.assertIn("The guard refuses a backgrounded command", rules)
 
+    def test_worker_resolves_review_threads_after_the_push_and_before_the_report(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        para = s[s.index('For "address review"'):]
+        self.assertLess(para.index("push, then close every thread"), para.index("and only then report"))
+        self.assertIn("resolve <id> --fixed <the pushed sha>", para)
+
     def test_worker_leaves_no_background_commands(self):
         s = (ROOT / "agents/worker.md").read_text()
         # Step 3 (Verify) says foreground and finish before pushing or reporting;

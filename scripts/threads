@@ -49,10 +49,10 @@ def listing(threads, show_all) -> list:
         where = f"{t['path']}:{t['line'] if t['line'] else 'file'}"
         head = [t["id"], first["author"], where] + (["outdated"] if t["outdated"] else []) + (["resolved"] if t["resolved"] else [])
         lines.append(" ".join(head + [first_line(first["body"])]).rstrip())
-        if t["resolved"]:
-            closing = [c for c in t["comments"][1:] if first_line(c["body"]).startswith(REPLIES)]
-            if closing:
-                lines.append("  " + first_line(closing[-1]["body"]))
+        # A resolved thread shows its closing reply; an open one shows a trailing `reopened:` (what is still wrong).
+        last = t["comments"][-1] if len(t["comments"]) > 1 else None
+        if last and first_line(last["body"]).startswith(REPLIES if t["resolved"] else ("reopened:",)):
+            lines.append("  " + first_line(last["body"]))
     return lines
 
 
@@ -121,7 +121,9 @@ def main(argv=None) -> int:
             outcome, mutation = "resolved", RESOLVE_THREAD
         else:
             reply, outcome, mutation = f"reopened: {args.why}", "reopened", UNRESOLVE_THREAD
-        graphql(REPLY,cwd, id=thread["id"], body=reply)
+        # A retry after a failed mutation must not post the same reply twice.
+        if not (thread["comments"] and thread["comments"][-1]["body"].strip() == reply):
+            graphql(REPLY, cwd, id=thread["id"], body=reply)
         graphql(mutation, cwd, id=thread["id"])
     except github.GhError as e:
         common.die(f"threads: gh failed: {e.message}")

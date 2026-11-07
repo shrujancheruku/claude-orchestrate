@@ -64,6 +64,25 @@ class Threads(unittest.TestCase):
         self.assertEqual(r.stdout.splitlines(),
                          ["T1 rev a.py:3 resolved [blocking] x", "  fixed in abc1234", "T2 rev a.py:3 resolved [minor] y"])
 
+    def test_outdated_thread_shows_its_original_line(self):
+        old = thread("T1", outdated=True, line=None)
+        old["originalLine"] = 7
+        self.gh(reply([old]))
+        self.assertEqual(self.env.run("threads", 12).stdout.splitlines(), ["T1 rev a.py:7 outdated [blocking] bad"])
+
+    def test_reopened_thread_shows_the_reopen_reason(self):
+        self.gh(reply([thread("T1", comments=[comment("rev", "[blocking] x"), comment("w", "fixed in abc1234"),
+                                              comment("rev", "reopened: still broken\nmore")])]))
+        self.assertEqual(self.env.run("threads", 12).stdout.splitlines(),
+                         ["T1 rev a.py:3 [blocking] x", "  reopened: still broken"])
+
+    def test_retry_does_not_post_the_same_reply_twice(self):
+        self.gh(reply([thread("T1", comments=[comment("rev", "[blocking] x"), comment("w", "left: later")])]))
+        self.assertEqual(self.env.run("threads", 12, "resolve", "T1", "--left", "later").returncode, 0)
+        m = self.mutations()
+        self.assertEqual(len(m), 1)
+        self.assertIn("resolveReviewThread", m[0][3])
+
     def test_nothing_printed_when_no_threads(self):
         self.gh(reply([]))
         r = self.env.run("threads", 12)
@@ -156,7 +175,7 @@ class Prompts(unittest.TestCase):
 
     def test_reviewer_posts_file_level_comments_and_reopens_in_round_2(self):
         s = self.text("agents/reviewer.md")
-        self.assertIn('"subject_type": "file"', s)
+        self.assertIn("pulls/<n>/comments -f path=<path> -f subject_type=file", s)
         self.assertIn("threads <pr> --all", s)
         self.assertIn("threads <pr> reopen", s)
         for form in ("fixed in <sha>", "left: <why>", "reopened: <why>"):
@@ -166,7 +185,6 @@ class Prompts(unittest.TestCase):
         s = self.text("agents/worker.md")
         para = s[s.index('For "address review"'):]
         self.assertIn("threads <pr>", para)
-        self.assertLess(para.index("push, then close every thread"), para.index("and only then report"))
         self.assertIn("--fixed <the pushed sha>", para)
         self.assertIn("stop-reason: human-only", para)
         self.assertNotIn("reviews/<id>/comments", s)
