@@ -25,6 +25,7 @@ import time
 import common
 import github
 import runlog
+from repo import main_checkout
 
 MAX_FAILURES = 5  # consecutive `gh` failures for one PR before it ends in an error line
 EXIT_ERROR = 3
@@ -74,7 +75,7 @@ def main(argv=None) -> int:
     if code != 0:
         print("watch-ci: cannot run: not inside a git repository", file=sys.stderr, flush=True)
         return 2
-    root = runlog.main_checkout(".").resolve()
+    root = main_checkout(".").resolve()
     failures = {pr: 0 for pr in pending}
     errored = False
     while pending:
