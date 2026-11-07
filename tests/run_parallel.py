@@ -34,7 +34,8 @@ def run_module(tests_dir, module):
     out = p.stdout
     ran = RAN.search(out)
     ok = p.returncode == 0
-    if ok and (ran is None or int(ran.group(1)) == 0):
+    # Python 3.12+ exits 5 for zero tests, older ones exit 0; either way say so in the output.
+    if ran is not None and int(ran.group(1)) == 0:
         ok, out = False, out + "\nno tests found in this module\n"
     return module, ok, time.monotonic() - start, out
 
