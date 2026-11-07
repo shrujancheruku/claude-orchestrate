@@ -369,8 +369,27 @@ class ProfileTest(unittest.TestCase):
     def test_a_pass_after_the_last_record_adds_no_negative_capacity(self):
         self.fx.passes([{"ts": at(1), "slots": 2, "free": 1}, {"ts": at(90), "slots": 1, "free": 1}])
         p = self.fx.run()
-        self.assertEqual([n for _, n in p["slots_timeline"]], [2])
+        # The late pass sets the final count but has no time inside the profile, so capacity is unchanged.
+        self.assertEqual([n for _, n in p["slots_timeline"]], [2, 1])
         self.assertAlmostEqual(p["metrics"]["occupancy"], (29 + 30) * 60 / (2 * 40 * 60))
+
+    def test_a_pass_logged_after_the_last_record_sets_the_slot_count(self):
+        # The run records its pass and builds the profile at the end of that same pass, so the pass is the newest record.
+        self.fx.passes([{"ts": at(90), "slots": 5, "free": 3, "greedy": True}])
+        self.fx.events([MERGED_50])
+        p = self.fx.run()
+        self.assertEqual(p["slots"], 5)
+        self.assertEqual([n for _, n in p["slots_timeline"]], [5])
+        self.assertEqual(p["end"], at(41))
+        self.assertIn("5 slots (greedy)", prof.summary(p, Path("x.json")))
+
+    def test_an_earlier_pass_then_a_late_one_reads_3_to_5(self):
+        self.fx.passes([{"ts": at(1), "slots": 3, "free": 1}, {"ts": at(90), "slots": 5, "free": 1}])
+        self.fx.events([MERGED_50])
+        p = self.fx.run()
+        self.assertEqual(p["slots"], 5)
+        self.assertEqual([n for _, n in p["slots_timeline"]], [3, 5])
+        self.assertIn("3→5 slots", prof.summary(p, Path("x.json")))
 
     def test_forced_slots_override_the_pass_log(self):
         self.fx.passes([{"ts": at(1), "slots": 3, "free": 1}, {"ts": at(35), "slots": 2, "free": 1}])

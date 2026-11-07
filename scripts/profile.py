@@ -305,8 +305,10 @@ def slot_segments(passes: list, tickets: list, start: datetime, end: datetime, f
 
     Each pass's own `slots` holds from its timestamp until the next pass's. `forced` (--slots) overrides them all.
     With no count anywhere, `fallback` (the config) applies, then the session's peak concurrency."""
-    cuts = [(parse_ts(p.get("ts")), int(p["slots"])) for p in passes if p.get("slots") and parse_ts(p.get("ts"))]
-    cuts = sorted((c for c in cuts if c[0] < end), key=lambda c: c[0])  # a pass logged after the last record has no time to cover
+    # A pass logged after the last record (the run builds the profile at the end of the pass that just ran) still sets
+    # the count in force. It is clamped to `end`, so it adds no capacity and no negative segment, but it is the final count.
+    cuts = [(min(parse_ts(p.get("ts")), end), int(p["slots"])) for p in passes if p.get("slots") and parse_ts(p.get("ts"))]
+    cuts = sorted(cuts, key=lambda c: c[0])
     if forced:
         cuts = [(start, forced)]
     elif not cuts and fallback:
