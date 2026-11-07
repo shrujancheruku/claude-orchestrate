@@ -46,8 +46,9 @@ class WorkerTurnRules(unittest.TestCase):
 
     def test_run_skill_handles_locked_worktree_without_force(self):
         s = (ROOT / "skills/run/SKILL.md").read_text()
-        # unlock must come before the plain remove
-        self.assertLess(s.index("git worktree unlock <dir>"), s.index("git worktree remove <dir>"))
+        # scripts/merge unlocks a harness lock itself (#231): no agent task to stop, no unlock step here
+        self.assertNotIn("stop that worker's agent task", s)
+        self.assertNotIn("git worktree unlock <dir>", s)
         files = [ROOT / "README.md", ROOT / "docs/guide.md"]
         for d in ("agents", "skills", "docs/agents"):
             files += [p for p in (ROOT / d).rglob("*.md")]
