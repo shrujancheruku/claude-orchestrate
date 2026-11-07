@@ -171,6 +171,26 @@ class Rescue(unittest.TestCase):
         self.assertTrue(self.wt.exists())
         self.assertNotIn("removed", r.stdout)
 
+    def test_a_failure_after_the_unlock_puts_the_lock_back(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        reason = f"claude agent agent-abc (pid {dead_pid()} start Sat Nov  7 06:14:20 2026)"
+        self.lock(reason)
+        hook = self.env.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        r = self.rescue()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertTrue(self.wt.exists())
+        self.assertIn(reason, git(self.env.repo, "worktree", "list", "--porcelain"))
+
+    def test_a_branch_without_a_ticket_number_is_exit_2(self):
+        git(self.env.repo, "worktree", "add", "-b", "scratch", str(self.wt), "main")
+        r = self.env.run("rescue", "scratch", check=False)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("<number>-<slug>", r.stderr)
+        self.assertTrue(self.wt.exists())
+
     def test_failed_commit_keeps_the_worktree(self):
         self.worktree()
         (self.wt / "a.txt").write_text("a\n")

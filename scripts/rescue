@@ -16,7 +16,7 @@ calls `gh`: its only tracker contact is `holds`, run as a subprocess. Each step 
 
 No worktree on the branch: `nothing to rescue: no worktree on <branch>`, exit 0 (the remote branch is the whole state).
 Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something held or that could not be checked
-(dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, nothing removed);
+(dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, nothing removed, a lock step 1 lifted put back);
 3 a live lock that is not this session's (`live <pid | ?> <worktree>`). Stdlib only, Python 3.9+.
 """
 
@@ -36,7 +36,14 @@ def say(msg):
     print(msg, flush=True)
 
 
+# (root, path, reason) of a lock step 1 lifted: a later failure puts it back, so the worktree is left as found.
+LIFTED: list = []
+
+
 def fail(msg) -> int:
+    for lroot, path, reason in LIFTED:
+        common.run("git", "worktree", "lock", "--reason", reason, path, cwd=lroot)
+    LIFTED.clear()
     print(f"rescue: {msg}", file=sys.stderr)
     return 2
 
@@ -79,6 +86,7 @@ def liveness(root, branch, wt):
     u = git(root, "worktree", "unlock", wt["path"])
     if u.code != 0:
         return 2, f"could not unlock {wt['path']}: {common.one_line(u.stderr)}"
+    LIFTED.append((root, wt["path"], reason))
     return None, f"lock: {'this session' if state == 'live' else 'dead'} pid {pid}, unlocked"
 
 
@@ -110,6 +118,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     root, branch = Path(args.repo), args.branch
     ticket = repo.ticket_of_branch(branch)
+    if ticket is None:
+        return fail(f"{branch} is not named <number>-<slug>, so there is no ticket to check the overlap for")
 
     wt = next((w for w in common.worktrees(root) if w["branch"] == branch), None)
     if wt is None:
@@ -165,8 +175,7 @@ def main(argv=None) -> int:
     removed = repo.remove_worktree(path, root)
     if "NOT removed" in removed:
         say(removed)
-        print(f"rescue: {removed}", file=sys.stderr)
-        return 2
+        return fail(removed)
     say(f"removed {path}")
 
     return overlap(root, changed, ticket)
