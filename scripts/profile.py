@@ -36,7 +36,8 @@ import common  # noqa: E402
 import config  # noqa: E402
 import runlog  # noqa: E402
 import session  # noqa: E402
-from session import TOKEN_KEYS, Transcript, iso, parse_ts  # noqa: E402
+from repo import iso, parse_ts  # noqa: E402
+from session import TOKEN_KEYS, Transcript  # noqa: E402
 
 SCHEMA = 2
 PROFILES = runlog.PROFILES  # saved profiles sit beside the run log

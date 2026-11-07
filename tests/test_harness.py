@@ -11,22 +11,22 @@ from harness import SCRIPTS, ScriptEnv, git # noqa: E402
 
 TRIVIAL_CLI = '''
 import subprocess, sys
-import common
+import common, runlog
 
 slots = common.config_section(".", "Slots")
 out = subprocess.run(["gh", "pr", "view", sys.argv[1], "--json", "state"], capture_output=True, text=True).stdout
 print("pr", sys.argv[1], common.one_line(out))
 print(common.tail("\\n".join("line %d" % i for i in range(100))).splitlines()[0])
 print("slots:", common.one_line(slots or "none"))
-common.append_event(".", "merge", "merged", ref="#" + sys.argv[1], session="s1")
+runlog.append_event(".", "merge", "merged", ref="#" + sys.argv[1], session="s1")
 '''
 
 SECTION_CLI = '''
 import sys
-import common
+import common, runlog
 
 print(common.config_section(".", sys.argv[1]))
-common.append_event(".", "gate", "pass")
+runlog.append_event(".", "gate", "pass")
 '''
 
 
@@ -42,6 +42,7 @@ class HarnessSmoke(unittest.TestCase):
         d.mkdir(exist_ok=True)
         shutil.copy(SCRIPTS / "common.py", d / "common.py")
         shutil.copy(SCRIPTS / "runlog.py", d / "runlog.py")
+        shutil.copy(SCRIPTS / "repo.py", d / "repo.py")
         path = d / name
         path.write_text(source)
         return path

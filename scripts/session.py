@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import common
+from repo import iso, parse_ts
 
 PLUGIN = common.PLUGIN
 TOKEN_KEYS = {
@@ -31,24 +32,6 @@ LIMIT_TEXT = re.compile(r"usage limit|rate limit|limit reached|resets? (?:at|in)
 # `<worktreePath>` the agent's own `.claude/worktrees/agent-<id>`. The notice is queued into the main transcript.
 TASK_ID = re.compile(r"<task-id>([^<]+)</task-id>")
 WORKTREE_PATH = re.compile(r"<worktreePath>([^<]+)</worktreePath>")
-
-
-def parse_ts(value) -> datetime | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        # Epoch seconds, or milliseconds from some callers.
-        return datetime.fromtimestamp(value / 1000 if value > 1e11 else value, timezone.utc)
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    # A naive value would raise TypeError against aware bounds; treat it as UTC.
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def iso(dt: datetime | None) -> str | None:
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
 
 
 def text_of(block) -> str:
