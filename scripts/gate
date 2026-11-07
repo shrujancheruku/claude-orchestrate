@@ -39,7 +39,7 @@ HOLDS = Path(__file__).resolve().parent / "holds"
 # Paths (by file name) that hold secrets, and added lines that are secrets.
 SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "id_rsa*", "id_ed25519*",
                 "*credentials*.json")
-SECRET_LINE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|github_pat_|xox[abp]-")
+SECRET_LINE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|github_pat[_]|xox[abp]-")
 # A lockfile and the manifest that must change with it (same directory).
 LOCKFILES = {"package-lock.json": "package.json", "yarn.lock": "package.json", "pnpm-lock.yaml": "package.json",
              "poetry.lock": "pyproject.toml", "uv.lock": "pyproject.toml", "Cargo.lock": "Cargo.toml",
@@ -56,21 +56,22 @@ def check(name, ok, why=""):
 
 
 def parse_diff(diff):
-    """(changed, added, lines) of a unified diff: every changed path, the paths added or renamed to (not deleted),
-    and the added lines."""
-    changed, added, lines, current, deleted = [], [], [], None, False
+    """(changed, added, lines) of a unified diff: every changed path, the paths created or renamed/copied to (a
+    header block with `new file mode`, `rename to` or `copy to`; not an edit of an existing file), and the added
+    lines."""
+    changed, added, lines, current, created = [], [], [], None, False
     for line in diff.splitlines():
         m = DIFF_HEADER.match(line)
         if m:
-            if current is not None and not deleted:
+            if current is not None and created:
                 added.append(current)
-            current, deleted = m.group(1), False
+            current, created = m.group(1), False
             changed.append(current)
-        elif line.startswith("deleted file mode"):
-            deleted = True
+        elif line.startswith(("new file mode", "rename to ", "copy to ")):
+            created = True
         elif line.startswith("+") and not line.startswith("+++"):
             lines.append(line[1:])
-    if current is not None and not deleted:
+    if current is not None and created:
         added.append(current)
     return changed, added, lines
 
@@ -113,7 +114,9 @@ def dependencies_check(view):
 
 def overlap_check(pr, cwd):
     """The `holds --pr` verdict as a check, or an error string when holds could not run (its exit 2)."""
-    p = common.run(sys.executable, str(HOLDS), "--pr", str(pr), cwd=cwd)
+    # --repo is the main checkout: the state file holding the building tickets' touch maps lives only there,
+    # and from a worker's worktree holds would read none.
+    p = common.run(sys.executable, str(HOLDS), "--pr", str(pr), "--repo", repo.main_checkout(cwd), cwd=cwd)
     if p.code == 0:
         return check("no overlap with held paths", True)
     if p.code == 1:

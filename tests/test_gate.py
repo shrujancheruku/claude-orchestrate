@@ -336,8 +336,8 @@ class GateTest(unittest.TestCase):
                 runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
 
     def test_secret_lines_fail(self):
-        for line in ("-----BEGIN RSA PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----", "k = AKIAABCDEFGHIJKLMNOP",
-                     "t = ghp_" + "a" * 20, "t = github_pat_11ABC", "t = xoxb-123", "t = xoxa-1", "t = xoxp-1"):
+        for line in ("-----BEGIN RSA PRIVATE " + "KEY-----", "-----BEGIN PRIVATE " + "KEY-----", "k = AKIA" + "ABCDEFGHIJKLMNOP",
+                     "t = ghp_" + "a" * 20, "t = github_pat" + "_11ABC", "t = xo" + "xb-123", "t = xo" + "xa-1", "t = xo" + "xp-1"):
             with self.subTest(line=line):
                 self.prime(diff=added_file("src/ok.py", line))
                 self.failed_only(self.gate(), "no secrets added")
@@ -348,6 +348,27 @@ class GateTest(unittest.TestCase):
                 "diff --git a/s.py b/s.py\n--- a/s.py\n+++ b/s.py\n@@ -1 +1 @@\n-t = ghp_" + "a" * 20 + "\n+t = 1\n")
         self.prime(diff=diff)
         self.assertEqual(self.gate().returncode, 0)
+
+    def test_editing_an_existing_env_example_or_credentials_file_passes(self):
+        # Only an added or renamed path counts (#270): the worker cannot clear a file that was already tracked.
+        for path in (".env.example", "config/credentials.json"):
+            with self.subTest(path=path):
+                self.prime(diff=CLEAN_DIFF.replace("src/a.py", path))
+                self.assertEqual(self.gate().returncode, 0)
+
+    def test_building_tickets_are_held_when_run_from_a_worktree(self):
+        # The state file lives only in the main checkout; the gate runs from the worker's linked worktree.
+        self.prime()
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"tickets": {"12": {"touch_map": ["src/a.py:5"]}}}))
+        wt = self.env.repo / ".claude" / "worktrees" / "w1"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "w1", str(wt)], cwd=self.env.repo, check=True)
+        self.assertFalse((wt / ".claude" / "orchestrate-state.json").exists())
+        responses = json.loads(self.env.gh_state.read_text())["responses"]
+        self.env.set_gh([{"args": ["issue", "view"], "stdout": json.dumps({"state": "OPEN", "assignees": []})}] + responses)
+        out = self.failed_only(self.run_from(wt), "no overlap with held paths")
+        self.assertIn("building #12", out)
 
     def test_a_renamed_to_secret_path_fails(self):
         diff = "diff --git a/old.txt b/.env\nsimilarity index 100%\nrename from old.txt\nrename to .env\n"
