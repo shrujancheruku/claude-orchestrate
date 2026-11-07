@@ -47,7 +47,7 @@ The **state file**, `.claude/orchestrate-state.json` (gitignored), holds what th
 
 **When to use the scout:** only for jobs that involve searching or judgement and would otherwise take two or more of your turns or pull a lot of output into your context: reconcile, touch maps and pre-merge checks. Do anything smaller yourself. Each comes back in the scout's fixed shape (see its definition), so you read conclusions, not evidence.
 
-The **held paths** at any moment are the files in open PRs' diffs, the touch maps of building tickets, and the config's exclusive holds. A ticket may not change a path another ticket holds. `"${CLAUDE_SKILL_DIR}/../../scripts/holds"` decides what is held and whether a ticket overlaps it; you never compare paths yourself.
+The **held paths** at any moment are the files in open PRs' diffs, the touch maps of building tickets, the changed files in the worktree of an **Elsewhere** ticket's live worker, and the config's exclusive holds. A ticket may not change a path another ticket holds. `"${CLAUDE_SKILL_DIR}/../../scripts/holds"` decides what is held and whether a ticket overlaps it, so the overlap rule stays there; you never compare paths yourself.
 
 Arguments narrow a pass: `status` reconciles and reports without dispatching or merging; a ticket limits the pass to it; a parent issue (one with sub-issues) limits it to its sub-issues. `--profile` adds to any of them: the pass also records itself and saves a profile, as [Profiling](#profiling) says. `--greedy[=N]` adds to a full or parent pass: it sizes the slot count from how many tickets can run at once, as [Greedy slots](#greedy-slots) says.
 
