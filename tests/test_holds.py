@@ -22,19 +22,25 @@ class Holds(unittest.TestCase):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def gh(self, prs=None, branches=None):
-        """prs: {number: [paths]}; branches: {number: head branch}."""
+    def gh(self, prs=None, branches=None, issues=None, merged=()):
+        """prs: {number: [paths]}; branches: {number: head branch}; issues: {ticket: state} (OPEN for
+        any other ticket in the state file); merged: head branches of merged PRs."""
         prs, branches = prs or {}, branches or {}
         listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": False} for n in prs]
         responses = [
             {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": "main"}})},
-            {"args": ["pr", "list"], "stdout": json.dumps(listing)},
+            {"args": ["pr", "list", "--state", "open"], "stdout": json.dumps(listing)},
         ]
         for n, files in prs.items():
             responses.append({"args": ["pr", "view", str(n), "--json", "files"],
                               "stdout": json.dumps({"files": [{"path": p} for p in files]})})
             responses.append({"args": ["pr", "view", str(n), "--json", "headRefName"],
                               "stdout": json.dumps({"headRefName": branches.get(n, f"b{n}")})})
+        for n, st in (issues or {}).items():
+            responses.append({"args": ["issue", "view", str(n)], "stdout": json.dumps({"state": st})})
+        responses.append({"args": ["issue", "view"], "stdout": json.dumps({"state": "OPEN"})})
+        responses.append({"args": ["pr", "list", "--state", "merged"],
+                          "stdout": json.dumps([{"number": 1, "headRefName": b} for b in merged])})
         self.env.set_gh(responses)
 
     def state(self, tickets):
@@ -92,20 +98,50 @@ class Holds(unittest.TestCase):
 
     def test_own_pr_and_touch_map_left_out(self):
         self.gh({9: ["a.py"], 10: ["b.py"]}, branches={9: "7-my-ticket", 10: "8-other"})
-        self.state({7: ["a.py:1"], 8: ["c.py:1"]})
+        self.state({7: ["a.py:1"], 11: ["c.py:1"]})
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(r.stdout.splitlines(), [
-            "b.py (held by open PR #10)", "c.py (held by building #8)", "overlap: none"])
+            "b.py (held by open PR #10)", "c.py (held by building #11)", "overlap: none"])
 
     def test_pre_merge_check_uses_the_prs_diff(self):
         self.gh({9: ["a.py", "b.py"], 10: ["b.py"]}, branches={9: "7-mine", 10: "8-other"})
-        self.state({7: ["a.py"], 8: ["z.py"]})
+        self.state({7: ["a.py"], 11: ["z.py"]})
         r = self.holds("--pr", "9")
         self.assertEqual(r.returncode, 1)
         self.assertEqual(r.stdout.splitlines(), [
-            "b.py (held by open PR #10)", "z.py (held by building #8)",
+            "b.py (held by open PR #10)", "z.py (held by building #11)",
             "overlap: b.py (held by open PR #10)"])
+
+    def test_closed_ticket_holds_nothing(self):
+        self.gh(issues={12: "CLOSED"})
+        self.state({12: ["src/x.py"]})
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_ticket_with_merged_pr_holds_nothing(self):
+        self.gh(merged=["12-the-fix"])
+        self.state({12: ["src/x.py"]})
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_open_ticket_with_open_pr_is_held_by_the_pr_only(self):
+        self.gh({9: ["src/x.py"]}, branches={9: "12-the-fix"})
+        self.state({12: ["src/x.py"]})
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertEqual(r.stdout.splitlines(), [
+            "src/x.py (held by open PR #9)", "overlap: src/x.py (held by open PR #9)"])
+        self.assertEqual(r.returncode, 1)
+
+    def test_ticket_check_gh_failure_could_not_run(self):
+        self.state({12: ["a.py"]})
+        self.env.set_gh([
+            {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": "main"}})},
+            {"args": ["pr", "list"], "stdout": "[]"},
+            {"args": ["issue", "view"], "stderr": "HTTP 502\n", "exit": 1}])
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("holds: gh:", r.stderr)
 
     def test_missing_state_file_means_no_building_tickets(self):
         self.gh({9: ["a.py"]})
