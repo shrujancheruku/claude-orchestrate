@@ -14,11 +14,16 @@ whose first line is the marker `> *Stopped for the lead.*`. Verdicts, in ticket 
     ABANDON #<n>             closed `wontfix` while still claimed: stop the worker, close its PR unmerged, keep the branch
     HOLD-PR #<n> <pr>        needs-lead from an ADR conflict, an open PR, live lead: hold the PR before merge, no time limit
     ASK-DEV #<n> <pr>        the same with --lead none: the developer decides; the PR stays held
+    LEAD-TICKET #<n>         claimed `lead` ticket with no open PR: the lead's work; no worker, never stalled
+    LEAD-PR #<n> <pr>        claimed `lead` ticket with its open PR: the PR joins the pipeline (CI, gate, review, merge)
+    RESEND #<n> <pr>         live lead, a lead PR whose newest `> *Waiting on lead (not delivered).*` names its current
+                             head and no `> *Resent to lead.*` names that head yet: send the failure again, once per head
 A narrowed or reworded ticket needs no verdict of its own: it is a RESUME. The ADR-conflict comment is the one
 whose first line is `> *ADR conflict held for the lead.*`; a needs-lead ticket whose newest such comment is newer
 than its newest stop comment is held by a conflict, and gets no FALLBACK or UNCAP.
 Last line, always: `counted: <k> of <cap>`, where k is the claimed open tickets that still hold a slot
-(not UNCAP, not FALLBACK, not HANDBACK, not ABANDON). With --lead none and nothing to route, only that line prints.
+(not `lead` tickets, not UNCAP, not FALLBACK, not HANDBACK, not ABANDON). A `lead` ticket holds no slot: no worker
+is dispatched for it. With --lead none and nothing to route, only that line prints.
 --now (an ISO time) is for tests; the default is the current time.
 Exit codes: 0 routed; 2 could not run (no `gh`, gh failed, no repository, an unreadable state file or
 --now), one line on stderr; the orchestrator then treats lead mode as off for that pass.
@@ -38,8 +43,14 @@ import session
 
 STOP_MARKER = "> *Stopped for the lead.*"  # the first line of every stop comment; run posts it verbatim
 ADR_MARKER = "> *ADR conflict held for the lead.*"  # the first line of an ADR-conflict comment; run posts it verbatim
+# A failure on a lead PR that run could not deliver to the lead, and the comment run posts after resending it. Both
+# carry a line `head <sha>`, the head commit the failure was about: that line is what dedupes a resend.
+UNDELIVERED_MARKER = "> *Waiting on lead (not delivered).*"
+RESENT_MARKER = "> *Resent to lead.*"
+HEAD_LINE = re.compile(r"^head ([0-9a-f]{40})$", re.MULTILINE)
 BRIEF_HEADING = "## Agent Brief"
 NEEDS_LEAD = "needs-lead"
+LEAD_LABEL = "lead"  # a ticket the lead owns: its PR is the pipeline's, and no worker is dispatched for it
 UNCAP_AFTER = timedelta(minutes=30)
 STATE = Path(".claude") / "orchestrate-state.json"
 
@@ -121,15 +132,15 @@ BRANCH_TICKET = re.compile(r"(\d+)-")  # the branch convention `<number>-<slug>`
 
 
 def load_open_pr_tickets(root):
-    """{ticket number: PR number} for each open PR whose branch names a ticket. A worker with a PR is not missing:
-    its PR is the record."""
-    prs = github.call_json("pr", "list", "--state", "open", "--limit", "200", "--json", "headRefName,number",
-                           shape=list, cwd=root)
+    """{ticket number: {"number": PR number, "head": head commit}} for each open PR whose branch names a ticket. A worker
+    with a PR is not missing: its PR is the record."""
+    prs = github.call_json("pr", "list", "--state", "open", "--limit", "200",
+                           "--json", "headRefName,headRefOid,number", shape=list, cwd=root)
     found = {}
     for pr in prs:
         m = BRANCH_TICKET.match(str((pr or {}).get("headRefName") or ""))
         if m:
-            found[int(m.group(1))] = (pr or {}).get("number")
+            found[int(m.group(1))] = {"number": (pr or {}).get("number"), "head": str((pr or {}).get("headRefOid") or "")}
     return found
 
 
@@ -170,13 +181,42 @@ def adr_hold_of(issue):
     return hold if stop is None or hold["created"] > stop["created"] else None
 
 
-def route(issues, state, lead, cap, now, open_prs=frozenset(), abandoned=frozenset()):
-    """The verdict lines, then the counted line."""
+def head_of(comment) -> str:
+    """The head commit a run comment names on its `head <sha>` line, or None."""
+    m = HEAD_LINE.search(comment["body"] or "")
+    return m.group(1) if m else None
+
+
+def resend_due(issue, head) -> bool:
+    """A lead PR's failure that run could not deliver is the newest such comment and names the current head, and no
+    resend has named that head yet. Once per head: a push is a new head, and so a new failure to deliver."""
+    undelivered = [c for c in issue["comments"] if c["created"] and first_line(c["body"]) == UNDELIVERED_MARKER]
+    if not undelivered or not head:
+        return False
+    if head_of(max(undelivered, key=lambda c: c["created"])) != head:
+        return False
+    return not any(first_line(c["body"]) == RESENT_MARKER and head_of(c) == head for c in issue["comments"])
+
+
+def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset()):
+    """The verdict lines, then the counted line. open_prs: {ticket: {"number", "head"}} for open PRs."""
+    open_prs = open_prs or {}
     lines, claimed, freed = [], set(), set()
     for n in sorted(abandoned):
         lines.append(f"ABANDON #{n}")
     for issue in sorted(issues, key=lambda i: i["number"]):
         n = issue["number"]
+        if LEAD_LABEL in issue["labels"]:
+            # The lead's own ticket: no worker is ever dispatched for it, so it never holds a slot and is never stalled.
+            # Its PR, once open, is the pipeline's: CI, gate, review and merge run on it like any other PR.
+            pr = open_prs.get(n)
+            if issue["claimed"] and pr:
+                lines.append(f"LEAD-PR #{n} {pr['number']}")
+                if lead == "live" and resend_due(issue, pr["head"]):
+                    lines.append(f"RESEND #{n} {pr['number']}")
+            elif issue["claimed"]:
+                lines.append(f"LEAD-TICKET #{n}")
+            continue
         if issue["claimed"]:
             claimed.add(n)
         if issue["claimed"] and issue["blockers"] and NEEDS_LEAD not in issue["labels"]:
@@ -186,10 +226,10 @@ def route(issues, state, lead, cap, now, open_prs=frozenset(), abandoned=frozens
         stop = stop_of(issue)
         since = stop["created"] if stop else None
         if NEEDS_LEAD in issue["labels"]:
-            pr = open_prs.get(n) if isinstance(open_prs, dict) else None
+            pr = open_prs.get(n)
             if pr and adr_hold_of(issue):
                 # An ADR conflict waits on the lead for as long as it takes: no UNCAP, no FALLBACK.
-                lines.append(f"{'HOLD-PR' if lead == 'live' else 'ASK-DEV'} #{n} {pr}")
+                lines.append(f"{'HOLD-PR' if lead == 'live' else 'ASK-DEV'} #{n} {pr['number']}")
                 continue
             if lead == "none":
                 lines.append(f"FALLBACK #{n}")

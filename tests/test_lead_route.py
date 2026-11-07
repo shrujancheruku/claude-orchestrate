@@ -18,6 +18,9 @@ SKILL = ROOT / "skills" / "run" / "SKILL.md"
 T0 = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
 MARKER = "> *Stopped for the lead.*"
 ADR_MARKER = "> *ADR conflict held for the lead.*"
+UNDELIVERED = "> *Waiting on lead (not delivered).*"
+RESENT = "> *Resent to lead.*"
+HEAD = "f" * 40  # the PR's current head commit, unless a test names another
 
 
 def iso(minutes):
@@ -41,12 +44,17 @@ def stop(minutes, question="Which value?"):
     return comment(minutes, f"{MARKER}\n\n{question}")
 
 
+def failure(minutes, marker, sha):
+    """A run comment naming the head commit its failure was about, as run writes it."""
+    return comment(minutes, f"{marker}\n\nhead {sha}\n\nci: test failed")
+
+
 class LeadRoute(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def serve(self, issues=(), gh_exit=0, open_branches=(), wontfix=()):
+    def serve(self, issues=(), gh_exit=0, open_branches=(), wontfix=(), heads=None):
         if gh_exit:
             graphql = {"args": ["api", "graphql"], "stderr": "HTTP 500", "exit": gh_exit}
         else:
@@ -54,7 +62,8 @@ class LeadRoute(unittest.TestCase):
             closed = {"data": {"repository": {"issues": {"nodes": [
                 {"number": n, "assignees": {"totalCount": a}} for n, a in wontfix]}}}}
             graphql = {"args": ["api", "graphql"], "seq": [{"stdout": json.dumps(body)}, {"stdout": json.dumps(closed)}]}
-        prs = [{"headRefName": b, "number": 100 + i} for i, b in enumerate(open_branches)]
+        prs = [{"headRefName": b, "headRefOid": (heads or {}).get(b, HEAD), "number": 100 + i}
+               for i, b in enumerate(open_branches)]
         self.responses = [{"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
                           graphql,
                           {"args": ["pr", "list"], "stdout": json.dumps(prs)}]
@@ -191,6 +200,44 @@ class LeadRoute(unittest.TestCase):
         self.state({})
         self.assertEqual(self.route(), (0, ["counted: 2 of 2"]))
 
+    def test_a_claimed_lead_ticket_without_a_pr_is_the_leads_work_and_holds_no_slot(self):
+        self.serve([issue(1, labels=["lead"], claimed=True, comments=[stop(10)]), issue(2, claimed=True)])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["LEAD-TICKET #1", "counted: 1 of 2"]))
+
+    def test_a_claimed_lead_ticket_with_its_pr_joins_the_pipeline(self):
+        self.serve([issue(1, labels=["lead"], claimed=True)], open_branches=["1-decision"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "counted: 0 of 2"]))
+
+    def test_an_unclaimed_lead_ticket_has_no_verdict(self):
+        self.serve([issue(1, labels=["lead"])], open_branches=["1-decision"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["counted: 0 of 2"]))
+
+    def test_a_lead_pr_failure_not_delivered_is_resent_once_per_head(self):
+        self.serve([issue(1, labels=["lead"], claimed=True, comments=[failure(10, UNDELIVERED, HEAD)])],
+                   open_branches=["1-decision"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "RESEND #1 100", "counted: 0 of 2"]))
+        self.serve([issue(1, labels=["lead"], claimed=True,
+                          comments=[failure(10, UNDELIVERED, HEAD), failure(11, RESENT, HEAD)])],
+                   open_branches=["1-decision"])
+        self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "counted: 0 of 2"]))
+
+    def test_no_resend_once_the_pr_has_a_new_head_since_the_failure(self):
+        old = "e" * 40
+        self.serve([issue(1, labels=["lead"], claimed=True, comments=[failure(10, UNDELIVERED, old)])],
+                   open_branches=["1-decision"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "counted: 0 of 2"]))
+
+    def test_no_resend_without_a_live_lead(self):
+        self.serve([issue(1, labels=["lead"], claimed=True, comments=[failure(10, UNDELIVERED, HEAD)])],
+                   open_branches=["1-decision"])
+        self.state({})
+        self.assertEqual(self.route(lead="none"), (0, ["LEAD-PR #1 100", "counted: 0 of 2"]))
+
     def test_exit_2_when_gh_fails(self):
         self.serve(gh_exit=1)
         self.state({})
@@ -220,6 +267,15 @@ class PromptSide(unittest.TestCase):
         loader.exec_module(mod)
         self.assertIn(mod.STOP_MARKER, SKILL.read_text())
         self.assertIn(mod.ADR_MARKER, SKILL.read_text())
+        self.assertIn(mod.UNDELIVERED_MARKER, SKILL.read_text())
+        self.assertIn(mod.RESENT_MARKER, SKILL.read_text())
+
+    def test_run_applies_each_lead_pipeline_verb_and_never_dispatches_a_lead_ticket(self):
+        text = SKILL.read_text()
+        for verb in ("LEAD-TICKET", "LEAD-PR", "RESEND"):
+            self.assertIn(verb, text)
+        step4 = text[text.index("4. **Fill free slots.**"):text.index("5. **Report and yield.**")]
+        self.assertIn("`lead`", step4, "step 4 must skip tickets labelled `lead`")
 
     def test_the_worker_reports_adr_conflicts_and_never_writes_adrs_in_lead_mode(self):
         text = (ROOT / "agents" / "worker.md").read_text()
