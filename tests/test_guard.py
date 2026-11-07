@@ -458,14 +458,16 @@ class GuardTest(unittest.TestCase):
 
     def test_verify_in_the_background_is_refused_for_workers_only(self):
         quoted = "'/home/u/.claude/plugins/cache/x/orchestrate/0.7.0/scripts/verify' --config"
-        for command in (quoted, "scripts/verify --config", "bash ../plugin/scripts/verify --config"):
+        for command in (quoted, "scripts/verify --config", "bash ../plugin/scripts/verify --config",
+                        "cd x && VAR=1 timeout 300 '/p/scripts/verify' --config"):
             with self.subTest(command=command):
                 self.assertEqual(decide("orchestrate:worker", command, background=True), "deny")
                 self.assertEqual(decide("orchestrate:worker", command, background=False), "allow")
                 self.assertEqual(decide("orchestrate:worker", command), "allow")
                 self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
                 self.assertEqual(decide(None, command, background=True), "allow")
-        for command in ("scripts/watch-ci 12", "sleep 5", "python3 scripts/verify.py"):
+        for command in ("scripts/watch-ci 12", "sleep 5", "python3 scripts/verify.py", "grep -n x scripts/verify",
+                        "git commit -m 'tweak scripts/verify'"):
             with self.subTest(command=command):
                 self.assertEqual(decide("orchestrate:worker", command, background=True), "allow")
 

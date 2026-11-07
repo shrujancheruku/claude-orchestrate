@@ -88,10 +88,6 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("outside a conflict list", run)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HandBackRules(unittest.TestCase):
     """#229: a worker's hand-back is trustworthy, and the run skill copes when it isn't."""
 
@@ -110,3 +106,7 @@ class HandBackRules(unittest.TestCase):
         self.assertIn("Wait for that worker's next completion", reports)
         self.assertIn("unfinished commit, push or open-the-PR steps", reports)
         self.assertIn("A second such stop from the same worker on the same ticket is a normal stop", reports)
+
+
+if __name__ == "__main__":
+    unittest.main()

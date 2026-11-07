@@ -1027,9 +1027,24 @@ def deny(reason: str) -> None:
     )
 
 
-# The plugin's verify script, by any path ending in `scripts/verify` (the brief's quoted absolute path
-# included). The boundary on both sides keeps `scripts/verify.py` and `scripts/verify-x` out.
-VERIFY_SCRIPT = re.compile(r"(?<![\w.-])scripts/verify(?![\w.-])")
+# The plugin's verify script, by any path ending in `scripts/verify`. Decided on lexed words (ADR 0002), so
+# quoting is resolved: the command word of a simple command, behind VAR=1 assignments, flags and the usual
+# wrappers or interpreters. `grep scripts/verify` or a commit message that names it is not a run of it.
+VERIFY_SCRIPT = re.compile(r"(?:^|/)scripts/verify$")
+VERIFY_WRAPPERS = {"env", "nohup", "time", "exec", "command", "timeout", "bash", "sh", "zsh", "python", "python3"}
+
+
+def runs_verify(parsed: "Parsed") -> bool:
+    for cmd in parsed.cmds:
+        for w in cmd.words:
+            if w.dynamic:
+                break
+            if re.fullmatch(r"\w+=.*|-.*|\d+[smhd]?", w.text) or basename(w) in VERIFY_WRAPPERS:
+                continue
+            if VERIFY_SCRIPT.search(w.text):
+                return True
+            break
+    return False
 
 
 def verdict(role: str, command: str, cwd: str, background: bool = False) -> str | None:
@@ -1038,15 +1053,15 @@ def verdict(role: str, command: str, cwd: str, background: bool = False) -> str 
     `background` is the call's `run_in_background`: a worker that backgrounds verify ends its turn
     mid-run and hands back a placeholder (#229), so that one combination is refused."""
     who, role = role_label(role), rules_role(role)
-    if background and role == "worker" and VERIFY_SCRIPT.search(command):
-        return (f"{who} can't run verify in the background (it would hand back before verify finishes). "
-                "Run it in the foreground and let it finish. If the harness moves it to the background "
-                "after a few minutes, wait for it to exit (a Monitor) before you go on.")
     try:
         parsed = Parsed(parse(command))
     except ParseError as err:
         return (f"the guard couldn't parse this command ({err}), so it can't check it. "
                 f"Rewrite it with balanced quotes and brackets. {NEXT_STEP[role]}")
+    if background and role == "worker" and runs_verify(parsed):
+        return (f"{who} can't run verify in the background (it would hand back before verify finishes). "
+                "Run it in the foreground and let it finish. If the harness moves it to the background "
+                "after a few minutes, wait for it to exit (a Monitor) before you go on.")
     if role == "reviewer":
         problem = review_post(parsed)
         if problem == "":
