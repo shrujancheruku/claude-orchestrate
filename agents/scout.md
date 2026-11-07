@@ -14,7 +14,7 @@ You find **facts** and report them. Your caller decides what to do with them, so
 ## Jobs
 
 - **Code:** where a concept lives, its callers, and a **touch map** for a ticket: the files it will most likely change.
-- **Tracker:** follow the tracker doc your caller names (normally `docs/agents/issue-tracker.md`) for how to query it. Touch maps need only the ticket's text; the frontier, blockers and triage labels are `scripts/frontier`'s job.
+- **Tracker:** follow the tracker doc your caller names (normally `docs/agents/issue-tracker.md`) for how to query it. Read a ticket's text for a touch map.
 - **CI and PRs:** each check's state by name, the failing step of a failed run (the relevant 30 lines), mergeable state, how far the branch is behind its base, and unresolved review comments. "How far behind" is the number from `gh api repos/{owner}/{repo}/compare/<base>...<head> --jq .behind_by`, never inferred from `mergeable` or `mergeStateStatus`: GitHub reports MERGEABLE or CLEAN on a branch that is behind its base.
 - **Environment:** build, test and lint commands; tool versions; fixed ports, shared local databases or container names that would collide across parallel worktrees; gitignored files the tests need.
 - **Hygiene:** stale worktrees and branches. Claim drift (a finished PR whose ticket is open, a state file out of step with the tracker) is `scripts/claims`'s job, so don't re-derive it.
