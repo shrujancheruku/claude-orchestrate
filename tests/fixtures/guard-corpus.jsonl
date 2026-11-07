@@ -545,3 +545,6 @@
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.0/scripts/verify' --config", "expected": "deny", "background": true, "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh run watch 123 --exit-status | tail -3", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh run watch 123 --exit-status", "expected": "allow", "background": true, "source": "hand"}
+{"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.11/scripts/verify' --config", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.12/scripts/verify' --config", "expected": "deny", "timeout": 300000, "source": "hand"}
+{"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.13/scripts/verify' --config", "expected": "allow", "timeout": 600000, "source": "hand"}
