@@ -25,8 +25,7 @@ from pathlib import Path
 
 import common
 import session
-
-STATE = Path(".claude") / "orchestrate-state.json"
+from repo import STATE
 
 
 def find_transcript(arg: str) -> Path:
@@ -44,20 +43,6 @@ def model_of(records, dispatch_model, meta_model):
     return dispatch_model or meta_model
 
 
-def worktree_for_branch(repo: Path, branch: str) -> str | None:
-    """The path `git worktree list` gives for the checkout of `branch`, or None."""
-    code, out, _ = common.run("git", "worktree", "list", "--porcelain", cwd=repo)
-    if code != 0:
-        return None
-    path = None
-    for line in out.splitlines():
-        if line.startswith("worktree "):
-            path = line[len("worktree "):]
-        elif line == f"branch refs/heads/{branch}" and path:
-            return path
-    return None
-
-
 def worktree_of(agent_id: str, branch, repo: Path, completions: dict) -> str | None:
     """Where the worker's worktree is, or None once it is gone. Each source must exist to count.
 
@@ -67,7 +52,7 @@ def worktree_of(agent_id: str, branch, repo: Path, completions: dict) -> str | N
     for path in (completions.get(agent_id), repo / ".claude" / "worktrees" / f"agent-{agent_id}"):
         if path and Path(path).is_dir():
             return str(Path(path))
-    found = worktree_for_branch(repo, branch) if branch else None
+    found = next((w["path"] for w in common.worktrees(repo) if w["branch"] == branch), None) if branch else None
     return found if found and Path(found).is_dir() else None
 
 

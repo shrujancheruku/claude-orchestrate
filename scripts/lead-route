@@ -42,7 +42,7 @@ from pathlib import Path
 
 import common
 import github
-import session
+from repo import STATE, first_line, parse_ts, ticket_branch, ticket_of_branch
 
 STOP_MARKER = "> *Stopped for the lead.*"  # the first line of every stop comment; run posts it verbatim
 ADR_MARKER = "> *ADR conflict held for the lead.*"  # the first line of an ADR-conflict comment; run posts it verbatim
@@ -55,7 +55,6 @@ BRIEF_HEADING = "## Agent Brief"
 NEEDS_LEAD = "needs-lead"
 LEAD_LABEL = "lead"  # a ticket the lead owns: its PR is the pipeline's, and no worker is dispatched for it
 UNCAP_AFTER = timedelta(minutes=30)
-STATE = Path(".claude") / "orchestrate-state.json"
 
 ISSUES_QUERY = """query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -82,13 +81,9 @@ ABANDON_QUERY = """query($owner: String!, $name: String!) {
 }"""
 
 
-def first_line(text) -> str:
-    return (text or "").lstrip().split("\n", 1)[0].strip()
-
-
 def edit_times(node) -> list:
     nodes = ((node or {}).get("userContentEdits") or {}).get("nodes") or []
-    return [t for t in (session.parse_ts(n.get("editedAt")) for n in nodes) if t]
+    return [t for t in (parse_ts(n.get("editedAt")) for n in nodes) if t]
 
 
 def malformed(what):
@@ -118,7 +113,7 @@ def load_issues(root, repo):
         nodes = data["data"]["repository"]["issues"]["nodes"]
         issues = []
         for node in nodes:
-            comments = [{"body": c.get("body") or "", "created": session.parse_ts(c.get("createdAt")),
+            comments = [{"body": c.get("body") or "", "created": parse_ts(c.get("createdAt")),
                          "edits": edit_times(c)} for c in (node.get("comments") or {}).get("nodes") or []]
             issues.append({"number": int(node["number"]),
                            "claimed": ((node.get("assignees") or {}).get("totalCount") or 0) > 0,
@@ -131,9 +126,6 @@ def load_issues(root, repo):
     return issues
 
 
-BRANCH_TICKET = re.compile(r"(\d+)-")  # the branch convention `<number>-<slug>`
-
-
 def load_open_pr_tickets(root):
     """{ticket number: {"number": PR number, "head": head commit}} for each open PR whose branch names a ticket. A worker
     with a PR is not missing: its PR is the record."""
@@ -141,9 +133,9 @@ def load_open_pr_tickets(root):
                            "--json", "headRefName,headRefOid,number", shape=list, cwd=root)
     found = {}
     for pr in prs:
-        m = BRANCH_TICKET.match(str((pr or {}).get("headRefName") or ""))
-        if m:
-            found[int(m.group(1))] = {"number": (pr or {}).get("number"), "head": str((pr or {}).get("headRefOid") or "")}
+        n = ticket_of_branch((pr or {}).get("headRefName"))
+        if n is not None:
+            found[n] = {"number": (pr or {}).get("number"), "head": str((pr or {}).get("headRefOid") or "")}
     return found
 
 
@@ -256,7 +248,7 @@ def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset(), l
                 else:
                     lines.append(f"REDISPATCH #{n}")
             continue
-        last = session.parse_ts(worker.get("last_report"))
+        last = parse_ts(worker.get("last_report"))
         if last is None or since <= last:
             continue  # the worker has reported since the stop: nothing to answer
         if "haiku" in str(worker.get("model") or "") and changed_after(issue, since):
@@ -277,7 +269,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if args.cap < 1:
         ap.error("--cap must be at least 1")
-    now = datetime.now(timezone.utc) if args.now is None else session.parse_ts(args.now)
+    now = datetime.now(timezone.utc) if args.now is None else parse_ts(args.now)
     if now is None:
         common.die(f"lead-route: cannot run: --now is not an ISO time: {args.now}")
     root = Path(args.repo).resolve()
@@ -291,7 +283,7 @@ def main(argv=None) -> int:
     except github.GhError as e:
         common.die(f"lead-route: cannot run: gh failed: {e.message}")
     def liveness(n):
-        branch = common.ticket_branch(root, n)
+        branch = ticket_branch(root, n)
         state, pid, _wt, _reason = common.worker_liveness(root, branch) if branch else ("none", None, None, None)
         return state, pid
 

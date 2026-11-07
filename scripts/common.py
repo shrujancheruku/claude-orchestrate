@@ -55,15 +55,6 @@ def section_of(text: str, name: str) -> str | None:
     return None if body is None else "\n".join(body).strip("\n")
 
 
-def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = None, **extra) -> dict:
-    """Append one event to the run log: a thin call into runlog.append_event, which owns the log.
-
-    Imported on use because runlog imports this module.
-    """
-    import runlog
-    return runlog.append_event(repo, kind, outcome, ref=ref, session=session, **extra)
-
-
 class Run(NamedTuple):
     """What run() returns: unpacks as (code, stdout, stderr); `returncode` is an alias of `code`."""
     code: int
@@ -242,14 +233,6 @@ def worktrees(root) -> list:
         elif cur is not None and (line == "locked" or line.startswith("locked ")):
             cur["locked"] = line[len("locked "):].strip()
     return found
-
-
-def ticket_branch(root, ticket):
-    """The branch `<ticket>-...` checked out in some worktree, or None (the branch convention `<number>-<slug>`)."""
-    for wt in worktrees(root):
-        if wt["branch"] and wt["branch"].startswith(f"{ticket}-"):
-            return wt["branch"]
-    return None
 
 
 def lock_state(reason):
