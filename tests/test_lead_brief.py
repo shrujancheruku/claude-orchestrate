@@ -33,6 +33,18 @@ def iso(days):
     return (NOW - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def issue_node(number, title, labels=(), subs=(0, 0), created=0):
+    """One raw node of the open-issues snapshot (github.ISSUES_QUERY): what section_tickets and section_roadmap read."""
+    return {"number": number, "title": title, "url": f"https://x/issues/{number}", "createdAt": iso(created),
+            "labels": {"nodes": [{"name": n} for n in labels]},
+            "subIssuesSummary": {"total": subs[0], "completed": subs[1]}}
+
+
+def issues_page(nodes, more):
+    return json.dumps({"data": {"repository": {"issues": {
+        "pageInfo": {"hasNextPage": more, "endCursor": "c1" if more else None}, "nodes": nodes}}}})
+
+
 def pr(number, days, title=None, body="Closes #7", reviews=(), comments=(), labels=()):
     return {"number": number, "title": title or f"feat: thing {number}", "url": f"https://x/pull/{number}",
             "body": body, "mergedAt": iso(days), "labels": {"nodes": [{"name": n} for n in labels]},
@@ -59,31 +71,27 @@ class LeadBrief(unittest.TestCase):
         (r / "docs" / "adr" / "0001-slot-count.md").write_text("# Slot count\n\nStatus: accepted\n")
         (r / "docs" / "adr" / "0002-other.md").write_text("# Other thing\n")
 
-    def serve(self, merged=(), total=None, roadmap=None, issues=None, merged_exit=0):
+    def serve(self, merged=(), total=None, pages=None, merged_exit=0, issues_exit=0):
+        """`pages` is the open-issues snapshot as a list of pages of raw nodes; the default is one page of five."""
         merged = list(merged)
         mbody = {"data": {"repository": {"pullRequests": {"totalCount": len(merged) if total is None else total,
                                                           "nodes": merged}}}}
-        rbody = {"data": {"repository": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": roadmap if roadmap is not None else [
-            {"number": 5, "title": "Map", "url": "https://x/issues/5", "labels": {"nodes": [{"name": "wayfinder:map"}]},
-             "subIssuesSummary": {"total": 4, "completed": 1}},
-            {"number": 6, "title": "Parent", "url": "https://x/issues/6", "labels": {"nodes": []},
-             "subIssuesSummary": {"total": 2, "completed": 2}},
-            {"number": 8, "title": "Plain", "url": "https://x/issues/8", "labels": {"nodes": []},
-             "subIssuesSummary": {"total": 0, "completed": 0}}]}}}}
-        issues = issues or {}
+        if pages is None:
+            pages = [[issue_node(3, "Q", ["needs-lead"], created=2), issue_node(4, "Mine", ["lead"]),
+                      issue_node(5, "Map", ["wayfinder:map"], subs=(4, 1)),
+                      issue_node(6, "Parent", subs=(2, 2)), issue_node(8, "Plain")]]
+        issues_resp = ({"args": ["api", "graphql", "-f", "query=" + lead_brief.github.ISSUES_QUERY],
+                        "stderr": "HTTP 500", "exit": issues_exit}
+                       if issues_exit else
+                       {"args": ["api", "graphql", "-f", "query=" + lead_brief.github.ISSUES_QUERY],
+                        "seq": [{"stdout": issues_page(p, more=i < len(pages) - 1)} for i, p in enumerate(pages)]})
         merged_resp = ({"args": ["api", "graphql", "-f", "query=" + lead_brief.MERGED_QUERY], "stderr": "HTTP 500", "exit": merged_exit}
                        if merged_exit else
                        {"args": ["api", "graphql", "-f", "query=" + lead_brief.MERGED_QUERY], "stdout": json.dumps(mbody)})
         self.env.set_gh([
             {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
             merged_resp,
-            {"args": ["api", "graphql", "-f", "query=" + lead_brief.ROADMAP_QUERY], "stdout": json.dumps(rbody)},
-            {"args": ["issue", "list", "--state", "open", "--label", "needs-lead"],
-             "stdout": json.dumps(issues.get("needs-lead", [{"number": 3, "title": "Q", "url": "https://x/issues/3",
-                                                             "createdAt": iso(2)}]))},
-            {"args": ["issue", "list", "--state", "open", "--label", "lead"],
-             "stdout": json.dumps(issues.get("lead", [{"number": 4, "title": "Mine", "url": "https://x/issues/4",
-                                                       "createdAt": iso(0)}]))},
+            issues_resp,
         ])
 
     def brief(self, *args, check=True):
@@ -112,26 +120,29 @@ class LeadBrief(unittest.TestCase):
         self.assertIn("[parent] #6 Parent https://x/issues/6 — 0 open, 2 closed", out)
         self.assertNotIn("Plain", out)
 
-    def test_the_roadmap_reads_every_page_of_100(self):
-        self.serve()
-        page = lambda nodes, more: json.dumps({"data": {"repository": {"issues": {  # noqa: E731
-            "pageInfo": {"hasNextPage": more, "endCursor": "c1" if more else None}, "nodes": nodes}}}})
-        item = lambda n: {"number": n, "title": f"M{n}", "url": f"https://x/issues/{n}",  # noqa: E731
-                          "labels": {"nodes": [{"name": "wayfinder:map"}]}, "subIssuesSummary": {"total": 1, "completed": 0}}
-        responses = json.loads(self.env.gh_state.read_text())["responses"]
-        for r in responses:
-            if r["args"][-1] == "query=" + lead_brief.ROADMAP_QUERY:
-                r.pop("stdout")
-                r["seq"] = [{"stdout": page([item(n) for n in range(1, 101)], True)},
-                            {"stdout": page([item(101)], False)}]
-        self.env.set_gh(responses)
+    def test_the_snapshot_is_read_in_pages_once_and_shared_by_tickets_and_roadmap(self):
+        first = [issue_node(n, f"M{n}", ["wayfinder:map"], subs=(1, 0)) for n in range(1, 101)]
+        self.serve(pages=[first, [issue_node(101, "M101", ["wayfinder:map"], subs=(1, 0)),
+                                  issue_node(102, "Late", ["needs-lead"])]])
         _, out, _ = self.brief()
         self.assertIn("[map] #1 M1", out)
         self.assertIn("[map] #101 M101", out)
-        calls = [c for c in self.env.gh_calls() if "query=" + lead_brief.ROADMAP_QUERY in c]
-        self.assertEqual(len(calls), 2)
+        self.assertIn("[needs-lead] #102 Late", out)
+        calls = [c for c in self.env.gh_calls() if "query=" + lead_brief.github.ISSUES_QUERY in c]
+        self.assertEqual(len(calls), 2)  # one read of every page, not one per section
         self.assertIn("after=c1", calls[1])
-        self.assertTrue(all("limit=100" in c for c in calls))
+
+    def test_lead_brief_carries_no_roadmap_query_of_its_own(self):
+        self.assertFalse(hasattr(lead_brief, "ROADMAP_QUERY"))
+        self.assertNotIn("ROADMAP", (ROOT / "scripts" / "lead-brief").read_text())
+
+    def test_a_failing_snapshot_leaves_tickets_and_roadmap_unavailable_and_the_rest_prints(self):
+        self.serve(issues_exit=1)
+        _, out, _ = self.brief()
+        self.assertIn("== tickets ==\nunavailable: gh failed: HTTP 500", out)
+        self.assertIn("== roadmap ==\nunavailable: gh failed: HTTP 500", out)
+        self.assertIn("== merges ==", out)
+        self.assertIn("CONFIG TEXT", out)
 
     def test_an_l_review_without_note_lines_still_shows_tier_l_and_says_none_found(self):
         self.serve([pr(10, 1, reviews=["Round 1 · verdict: approve · tier: L\n\nok"])])
