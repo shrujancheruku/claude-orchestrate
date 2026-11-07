@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""ci-times [--since <time or PR>] : is CI wait over the limit, and is it too few runners or a slow job?
+
+Reads merged PRs only (`gh`). Each PR's commits that have check runs are its heads; a head's push-to-green
+runs from the commit's committed time (the closest push time `gh` gives per commit) to its last check
+completing, and only when every check passed. Heads that never went green are left out, and a fix push
+counts as its own head. Output, one item per line:
+    heads: <n> green over <m> PRs (<k> never green)
+    median: <t>
+    p90: <t>
+    slowest checks (queued / running):  then up to 3 lines, by median total
+    limit: <minutes>m (default|config)
+    cause: <runners|slow job> (<check>)     only when over
+    over: yes|no
+Default window: the last 10 merged PRs; --since <ISO time | PR number> takes every merged PR since instead.
+Default limit: p90 over 10 minutes; the config's optional `- **CI wait limit:** <minutes>` overrides it.
+Exit codes: 0 reported (also when no head went green: `over: no`); 2 could not run (no `gh`, no repository,
+an unreadable --since), one line on stderr.
+Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import math
+import statistics
+import sys
+from datetime import datetime, timezone
+
+import common
+import config
+import github
+import runlog
+
+DEFAULT_PR_COUNT = 10
+DEFAULT_LIMIT_MINUTES = 10
+SLOWEST = 3
+LIST_LIMIT = 100  # merged PRs fetched; --since beyond the newest 100 is cut off
+GOOD = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+
+
+def parse_time(s):
+    try:
+        t = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def p90(values):
+    """Nearest-rank 90th percentile."""
+    v = sorted(values)
+    return v[math.ceil(0.9 * len(v)) - 1]
+
+
+def fmt(seconds):
+    m, s = divmod(int(round(seconds)), 60)
+    return f"{m}m{s:02d}s"
+
+
+def head_times(pushed, runs):
+    """(push-to-green seconds, [(name, queued, running)]) for one head, or None when it never went green."""
+    checks, last = [], pushed
+    for r in runs:
+        start, end = parse_time(r.get("started_at")), parse_time(r.get("completed_at"))
+        if r.get("status") != "completed" or str(r.get("conclusion", "")).upper() not in GOOD or not (start and end):
+            return None
+        checks.append((r.get("name", "?"), max((start - pushed).total_seconds(), 0), (end - start).total_seconds()))
+        last = max(last, end)
+    return (last - pushed).total_seconds(), checks
+
+
+def merged_prs(since_arg, root):
+    prs = github.call_json("pr", "list", "--state", "merged", "--limit", str(LIST_LIMIT),
+                           "--json", "number,mergedAt", shape=list, cwd=root)
+    prs = [p for p in prs if parse_time(p.get("mergedAt"))]
+    prs.sort(key=lambda p: parse_time(p["mergedAt"]), reverse=True)
+    if since_arg is None:
+        return prs[:DEFAULT_PR_COUNT]
+    if str(since_arg).lstrip("#").isdigit():
+        n = common.pr_ref(since_arg)[1]
+        cut = parse_time(github.pr_view(n, "mergedAt", cwd=root).get("mergedAt"))
+        if cut is None:
+            common.die(f"ci-times: PR #{n} is not merged")
+        return [p for p in prs if parse_time(p["mergedAt"]) > cut]
+    cut = parse_time(since_arg)
+    if cut is None:
+        common.die(f"ci-times: --since is not a time or a PR number: {since_arg}")
+    return [p for p in prs if parse_time(p["mergedAt"]) >= cut]
+
+
+def measure(prs, root):
+    """(push-to-green list, per-check {name: [(queued, running)]}, heads never green) over the PRs."""
+    greens, per_check, never = [], {}, 0
+    for pr in prs:
+        commits = github.pr_view(pr["number"], "commits", cwd=root).get("commits") or []
+        for c in commits:
+            pushed = parse_time(c.get("committedDate"))
+            data = github.call_json("api", f"repos/{{owner}}/{{repo}}/commits/{c['oid']}/check-runs?per_page=100",
+                                    cwd=root)
+            runs = data.get("check_runs") or []
+            if pushed is None or not runs:
+                continue  # not a pushed head: nothing ran on it
+            got = head_times(pushed, runs)
+            if got is None:
+                never += 1
+                continue
+            greens.append(got[0])
+            for name, queued, running in got[1]:
+                per_check.setdefault(name, []).append((queued, running))
+    return greens, per_check, never
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--since", help="an ISO time, or a PR number (merged after that PR)")
+    args = ap.parse_args(argv)
+    code, _, _ = common.run("git", "rev-parse", "--show-toplevel")
+    if code != 0:
+        common.die("ci-times: cannot run: not inside a git repository")
+    root = runlog.main_checkout(".").resolve()
+    cfg = config.Config.load(root)
+    limit, source = (cfg.ci_wait_limit, "config") if cfg.ci_wait_limit else (DEFAULT_LIMIT_MINUTES, "default")
+    try:
+        prs = merged_prs(args.since, root)
+        greens, per_check, never = measure(prs, root)
+    except github.GhError as e:
+        common.die(f"ci-times: cannot run: gh failed: {e.message}")
+    print(f"heads: {len(greens)} green over {len(prs)} PRs ({never} never green)")
+    if not greens:
+        print(f"limit: {limit}m ({source})")
+        print("over: no")
+        return 0
+    stats = []
+    for name, rows in per_check.items():
+        q = statistics.median(r[0] for r in rows)
+        run = statistics.median(r[1] for r in rows)
+        stats.append((q + run, name, q, run))
+    stats.sort(reverse=True)
+    top90 = p90(greens)
+    over = top90 > limit * 60
+    print(f"median: {fmt(statistics.median(greens))}")
+    print(f"p90: {fmt(top90)}")
+    print("slowest checks (queued / running):")
+    for _, name, q, run in stats[:SLOWEST]:
+        print(f"  {name}: {fmt(q)} / {fmt(run)}")
+    print(f"limit: {limit}m ({source})")
+    if over:
+        _, name, q, run = stats[0]
+        print(f"cause: {'runners' if q > run else 'slow job'} ({name})")
+    print(f"over: {'yes' if over else 'no'}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -39,6 +39,7 @@ class Config(NamedTuple):
     verify_groups: tuple = ()  # the Verify section's commands: a tuple of groups, each a tuple of command strings
     has_verify: bool = False  # the config has a `## Verify` section at all
     orchestrator_model: str | None = None  # the Models table's Orchestrator row; None when blank, the old wording or missing
+    ci_wait_limit: int | None = None  # minutes: the optional `**CI wait limit:**` line; None when absent or not a number
     problems: tuple = ()  # Problem entries
 
     @classmethod
@@ -88,6 +89,7 @@ class Config(NamedTuple):
             verify_groups=_verify_groups(common.section_of(text, "Verify")),
             has_verify=common.section_of(text, "Verify") is not None,
             orchestrator_model=_orchestrator_model(common.section_of(text, "Models")),
+            ci_wait_limit=_ci_wait_limit(text),
             problems=tuple(problems),
         )
 
@@ -97,6 +99,7 @@ class Config(NamedTuple):
 
 _SHARED_ITEM = re.compile(r"-\s+\*\*Shared files:?\*\*")
 _GENERATED_ITEM = re.compile(r"-\s+\*\*Generated:?\*\*")
+_CI_WAIT = re.compile(r"^[-*\s]*\*\*CI wait limit:?\*\*:?\s*(\d+)\b", re.IGNORECASE | re.MULTILINE)
 _POST_FLAG = re.compile(r"^[-*\s]*Post reviews[:*\s]*(yes|no)\b", re.IGNORECASE | re.MULTILINE)
 _BULLET = re.compile(r"\s+[-*]\s+")
 
@@ -191,6 +194,12 @@ def _tiers(review):
     s = re.search(r"S is at most <?(\d+)>? changed lines in at most <?(\d+)>? files", text)
     l = re.search(r"L touches[^;.]*? more than <?(\d+)>? lines", text)
     return (int(s.group(1)) if s else None, int(s.group(2)) if s else None, int(l.group(1)) if l else None)
+
+
+def _ci_wait_limit(text):
+    """Minutes from `- **CI wait limit:** <minutes>`; the template's `<minutes ...>` placeholder is not a number."""
+    m = _CI_WAIT.search(text)
+    return int(m.group(1)) if m else None
 
 
 _OLD_ORCHESTRATOR = "the session's model"  # the template's wording before the lead layer: means no model
