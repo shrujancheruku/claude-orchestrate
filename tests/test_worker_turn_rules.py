@@ -33,17 +33,35 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("listed under Held paths in the brief", bullet)
         self.assertNotIn(":line", bullet)
 
-    def test_report_block_carries_the_eight_stop_reasons_and_rules_name_the_guard(self):
+    def test_report_block_carries_the_nine_stop_reasons_and_rules_name_the_guard(self):
         s = (ROOT / "agents/worker.md").read_text()
         report = s[s.index("## Report"):]
         line = next(l for l in report.splitlines() if l.startswith("stop-reason:"))
         reasons = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
-                   "verify-outside-ticket", "already-done", "no-primary-source")
+                   "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied")
+        self.assertIn("denied-command:", report)
         for r in reasons:
             self.assertIn(r, line)
             self.assertIn(f"`stop-reason: {r}`", s[s.index("## Stop and report"):s.index("## Discovered work")])
         rules = s[s.index("## Turn rules"):s.index("## Pushing")]
         self.assertIn("The guard refuses a backgrounded command", rules)
+
+    def test_a_denied_command_is_permission_denied_never_retried_or_worked_around(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        stop = s[s.index("## Stop and report"):s.index("## Discovered work")]
+        bullet = next(l for l in stop.splitlines() if "`stop-reason: permission-denied`" in l)
+        self.assertIn("not `human-only`", bullet)
+        self.assertIn("Never retry the call", bullet)
+        self.assertIn("work around", bullet)
+        self.assertIn("denied-command:", bullet)
+
+    def test_run_skill_keeps_a_permission_denied_ticket_and_never_runs_the_command(self):
+        s = (ROOT / "skills/run/SKILL.md").read_text()
+        para = next(l for l in s.splitlines() if l.startswith("- `valid stopped permission-denied`"))
+        for needle in ("not** a hand-back", "does not apply", "Keep the claim, `ready-for-agent`, the slot and the touch map",
+                       "no `needs-lead`", "Never run the denied command yourself", "SendMessage", "`! <command>`",
+                       "review loop with no worker turn"):
+            self.assertIn(needle, para)
 
     def test_worker_resolves_review_threads_after_the_push_and_before_the_report(self):
         s = (ROOT / "agents/worker.md").read_text()

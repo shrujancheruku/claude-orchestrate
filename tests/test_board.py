@@ -105,6 +105,21 @@ class Board(unittest.TestCase):
         self.assertEqual(self.edits(), {"I1": "Building", "I2": "In review", "I3": "Needs lead",
                                         "I4": "Waiting on you", "I5": "Waiting on you"})
 
+    def test_a_permission_denied_ticket_waits_on_you_until_a_pr_exists(self):
+        import runlog
+        self.config()
+        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="1", status="stopped",
+                            stop_reason="permission-denied", denied_command="gh pr create")
+        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="2", status="stopped",
+                            stop_reason="permission-denied", denied_command="gh pr create")
+        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)],
+                prs=[{"number": 12, "headRefName": "2-thing", "state": "OPEN", "mergedAt": None}],
+                cards=[card(1), card(2)])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        # #2's PR now exists (the user ran the command): it is in review, not waiting.
+        self.assertEqual(self.edits(), {"I1": "Waiting on you", "I2": "In review"})
+
     def test_a_card_is_added_when_a_ticket_is_first_claimed_and_not_for_an_unclaimed_one(self):
         self.config()
         self.gh(tickets=[ticket(1, claimed=True), ticket(6, ["ready-for-human"])])

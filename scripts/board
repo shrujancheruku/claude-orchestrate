@@ -6,7 +6,8 @@ rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a s
     Building         claimed, and `claims` says building, elsewhere, stalled or with-lead
     In review        claimed, and `claims` says in-review
     Needs lead       labelled `needs-lead`
-    Waiting on you   labelled `ready-for-human` or `needs-info`
+    Waiting on you   labelled `ready-for-human` or `needs-info`, or claimed with no PR while the newest
+                     `worker-report` in the run log for it is a `permission-denied` stop (the user must act)
     Done             the ticket's PR merged; the card is archived a day after the merge
 A card is added when its ticket is first claimed; a ticket that is merely labelled gets no card of its own.
 The column is the custom single-select field `Stage`, created on first sync: GitHub's built-in `Status` options
@@ -25,6 +26,7 @@ import claims
 import common
 import config
 import github
+import runlog
 from repo import STATE, parse_ts, ticket_of_branch
 
 FIELD = "Stage"
@@ -38,7 +40,20 @@ CLAIM_STAGE = {"building": BUILDING, "elsewhere": BUILDING, "stalled": BUILDING,
                "in-review": REVIEW, "done": DONE}
 
 
-def desired(issues, found):
+def permission_denied(repo, found) -> set:
+    """The claimed tickets whose newest worker report is a permission-denied stop and that have no PR yet: the
+    worker's finished branch waits on the user (the marker is the run log, so a later session sees it too)."""
+    out = set()
+    for t, claim in found.items():
+        if claim.state == "in-review":
+            continue
+        last = runlog.latest_event(repo, runlog.WORKER_REPORT, t, skip_outcomes=("duplicate",))
+        if last and last.get("stop_reason") == "permission-denied":
+            out.add(t)
+    return out
+
+
+def desired(issues, found, denied=()):
     """{ticket: (stage, issue, claimed)} for the open tickets that belong on the board. found: claims.claims' {ticket:
     Claim}, which holds every claimed open ticket."""
     out = {}
@@ -47,7 +62,7 @@ def desired(issues, found):
         claimed = bool(issue.get("assignees"))
         if "needs-lead" in labels:
             stage = NEEDS_LEAD
-        elif labels & {"ready-for-human", "needs-info"}:
+        elif labels & {"ready-for-human", "needs-info"} or issue["number"] in denied:
             stage = WAITING
         elif claimed:
             stage = CLAIM_STAGE[found[issue["number"]].state]
@@ -98,7 +113,7 @@ def sync(owner, number, repo):
         github.call("project", "item-edit", "--id", card_id, "--project-id", proj["id"], "--field-id", field["id"],
                     "--single-select-option-id", options[stage], cwd=repo)
 
-    want = desired(issues, found)
+    want = desired(issues, found, permission_denied(repo, found))
     for t, (stage, issue, claimed) in sorted(want.items()):
         card = cards.get(t)
         if card is None:
