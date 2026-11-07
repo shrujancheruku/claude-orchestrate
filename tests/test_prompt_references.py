@@ -74,7 +74,7 @@ class PromptReferences(unittest.TestCase):
     def test_references_found(self):
         # Guards the extractor itself: if the regex rots, the checks below pass vacuously.
         names = {r[2] for r in references()}
-        self.assertTrue({"gate", "merge", "verify", "watch-ci", "rebuild-state", "profile.py"} <= names, names)
+        self.assertTrue({"gate", "merge", "verify", "watch-ci", "rebuild-state", "profile.py", "ci-times", "lead-brief"} <= names, names)
 
     def test_every_referenced_script_exists(self):
         for path, n, name, _, _ in references():
