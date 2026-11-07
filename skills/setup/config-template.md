@@ -4,7 +4,7 @@
 
 ## Backlog
 
-- **Tracker docs:** `docs/agents/issue-tracker.md` (operations, blocking, claiming) and `docs/agents/triage-labels.md` (label strings), from `/setup-matt-pocock-skills`. Takeable tickets are open, `ready-for-agent`, unassigned and unblocked, with no open sub-issues and no `wayfinder:` label, taken in ascending issue number. Claim = assign to the user.
+- **Tracker docs:** `docs/agents/issue-tracker.md` (operations, blocking, claiming) and `docs/agents/triage-labels.md` (label strings), from `/setup-matt-pocock-skills`. Takeable tickets are what `scripts/frontier` lists, in ascending issue number. Claim = assign to the user.
 - **Domain docs:** `docs/agents/domain.md` (the glossary and ADRs workers and reviewers follow).
 
 <!-- Only when docs/agents/ doesn't exist, replace the two lines above with:
