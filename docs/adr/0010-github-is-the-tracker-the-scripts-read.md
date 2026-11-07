@@ -2,7 +2,7 @@
 
 ## Context
 
-Every script that reads the tracker calls `gh`: `gate`, `merge`, `holds`, `board`, `lead-route`, `lead-brief`, and soon `claims` (#262) and `frontier` (#273). The two newest read GitHub-only fields that have no equivalent elsewhere: `blockedBy` (native issue dependencies), `subIssuesSummary` and `parent` (sub-issues).
+Every script that reads the tracker calls `gh`: `gate`, `merge`, `holds`, `board`, `lead-route`, `lead-brief`, and soon `claims` (#262) and `frontier` (#273). The two newest read GitHub-only fields that have no equivalent elsewhere: `blockedBy` (native issue dependencies, read by `lead-route`) and `subIssuesSummary` (sub-issues, read by `lead-brief`).
 
 Meanwhile `/setup-matt-pocock-skills` ships three tracker docs (GitHub, GitLab, local), and `skills/setup/config-template.md` offers a "Backlog in config" form. A reader will ask whether orchestrate runs on another tracker. It does not. #239 found that an adapter with one implementation is a hypothetical seam, so no second tracker has a caller to shape one.
 
