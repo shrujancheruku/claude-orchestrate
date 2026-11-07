@@ -319,13 +319,15 @@ def update_approved(cwd, merged_pr, default, specs):
     for spec in specs:
         n, _, sha = spec.partition("=")
         n = n.lstrip("#")
-        if not n.isdigit() or not sha or n == str(merged_pr) or default is None:
+        if not n.isdigit() or not sha:
             say(f"also-approved {spec!r} skipped: expected PR=SHA")
             continue
+        if n == str(merged_pr) or default is None:
+            continue  # the PR just landed, or the default branch is unknown: nothing to update
         try:
             v = github.pr_view(n, "state,headRefName,headRefOid,isCrossRepository,mergeStateStatus", cwd)
             if v.get("state") != "OPEN" or v.get("isCrossRepository") or v.get("headRefOid") != sha:
-                say(f"PR #{n} left alone: not open, a fork, or pushed to since its approval")
+                say(f"PR #{n} left alone: not open, a fork, or its head is no longer the approved one (pushed to, or updated by the sweep)")
                 continue
             behind = github.behind_by(default, v.get("headRefName") or sha, cwd)
             if not behind:
