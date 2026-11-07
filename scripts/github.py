@@ -50,6 +50,36 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
 }"""
 
 
+THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated path line
+          comments(first: 50) {
+            pageInfo { hasNextPage endCursor }
+            nodes { author { login } body url }
+          }
+        }
+      }
+    }
+  }
+}"""
+
+# The rest of one thread's comments, when it has more than the 50 the threads query returns.
+THREAD_COMMENTS_QUERY = """query($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on PullRequestReviewThread {
+      comments(first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { author { login } body url }
+      }
+    }
+  }
+}"""
+
+
 class GhError(Exception):
     def __init__(self, kind: str, message: str):
         super().__init__(message)
@@ -240,3 +270,74 @@ def open_issues(repo: dict, cwd=None) -> list:
         if after in seen:  # a cursor that does not advance would loop for ever
             raise GhError(MALFORMED, "gh returned a repeated page cursor (issues)")
         seen.add(after)
+
+
+def _connection(query, variables, path, after=None, cwd=None) -> list:
+    """Every node of one GraphQL connection, all pages. `path` runs from the reply's `data` to the connection;
+    `variables` are passed as -F (numbers) or -f (strings, never coerced); `after` starts past a known cursor."""
+    nodes, seen = [], set()
+    while True:
+        args = ["api", "graphql", "-f", f"query={query}"]
+        for k, v in variables.items():
+            args += ["-F" if isinstance(v, int) else "-f", f"{k}={v}"]
+        if after:
+            args += ["-f", f"after={after}"]
+        conn = call_json(*args, cwd=cwd)
+        try:
+            conn = conn["data"]
+            for key in path:
+                conn = conn[key]
+            page = conn["nodes"]
+        except (KeyError, TypeError):
+            raise GhError(MALFORMED, "gh returned an unexpected reply (review threads)") from None
+        if not isinstance(page, list):
+            raise GhError(MALFORMED, "gh returned an unexpected reply (review threads)")
+        nodes += page
+        info = conn.get("pageInfo") or {}
+        after = info.get("endCursor") if info.get("hasNextPage") else None
+        if not after:
+            return nodes
+        if after in seen:  # a cursor that does not advance would loop for ever
+            raise GhError(MALFORMED, "gh returned a repeated page cursor (review threads)")
+        seen.add(after)
+
+
+def _comment(c: dict) -> dict:
+    return {"author": (c.get("author") or {}).get("login") or "ghost", "body": str(c.get("body") or ""),
+            "url": c.get("url")}
+
+
+def review_threads(pr, cwd=None) -> list:
+    """Every review thread of a PR, past 100 threads and past 50 comments in a thread:
+    [{id, resolved, outdated, path, line (None on a file-level thread), comments: [{author, body, url}]}].
+    The one home of the threads read (`threads` and `merge` both use it)."""
+    info = repo_info(cwd=cwd)
+    try:
+        owner, name = info["owner"]["login"], info["name"]
+        number = int(str(pr).lstrip("#"))
+    except (KeyError, TypeError, ValueError):
+        raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
+    nodes = _connection(THREADS_QUERY, {"owner": owner, "name": name, "number": number},
+                        ("repository", "pullRequest", "reviewThreads"), cwd=cwd)
+    out = []
+    for n in nodes:
+        try:
+            comments = list(n["comments"]["nodes"])
+            page = n["comments"].get("pageInfo") or {}
+            tid = n["id"]
+        except (KeyError, TypeError, AttributeError):
+            raise GhError(MALFORMED, "gh returned an unexpected reply (review threads)") from None
+        if page.get("hasNextPage") and page.get("endCursor"):
+            comments += _connection(THREAD_COMMENTS_QUERY, {"id": tid}, ("node", "comments"),
+                                    after=page["endCursor"], cwd=cwd)
+        out.append({"id": tid, "resolved": bool(n.get("isResolved")), "outdated": bool(n.get("isOutdated")),
+                    "path": n.get("path") or "", "line": n.get("line"),
+                    "comments": [_comment(c) for c in comments if isinstance(c, dict)]})
+    return out
+
+
+def pr_commit_shas(pr, cwd=None) -> list:
+    """The commit shas on a PR's branch at the remote (the host's own list, paged)."""
+    out = call("api", "--paginate", f"repos/{{owner}}/{{repo}}/pulls/{str(pr).lstrip('#')}/commits",
+               "--jq", ".[].sha", cwd=cwd)
+    return out.split()
