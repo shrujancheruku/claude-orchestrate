@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""watch-ci <pr>... : wait for each PR's checks to settle; one line per PR as it settles.
+"""watch-ci <pr>... : wait for each ready (non-draft) PR's checks to settle; one line per PR as it settles.
 
 Run it as a Monitor command so the orchestrator never sleeps or polls. Each line:
     PR #<n> <pass|fail> <merge state> <head commit>

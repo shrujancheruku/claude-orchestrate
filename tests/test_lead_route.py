@@ -233,6 +233,17 @@ class LeadRoute(unittest.TestCase):
         self.state({"3": self.worker(last=5)})
         self.assertEqual(self.route(now=600), (0, ["HOLD-PR #3 102", "counted: 1 of 2"]))
 
+    def test_a_draft_is_not_held_for_an_adr_conflict_but_a_ready_pr_is(self):
+        # #3 stopped on an ADR conflict with a draft open: it is building, so no hold (no lead: FALLBACK frees it).
+        # #4 has a ready PR: held as before.
+        marker = comment(0, ADR_MARKER)
+        self.serve([issue(3, labels=["needs-lead"], claimed=True, comments=[marker]),
+                    issue(4, labels=["needs-lead"], claimed=True, comments=[marker])],
+                   open_branches=["3-z", "4-w"], drafts=["3-z"])
+        self.state({})
+        self.assertEqual(self.route(lead="none"),
+                         (0, ["FALLBACK #3", "ASK-DEV #4 101", "counted: 1 of 2"]))
+
     def test_ask_dev_for_an_adr_conflict_with_no_lead(self):
         self.serve([issue(3, labels=["needs-lead"], claimed=True, comments=[comment(0, ADR_MARKER)])],
                    open_branches=["3-z"])
