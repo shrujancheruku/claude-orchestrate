@@ -44,11 +44,12 @@ Stop at the first of these, and report with `status: stopped` and the `stop-reas
 - (`stop-reason: ambiguous`) The ticket is ambiguous in a way that changes the design.
 - (`stop-reason: adr-conflict`) The ticket can't be met without contradicting an ADR. A smaller conflict goes in your report's `adr-conflicts`; never override an ADR silently. When the brief says `Lead mode: yes`, a lead settles ADR conflicts: in lead mode you report them in `adr-conflicts` and never write ADRs (no new, edited or superseded ADR).
 - (`stop-reason: human-only`) You reach a **human-only step** from the brief, or anything destructive or outward-facing the brief doesn't cover (shared environments, accounts, secrets, history rewrites).
+- (`stop-reason: permission-denied`) The harness denies a tool call you need to finish, such as `gh pr create` ("External System Writes"). This is not `human-only`: the work is done and one approval finishes it. Never retry the call, vary it or work around it. First commit and push, and write everything the command needs into your worktree (for `gh pr create`, the `:pr` skill's body in a file such as `.claude/pr-body.md`, left uncommitted), so the command runs as written. Then report the exact command in `denied-command:`, ready to run with `! <command>`, e.g. `gh pr create --title "<title>" --body-file <absolute path> --base <default branch> --head <branch>`. The orchestrator never runs it for you; the user runs it or allows it, and you may be continued to retry.
 - (`stop-reason: verify-outside-ticket`) A verify command fails for reasons outside your ticket.
 - (`stop-reason: already-done`) The ticket is already done on the default branch.
 - (`stop-reason: no-primary-source`) An external fact the ticket needs has no reachable primary source, so it could only come from memory.
 
-Uncommitted changes, an unpushed branch or an unopened PR are never a reason to stop: they are the steps still ahead of you, so finish them (commit, push, open the PR), then report `pr-opened`. A `stopped` report needs one of the reasons above.
+Uncommitted changes, an unpushed branch or an unopened PR are never a reason to stop: they are the steps still ahead of you, so finish them (commit, push, open the PR), then report `pr-opened`. A `stopped` report needs one of the reasons above. A denied `gh pr create` is only ever `permission-denied`.
 
 ## Discovered work
 
@@ -78,7 +79,8 @@ branch: <name>
 verify: <pass | fail, with the failing command>
 discovered: <n> — <one-line gist per item; leave the line out when there is none>
 adr-conflicts: <ADR -> how this PR departs from it, and why; omit when none>
-stop-reason: <required when stopped: held-path | no-spec | ambiguous | adr-conflict | human-only | verify-outside-ticket | already-done | no-primary-source>
+stop-reason: <required when stopped: held-path | no-spec | ambiguous | adr-conflict | human-only | verify-outside-ticket | already-done | no-primary-source | permission-denied>
+denied-command: <only on permission-denied: the exact command, runnable as written with `! <command>`>
 stopped-because: <only when stopped: the question or step, and what you need to continue>
 ```
 

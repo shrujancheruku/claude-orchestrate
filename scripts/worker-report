@@ -6,7 +6,8 @@ line and appends a `worker-report` event to the run log. The orchestrator applie
     valid pr-opened <pr> <head>      `status: pr-opened` and an open PR exists; <pr> and <head> are the host's
     valid stopped <stop-reason>      `status: stopped` with a `stop-reason:` on the list below
     interim                          no `status:` line, but text (a placeholder, a progress note)
-    not-a-stop                       `status: stopped` with no `stop-reason:` line, or an unlisted one
+    not-a-stop                       `status: stopped` with no `stop-reason:` line, or an unlisted one, or a
+                                     `permission-denied` with no `denied-command:` line
     not-a-pr-opened                  `status: pr-opened`, but no open PR on the report's `pr:` or on --branch
     duplicate <verdict>              the newest earlier verdict for this ticket was the same, with the same head and stop-reason
     missing-report pr <pr> <head>    a bare completion notice, and an open PR on --branch
@@ -14,7 +15,8 @@ line and appends a `worker-report` event to the run log. The orchestrator applie
     limit [<reset time>]             no report, and the text names a usage limit
     error <gist>                     no report, and the text names another API error
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
-no-primary-source. Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
+no-primary-source, permission-denied (which also needs the exact denied command in `denied-command:`; the event
+carries it). Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
 run log): one line on stderr, run it again on the next wake. Stdlib only, Python 3.9+.
 """
 
@@ -30,9 +32,10 @@ import runlog
 import session
 
 STOP_REASONS = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
-                "verify-outside-ticket", "already-done", "no-primary-source")
+                "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied")
 STATUS = re.compile(r"^[ \t>*-]*status:[ \t]*(pr-opened|stopped)\b", re.I | re.M)
 STOP_REASON = re.compile(r"^[ \t>*-]*stop-reason:[ \t]*`?([\w-]+)", re.I | re.M)
+DENIED_COMMAND = re.compile(r"^[ \t>*-]*denied-command:[ \t]*`*([^\s`].*?)`*[ \t]*$", re.I | re.M)
 REPORT_PR = re.compile(r"^[ \t>*-]*pr:[ \t]*\S*?/pull/(\d+)", re.I | re.M)
 # The harness's own wrapper elements say nothing about the worker's work: a completion with only these is bare.
 NOTICE = re.compile(r"<(task-id|tool-use-id|output-file|worktreePath|worktreeBranch|status|summary|usage)>.*?</\1>", re.S)
@@ -76,6 +79,13 @@ def classify(text: str, branch: str, lookup) -> tuple:
     if status == "stopped":
         r = STOP_REASON.search(text)
         reason = r.group(1).lower() if r else None
+        if reason == "permission-denied":
+            # Nothing can resume a denial without the command: the user runs it with `!`, or allows it.
+            d = DENIED_COMMAND.search(text)
+            if not d:
+                return ("not-a-stop",), {"status": status}
+            return ("valid", "stopped", reason), {"status": status, "stop_reason": reason,
+                                                  "denied_command": d.group(1).strip()}
         if reason in STOP_REASONS:
             return ("valid", "stopped", reason), {"status": status, "stop_reason": reason}
         return ("not-a-stop",), {"status": status}
@@ -116,7 +126,7 @@ def runlog_dup(repo, ticket, words, fields) -> bool:
     """True when the newest earlier verdict for this ticket (a duplicate does not count) matches this one."""
     last = runlog.latest_event(repo, runlog.WORKER_REPORT, ticket, skip_outcomes=("duplicate",))
     return bool(last) and last.get("outcome") == words[0] and all(
-        last.get(k) == fields.get(k) for k in ("status", "head", "stop_reason"))
+        last.get(k) == fields.get(k) for k in ("status", "head", "stop_reason", "denied_command"))
 
 
 if __name__ == "__main__":
