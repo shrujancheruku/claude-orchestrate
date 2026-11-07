@@ -13,6 +13,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv  # noqa: E402
 
+# The queries are matched by their text, so the fake gh sees the call exactly as GitHub would.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from importlib.machinery import SourceFileLoader  # noqa: E402
+from importlib.util import module_from_spec, spec_from_loader  # noqa: E402
+
+_loader = SourceFileLoader("lead_brief", str(Path(__file__).resolve().parent.parent / "scripts" / "lead-brief"))
+lead_brief = module_from_spec(spec_from_loader("lead_brief", _loader))
+_loader.exec_module(lead_brief)
+
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "run" / "SKILL.md"
 NOW = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
@@ -62,13 +71,13 @@ class LeadBrief(unittest.TestCase):
             {"number": 8, "title": "Plain", "url": "https://x/issues/8", "labels": {"nodes": []},
              "subIssuesSummary": {"total": 0, "completed": 0}}]}}}}
         issues = issues or {}
-        merged_resp = ({"args": ["api", "graphql", "-F", "which=merged"], "stderr": "HTTP 500", "exit": merged_exit}
+        merged_resp = ({"args": ["api", "graphql", "-f", "query=" + lead_brief.MERGED_QUERY], "stderr": "HTTP 500", "exit": merged_exit}
                        if merged_exit else
-                       {"args": ["api", "graphql", "-F", "which=merged"], "stdout": json.dumps(mbody)})
+                       {"args": ["api", "graphql", "-f", "query=" + lead_brief.MERGED_QUERY], "stdout": json.dumps(mbody)})
         self.env.set_gh([
             {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
             merged_resp,
-            {"args": ["api", "graphql", "-F", "which=roadmap"], "stdout": json.dumps(rbody)},
+            {"args": ["api", "graphql", "-f", "query=" + lead_brief.ROADMAP_QUERY], "stdout": json.dumps(rbody)},
             {"args": ["issue", "list", "--state", "open", "--label", "needs-lead"],
              "stdout": json.dumps(issues.get("needs-lead", [{"number": 3, "title": "Q", "url": "https://x/issues/3",
                                                              "createdAt": iso(2)}]))},
@@ -111,7 +120,7 @@ class LeadBrief(unittest.TestCase):
                           "labels": {"nodes": [{"name": "wayfinder:map"}]}, "subIssuesSummary": {"total": 1, "completed": 0}}
         responses = json.loads(self.env.gh_state.read_text())["responses"]
         for r in responses:
-            if r["args"][-1] == "which=roadmap":
+            if r["args"][-1] == "query=" + lead_brief.ROADMAP_QUERY:
                 r.pop("stdout")
                 r["seq"] = [{"stdout": page([item(n) for n in range(1, 101)], True)},
                             {"stdout": page([item(101)], False)}]
@@ -119,7 +128,7 @@ class LeadBrief(unittest.TestCase):
         _, out, _ = self.brief()
         self.assertIn("[map] #1 M1", out)
         self.assertIn("[map] #101 M101", out)
-        calls = [c for c in self.env.gh_calls() if "which=roadmap" in c]
+        calls = [c for c in self.env.gh_calls() if "query=" + lead_brief.ROADMAP_QUERY in c]
         self.assertEqual(len(calls), 2)
         self.assertIn("after=c1", calls[1])
         self.assertTrue(all("limit=100" in c for c in calls))

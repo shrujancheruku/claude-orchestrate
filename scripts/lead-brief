@@ -83,11 +83,10 @@ def repo_vars(root) -> list:
         raise Unavailable("gh returned an unexpected reply (repo)")
 
 
-def graphql(root, which, query, limit, repo, after=None):
-    """One `gh api graphql` call; `which` names the query in the argument list (and so in a test's fake gh)."""
+def graphql(root, query, limit, repo, after=None):
+    """One `gh api graphql` call; every `-F`/`-f` variable is one the query declares."""
     cursor = ["-f", f"after={after}"] if after else []
-    return gh_json(root, "api", "graphql", "-F", f"which={which}", "-F", f"limit={limit}", *repo, *cursor,
-                   "-f", f"query={query}")
+    return gh_json(root, "api", "graphql", "-f", f"query={query}", "-F", f"limit={limit}", *repo, *cursor)
 
 
 def nodes_of(data, key, *path):
@@ -142,7 +141,7 @@ def section_tickets(root, now) -> list:
 def section_roadmap(root, repo) -> list:
     issues, after = [], None
     for _ in range(100):  # pages of 100: every open issue is read, not just the newest
-        data = graphql(root, "roadmap", ROADMAP_QUERY, ROADMAP_PAGE, repo, after)
+        data = graphql(root, ROADMAP_QUERY, ROADMAP_PAGE, repo, after)
         issues += nodes_of(data, "issues", "nodes")
         info = nodes_of(data, "issues", "pageInfo")
         after = info.get("endCursor")
@@ -172,7 +171,7 @@ def pr_of(node) -> dict:
 
 
 def load_merged(root, repo):
-    data = graphql(root, "merged", MERGED_QUERY, MERGED_LIMIT, repo)
+    data = graphql(root, MERGED_QUERY, MERGED_LIMIT, repo)
     prs = [pr_of(n) for n in nodes_of(data, "pullRequests", "nodes")]
     prs = sorted((p for p in prs if p["merged"]), key=lambda p: (p["merged"], p["number"]))
     return prs, int(nodes_of(data, "pullRequests", "totalCount"))
