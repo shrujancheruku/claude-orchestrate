@@ -39,7 +39,7 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         createdAt
         parent { number }
         subIssuesSummary { total completed }
-        labels(first: 20) { nodes { name } }
+        labels(first: 30) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
         userContentEdits(first: 20) { nodes { editedAt } }
