@@ -2,7 +2,9 @@
 """merge <pr> [--method squash|merge|rebase] [--approved-head SHA] [--ticket N]... [--worktree DIR] : merge a PR, then clean up.
 
 With --approved-head (the PR head the reviewer approved; the orchestrator always passes it) the script
-first decides readiness and merges nothing unless the PR is ready: a PR behind the default branch is
+first decides readiness and merges nothing unless the PR is ready: CI not green on the head (a check
+pending, failed, cancelled or missing, or no checks at all) or an open blocker on the PR's ticket (the
+branch's `<number>-` prefix, else the PR's closing reference) is a refusal (exit 1, the clause named); a PR behind the default branch is
 updated with `gh pr update-branch` (exit 5); the worker's own change since the approved head, not counting
 what merges of the default branch brought in, that touches a config risk path or exceeds the S thresholds
 needs re-review (exit 6). Without the flag it merges as before.
@@ -41,6 +43,7 @@ import common
 import config
 import github
 import replay
+import repo
 import runlog
 from repo import remove_worktree
 
@@ -57,7 +60,7 @@ run = common.run  # (code, stdout, stderr); a missing gh or git is code 127, not
 def view(pr, cwd):
     """(view, "") or (None, why); a failed or unusable `gh pr view` is never a traceback."""
     try:
-        return github.pr_view(pr, "state,headRefName,headRefOid,isCrossRepository,closingIssuesReferences", cwd), ""
+        return github.pr_view(pr, "state,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,statusCheckRollup", cwd), ""
     except github.GhError as e:
         return None, e.message
 
@@ -120,6 +123,29 @@ def own_changes(cwd, approved, head, default):
     return files, lines
 
 
+def merge_rule(cwd, pr, v, head):
+    """Exit code 1 (or 2: could not read) when CI is not green on the head or the PR's ticket has an open blocker, else None."""
+    verdict, names = github.ci_verdict(v.get("statusCheckRollup"))
+    if verdict != "pass":
+        say(f"PR #{pr} is not ready: CI {verdict} on {head[:12]}: {', '.join(names) or 'no checks'}")
+        return 1
+    ticket = repo.ticket_of_branch(v.get("headRefName"))
+    if ticket is None:
+        refs = [r.get("number") for r in v.get("closingIssuesReferences") or [] if isinstance(r.get("number"), int)]
+        ticket = refs[0] if refs else None
+    if ticket is None:
+        return None  # no ticket, no dependency to wait for
+    try:
+        blockers = github.open_blockers(ticket, cwd)
+    except github.GhError as e:
+        say(f"merge: could not read the blockers of #{ticket} for PR #{pr}: {e.message}")
+        return 2
+    if blockers:
+        say(f"PR #{pr} is not ready: ticket #{ticket} has {blockers} open blocker(s)")
+        return 1
+    return None
+
+
 def readiness(cwd, pr, v, approved):
     """Exit code 1, 2, 5 or 6 when the PR is not ready to merge against `approved`, else None (ready)."""
     default = default_branch(cwd)
@@ -127,6 +153,9 @@ def readiness(cwd, pr, v, approved):
     if default is None or not head:
         say(f"merge: cannot decide readiness for PR #{pr}: the default branch or head is unknown")
         return 2
+    refusal = merge_rule(cwd, pr, v, head)
+    if refusal is not None:
+        return refusal
     try:
         behind = github.behind_by(default, v.get("headRefName") or head, cwd)
     except github.GhError as e:

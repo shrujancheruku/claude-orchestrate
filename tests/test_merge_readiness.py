@@ -13,6 +13,9 @@ READY_CONFIG = ("## Review\n\n- **Risk paths** (any PR touching them is reviewed
                 "- **Tiers:** S is at most <10> changed lines in at most <2> files, none on a risk path; "
                 "L touches a risk path or changes more than <400> lines; M is everything else.\n")
 
+GREEN = [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"},
+         {"context": "lint", "state": "SUCCESS"}]
+
 
 class ReadinessTest(unittest.TestCase):
     """--approved-head: behind leads to exit 5, a change since the approved head needing re-review to exit 6."""
@@ -36,9 +39,10 @@ class ReadinessTest(unittest.TestCase):
         git(self.repo, "checkout", "-q", "main")
         return sha
 
-    def merge(self, head, behind="0", update=None, approved="", flag=True):
-        pr_json = {"state": "OPEN", "headRefName": "feat-br", "headRefOid": head,
-                   "isCrossRepository": False, "closingIssuesReferences": []}
+    def merge(self, head, behind="0", update=None, approved="", flag=True, checks=GREEN, blockers="0\n",
+              branch="feat-br", closing=(), ticket=9):
+        pr_json = {"state": "OPEN", "headRefName": branch, "headRefOid": head, "statusCheckRollup": checks,
+                   "isCrossRepository": False, "closingIssuesReferences": [{"number": n} for n in closing]}
         view = {"stdout": json.dumps(pr_json)}
         merged = {"stdout": json.dumps(dict(pr_json, state="MERGED"))}
         self.env.set_gh([
@@ -46,6 +50,8 @@ class ReadinessTest(unittest.TestCase):
             {"args": ["repo", "view"], "stdout": '{"defaultBranchRef":{"name":"main"}}'},
             {"args": ["api", "repos/{owner}/{repo}/compare/main...feat-br", "--jq", ".behind_by"],
              "stdout": behind + "\n"},
+            {"args": ["api", f"repos/{{owner}}/{{repo}}/issues/{ticket}", "--jq", ".issue_dependencies_summary.blocked_by"],
+             "stdout": blockers},
             {"args": ["pr", "update-branch"], **(update or {"exit": 0})},
             {"args": ["pr", "merge"], "exit": 0},
             {"args": ["pr", "list"], "stdout": "[]"},
@@ -120,6 +126,60 @@ class ReadinessTest(unittest.TestCase):
     def test_unknown_approved_head_needs_re_review(self):
         head = self.push({"b.txt": "x\n"})
         self.assertEqual(self.merge(head, approved="f" * 40).returncode, 6)
+
+    def refused(self, p, clause):
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn(clause, p.stdout)
+        self.assertEqual(self.called(["pr", "merge"]), [])
+        self.assertEqual(self.called(["pr", "update-branch"]), [])
+
+    def test_pending_ci_refuses_naming_the_check(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, checks=GREEN + [{"name": "slow", "status": "IN_PROGRESS", "conclusion": ""}])
+        self.refused(p, "CI pending")
+        self.assertIn("slow", p.stdout)
+        self.assertIn(head[:12], p.stdout)
+
+    def test_failed_check_refuses(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, behind="2", checks=GREEN + [{"name": "unit", "status": "COMPLETED", "conclusion": "FAILURE"}])
+        self.refused(p, "CI failed")
+        self.assertIn("unit", p.stdout)
+
+    def test_cancelled_check_refuses(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, checks=[{"name": "unit", "status": "COMPLETED", "conclusion": "CANCELLED"}])
+        self.refused(p, "CI failed")
+
+    def test_no_checks_refuses_as_pending(self):
+        head = self.push({"b.txt": "x\n"})
+        self.refused(self.merge(head, checks=[]), "CI pending")
+
+    def test_skipped_and_neutral_checks_pass(self):
+        head = self.push({"b.txt": "x\n"})
+        checks = GREEN + [{"name": "opt", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                          {"name": "n", "status": "COMPLETED", "conclusion": "NEUTRAL"}]
+        self.assertEqual(self.merge(head, checks=checks).returncode, 0)
+
+    def test_open_blocker_on_the_branch_ticket_refuses(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, branch="feat-br", closing=[9], blockers="2\n")
+        self.refused(p, "ticket #9 has 2 open blocker(s)")
+
+    def test_closed_blockers_pass(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, closing=[9], blockers="0\n")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(len(self.called(["pr", "merge"])), 1)
+
+    def test_no_ticket_passes_without_asking_for_blockers(self):
+        head = self.push({"b.txt": "x\n"})
+        self.assertEqual(self.merge(head, blockers="3\n").returncode, 0)
+        self.assertEqual([c for c in self.env.gh_calls() if "issues" in " ".join(c)], [])
+
+    def test_without_the_flag_ci_is_not_checked(self):
+        head = self.push({"b.txt": "x\n"})
+        self.assertEqual(self.merge(head, checks=[], flag=False).returncode, 0)
 
 
 if __name__ == "__main__":
