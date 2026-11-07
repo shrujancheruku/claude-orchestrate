@@ -128,6 +128,16 @@ scripts/lead-brief [--repo .] [--now ISO] [--checkpoint <pr>]
 
 `lead-route` is run by the orchestrator each pass, `lead-brief` by the lead at start-up and after a compaction. Their `--now` is for tests.
 
+## Projects board
+
+Setup offers an opt-in GitHub Projects board. It needs the token's `project` scope (setup gives you `! gh auth refresh -s project` to run, and offers retry or skip), creates the project under the repo owner and links it to the repo (falling back to your own account, unlinked), and writes `- **Board:** <project URL>` into the config itself. With that line, `/orchestrate:run` runs `scripts/board` in step 5 of every pass; without it the script does nothing.
+
+The board is rebuilt from tracker and PR state only, in the single-select field `Stage` (created on first sync; GitHub's built-in `Status` options can't be edited through `gh`): **Building** (claimed, no open PR), **In review** (claimed, open PR), **Needs lead** (`needs-lead`; empty with lead mode off), **Waiting on you** (`ready-for-human` or `needs-info`) and **Done** (merged, archived a day later). A card is added when its ticket is first claimed. Running it twice changes nothing. A failure prints one line and exits 1, and `run` carries on. The lead never reads or writes the board, and GitHub's built-in project workflows aren't used.
+
+```
+scripts/board [--repo .]
+```
+
 ## Profiling
 
 `/orchestrate:run --profile` runs normal passes, and at the end of each one records the pass and saves a profile of the session so far. Each pass also records why free slots stayed idle (`overlap`, `gate`, `empty` for nothing takeable, `limit`), so with `--greedy` the profile shows whether a higher cap would have run more, or whether overlap and an empty backlog were what held it back:

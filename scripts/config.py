@@ -40,6 +40,7 @@ class Config(NamedTuple):
     has_verify: bool = False  # the config has a `## Verify` section at all
     orchestrator_model: str | None = None  # the Models table's Orchestrator row; None when blank, the old wording or missing
     ci_wait_limit: int | None = None  # minutes: the optional `**CI wait limit:**` line; None when absent or not a number
+    board: str | None = None  # the `- **Board:** <project URL>` line setup writes; None when absent
     problems: tuple = ()  # Problem entries
 
     @classmethod
@@ -90,6 +91,7 @@ class Config(NamedTuple):
             has_verify=common.section_of(text, "Verify") is not None,
             orchestrator_model=_orchestrator_model(common.section_of(text, "Models")),
             ci_wait_limit=_ci_wait_limit(text),
+            board=_board(text),
             problems=tuple(problems),
         )
 
@@ -205,7 +207,16 @@ def _ci_wait_limit(text):
     return int(m.group(1)) if m else None
 
 
-_OLD_ORCHESTRATOR = "the session's model"  # the template's wording before the lead layer: means no model
+_BOARD = re.compile(r"^-\s+\*\*Board:\*\*\s*(https?://\S+)", re.M)
+
+
+def _board(text):
+    """The Projects board URL from the line `- **Board:** <url>` (a top-level bullet; setup writes it), or None."""
+    m = _BOARD.search(text)
+    return m.group(1).rstrip(".,;") if m else None
+
+
+_OLD_ORCHESTRATOR ="the session's model"  # the template's wording before the lead layer: means no model
 
 
 def _orchestrator_model(models):

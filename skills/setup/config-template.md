@@ -13,6 +13,10 @@
 - **Tracker:** <host; how blocking is expressed; claim = assign to the user; the label that marks a ticket ready>
 -->
 
+<!-- Optional Projects board. Setup writes the line itself when you opt in; `scripts/board` syncs it every pass and does nothing without it:
+- **Board:** <project URL>
+-->
+
 ## Slots
 
 - **Slots:** <n, default 2>. How many tickets are in flight at once. Parallel workers multiply token use, so this is the throttle. `/orchestrate:run` suggests changes of one; it changes this line only when the user says yes.
