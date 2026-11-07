@@ -114,6 +114,12 @@ def issue_state(issue, cwd=None) -> str:
     return str(call_json("issue", "view", str(issue), "--json", "state", cwd=cwd).get("state"))
 
 
+def issue_claim(issue, cwd=None) -> tuple:
+    """(state, claimed) of an issue: claimed when it has an assignee (the claim, as the tracker doc says)."""
+    data = call_json("issue", "view", str(issue), "--json", "state,assignees", cwd=cwd)
+    return str(data.get("state")), bool(data.get("assignees"))
+
+
 def close_issue(issue, cwd=None) -> None:
     call("issue", "close", str(issue), cwd=cwd)
 
