@@ -10,8 +10,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from harness import ScriptEnv, gh_repo_view  # noqa: E402
 import github  # noqa: E402
 from importlib.machinery import SourceFileLoader  # noqa: E402
+from importlib.util import module_from_spec, spec_from_loader  # noqa: E402
 
-threads_script = SourceFileLoader("threads_script", str(Path(__file__).resolve().parent.parent / "scripts" / "threads")).load_module()
+# An extensionless script: spec_from_loader with an explicit loader (load_module is gone in new Pythons).
+_loader = SourceFileLoader("threads_script", str(Path(__file__).resolve().parent.parent / "scripts" / "threads"))
+threads_script = module_from_spec(spec_from_loader("threads_script", _loader))
+_loader.exec_module(threads_script)
 
 SHA = "abc1234def5678abc1234def5678abc1234def56"
 Q = ["api", "graphql", "-f", "query=" + github.THREADS_QUERY]
