@@ -41,10 +41,19 @@ standards: <rule, glossary term or ADR → holds | broken>, one per line for eac
 findings:
 - [blocking | minor] [spec | standards] path:line — what's wrong → what would fix it
 risk-notes: <L only: path:line-range — what to look at>
+discovered: <n> — <one-line gist per item; leave the line out when there is none>
 posted: <review url | failed: reason | off>
 ```
 
-`approve` means no blocking findings. Minor findings ride along for the worker to take or leave; on a round-1 `approve` with minors, nobody re-reviews them.
+`approve` means no blocking findings. Work outside the ticket's scope is never a `[minor]` finding: report it as **discovered work** (see **Discovered work**). Minor findings ride along for the worker to take or leave; on a round-1 `approve` with minors, nobody re-reviews them.
+
+## Discovered work
+
+Work the PR's ticket doesn't cover and the backlog is missing (a pre-existing bug in nearby code, a refactor the change shows is needed, an unplanned dependency) is **discovered work**, not a finding: it never changes the verdict. Put it in a `## Discovered work` section of your posted review, one line per item, free text with no kind label:
+
+`- <what is missing> — <where: path or ticket> — <why it matters>`
+
+A problem in the PR's own change is still a finding. Leave the section out when there is none.
 
 ## Continuation
 
@@ -61,6 +70,7 @@ What you return depends on `posted`:
   blocking: <count>
   non-blocking: <count>
   review: <review url>
+  discovered: <n> — <one-line gist per item; leave the line out when there is none>
   risk-notes: <L only: risky path — what to look at, one line each>
   ```
 - **Not posted** (`posted: off` or `posted: failed: <reason>`): return the full verdict block above, with every finding, so the caller can pass them on and the loop still works.
@@ -85,7 +95,7 @@ EOF
 
 `gh pr review <n> --comment --body '<body>'` also works for a short body with no single quotes, `$`, backticks or backslashes. A plain `cd <path> &&` may come first; chain nothing else, and put nothing after the heredoc. `--approve` and `--request-changes` are refused. The `gh api` shape is the one that takes inline `comments`.
 
-- **Body:** `Round <n> · verdict: <approve | changes> · tier: <S | M | L>`, then the spec and standards lines, then the findings that can't go inline, then the risk notes (L), each as `path:line-range — what to look at`.
+- **Body:** `Round <n> · verdict: <approve | changes> · tier: <S | M | L>`, then the spec and standards lines, then the findings that can't go inline, then the `## Discovered work` section, then the risk notes (L), each as `path:line-range — what to look at`.
 - **Comments:** one per finding whose line is in the diff, starting `[blocking]` or `[minor]`, then what's wrong and what would fix it.
 - Escape the JSON properly; a malformed payload is refused.
 
