@@ -54,7 +54,7 @@ Work the backlog is missing, found while you build, is **discovered work**: a pr
 
 `- <what is missing> — <where: path or ticket> — <why it matters>`
 
-Work the ticket can't be finished without is not discovered work: it stays a stop under the rules above. Leave the section out when there is none.
+Work the ticket can't be finished without is not discovered work: it stays a stop under the rules above. Leave the section out when there is none. On a stop with no PR (`pr: none`) there is no body to hold it: report the items in the `discovered:` line only.
 
 ## Follow-ups
 
