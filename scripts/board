@@ -2,9 +2,9 @@
 """board [--repo PATH] : sync the opt-in GitHub Projects board from tracker and PR state.
 
 Reads the config's `- **Board:** <project URL>` line; with none it does nothing (exit 0, silent). Otherwise it
-rebuilds each card's `Stage` from the tracker and the PRs only, so a second run changes nothing:
-    Building         claimed, no open PR on a `<ticket>-<slug>` branch
-    In review        claimed, with such an open PR
+rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a second run changes nothing:
+    Building         claimed, and `claims` says building, elsewhere, stalled or with-lead
+    In review        claimed, and `claims` says in-review
     Needs lead       labelled `needs-lead`
     Waiting on you   labelled `ready-for-human` or `needs-info`
     Done             the ticket's PR merged; the card is archived a day after the merge
@@ -19,21 +19,28 @@ import argparse
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+import claims
 import common
 import config
 import github
-from repo import parse_ts, ticket_of_branch
+from repo import STATE, parse_ts, ticket_of_branch
 
 FIELD = "Stage"
 BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE = "Building", "In review", "Needs lead", "Waiting on you", "Done"
 STAGES = [BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE]
 ARCHIVE_AFTER = timedelta(days=1)
 PROJECT_URL = re.compile(r"^https://[^/]+/(?:orgs|users)/([^/]+)/projects/(\d+)/?")
+# The board is the coarse view: every claim state that is not in review or done is Building. Liveness and stalls
+# stay in the pass table (`claims`), and a new column would break every existing board (sync refuses a missing option).
+CLAIM_STAGE = {"building": BUILDING, "elsewhere": BUILDING, "stalled": BUILDING, "with-lead": BUILDING,
+               "in-review": REVIEW, "done": DONE}
 
 
-def desired(issues, open_prs):
-    """{ticket: (stage, issue, claimed)} for the open tickets that belong on the board."""
+def desired(issues, found):
+    """{ticket: (stage, issue, claimed)} for the open tickets that belong on the board. found: claims.claims' {ticket:
+    Claim}, which holds every claimed open ticket."""
     out = {}
     for issue in issues:
         labels = {x["name"] for x in issue.get("labels") or []}
@@ -43,7 +50,7 @@ def desired(issues, open_prs):
         elif labels & {"ready-for-human", "needs-info"}:
             stage = WAITING
         elif claimed:
-            stage = REVIEW if issue["number"] in open_prs else BUILDING
+            stage = CLAIM_STAGE[found[issue["number"]].state]
         else:
             continue
         out[issue["number"]] = (stage, issue, claimed)
@@ -67,8 +74,17 @@ def sync(owner, number, repo):
     issues = github.call_json("issue", "list", "--state", "open", "--limit", "200",
                               "--json", "number,url,labels,assignees", shape=list, cwd=repo)
     prs = github.call_json("pr", "list", "--state", "all", "--limit", "100",
-                           "--json", "headRefName,state,mergedAt", shape=list, cwd=repo)
-    open_prs = {t for t in (ticket_of_branch(p.get("headRefName")) for p in prs if p.get("state") == "OPEN") if t}
+                           "--json", "number,headRefName,state,mergedAt", shape=list, cwd=repo)
+    # One PR read serves both claims (open and merged PRs) and the archive below.
+    root = Path(repo).resolve()
+    try:
+        found = claims.claims(root, root / STATE,
+                              [{"number": int(i["number"]), "claimed": bool(i.get("assignees")),
+                                "labels": {x["name"] for x in i.get("labels") or []}} for i in issues],
+                              [p for p in prs if p.get("state") == "OPEN"],
+                              [p for p in prs if p.get("state") == "MERGED"])
+    except ValueError as e:  # claims could not run (an unreadable state file, a failed git call)
+        raise github.GhError(github.FAILED, str(e)) from None
     merged = {}
     for p in prs:
         t, at = ticket_of_branch(p.get("headRefName")), parse_ts(p.get("mergedAt"))
@@ -82,7 +98,7 @@ def sync(owner, number, repo):
         github.call("project", "item-edit", "--id", card_id, "--project-id", proj["id"], "--field-id", field["id"],
                     "--single-select-option-id", options[stage], cwd=repo)
 
-    want = desired(issues, open_prs)
+    want = desired(issues, found)
     for t, (stage, issue, claimed) in sorted(want.items()):
         card = cards.get(t)
         if card is None:
