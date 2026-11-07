@@ -3,7 +3,7 @@
 
 Reads the worker's whole completion text (the harness notice plus the report) on stdin, prints one verdict
 line and appends a `worker-report` event to the run log. The orchestrator applies the line word for word:
-    valid pr-opened <pr> <head>      `status: pr-opened` and an open PR exists; <pr> and <head> are the host's
+    valid pr-opened <pr> <head>      `status: pr-opened` and an open non-draft PR exists; <pr> and <head> are the host's
     valid stopped <stop-reason>      `status: stopped` with a `stop-reason:` on the list below
     interim                          no `status:` line, but text (a placeholder, a progress note)
     not-a-stop                       `status: stopped` with no `stop-reason:` line, or an unlisted one, or a
@@ -49,7 +49,9 @@ def is_bare(text: str) -> bool:
 
 
 def find_pr(prs: list, report_pr: str | None, branch: str):
-    """The open PR the report names, else the one on the branch; None when neither is open."""
+    """The open PR the report names, else the one on the branch; None when neither is open. A draft is the worker's
+    progress marker (ADR 0011), not the PR its `pr-opened` promises, so it never counts."""
+    prs = [pr for pr in prs if not pr.get("isDraft")]
     for pr in prs:
         if report_pr and str(pr.get("number")) == report_pr:
             return pr

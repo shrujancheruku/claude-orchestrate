@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""watch-ci <pr>... : wait for each PR's checks to settle; one line per PR as it settles.
+"""watch-ci <pr>... : wait for each ready (non-draft) PR's checks to settle; one line per PR as it settles.
 
 Run it as a Monitor command so the orchestrator never sleeps or polls. Each line:
     PR #<n> <pass|fail> <merge state> <head commit>
@@ -29,7 +29,7 @@ from repo import main_checkout
 
 MAX_FAILURES = 5  # consecutive `gh` failures for one PR before it ends in an error line
 EXIT_ERROR = 3
-FIELDS = "statusCheckRollup,mergeStateStatus,headRefOid,state"
+FIELDS = "statusCheckRollup,mergeStateStatus,headRefOid,state,isDraft"
 BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
 PENDING_STATES = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
@@ -38,6 +38,8 @@ def judge(view: dict):
     """'pass' | 'fail' | None (still pending) from one `gh pr view --json` result."""
     if view.get("state") in ("MERGED", "CLOSED"):
         return "pass" if view["state"] == "MERGED" else "fail"
+    if view.get("isDraft"):
+        return None  # a draft is building, not in review: CI is read once it is marked ready
     checks = view.get("statusCheckRollup") or []
     if not checks:
         return None

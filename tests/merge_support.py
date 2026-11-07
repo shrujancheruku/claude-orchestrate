@@ -96,8 +96,8 @@ class SweepMixin(MergeMixin):
             self.env.commit(path, text, f"feat: landed {path}")
         git(self.env.repo, "push", "origin", "main")
 
-    def sweep(self, method="squash", branches=("pr-a",)):
-        listing = json.dumps([{"number": 8 + i, "headRefName": b, "isCrossRepository": False}
+    def sweep(self, method="squash", branches=("pr-a",), drafts=()):
+        listing = json.dumps([{"number": 8 + i, "headRefName": b, "isCrossRepository": False, "isDraft": b in drafts}
                               for i, b in enumerate(branches)])
         self.seq({"pr view": [pr("MERGED")], "issue view": CLOSED_ISSUE, REF_GET: [OK],
                   "pr list": [{"stdout": listing}]})

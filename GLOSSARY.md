@@ -43,7 +43,7 @@ A claimed ticket together with what decides its state: its branch, worktree and 
 _Avoid_: ticket record, worker state, claim state
 
 **Building**:
-A claimed ticket with no PR yet and a worker from this session on it. Source: `scripts/claims`, `skills/run/SKILL.md`.
+A claimed ticket with no ready PR yet (none, or only a **Draft PR**) and a worker from this session on it. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: running, active
 
 **Paused**:
@@ -63,8 +63,12 @@ Saving a worktree's work to its branch and removing the worktree, so nothing is 
 _Avoid_: cleanup, salvage, sweep (that is the merge's)
 
 **In review**:
-A claimed ticket whose PR is open. Source: `scripts/claims`, `skills/run/SKILL.md`.
+A claimed ticket whose PR is open and not a draft. A **Draft PR** is not in review. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: under review, open
+
+**Draft PR**:
+The PR a worker opens as a draft at the end of its Orient, after an empty `chore: start #<n>` commit, so the developer can follow the work. The ticket stays **Building** while it is a draft; CI, the gate, review and merge apply only once the worker marks it ready, and the merge sweep skips it. Kept apart from **In review**. Source: `docs/adr/0011-a-draft-pr-is-building.md`, `agents/worker.md`.
+_Avoid_: WIP PR, early PR
 
 **Waiting**:
 A claimed ticket blocked on the user: a gate, a question or a third review round. With a lead live it waits on the lead instead and carries `needs-lead`. Source: `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.

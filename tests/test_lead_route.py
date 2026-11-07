@@ -57,7 +57,7 @@ class LeadRoute(unittest.TestCase):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def serve(self, issues=(), gh_exit=0, open_branches=(), wontfix=(), heads=None, merged_branches=()):
+    def serve(self, issues=(), gh_exit=0, open_branches=(), wontfix=(), heads=None, merged_branches=(), drafts=()):
         if gh_exit:
             graphql = {"args": ["api", "graphql"], "stderr": "HTTP 500", "exit": gh_exit}
         else:
@@ -65,8 +65,8 @@ class LeadRoute(unittest.TestCase):
             closed = {"data": {"repository": {"issues": {"nodes": [
                 {"number": n, "assignees": {"totalCount": a}} for n, a in wontfix]}}}}
             graphql = {"args": ["api", "graphql"], "seq": [{"stdout": json.dumps(body)}, {"stdout": json.dumps(closed)}]}
-        prs = [{"headRefName": b, "headRefOid": (heads or {}).get(b, HEAD), "number": 100 + i}
-               for i, b in enumerate(open_branches)]
+        prs = [{"headRefName": b, "headRefOid": (heads or {}).get(b, HEAD), "number": 100 + i,
+                "isDraft": b in drafts} for i, b in enumerate(open_branches)]
         merged = [{"headRefName": b, "number": 200 + i} for i, b in enumerate(merged_branches)]
         repo = {"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}}
         self.responses = [{"args": ["repo", "view"], "stdout": json.dumps(repo)},
@@ -132,6 +132,12 @@ class LeadRoute(unittest.TestCase):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
         self.state({})
         self.assertEqual(self.route(), (0, ["REDISPATCH #1", "counted: 1 of 2"]))
+
+    def test_a_draft_pr_does_not_stop_a_redispatch_but_a_ready_one_does(self):
+        self.serve([issue(1, claimed=True, comments=[stop(10)]), issue(2, claimed=True, comments=[stop(10)])],
+                   open_branches=["1-widget", "2-gadget"], drafts=["1-widget"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["REDISPATCH #1", "counted: 2 of 2"]))
 
     def lock_worktree(self, reason, branch="1-widget"):
         """A real worktree on `branch`, locked with `reason`: another session's worker, as the harness leaves it.
@@ -226,6 +232,17 @@ class LeadRoute(unittest.TestCase):
                    open_branches=["1-x", "2-y", "3-z"])
         self.state({"3": self.worker(last=5)})
         self.assertEqual(self.route(now=600), (0, ["HOLD-PR #3 102", "counted: 1 of 2"]))
+
+    def test_a_draft_is_not_held_for_an_adr_conflict_but_a_ready_pr_is(self):
+        # #3 stopped on an ADR conflict with a draft open: it is building, so no hold (no lead: FALLBACK frees it).
+        # #4 has a ready PR: held as before.
+        marker = comment(0, ADR_MARKER)
+        self.serve([issue(3, labels=["needs-lead"], claimed=True, comments=[marker]),
+                    issue(4, labels=["needs-lead"], claimed=True, comments=[marker])],
+                   open_branches=["3-z", "4-w"], drafts=["3-z"])
+        self.state({})
+        self.assertEqual(self.route(lead="none"),
+                         (0, ["FALLBACK #3", "ASK-DEV #4 101", "counted: 1 of 2"]))
 
     def test_ask_dev_for_an_adr_conflict_with_no_lead(self):
         self.serve([issue(3, labels=["needs-lead"], claimed=True, comments=[comment(0, ADR_MARKER)])],

@@ -213,13 +213,13 @@ def close_issue(issue, cwd=None) -> None:
 
 def open_prs(base: str, cwd=None) -> list:
     return call_json("pr", "list", "--state", "open", "--base", base, "--json",
-                     "number,headRefName,isCrossRepository", shape=list, cwd=cwd)
+                     "number,headRefName,isCrossRepository,isDraft", shape=list, cwd=cwd)
 
 
 def open_prs_with_heads(cwd=None) -> list:
     """Every open PR (any base) with its number, branch and head commit: what a worker's report is checked against."""
     return call_json("pr", "list", "--state", "open", "--limit", "200", "--json",
-                     "number,headRefName,headRefOid", shape=list, cwd=cwd)
+                     "number,headRefName,headRefOid,isDraft", shape=list, cwd=cwd)
 
 
 def merged_prs(base: str, cwd=None) -> list:
