@@ -10,8 +10,15 @@ whose first line is the marker `> *Stopped for the lead.*`. Verdicts, in ticket 
     REDISPATCH #<n>          a claimed ticket with a stop comment, no worker in the state file, and no open PR
     FALLBACK #<n>            needs-lead with --lead none: the lead is gone; the ticket is handed back
     UNCAP #<n>               needs-lead, claimed, live lead, stop comment more than 30 minutes old
+    HANDBACK #<n> blocked-by #<m>...  claimed, open blockers (the lead split it): hand it back, keep the branch
+    ABANDON #<n>             closed `wontfix` while still claimed: stop the worker, close its PR unmerged, keep the branch
+    HOLD-PR #<n> <pr>        needs-lead from an ADR conflict, an open PR, live lead: hold the PR before merge, no time limit
+    ASK-DEV #<n> <pr>        the same with --lead none: the developer decides; the PR stays held
+A narrowed or reworded ticket needs no verdict of its own: it is a RESUME. The ADR-conflict comment is the one
+whose first line is `> *ADR conflict held for the lead.*`; a needs-lead ticket whose newest such comment is newer
+than its newest stop comment is held by a conflict, and gets no FALLBACK or UNCAP.
 Last line, always: `counted: <k> of <cap>`, where k is the claimed open tickets that still hold a slot
-(not UNCAP, not FALLBACK). With --lead none and nothing to route, only that line prints.
+(not UNCAP, not FALLBACK, not HANDBACK, not ABANDON). With --lead none and nothing to route, only that line prints.
 --now (an ISO time) is for tests; the default is the current time.
 Exit codes: 0 routed; 2 could not run (no `gh`, gh failed, no repository, an unreadable state file or
 --now), one line on stderr; the orchestrator then treats lead mode as off for that pass.
@@ -30,6 +37,7 @@ import github
 import session
 
 STOP_MARKER = "> *Stopped for the lead.*"  # the first line of every stop comment; run posts it verbatim
+ADR_MARKER = "> *ADR conflict held for the lead.*"  # the first line of an ADR-conflict comment; run posts it verbatim
 BRIEF_HEADING = "## Agent Brief"
 NEEDS_LEAD = "needs-lead"
 UNCAP_AFTER = timedelta(minutes=30)
@@ -42,9 +50,19 @@ ISSUES_QUERY = """query($owner: String!, $name: String!) {
         number
         labels(first: 20) { nodes { name } }
         assignees(first: 1) { totalCount }
+        blockedBy(first: 20) { nodes { number state } }
         userContentEdits(first: 20) { nodes { editedAt } }
         comments(last: 100) { nodes { body createdAt userContentEdits(first: 20) { nodes { editedAt } } } }
       }
+    }
+  }
+}"""
+
+# Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
+ABANDON_QUERY = """query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 30, states: CLOSED, labels: ["wontfix"], orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number assignees(first: 1) { totalCount } }
     }
   }
 }"""
@@ -63,9 +81,23 @@ def malformed(what):
     common.die(f"lead-route: cannot run: gh returned an unexpected reply ({what})")
 
 
-def load_issues(root):
-    """Open issues as plain dicts: number, claimed, labels, body_edits, comments (body, created, edits)."""
-    repo = github.call_json("repo", "view", "--json", "owner,name", cwd=root)
+def load_repo(root):
+    return github.call_json("repo", "view", "--json", "owner,name", cwd=root)
+
+
+def load_abandoned(root, repo):
+    """Numbers of closed `wontfix` tickets that are still assigned."""
+    data = github.call_json("api", "graphql", "-f", f"query={ABANDON_QUERY}",
+                            "-F", f"owner={repo['owner']['login']}", "-F", f"name={repo['name']}", cwd=root)
+    try:
+        nodes = data["data"]["repository"]["issues"]["nodes"]
+        return {int(n["number"]) for n in nodes if ((n.get("assignees") or {}).get("totalCount") or 0) > 0}
+    except (KeyError, TypeError, ValueError):
+        malformed("closed issues")
+
+
+def load_issues(root, repo):
+    """Open issues as plain dicts: number, claimed, labels, blockers, body_edits, comments (body, created, edits)."""
     data = github.call_json("api", "graphql", "-f", f"query={ISSUES_QUERY}",
                             "-F", f"owner={repo['owner']['login']}", "-F", f"name={repo['name']}", cwd=root)
     try:
@@ -77,6 +109,8 @@ def load_issues(root):
             issues.append({"number": int(node["number"]),
                            "claimed": ((node.get("assignees") or {}).get("totalCount") or 0) > 0,
                            "labels": {x["name"] for x in (node.get("labels") or {}).get("nodes") or []},
+                           "blockers": sorted(int(b["number"]) for b in (node.get("blockedBy") or {}).get("nodes") or []
+                                              if str(b.get("state") or "").upper() == "OPEN"),
                            "body_edits": edit_times(node), "comments": comments})
     except (KeyError, TypeError, ValueError):
         malformed("issues")
@@ -87,14 +121,15 @@ BRANCH_TICKET = re.compile(r"(\d+)-")  # the branch convention `<number>-<slug>`
 
 
 def load_open_pr_tickets(root):
-    """Ticket numbers that an open PR's branch names. A worker with a PR is not missing: its PR is the record."""
-    prs = github.call_json("pr", "list", "--state", "open", "--limit", "200", "--json", "headRefName",
+    """{ticket number: PR number} for each open PR whose branch names a ticket. A worker with a PR is not missing:
+    its PR is the record."""
+    prs = github.call_json("pr", "list", "--state", "open", "--limit", "200", "--json", "headRefName,number",
                            shape=list, cwd=root)
-    found = set()
+    found = {}
     for pr in prs:
         m = BRANCH_TICKET.match(str((pr or {}).get("headRefName") or ""))
         if m:
-            found.add(int(m.group(1)))
+            found[int(m.group(1))] = (pr or {}).get("number")
     return found
 
 
@@ -125,16 +160,37 @@ def changed_after(issue, since) -> bool:
                and (c["created"] > since or any(t > since for t in c["edits"])) for c in issue["comments"])
 
 
-def route(issues, state, lead, cap, now, open_prs=frozenset()):
+def adr_hold_of(issue):
+    """The newest ADR-conflict comment, when it is newer than the newest stop comment (else the stop is the reason)."""
+    holds = [c for c in issue["comments"] if c["created"] and first_line(c["body"]) == ADR_MARKER]
+    if not holds:
+        return None
+    hold = max(holds, key=lambda c: c["created"])
+    stop = stop_of(issue)
+    return hold if stop is None or hold["created"] > stop["created"] else None
+
+
+def route(issues, state, lead, cap, now, open_prs=frozenset(), abandoned=frozenset()):
     """The verdict lines, then the counted line."""
     lines, claimed, freed = [], set(), set()
+    for n in sorted(abandoned):
+        lines.append(f"ABANDON #{n}")
     for issue in sorted(issues, key=lambda i: i["number"]):
         n = issue["number"]
         if issue["claimed"]:
             claimed.add(n)
+        if issue["claimed"] and issue["blockers"] and NEEDS_LEAD not in issue["labels"]:
+            lines.append(f"HANDBACK #{n} blocked-by " + " ".join(f"#{b}" for b in issue["blockers"]))
+            freed.add(n)
+            continue
         stop = stop_of(issue)
         since = stop["created"] if stop else None
         if NEEDS_LEAD in issue["labels"]:
+            pr = open_prs.get(n) if isinstance(open_prs, dict) else None
+            if pr and adr_hold_of(issue):
+                # An ADR conflict waits on the lead for as long as it takes: no UNCAP, no FALLBACK.
+                lines.append(f"{'HOLD-PR' if lead == 'live' else 'ASK-DEV'} #{n} {pr}")
+                continue
             if lead == "none":
                 lines.append(f"FALLBACK #{n}")
                 freed.add(n)
@@ -179,11 +235,13 @@ def main(argv=None) -> int:
     state_path = Path(args.state) if args.state else root / STATE
     state = load_state(state_path)
     try:
-        issues = load_issues(root)
+        repo = load_repo(root)
+        issues = load_issues(root, repo)
         open_prs = load_open_pr_tickets(root)
+        abandoned = load_abandoned(root, repo)
     except github.GhError as e:
         common.die(f"lead-route: cannot run: gh failed: {e.message}")
-    for line in route(issues, state, args.lead, args.cap, now, open_prs):
+    for line in route(issues, state, args.lead, args.cap, now, open_prs, abandoned):
         print(line)
     return 0
 
