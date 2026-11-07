@@ -151,5 +151,5 @@ _Avoid_: stop note, question comment
 _Avoid_: checkpoint, cursor, lead state
 
 **Risk note**:
-A line from a worker or the orchestrator on a decision or PR the lead should weigh, saying what is risky and why. Source: `docs/adr/0008-lead-above-orchestrator.md`.
+A line from a worker, the orchestrator or an L-tier reviewer (`path:line-range — what to look at`) on a decision or PR the lead should weigh, saying what is risky and why. `scripts/lead-brief` reads them from the posted review or the fallback PR comment. Source: `docs/adr/0008-lead-above-orchestrator.md`.
 _Avoid_: warning, caveat, flag
