@@ -143,5 +143,21 @@ class LeadDocs(unittest.TestCase):
         self.assertIn("projects-board", anchors)
 
 
+class GlossaryTerms(unittest.TestCase):
+    """The two mechanical check points have their own terms, and the retired "Pre-merge check" is gone (#272)."""
+
+    def glossary(self):
+        return (ROOT / "GLOSSARY.md").read_text()
+
+    def test_script_gate_and_merge_readiness_are_defined(self):
+        text = self.glossary()
+        self.assertIn("**Script gate**:", text)
+        self.assertIn("**Merge readiness**:", text)
+
+    def test_pre_merge_check_is_retired(self):
+        self.assertNotIn("**Pre-merge check**", self.glossary())
+        self.assertNotIn("Pre-merge check", (ROOT / "docs/guide.md").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

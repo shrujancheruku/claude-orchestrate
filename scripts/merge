@@ -41,6 +41,7 @@ import common
 import config
 import github
 import replay
+import runlog
 
 # "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
 IN_PROGRESS = re.compile(r"already in progress|already merged", re.I)
@@ -80,8 +81,7 @@ def delete_local_branch(branch, cwd):
     """`git branch -D` unless the branch is absent or checked out in some worktree."""
     if run("git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=cwd).returncode != 0:
         return "local branch already gone"
-    wt = run("git", "worktree", "list", "--porcelain", cwd=cwd).stdout.splitlines()
-    if f"branch refs/heads/{branch}" in wt:
+    if any(wt["branch"] == branch for wt in common.worktrees(cwd)):
         return f"local branch {branch} kept: checked out in a worktree"
     d = run("git", "branch", "-D", branch, cwd=cwd)
     return f"local branch {branch} " + ("deleted" if d.returncode == 0 else f"NOT deleted: {common.one_line(d.stderr)}")
@@ -252,14 +252,14 @@ def main(argv=None) -> int:
             break
         if state == "CLOSED":
             say(f"PR #{pr} closed without merging")
-            common.append_event(cwd, "merge", "closed", ref=ref, branch=branch)
+            runlog.append_event(cwd, "merge", "closed", ref=ref, branch=branch)
             return 1
         if refused:
             say(f"merge refused for PR #{pr}: {refused}")
             return 1
         if time.monotonic() >= deadline:
             say(f"PR #{pr} not MERGED after {args.timeout:g}s (state {state}); run merge again later")
-            common.append_event(cwd, "merge", "timeout", ref=ref, branch=branch)
+            runlog.append_event(cwd, "merge", "timeout", ref=ref, branch=branch)
             return 3
         time.sleep(args.interval)
 
@@ -305,7 +305,7 @@ def main(argv=None) -> int:
     if safe:
         say(delete_local_branch(branch, cwd))
 
-    common.append_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
+    runlog.append_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
                         tickets=[int(t) for t in tickets if t.isdigit()])
     return 4 if sweep(cwd, pr, branch, default, args.method) else 0
 
@@ -339,7 +339,7 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
             say(f"sweep: PR #{n} {b}: could not check for conflicts; left alone")
             continue
         for path, outcome in result.events:
-            common.append_event(cwd, "replay", outcome, ref=n, branch=b, file=path)
+            runlog.append_event(cwd, "replay", outcome, ref=n, branch=b, file=path)
         if result.status == "updated":
             say(f"sweep: PR #{n} {b} updated" + (" (force-with-lease)" if method == "rebase" else ""))
         elif result.status == "handed-back":

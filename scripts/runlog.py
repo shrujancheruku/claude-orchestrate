@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import common
+from repo import main_checkout, parse_ts
 
 PROFILES = Path(".claude") / "orchestrate-profiles"
 EVENTS_LOG = "events.jsonl"
@@ -33,34 +34,6 @@ OUTCOMES = {
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"
-
-
-def main_checkout(repo) -> Path:
-    """The main checkout that owns the run log for `repo`, which may be a subdirectory or a linked worktree.
-
-    A linked worktree shares the main checkout's common dir, so its parent is the one root every
-    worktree agrees on. Outside a checkout (or with the VCS tool missing) `repo` itself is the root.
-
-    A `repo` that no longer exists (a worktree the harness removed, whose transcript still names it) is asked
-    from its nearest parent that exists, which is the main checkout or its `.claude` dir, so it resolves the same.
-
-    Known limit: a bare repository with linked worktrees has a common dir not named `.git`, so each
-    worktree is its own root there.
-    """
-    repo = Path(repo)
-    start = next((p for p in (repo, *repo.parents) if p.is_dir()), repo)
-    code, out, _ = common.run("git", "rev-parse", "--git-common-dir", cwd=start)
-    if code != 0 or not out.strip():
-        return repo
-    common_dir = Path(out.strip())
-    if not common_dir.is_absolute():
-        common_dir = start / common_dir
-    common_dir = common_dir.resolve()
-    if common_dir.name == ".git":
-        return common_dir.parent
-    # A submodule or a GIT_DIR checkout: the common dir isn't `.git`, so use this checkout's own toplevel.
-    code, out, _ = common.run("git", "rev-parse", "--show-toplevel", cwd=start)
-    return Path(out.strip()) if code == 0 and out.strip() else repo
 
 
 def log_path(repo, name: str) -> Path:
@@ -115,7 +88,7 @@ def read_events(repo, session: str, start: datetime, end: datetime) -> list | No
         return None
     out = []
     for e in common.read_jsonl(path):
-        ts = _parse_ts(e.get("ts"))
+        ts = parse_ts(e.get("ts"))
         if e.get("session") == session or (not e.get("session") and ts and start <= ts <= end):
             out.append(e)
     # A log with nothing for this session is the same as no log: an older plugin's session.
@@ -134,11 +107,3 @@ def read_passes(repo, session: str) -> list:
     if not repo:
         return []
     return [p for p in common.read_jsonl(log_path(repo, PASS_LOG)) if p.get("session") == session]
-
-
-def _parse_ts(value):
-    try:
-        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)

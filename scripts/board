@@ -23,25 +23,13 @@ from datetime import datetime, timedelta, timezone
 import common
 import config
 import github
+from repo import parse_ts, ticket_of_branch
 
 FIELD = "Stage"
 BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE = "Building", "In review", "Needs lead", "Waiting on you", "Done"
 STAGES = [BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE]
 ARCHIVE_AFTER = timedelta(days=1)
-BRANCH_TICKET = re.compile(r"(\d+)-")  # the branch convention `<number>-<slug>`
 PROJECT_URL = re.compile(r"^https://[^/]+/(?:orgs|users)/([^/]+)/projects/(\d+)/?")
-
-
-def ticket_of(branch):
-    m = BRANCH_TICKET.match(branch or "")
-    return int(m.group(1)) if m else None
-
-
-def parse_ts(text):
-    try:
-        return datetime.fromisoformat(str(text).replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def desired(issues, open_prs):
@@ -80,10 +68,10 @@ def sync(owner, number, repo):
                               "--json", "number,url,labels,assignees", shape=list, cwd=repo)
     prs = github.call_json("pr", "list", "--state", "all", "--limit", "100",
                            "--json", "headRefName,state,mergedAt", shape=list, cwd=repo)
-    open_prs = {t for t in (ticket_of(p.get("headRefName")) for p in prs if p.get("state") == "OPEN") if t}
+    open_prs = {t for t in (ticket_of_branch(p.get("headRefName")) for p in prs if p.get("state") == "OPEN") if t}
     merged = {}
     for p in prs:
-        t, at = ticket_of(p.get("headRefName")), parse_ts(p.get("mergedAt"))
+        t, at = ticket_of_branch(p.get("headRefName")), parse_ts(p.get("mergedAt"))
         if t and at and p.get("state") == "MERGED":
             merged[t] = max(merged.get(t, at), at)
     items = github.call_json("project", "item-list", str(number), *own, "--limit", "1000", "--format", "json",
