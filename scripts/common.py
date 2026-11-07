@@ -186,3 +186,92 @@ def subagent_metas(main_path) -> dict:
         if isinstance(meta, dict):
             out[meta.get("toolUseId")] = (meta_path.name[: -len(".meta.json")], meta)
     return out
+
+
+# --- worker liveness (ADR 0009) ---------------------------------------------------------------------------------
+# A ticket's old worker is live when the worktree on its branch is locked and the lock's session pid is running with
+# the start time the lock records. The harness writes the reason `claude agent <id> (pid <n> start <time>)`.
+LOCK_REASON = re.compile(r"\(pid (\d+) start ([A-Za-z]{3} [A-Za-z]{3} +\d+ \d\d:\d\d:\d\d \d{4})\)")
+LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
+START_TOLERANCE = 2  # seconds: the lock records whole seconds, and `ps` rounds its own
+
+
+def parse_lock_reason(reason):
+    """(pid, start as an aware UTC datetime) from a harness lock reason, or None when it doesn't parse.
+
+    The lock's time is UTC; `ps` prints local time, so callers compare through `process_start`, which normalises."""
+    m = LOCK_REASON.search(reason or "")
+    if not m:
+        return None
+    try:
+        start = datetime.strptime(" ".join(m.group(2).split()), LSTART_FORMAT)
+    except ValueError:
+        return None
+    return int(m.group(1)), start.replace(tzinfo=timezone.utc)
+
+
+def process_start(pid):
+    """The aware UTC start time of a running process, or None when it isn't running (or `ps` can't say)."""
+    r = run("ps", "-p", str(pid), "-o", "lstart=", env=dict(os.environ, LC_ALL="C"))
+    text = " ".join(r.stdout.split())
+    if r.code != 0 or not text:
+        return None
+    try:
+        return datetime.strptime(text, LSTART_FORMAT).astimezone(timezone.utc)  # naive local time -> UTC
+    except ValueError:
+        return None
+
+
+def worktrees(root) -> list:
+    """[{"path", "branch" (short name or None), "locked" (reason, "" for none given, None when unlocked)}] from
+    `git worktree list --porcelain`; [] when git can't list them."""
+    r = run("git", "worktree", "list", "--porcelain", cwd=root)
+    if r.code != 0:
+        return []
+    found, cur = [], None
+    for line in r.stdout.splitlines() + [""]:
+        if not line:
+            if cur:
+                found.append(cur)
+            cur = None
+        elif line.startswith("worktree "):
+            cur = {"path": line[len("worktree "):], "branch": None, "locked": None}
+        elif cur is not None and line.startswith("branch "):
+            ref = line[len("branch "):]
+            cur["branch"] = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+        elif cur is not None and (line == "locked" or line.startswith("locked ")):
+            cur["locked"] = line[len("locked "):].strip()
+    return found
+
+
+def ticket_branch(root, ticket):
+    """The branch `<ticket>-...` checked out in some worktree, or None (the branch convention `<number>-<slug>`)."""
+    for wt in worktrees(root):
+        if wt["branch"] and wt["branch"].startswith(f"{ticket}-"):
+            return wt["branch"]
+    return None
+
+
+def lock_state(reason):
+    """('live' | 'dead', pid or None) for a lock reason. One that doesn't parse is live: a second worker costs more
+    than a ticket left waiting, and the pass shows the reason so the user can unlock a stale one."""
+    parsed = parse_lock_reason(reason)
+    if parsed is None:
+        return "live", None
+    pid, start = parsed
+    actual = process_start(pid)
+    if actual is not None and abs((actual - start).total_seconds()) <= START_TOLERANCE:
+        return "live", pid
+    return "dead", pid  # not running, or the number was reused by another process
+
+
+def worker_liveness(root, branch):
+    """(state, pid, worktree, reason): state is live | dead | none for the worktree checked out on `branch`, found
+    by `git worktree list`, never from the state file. pid is None when the lock reason doesn't parse."""
+    for wt in worktrees(root):
+        if wt["branch"] == branch:
+            if wt["locked"] is None:
+                return "none", None, wt["path"], None
+            state, pid = lock_state(wt["locked"])
+            return state, pid, wt["path"], wt["locked"]
+    return "none", None, None, None
