@@ -3,7 +3,8 @@
 
 The one place the overlap rule lives. A path is held by an open PR (its diff, through `gh`), by a
 building ticket (its touch map in the state file), by an Elsewhere ticket (a live worker in another session:
-the changes in its worktree, ADR 0009) or by an exclusive hold (the config). Paths are compared
+the changes in its worktree, ADR 0009) or by an exclusive hold (the config). The ticket states come from the
+claims module (scripts/claims.py): one tracker read per run, never a `gh` call per ticket. Paths are compared
 as files: any `:line` or line range is stripped, so a different section of one file still overlaps.
 The ticket's own PR and touch map are left out: --ticket N leaves out the PR whose branch starts `N-`;
 --pr N leaves out PR N and the ticket its branch names.
@@ -19,11 +20,11 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import json
 import re
 import sys
 from pathlib import Path
 
+import claims
 import common
 import config
 import github
@@ -36,45 +37,6 @@ def plain(entry: str) -> str:
     """A touch-map entry as a file path: no `:line` or line range, no leading `./`."""
     path = LINE_SUFFIX.sub("", entry.strip().strip("`"))
     return path[2:] if path.startswith("./") else path
-
-
-def building(state_file: Path, own) -> dict:
-    """{ticket: [paths]} for every ticket in the state file but `own`; {} when the file is missing."""
-    try:
-        data = json.loads(state_file.read_text())
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError) as e:
-        raise ValueError(f"unreadable state file {state_file}: {e}") from None
-    tickets = data.get("tickets") if isinstance(data, dict) else None
-    if not isinstance(tickets, dict):
-        raise ValueError(f"state file {state_file} has no tickets object")
-    out = {}
-    for n, t in tickets.items():
-        entries = t.get("touch_map") if isinstance(t, dict) else None
-        if str(n) != str(own) and isinstance(entries, list):
-            out[n] = [plain(e) for e in entries if isinstance(e, str) and plain(e)]
-    return out
-
-
-def still_building(tickets: dict, with_open_pr: set, base: str, repo: Path) -> dict:
-    """Keep the state-file tickets that are Building: issue open and no PR yet.
-
-    The state file is a cache and the tracker wins (rebuild-state keeps every worker the session
-    dispatched, merged ones too). A ticket with an open PR is already held through that PR's diff.
-    """
-    out, merged = {}, None
-    for n, paths in tickets.items():
-        # rebuild-state keys tickets by number; a key that is not one cannot be checked against the tracker.
-        if not str(n).isdigit() or int(n) in with_open_pr:
-            continue
-        if github.issue_state(n, cwd=repo).upper() != "OPEN":
-            continue
-        if merged is None:  # one lookup, only when an open issue remains
-            merged = {ticket_of_branch(p.get("headRefName")) for p in github.merged_prs(base, cwd=repo) if isinstance(p, dict)}
-        if int(n) not in merged:
-            out[n] = paths
-    return out
 
 
 def worktree_changes(path, base: str) -> list:
@@ -94,27 +56,34 @@ def worktree_changes(path, base: str) -> list:
     return sorted({p for out in (changed.stdout, untracked.stdout) for p in out.split("\0") if p})
 
 
-def elsewhere(root: Path, base: str, skip: set) -> dict:
-    """{ticket: [paths]} for each Elsewhere ticket (ADR 0009): a claimed, open ticket with no PR this session is building,
-    whose worktree the liveness helper says a live session's worker holds. Its changes are held. A dead, missing or
-    unlocked worker holds nothing, and so does a live one that has changed nothing yet. `skip` holds the tickets
-    already held through a PR or the state file, and this ticket's own. Worktrees come from `git worktree list`,
-    never the state file."""
-    out = {}
-    for wt in common.worktrees(root):
-        n = ticket_of_branch(wt["branch"])
-        if n is None or n in skip or wt["locked"] is None:
+def claim_issues(nodes: list) -> list:
+    """The open issues as claims.claims takes them, from github.open_issues' GraphQL nodes (the shape scripts/claims builds)."""
+    return [{"number": int(n["number"]),
+             "claimed": ((n.get("assignees") or {}).get("totalCount") or 0) > 0,
+             "labels": {x["name"] for x in (n.get("labels") or {}).get("nodes") or []}} for n in nodes]
+
+
+def claimed_paths(found: dict, own, base: str) -> tuple:
+    """({ticket: [paths]} for the Building claims, {ticket: [paths]} for the Elsewhere claims), the ticket `own` left out.
+    A Building claim holds its touch map (the state-file entries, through `plain`); an Elsewhere claim holds its
+    worktree's changes, the ones a live worker has made so far (ADR 0009). An open PR is a different claim state,
+    so a ticket with a PR is held only through the PR's diff."""
+    tickets, others = {}, {}
+    for n, c in sorted(found.items()):
+        if n == own:
             continue
-        if common.worker_liveness(root, wt["branch"])[0] != "live":
-            continue
-        # The tracker decides: a closed or unclaimed ticket whose worktree lingers holds nothing.
-        issue_state, claimed = github.issue_claim(n, cwd=root)
-        if issue_state.upper() != "OPEN" or not claimed:
-            continue
-        paths = worktree_changes(wt["path"], base)
-        if paths:
-            out[n] = paths
-    return out
+        if c.state == "building":
+            entries = (c.worker or {}).get("touch_map")
+            paths = [plain(e) for e in entries if isinstance(e, str) and plain(e)] if isinstance(entries, list) else []
+            if paths:
+                tickets[n] = paths
+        elif c.state == "elsewhere" or (c.state == "with-lead" and c.lock and c.lock[0] == "live" and c.worktree):
+            # A `lead` ticket with a live worker's worktree still holds its uncommitted changes, as it did before the
+            # claims module: the claims state says with-lead, but a live lock means someone is still writing there.
+            paths = worktree_changes(c.worktree, base)
+            if paths:
+                others[n] = paths
+    return tickets, others
 
 
 def covers(held: str, path: str) -> bool:
@@ -123,12 +92,13 @@ def covers(held: str, path: str) -> bool:
 
 
 def held_paths(cfg, prs: dict, tickets: dict, others: dict) -> dict:
-    """{path: [holder, ...]} in a stable order. `others` is {ticket: [paths]} for the Elsewhere tickets."""
+    """{path: [holder, ...]} in a stable order. `tickets` is {ticket: [paths]} for the Building tickets, `others` for the
+    Elsewhere ones."""
     held: dict = {}
     for n, paths in sorted(prs.items()):
         for p in paths:
             held.setdefault(p, []).append(f"open PR #{n}")
-    for n, paths in sorted(tickets.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
+    for n, paths in sorted(tickets.items()):
         for p in paths:
             held.setdefault(p, []).append(f"building #{n}")
     for n, paths in sorted(others.items()):
@@ -177,8 +147,12 @@ def main(argv=None) -> int:
         ap.error("--touch-map needs --ticket")
     repo = Path(args.repo)
     cfg = config.Config.load(repo)
+    state_file = Path(args.state) if args.state else repo / STATE
     try:
-        base = github.default_branch(cwd=repo)
+        info = github.repo_info(cwd=repo)
+        base = (info.get("defaultBranchRef") or {}).get("name")
+        if not isinstance(base, str):
+            raise github.GhError(github.MALFORMED, "gh returned no default branch")
         own_pr, own_ticket = None, args.ticket
         if args.pr:
             own_pr = common.pr_ref(args.pr)[0]
@@ -187,24 +161,24 @@ def main(argv=None) -> int:
             candidates = github.pr_files(own_pr, cwd=repo)
         else:
             candidates = [plain(e) for e in args.touch_map if plain(e) and plain(e).lower() != "none"]
-        prs, open_heads = {}, []
-        for pr in github.open_prs(base, cwd=repo):
+        open_prs = github.open_prs(base, cwd=repo)
+        prs = {}
+        for pr in open_prs:
             if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
                 raise github.GhError(github.MALFORMED, "gh returned a PR list entry without a number")
-            open_heads.append(pr.get("headRefName"))
             if str(pr["number"]) == str(own_pr) or (own_ticket is not None and ticket_of_branch(pr.get("headRefName")) == own_ticket):
                 continue
             prs[pr["number"]] = github.pr_files(pr["number"], cwd=repo)
-        tickets = still_building(building(Path(args.state) if args.state else repo / STATE, own_ticket),
-                                 {ticket_of_branch(h) for h in open_heads}, base, repo)
-        # Tickets already held through a PR or the state file, and this ticket's own: a live worker on one of
-        # those is not a second hold.
-        skip = {ticket_of_branch(h) for h in open_heads} | {own_ticket} | {int(n) for n in tickets if str(n).isdigit()}
-        others = elsewhere(repo, base, skip)
+        # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
+        # `changes` is a no-op: holds needs each worktree's changed paths, not the dirty and unpushed counts claims
+        # would take, and a git failure there would stop a pass that never needed them.
+        found = claims.claims(repo, state_file, claim_issues(github.open_issues(info, cwd=repo)), open_prs,
+                              github.merged_prs(base, cwd=repo), changes=lambda path, branch: None)
+        tickets, others = claimed_paths(found, own_ticket, base)
     except github.GhError as e:
         print(f"holds: gh: {e.message}", file=sys.stderr)
         return 2
-    except ValueError as e:
+    except (KeyError, TypeError, ValueError) as e:
         print(f"holds: {e}", file=sys.stderr)
         return 2
     return report(held_paths(cfg, prs, tickets, others), candidates, cfg)
