@@ -289,6 +289,15 @@ class PromptSide(unittest.TestCase):
         self.assertIsNone(re.search(r"30[- ]minute", text), "the 30-minute rule lives in scripts/lead-route")
         self.assertNotIn("newer than", text, "the resume comparison lives in scripts/lead-route")
 
+    def test_held_paths_sentence_names_elsewhere_worktrees_and_defers_to_holds(self):
+        # #253: scripts/holds holds an Elsewhere ticket's live worktree changes (#226); the run prompt must say so.
+        text = SKILL.read_text()
+        sentence = next(l for l in text.splitlines() if "**held paths**" in l)
+        self.assertIn("**Elsewhere**", sentence)
+        self.assertIn("worktree", sentence)
+        self.assertIn("scripts/holds", sentence)
+        self.assertIn("never compare paths yourself", sentence)
+
     def test_the_prompt_writes_the_marker_the_script_reads(self):
         import importlib.machinery
         import importlib.util
