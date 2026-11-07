@@ -21,6 +21,7 @@ FILL = [
     ("<globs>", "`hooks/**`, `scripts/gate`"),
     ("<50>", "50"), ("<3> files", "3 files"), ("<400>", "400"),
     ("<yes | no>. When yes", "yes. When yes"),
+    ("<minutes>. Optional", "15. Optional"),
 ]
 CHECKS = ("- **Repo-specific checks:** docs updated (run: `make codegen && make check`), see `README.md`, "
           "and lint (run: `sh lint.sh`)")
@@ -63,6 +64,12 @@ class ConfigTemplate(unittest.TestCase):
             self.assertNotIn("opus (used", text)
             self.assertIsNone(config.Config.parse(text).orchestrator_model, new)
         self.assertEqual(config.Config.parse(filled().replace("opus (used", "sonnet (used")).orchestrator_model, "sonnet")
+
+    def test_ci_wait_limit_set_missing_and_unfilled(self):
+        self.assertEqual(config.Config.parse(filled()).ci_wait_limit, 15)
+        line = next(l for l in filled().splitlines() if l.startswith("- **CI wait limit:**"))
+        self.assertIsNone(config.Config.parse(filled().replace(line + "\n", "")).ci_wait_limit)
+        self.assertIsNone(config.Config.parse(TEMPLATE).ci_wait_limit)  # the placeholder is not a number
 
     def test_the_unfilled_template_reads_without_raising(self):
         # Placeholders are entries, not crashes.

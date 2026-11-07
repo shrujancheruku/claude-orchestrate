@@ -84,6 +84,15 @@ It splits the command into shell words (quotes, escapes, `$(...)`, heredocs, `sh
 
 On macOS, `git fetch`, `pull` and `push` over an SSH remote fail inside the sandbox even when the host is allowed, because plain ssh ignores the sandbox proxy ([docs](https://code.claude.com/docs/en/sandboxing)); agents see `Permission denied (publickey)`. On Linux and WSL2, git's SSH is tunnelled through the sandbox proxy once the host is in `sandbox.network.allowedDomains`, so that alone is enough. For an SSH remote, `/orchestrate:setup` offers, with your yes, to run `scripts/sandbox-git`, which adds `git fetch *`, `git pull *` and `git push *` to `sandbox.excludedCommands` and the remote's host to `sandbox.network.allowedDomains` in `.claude/settings.local.json` (gitignored; leave it uncommitted; nothing under `~/.claude` is touched). Those three git commands then run **unsandboxed** and can reach any host. `excludedCommands` matches the command text, so a command run from inside a script or wrapper isn't matched, and workers push with plain `git push` ([docs](https://code.claude.com/docs/en/sandboxing)). Without that, a worker pushes over HTTPS through `gh`'s credential helper for one call (`git -c credential.helper='!gh auth git-credential' push https://github.com/<owner>/<repo>.git <branch>`), which needs github.com reachable from the sandbox. A worker never turns the sandbox off to push.
 
+## Measuring CI wait
+
+`scripts/ci-times [--since <time or PR>]` tells you whether CI wait is over the limit and whether the cause looks like too few runners or one slow job. It reads merged PRs only, works with lead mode off, and prints the median and p90 push-to-green, the slowest checks with queued and running time, and `over: yes|no`.
+
+- **Push-to-green** runs from a head's commit time (not the push time, which `gh` does not give per commit, so a late push or a rebase skews it) to its last check going green. Heads that never went green are left out; a fix push counts as its own head.
+- **Window:** the last 10 merged PRs, or every merged PR since a time or PR with `--since`.
+- **Limit:** over means a p90 above 10 minutes. Set `- **CI wait limit:** <minutes>` in the config's Review section to change it.
+- **Cause:** a hint, not a diagnosis. When over, `runners` if the slowest check (by median) waited longer than it ran, else `slow job`. Queued is measured from the commit, so a job that `needs:` another shows the upstream job's runtime as queued and can read as `runners`.
+
 ## Running out of usage
 
 Every agent draws on your plan, so a usage limit tends to stop several workers at once.
