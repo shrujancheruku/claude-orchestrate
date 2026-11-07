@@ -12,6 +12,7 @@ reviewed edit to the corpus line in the same PR.
 
 Lines whose long quoted text became `TEXT` (a `bash -c "..."`, `python3 -c "..."` or `gh api "..."`
 call) and heredoc bodies (`BODY`) are shape checks, not the original command: the quoted text is gone.
+A line with `"background": true` is a call made with `run_in_background` set.
 Lines with `"source": "hand"` are written by hand, not mined: they pin refusals no real session
 exercised (a worker pushing to main, a scout writing), so over-allowing shows up too.
 
@@ -73,8 +74,10 @@ class Decider:
         spec.loader.exec_module(self.module)
         self.cwd = cwd
 
-    def __call__(self, role, command):
+    def __call__(self, role, command, background=False):
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.cwd}
+        if background:
+            payload["tool_input"]["run_in_background"] = True
         if role:
             payload["agent_type"] = role
         stdin, stdout = sys.stdin, sys.stdout
@@ -103,7 +106,7 @@ class GuardCorpus(unittest.TestCase):
         self.assertGreater(len(self.rows), 400)
         for n, row in enumerate(self.rows, 1):
             with self.subTest(line=n):
-                self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source"})
+                self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source", "background"})
                 self.assertTrue(row["role"].startswith("orchestrate:"), row["role"])
                 self.assertTrue(row["command"].strip())
                 self.assertIn(row["expected"], ("allow", "deny"))
@@ -114,7 +117,7 @@ class GuardCorpus(unittest.TestCase):
 
     def test_guard_decides_every_line_as_labelled(self):
         for n, row in enumerate(self.rows, 1):
-            actual = self.decide(row["role"], row["command"])
+            actual = self.decide(row["role"], row["command"], row.get("background", False))
             label = f"line {n} ({row['role']}): {row['command'][:100]!r}"
             with self.subTest(label):
                 if "gap" in row:

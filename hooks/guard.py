@@ -1111,18 +1111,23 @@ def runs_verify(parsed: "Parsed") -> bool:
 def verdict(role: str, command: str, cwd: str, background: bool = False) -> str | None:
     """The reason to deny this command for this role, or None to let it run.
 
-    `background` is the call's `run_in_background`: a worker that backgrounds verify ends its turn
-    mid-run and hands back a placeholder (#229), so that one combination is refused."""
+    `background` is the call's `run_in_background`: a worker that leaves a command in the background is
+    woken by each completion and hands back again (#229, #255, #259), and has no command that needs it,
+    so every backgrounded worker call is refused. This only sees the flag the worker set; when the harness
+    itself moves a long foreground call to the background, the worker waits for it (see agents/worker.md)."""
     who, role = role_label(role), rules_role(role)
     try:
         parsed = Parsed(parse(command))
     except ParseError as err:
         return (f"the guard couldn't parse this command ({err}), so it can't check it. "
                 f"Rewrite it with balanced quotes and brackets. {NEXT_STEP[role]}")
-    if background and role == "worker" and runs_verify(parsed):
-        return (f"{who} can't run verify in the background (it would hand back before verify finishes). "
-                "Run it in the foreground and let it finish. If the harness moves it to the background "
-                "after a few minutes, wait for it to exit (a Monitor) before you go on.")
+    if background and role == "worker":
+        if runs_verify(parsed):
+            return (f"{who} can't run verify in the background (it would hand back before verify finishes). "
+                    "Run it in the foreground and let it finish. If the harness moves it to the background "
+                    "after a few minutes, wait for it to exit (a Monitor) before you go on.")
+        return (f"{who} can't run a command in the background (each time it reports, the worker is woken "
+                "and hands back again). Run it in the foreground and wait for it to finish.")
     if role == "reviewer":
         problem = review_post(parsed)
         if problem == "":
