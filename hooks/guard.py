@@ -1027,9 +1027,21 @@ def deny(reason: str) -> None:
     )
 
 
-def verdict(role: str, command: str, cwd: str) -> str | None:
-    """The reason to deny this command for this role, or None to let it run."""
+# The plugin's verify script, by any path ending in `scripts/verify` (the brief's quoted absolute path
+# included). The boundary on both sides keeps `scripts/verify.py` and `scripts/verify-x` out.
+VERIFY_SCRIPT = re.compile(r"(?<![\w.-])scripts/verify(?![\w.-])")
+
+
+def verdict(role: str, command: str, cwd: str, background: bool = False) -> str | None:
+    """The reason to deny this command for this role, or None to let it run.
+
+    `background` is the call's `run_in_background`: a worker that backgrounds verify ends its turn
+    mid-run and hands back a placeholder (#229), so that one combination is refused."""
     who, role = role_label(role), rules_role(role)
+    if background and role == "worker" and VERIFY_SCRIPT.search(command):
+        return (f"{who} can't run verify in the background (it would hand back before verify finishes). "
+                "Run it in the foreground and let it finish. If the harness moves it to the background "
+                "after a few minutes, wait for it to exit (a Monitor) before you go on.")
     try:
         parsed = Parsed(parse(command))
     except ParseError as err:
@@ -1069,7 +1081,7 @@ def main() -> None:
     try:
         if not isinstance(command, str):
             raise TypeError("command is not a string")
-        reason = verdict(role, command, data.get("cwd") or "")
+        reason = verdict(role, command, data.get("cwd") or "", tool_input.get("run_in_background") is True)
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
                   f"Rewrite it more simply. {NEXT_STEP[rules_role(role)]}")
