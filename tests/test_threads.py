@@ -141,5 +141,39 @@ class Threads(unittest.TestCase):
             self.assertEqual(self.env.run("threads", 12, *args, check=False).returncode, 2, args)
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class Prompts(unittest.TestCase):
+    """The prompts name the script and leave the reply form to it (ADR-0006)."""
+
+    def text(self, name):
+        return (ROOT / name).read_text()
+
+    def test_reviewer_posts_file_level_comments_and_reopens_in_round_2(self):
+        s = self.text("agents/reviewer.md")
+        self.assertIn('"subject_type": "file"', s)
+        self.assertIn("threads <pr> --all", s)
+        self.assertIn("threads <pr> reopen", s)
+        for form in ("fixed in <sha>", "left: <why>", "reopened: <why>"):
+            self.assertNotIn(form, s)
+
+    def test_worker_resolves_threads_after_the_push_and_names_human_only(self):
+        s = self.text("agents/worker.md")
+        para = s[s.index('For "address review"'):]
+        self.assertIn("threads <pr>", para)
+        self.assertLess(para.index("push, then close every thread"), para.index("and only then report"))
+        self.assertIn("--fixed <the pushed sha>", para)
+        self.assertIn("stop-reason: human-only", para)
+        self.assertNotIn("reviews/<id>/comments", s)
+        self.assertNotIn("fixed in <sha>", s)
+
+    def test_run_skill_does_not_restate_the_reply_form(self):
+        s = self.text("skills/run/SKILL.md")
+        self.assertIn("closes each minor's thread", s)
+        self.assertIn("closes the threads with the same script", s)
+        self.assertNotIn("fixed in <sha>", s)
+
+
 if __name__ == "__main__":
     unittest.main()
