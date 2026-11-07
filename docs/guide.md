@@ -87,10 +87,10 @@ On macOS, `git fetch`, `pull` and `push` over an SSH remote fail inside the sand
 
 `scripts/ci-times [--since <time or PR>]` tells you whether CI wait is over the limit and whether the cause looks like too few runners or one slow job. It reads merged PRs only, works with lead mode off, and prints the median and p90 push-to-green, the slowest checks with queued and running time, and `over: yes|no`.
 
-- **Push-to-green** runs from a head's commit time to its last check going green. Heads that never went green are left out; a fix push counts as its own head.
+- **Push-to-green** runs from a head's commit time (not the push time, which `gh` does not give per commit, so a late push or a rebase skews it) to its last check going green. Heads that never went green are left out; a fix push counts as its own head.
 - **Window:** the last 10 merged PRs, or every merged PR since a time or PR with `--since`.
 - **Limit:** over means a p90 above 10 minutes. Set `- **CI wait limit:** <minutes>` in the config's Review section to change it.
-- **Cause:** when over, `runners` if the slowest check waited longer than it ran, else `slow job`.
+- **Cause:** a hint, not a diagnosis. When over, `runners` if the slowest check (by median) waited longer than it ran, else `slow job`. Queued is measured from the commit, so a job that `needs:` another shows the upstream job's runtime as queued and can read as `runners`.
 
 ## Running out of usage
 

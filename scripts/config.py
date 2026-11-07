@@ -197,8 +197,11 @@ def _tiers(review):
 
 
 def _ci_wait_limit(text):
-    """Minutes from `- **CI wait limit:** <minutes>`; the template's `<minutes ...>` placeholder is not a number."""
-    m = _CI_WAIT.search(text)
+    """Minutes from `- **CI wait limit:** <minutes>`; the template's `<minutes ...>` placeholder is not a number.
+
+    Only the Review section is read; `0` counts as set here and ci-times treats it as unset (the default).
+    """
+    m = _CI_WAIT.search(common.section_of(text, "Review") or "")
     return int(m.group(1)) if m else None
 
 
