@@ -1,6 +1,14 @@
-"""Table tests for hooks/guard.py. Run: python3 -m unittest discover tests"""
+"""Table tests for hooks/guard.py. Run: python3 -m unittest discover tests
 
+The rule tests call the guard in-process (`main()` on the hook's JSON, stdin and stdout swapped), which
+takes about a tenth of the time of one `python3` spawn per case. Only GuardEntryPoint runs the real
+`python3 -I hooks/guard.py` file, so the entry point and its `-I` isolation are still exercised.
+"""
+
+import importlib.util
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -8,6 +16,35 @@ import unittest
 from pathlib import Path
 
 GUARD = Path(__file__).resolve().parent.parent / "hooks" / "guard.py"
+
+
+def load_guard():
+    # hooks/ is not a package, so load the file by path, as test_guard_corpus does.
+    spec = importlib.util.spec_from_file_location("guard_under_test", GUARD)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+GUARD_MODULE = load_guard()
+
+
+def run_hook(payload):
+    """The hook's stdout for this payload dict, from the guard's main() run in-process."""
+    stdin, stdout = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+    try:
+        try:
+            GUARD_MODULE.main()
+        except SystemExit:
+            pass
+        return sys.stdout.getvalue()
+    finally:
+        sys.stdin, sys.stdout = stdin, stdout
+
+
+def reason_of(out):
+    return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
 
 
 def decide(agent_type, command, cwd=None, background=None):
@@ -18,9 +55,7 @@ def decide(agent_type, command, cwd=None, background=None):
         payload["agent_type"] = agent_type
     if cwd is not None:
         payload["cwd"] = str(cwd)
-    out = subprocess.run(
-        [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True, check=True
-    ).stdout
+    out = run_hook(payload)
     return "deny" if out and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" else "allow"
 
 
@@ -513,10 +548,7 @@ class GuardTest(unittest.TestCase):
         self.assertIn("Monitor", reason)
 
     def run_guard(self, payload):
-        out = subprocess.run(
-            [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True, check=True
-        ).stdout
-        return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
+        return reason_of(run_hook(payload))
 
     def test_unknown_role_refusal_names_the_role(self):
         reason = self.run_guard({"agent_type": "orchestrate:nonexistent", "tool_input": {"command": "git commit -m x"}})
@@ -615,15 +647,9 @@ class GuardTest(unittest.TestCase):
             for command in UNPARSEABLE:
                 with self.subTest(role=role, command=command):
                     payload = {"tool_input": {"command": command}, "agent_type": "orchestrate:" + role}
-                    out = subprocess.run(
-                        [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True
-                    ).stdout
-                    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
-                    self.assertIn("couldn't parse", reason)
+                    self.assertIn("couldn't parse", self.run_guard(payload))
 
     def test_a_crash_inside_a_rule_denies(self):
-        import importlib.util
-        import io
         from unittest import mock
         spec = importlib.util.spec_from_file_location("guard_crash", GUARD)
         guard = importlib.util.module_from_spec(spec)
@@ -665,10 +691,7 @@ class GuardTest(unittest.TestCase):
             config.write_text("- **Post reviews:** yes\n")
             for command in ["echo ok && " + POST + COMMENT + "\nEOF", "gh pr review 12 --approve"]:
                 payload = {"tool_input": {"command": command}, "agent_type": "orchestrate:reviewer", "cwd": root}
-                out = subprocess.run(
-                    [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True
-                ).stdout
-                reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+                reason = self.run_guard(payload)
                 self.assertIn("pulls/<n>/reviews", reason)
                 self.assertIn("--comment --body-file -", reason)
 
@@ -677,10 +700,7 @@ class GuardTest(unittest.TestCase):
             "tool_input": {"command": "gh api --method POST repos/o/r/issues/1/comments -f body=x"},
             "agent_type": "orchestrate:reviewer",
         }
-        out = subprocess.run(
-            [sys.executable, "-I", str(GUARD)], input=json.dumps(payload), capture_output=True, text=True
-        ).stdout
-        self.assertIn("writes through the GitHub API", json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("writes through the GitHub API", self.run_guard(payload))
 
     def test_posting_off(self):
         for post in [POST + COMMENT + "\nEOF", "gh pr review 12 --comment --body 'x'"]:
@@ -694,6 +714,38 @@ class GuardTest(unittest.TestCase):
                     config.parent.mkdir()
                     config.write_text(text)
                 self.assertEqual(decide("orchestrate:reviewer", post, root), "deny")
+
+
+class GuardEntryPoint(unittest.TestCase):
+    """The real hook: `python3 -I hooks/guard.py`, JSON on stdin, JSON (or nothing) on stdout."""
+
+    def run_entry(self, stdin_text, env=None):
+        p = subprocess.run([sys.executable, "-I", str(GUARD)], input=stdin_text, capture_output=True, text=True,
+                           env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def test_deny_is_a_json_decision_on_stdout(self):
+        payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "git commit -m x"}}
+        out = json.loads(self.run_entry(json.dumps(payload)))
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertTrue(out["hookSpecificOutput"]["permissionDecisionReason"].startswith("orchestrate guard: "))
+
+    def test_allow_prints_nothing(self):
+        payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "git log --oneline -1"}}
+        self.assertEqual(self.run_entry(json.dumps(payload)), "")
+
+    def test_malformed_input_is_allowed_silently(self):
+        self.assertEqual(self.run_entry("{not json"), "")
+
+    def test_dash_I_ignores_a_planted_json_module(self):
+        # A json.py on PYTHONPATH would replace the stdlib one for a plain `python3`; -I must ignore it.
+        with tempfile.TemporaryDirectory() as planted:
+            (Path(planted) / "json.py").write_text("raise SystemExit('planted json imported')\n")
+            env = dict(os.environ, PYTHONPATH=planted)
+            payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "git commit -m x"}}
+            out = json.loads(self.run_entry(json.dumps(payload), env=env))
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
 if __name__ == "__main__":
