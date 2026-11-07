@@ -137,7 +137,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--touch-map", nargs="+", metavar="PATH", help="the ticket's touch-map entries (`path:line` is fine)")
     ap.add_argument("--ticket", type=int, help="the ticket number, to leave out its own PR and touch map")
-    ap.add_argument("--pr", help="check this PR's diff against the others (the pre-merge check)")
+    ap.add_argument("--pr", help="check this PR's diff against the others (the gate's overlap check)")
     ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
     ap.add_argument("--state", help=f"the state file (default: <repo>/{STATE})")
     args = ap.parse_args(argv)

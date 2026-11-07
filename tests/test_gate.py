@@ -24,15 +24,16 @@ class GateTest(unittest.TestCase):
         self.addCleanup(self.env.close)
 
     def prime(self, title="feat(x): add y", mergeable="MERGEABLE", behind=0, head="br", base="main", body="",
-              diff=CLEAN_DIFF, blockers=0, ticket=270, others=(), behind_reply=None, view_reply=None):
+              diff=CLEAN_DIFF, blockers=0, ticket=270, others=(), behind_reply=None, view_reply=None, issues=()):
         """Canned gh replies for the gate and for the `holds --pr` subprocess it runs: one PR view serves both."""
         view = {"title": title, "mergeable": mergeable, "baseRefName": base, "headRefName": head, "headRefOid": HEAD,
                 "body": body, "files": [{"path": "src/a.py"}]}
         self.env.set_gh([
             view_reply or {"args": ["pr", "view"], "stdout": json.dumps(view)},
             {"args": ["pr", "diff"], "stdout": diff},
+            {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": list(issues)}}}})},
             {"args": ["pr", "list"], "stdout": json.dumps(list(others))},
-            {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": "main"}})},
+            {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}})},
             {"args": ["api", f"repos/{{owner}}/{{repo}}/issues/{ticket}"], "stdout": f"{blockers}\n"},
             behind_reply or {"args": ["api"], "stdout": f"{behind}\n"},
         ])
@@ -358,15 +359,13 @@ class GateTest(unittest.TestCase):
 
     def test_building_tickets_are_held_when_run_from_a_worktree(self):
         # The state file lives only in the main checkout; the gate runs from the worker's linked worktree.
-        self.prime()
+        self.prime(issues=[{"number": 12, "labels": {"nodes": []}, "assignees": {"totalCount": 1}}])
         state = self.env.repo / ".claude" / "orchestrate-state.json"
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(json.dumps({"tickets": {"12": {"touch_map": ["src/a.py:5"]}}}))
         wt = self.env.repo / ".claude" / "worktrees" / "w1"
         subprocess.run(["git", "worktree", "add", "-q", "-b", "w1", str(wt)], cwd=self.env.repo, check=True)
         self.assertFalse((wt / ".claude" / "orchestrate-state.json").exists())
-        responses = json.loads(self.env.gh_state.read_text())["responses"]
-        self.env.set_gh([{"args": ["issue", "view"], "stdout": json.dumps({"state": "OPEN", "assignees": []})}] + responses)
         out = self.failed_only(self.run_from(wt), "no overlap with held paths")
         self.assertIn("building #12", out)
 
