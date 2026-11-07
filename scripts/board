@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""board [--repo PATH] : sync the opt-in GitHub Projects board from tracker and PR state.
+
+Reads the config's `- **Board:** <project URL>` line; with none it does nothing (exit 0, silent). Otherwise it
+rebuilds each card's `Stage` from the tracker and the PRs only, so a second run changes nothing:
+    Building         claimed, no open PR on a `<ticket>-<slug>` branch
+    In review        claimed, with such an open PR
+    Needs lead       labelled `needs-lead`
+    Waiting on you   labelled `ready-for-human` or `needs-info`
+    Done             the ticket's PR merged; the card is archived a day after the merge
+A card is added when its ticket is first claimed; a ticket that is merely labelled gets no card of its own.
+The column is the custom single-select field `Stage`, created on first sync: GitHub's built-in `Status` options
+are not editable through `gh`. Needs lead stays empty without a lead. The lead never reads or writes the board.
+Exit codes: 0 synced or no board; 1 any failure, one line on stderr (`run` carries on: the board never fails a pass).
+Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+
+import common
+import config
+import github
+
+FIELD = "Stage"
+BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE = "Building", "In review", "Needs lead", "Waiting on you", "Done"
+STAGES = [BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE]
+ARCHIVE_AFTER = timedelta(days=1)
+BRANCH_TICKET = re.compile(r"(\d+)-")  # the branch convention `<number>-<slug>`
+PROJECT_URL = re.compile(r"^https://[^/]+/(?:orgs|users)/([^/]+)/projects/(\d+)/?")
+
+
+def ticket_of(branch):
+    m = BRANCH_TICKET.match(branch or "")
+    return int(m.group(1)) if m else None
+
+
+def parse_ts(text):
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def desired(issues, open_prs):
+    """{ticket: (stage, issue, claimed)} for the open tickets that belong on the board."""
+    out = {}
+    for issue in issues:
+        labels = {x["name"] for x in issue.get("labels") or []}
+        claimed = bool(issue.get("assignees"))
+        if "needs-lead" in labels:
+            stage = NEEDS_LEAD
+        elif labels & {"ready-for-human", "needs-info"}:
+            stage = WAITING
+        elif claimed:
+            stage = REVIEW if issue["number"] in open_prs else BUILDING
+        else:
+            continue
+        out[issue["number"]] = (stage, issue, claimed)
+    return out
+
+
+def sync(owner, number, repo):
+    own = ["--owner", owner]
+    proj = github.call_json("project", "view", str(number), *own, "--format", "json", cwd=repo)
+    fields = github.call_json("project", "field-list", str(number), *own, "--format", "json", cwd=repo)
+    field = next((f for f in fields.get("fields", []) if f.get("name") == FIELD), None)
+    if field is None:
+        field = github.call_json("project", "field-create", str(number), *own, "--name", FIELD, "--data-type",
+                                 "SINGLE_SELECT", "--single-select-options", ",".join(STAGES), "--format", "json",
+                                 cwd=repo)
+    options = {o["name"]: o["id"] for o in field.get("options") or []}
+    missing = [s for s in STAGES if s not in options]
+    if missing:
+        raise github.GhError(github.FAILED, f"board field {FIELD} lacks options: {', '.join(missing)}")
+
+    issues = github.call_json("issue", "list", "--state", "open", "--limit", "200",
+                              "--json", "number,url,labels,assignees", shape=list, cwd=repo)
+    prs = github.call_json("pr", "list", "--state", "all", "--limit", "100",
+                           "--json", "headRefName,state,mergedAt", shape=list, cwd=repo)
+    open_prs = {t for t in (ticket_of(p.get("headRefName")) for p in prs if p.get("state") == "OPEN") if t}
+    merged = {}
+    for p in prs:
+        t, at = ticket_of(p.get("headRefName")), parse_ts(p.get("mergedAt"))
+        if t and at and p.get("state") == "MERGED":
+            merged[t] = max(merged.get(t, at), at)
+    items = github.call_json("project", "item-list", str(number), *own, "--limit", "1000", "--format", "json",
+                             cwd=repo).get("items", [])
+    cards = {(i.get("content") or {}).get("number"): i for i in items if (i.get("content") or {}).get("type") == "Issue"}
+
+    def set_stage(card_id, stage):
+        github.call("project", "item-edit", "--id", card_id, "--project-id", proj["id"], "--field-id", field["id"],
+                    "--single-select-option-id", options[stage], cwd=repo)
+
+    want = desired(issues, open_prs)
+    for t, (stage, issue, claimed) in sorted(want.items()):
+        card = cards.get(t)
+        if card is None:
+            if not claimed:
+                continue
+            added = github.call_json("project", "item-add", str(number), *own, "--url", issue["url"],
+                                     "--format", "json", cwd=repo)
+            card = {"id": added["id"]}
+        if card.get(FIELD.lower()) != stage:
+            set_stage(card["id"], stage)
+    now = datetime.now(timezone.utc)
+    for t, at in sorted(merged.items()):
+        card = cards.get(t)
+        if card is None or t in want:
+            continue
+        if now - at > ARCHIVE_AFTER:
+            github.call("project", "item-archive", str(number), *own, "--id", card["id"], cwd=repo)
+        elif card.get(FIELD.lower()) != DONE:
+            set_stage(card["id"], DONE)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--repo", default=".", help="repo root: the config is read and gh runs there")
+    args = ap.parse_args(argv)
+    url = config.Config.load(args.repo).board
+    if not url:
+        return 0
+    m = PROJECT_URL.match(url)
+    if not m:
+        print(f"board: cannot read the Board URL: {url}", file=sys.stderr)
+        return 1
+    try:
+        sync(m.group(1), int(m.group(2)), args.repo)
+    except github.GhError as e:
+        print(f"board: {common.one_line(e.message)}", file=sys.stderr)
+        return 1
+    except (KeyError, TypeError, ValueError, AttributeError):
+        print("board: gh returned an unexpected reply", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

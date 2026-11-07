@@ -65,6 +65,13 @@ class ConfigTemplate(unittest.TestCase):
             self.assertIsNone(config.Config.parse(text).orchestrator_model, new)
         self.assertEqual(config.Config.parse(filled().replace("opus (used", "sonnet (used")).orchestrator_model, "sonnet")
 
+    def test_board_set_and_missing(self):
+        url = "https://github.com/orgs/acme/projects/7"
+        self.assertIsNone(config.Config.parse(filled()).board)  # the template's line is a comment
+        self.assertIsNone(config.Config.parse(TEMPLATE).board)
+        text = filled().replace("## Slots", f"- **Board:** {url}\n\n## Slots", 1)
+        self.assertEqual(config.Config.parse(text).board, url)
+
     def test_ci_wait_limit_set_missing_and_unfilled(self):
         self.assertEqual(config.Config.parse(filled()).ci_wait_limit, 15)
         line = next(l for l in filled().splitlines() if l.startswith("- **CI wait limit:**"))
