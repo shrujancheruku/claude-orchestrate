@@ -31,7 +31,7 @@ A session started with `/orchestrate:run --greedy[=N]`: each pass fills slots wi
 _Avoid_: auto slots, unlimited, max parallelism
 
 **Claimed**:
-A ticket assigned to the user; it holds a slot until it merges or is handed back to the tracker. Source: `skills/run/SKILL.md`.
+A ticket assigned to the user; it holds a slot until it merges or is handed back to the tracker. On a claimed stop it may carry `needs-lead` beside `ready-for-agent`. Source: `skills/run/SKILL.md`, `docs/agents/triage-labels.md`.
 _Avoid_: taken, locked, in progress
 
 **Building**:
@@ -51,7 +51,7 @@ A claimed ticket whose PR is open. Source: `skills/run/SKILL.md`.
 _Avoid_: under review, open
 
 **Waiting**:
-A claimed ticket blocked on the user: a gate, a question or a third review round. Source: `skills/run/SKILL.md`.
+A claimed ticket blocked on the user: a gate, a question or a third review round. With a lead live it waits on the lead instead and carries `needs-lead`. Source: `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.
 _Avoid_: blocked, on hold
 
 **State file**:
@@ -123,3 +123,25 @@ _Avoid_: size class, level, review level
 **Round**:
 One review of a PR, numbered from 1; after three the ticket waits for the user. Source: `skills/run/SKILL.md`, `agents/reviewer.md`.
 _Avoid_: iteration, pass (a pass is one orchestrator run)
+
+### The lead
+
+**Lead**:
+The session above one orchestrator: it triages discovered work, writes ADRs and answers `needs-lead` stops, and never merges. Source: `docs/adr/0008-lead-above-orchestrator.md`.
+_Avoid_: supervisor, manager, parent orchestrator
+
+**Lead mode**:
+Whether a lead session is live above the orchestrator. Detected, never configured. Source: `docs/adr/0008-lead-above-orchestrator.md`.
+_Avoid_: lead flag, lead setting
+
+**Discovered work**:
+A problem a worker or reviewer finds outside its ticket's scope, filed as a draft ticket (`needs-triage` + `lead`) for the lead to triage. Not a finding, which is a reviewer's comment on the PR under review. Source: `docs/adr/0008-lead-above-orchestrator.md`, `agents/reviewer.md`.
+_Avoid_: follow-up, spin-off, finding
+
+**Lead watermark**:
+`.claude/orchestrate-lead.json`, gitignored: how far the lead has read the tracker, so a restarted lead resumes there. Source: `docs/adr/0008-lead-above-orchestrator.md`.
+_Avoid_: checkpoint, cursor, lead state
+
+**Risk note**:
+A line from a worker or the orchestrator on a decision or PR the lead should weigh, saying what is risky and why. Source: `docs/adr/0008-lead-above-orchestrator.md`.
+_Avoid_: warning, caveat, flag

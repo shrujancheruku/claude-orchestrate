@@ -53,7 +53,16 @@ class ConfigTemplate(unittest.TestCase):
         self.assertTrue(cfg.post_reviews)
         self.assertEqual(cfg.risk_paths, ("hooks/**", "scripts/gate"))
         self.assertEqual((cfg.tier_s_lines, cfg.tier_s_files, cfg.tier_l_lines), (50, 3, 400))
+        self.assertEqual(cfg.orchestrator_model, "opus")
         self.assertEqual(cfg.problems, ())
+
+    def test_orchestrator_model_is_none_when_blank_old_or_missing(self):
+        row = "| Orchestrator | opus (used when the lead launches it; a hand-started session keeps its own) | |"
+        for new in ("| Orchestrator | | |", "| Orchestrator | the session's model | |", "| Orchestrator |", ""):
+            text = filled().replace(row, new)
+            self.assertNotIn("opus (used", text)
+            self.assertIsNone(config.Config.parse(text).orchestrator_model, new)
+        self.assertEqual(config.Config.parse(filled().replace("opus (used", "sonnet (used")).orchestrator_model, "sonnet")
 
     def test_the_unfilled_template_reads_without_raising(self):
         # Placeholders are entries, not crashes.
