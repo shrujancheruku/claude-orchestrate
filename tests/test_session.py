@@ -71,6 +71,9 @@ class SessionReader(unittest.TestCase):
         self.assertEqual(session.touch_map(None), [])
         self.assertEqual(session.touch_map("Touch map: a.py:1; b.py:2 and none"), ["a.py:1", "b.py:2 and none"])
         self.assertEqual(session.touch_map("Touch map: none."), [])
+        self.assertEqual(session.touch_map("Touch map: a.py:1 (x, y), b.py:2 (p; q). Branch: 5-x."),
+                         ["a.py:1 (x, y)", "b.py:2 (p; q)"])
+        self.assertEqual(session.touch_map("Touch map: a.py (open, b.py"), ["a.py (open, b.py"])
         self.assertIsNone(session.branch_of("no brief here"))
 
 

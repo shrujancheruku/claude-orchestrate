@@ -115,6 +115,21 @@ class Holds(unittest.TestCase):
             "src/x.py (held by building #12)", "y.py (held by building #12)",
             "overlap: src/x.py (held by building #12)"])
 
+    def test_building_ticket_note_is_stripped_and_matches(self):
+        self.gh(open_tickets=[12])
+        self.state({12: ["scripts/gate:74 (main, new checks)"]})
+        r = self.holds("--touch-map", "scripts/gate", "--ticket", "7")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout.splitlines(), [
+            "scripts/gate (held by building #12)", "overlap: scripts/gate (held by building #12)"])
+
+    def test_candidate_note_is_stripped_and_matches(self):
+        self.gh(open_tickets=[12])
+        self.state({12: ["scripts/gate"]})
+        r = self.holds("--touch-map", "scripts/gate:3 (x)", "--ticket", "7")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("overlap: scripts/gate (held by building #12)", r.stdout)
+
     def test_shared_file_overlap_is_reported_not_counted(self):
         self.gh({9: ["CHANGELOG.md"]})
         self.config()
