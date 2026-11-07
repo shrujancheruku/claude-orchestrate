@@ -74,6 +74,10 @@ _Avoid_: events file, pass file, profile data
 The pointer-only message that hands a ticket to a worker: ticket, touch map, held paths, branch, verify command and rules. Source: `skills/run/brief.md`.
 _Avoid_: prompt, spec (the ticket is the spec)
 
+**Worker report**:
+The text a worker's completion carries: `status: pr-opened | stopped`, the PR, branch, verify result and, on a stop, `stop-reason`. `scripts/worker-report` classifies it before the orchestrator acts, and logs each verdict as a `worker-report` event. Source: `agents/worker.md` (Report), `scripts/worker-report`.
+_Avoid_: hand-back (that is the sweep's `HANDBACK` line), result, completion (the harness's notice, which may carry no report)
+
 ### Overlap
 
 **Touch map**:
@@ -103,7 +107,7 @@ The PR head commit the reviewer approved. `scripts/merge --approved-head` measur
 _Avoid_: approved SHA, reviewed commit, last-reviewed head
 
 **Hand-back**:
-A swept branch the script could not update and left untouched, reported as a `HANDBACK PR #n <branch>: <path> (<why>)` line (merge exit 4). Not the same as handing a ticket back to the tracker, and not a reviewer's result. Source: `skills/run/SKILL.md`, `agents/worker.md`.
+A swept branch the script could not update and left untouched, reported as a `HANDBACK PR #n <branch>: <path> (<why>)` line (merge exit 4). Not the same as handing a ticket back to the tracker, not a reviewer's result, and not a **Worker report**. Source: `skills/run/SKILL.md`, `agents/worker.md`.
 _Avoid_: bounce, kick-back
 
 **Conflict list**:
