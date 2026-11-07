@@ -132,10 +132,10 @@ class LeadDocs(unittest.TestCase):
         self.assertIn('claude --name lead "/orchestrate:lead"', section)
         self.assertIn('claude --name orchestrator "/orchestrate:run --greedy"', section)
         # Without a lead, each part falls back: stops to needs-info, discovered work and risk notes to the summary.
-        self.assertIn("Without a lead", section)
-        self.assertIn("needs-info", section)
-        self.assertIn("discovered", section)
-        self.assertIn("risk notes", section)
+        # Assert on text only the new paragraph has: "discovered" and "risk notes" predate this PR.
+        self.assertIn("**Without a lead.**", section)
+        self.assertIn("**Two terminals.**", section)
+        self.assertIn("Each pass report says `Lead: none`", section)
 
     def test_guide_has_ci_times_and_board_sections(self):
         anchors = guide_anchors()
