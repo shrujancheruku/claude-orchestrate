@@ -324,7 +324,7 @@ class PromptSide(unittest.TestCase):
         self.assertRegex(verdicts, r"REDISPATCH #<n>`: resume the ticket as stalled, so the rescue .* runs first")
         rescue = text[text.index("- **Resume a stalled ticket**"):text.index("- **While a limit holds**")]
         self.assertIn("skip an Elsewhere ticket", rescue)
-        self.assertIn("found by branch with `git worktree list` when the state file has none", rescue)
+        self.assertIn("the `worktree` field of `claims <ticket>`", rescue)
         handover = text[text.index("2. Hand over cleanly."):text.index("3. Dispatch the new worker")]
         self.assertIn("skip an Elsewhere ticket", handover)
         self.assertIn("scripts/claims", text)

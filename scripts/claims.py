@@ -88,7 +88,8 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     merged: [{"headRefName", ...}] merged PRs. worktrees: `git worktree list`'s (default: asked of `repo`); changes:
     (path, branch) -> (dirty, unpushed), swappable so a pure test needs no repository."""
     state = read_state(state_file)
-    wts = common.worktrees(repo) if worktrees is None else worktrees
+    # A worktree git still lists but whose directory is gone (prunable) is gone: git commands in it can't run.
+    wts = [w for w in common.worktrees(repo) if Path(w["path"]).is_dir()] if worktrees is None else worktrees
     open_issues = {int(i["number"]): i for i in issues}
     open_pr = {}
     for pr in prs:

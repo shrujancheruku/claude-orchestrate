@@ -302,6 +302,13 @@ class Cli(unittest.TestCase):
         r = self.cli()
         self.assertEqual((r.returncode, len(r.stderr.strip().splitlines())), (2, 1), r.stderr)
 
+    def test_a_worktree_whose_directory_is_gone_reads_as_gone(self):
+        self.nodes = [(1, True)]
+        path = self.worktree()
+        import shutil
+        shutil.rmtree(path)
+        self.assertEqual(self.line("1"), "#1 stalled no-branch pr none worker none worktree gone lock none")
+
     def test_exit_2_outside_a_repository(self):
         with tempfile.TemporaryDirectory() as d:
             r = self.cli(cwd=d)
