@@ -4,14 +4,17 @@ Also the prompt side: `run` calls lead-route and restates neither the 30-minute 
 """
 
 import json
+import os
 import re
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, git  # noqa: E402
+from test_worker_live import own_start_reason  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "run" / "SKILL.md"
@@ -126,6 +129,34 @@ class LeadRoute(unittest.TestCase):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
         self.state({})
         self.assertEqual(self.route(), (0, ["REDISPATCH #1", "counted: 1 of 2"]))
+
+    def lock_worktree(self, reason, branch="1-widget"):
+        """A real worktree on `branch`, locked with `reason`: another session's worker, as the harness leaves it."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / branch
+        git(self.env.repo, "worktree", "add", "-b", branch, str(path))
+        git(self.env.repo, "worktree", "lock", "--reason", reason, str(path))
+
+    def test_elsewhere_when_another_sessions_worker_is_live_and_it_still_counts(self):
+        self.serve([issue(1, claimed=True, comments=[stop(10)])])
+        self.state({})
+        self.lock_worktree(own_start_reason())
+        self.assertEqual(self.route(), (0, [f"ELSEWHERE #1 pid {os.getpid()}", "counted: 1 of 2"]))
+
+    def test_elsewhere_for_a_lock_that_does_not_parse(self):
+        self.serve([issue(1, claimed=True, comments=[stop(10)])])
+        self.state({})
+        self.lock_worktree("held by hand")
+        self.assertEqual(self.route(), (0, ["ELSEWHERE #1 pid ?", "counted: 1 of 2"]))
+
+    def test_redispatch_when_the_lock_is_dead_or_there_is_none(self):
+        self.serve([issue(1, claimed=True, comments=[stop(10)])])
+        self.state({})
+        self.lock_worktree(own_start_reason(shift=-3600))  # the pid was reused: a dead lock
+        self.assertEqual(self.route(), (0, ["REDISPATCH #1", "counted: 1 of 2"]))
+        self.serve([issue(2, claimed=True, comments=[stop(10)])])
+        self.assertEqual(self.route(), (0, ["REDISPATCH #2", "counted: 1 of 2"]))  # no worktree on 2-*
 
     def test_no_redispatch_when_the_ticket_already_has_an_open_pr(self):
         # A finished worker from an earlier session is not in this session's state file, but its PR is open.
@@ -276,6 +307,18 @@ class PromptSide(unittest.TestCase):
             self.assertIn(verb, text)
         step4 = text[text.index("4. **Fill free slots.**"):text.index("5. **Report and yield.**")]
         self.assertIn("`lead`", step4, "step 4 must skip tickets labelled `lead`")
+
+    def test_run_redispatches_through_the_rescue_and_skips_elsewhere_tickets(self):
+        text = SKILL.read_text()
+        verdicts = text[text.index("`ELSEWHERE #<n> pid <p>`"):text.index("`FALLBACK #<n>`")]
+        self.assertIn("do nothing", verdicts)
+        self.assertRegex(verdicts, r"REDISPATCH #<n>`: resume the ticket as stalled, so the rescue .* runs first")
+        rescue = text[text.index("- **Resume a stalled ticket**"):text.index("- **While a limit holds**")]
+        self.assertIn("skip an Elsewhere ticket", rescue)
+        self.assertIn("found by branch with `git worktree list` when the state file has none", rescue)
+        handover = text[text.index("2. Hand over cleanly."):text.index("3. Dispatch the new worker")]
+        self.assertIn("skip an Elsewhere ticket", handover)
+        self.assertIn("scripts/worker-live", text)
 
     def test_the_worker_reports_adr_conflicts_and_never_writes_adrs_in_lead_mode(self):
         text = (ROOT / "agents" / "worker.md").read_text()

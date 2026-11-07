@@ -7,7 +7,10 @@ per pass, after reconcile, and the orchestrator applies each line word for word.
 whose first line is the marker `> *Stopped for the lead.*`. Verdicts, in ticket order:
     RESUME #<n> <agent-id>   claimed, no needs-lead, a worker in the state file, stop comment newer than its last report
     ESCALATE #<n>            a RESUME on a haiku worker, where the body or an `## Agent Brief` comment changed after the stop
-    REDISPATCH #<n>          a claimed ticket with a stop comment, no worker in the state file, and no open PR
+    REDISPATCH #<n>          a claimed ticket with a stop comment, no worker in the state file, no open PR, and no live worker elsewhere
+    ELSEWHERE #<n> pid <p>   what would be a REDISPATCH, but the worktree on the ticket's branch is locked by a live session
+                             (pid <p>; `?` when the lock reason doesn't parse): another session's worker is still building.
+                             Do nothing; the ticket still counts against the cap (ADR 0009)
     FALLBACK #<n>            needs-lead with --lead none: the lead is gone; the ticket is handed back
     UNCAP #<n>               needs-lead, claimed, live lead, stop comment more than 30 minutes old
     HANDBACK #<n> blocked-by #<m>...  claimed, open blockers (the lead split it): hand it back, keep the branch
@@ -198,8 +201,9 @@ def resend_due(issue, head) -> bool:
     return not any(first_line(c["body"]) == RESENT_MARKER and head_of(c) == head for c in issue["comments"])
 
 
-def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset()):
-    """The verdict lines, then the counted line. open_prs: {ticket: {"number", "head"}} for open PRs."""
+def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset(), liveness=None):
+    """The verdict lines, then the counted line. open_prs: {ticket: {"number", "head"}} for open PRs.
+    liveness: ticket number -> (state, pid) with state live | dead | none, for the worktree on the ticket's branch."""
     open_prs = open_prs or {}
     lines, claimed, freed = [], set(), set()
     for n in sorted(abandoned):
@@ -245,7 +249,12 @@ def route(issues, state, lead, cap, now, open_prs=None, abandoned=frozenset()):
             # A state file is per session, so an earlier session's finished worker is missing from it. Its open
             # PR shows it did its work; redispatching would start a second worker on that branch.
             if n not in open_prs:
-                lines.append(f"REDISPATCH #{n}")
+                alive, pid = (liveness or (lambda _n: ("none", None)))(n)
+                if alive == "live":
+                    # Another session's worker is still building (ADR 0009): a second worker would share its branch.
+                    lines.append(f"ELSEWHERE #{n} pid {pid if pid is not None else '?'}")
+                else:
+                    lines.append(f"REDISPATCH #{n}")
             continue
         last = session.parse_ts(worker.get("last_report"))
         if last is None or since <= last:
@@ -281,7 +290,12 @@ def main(argv=None) -> int:
         abandoned = load_abandoned(root, repo)
     except github.GhError as e:
         common.die(f"lead-route: cannot run: gh failed: {e.message}")
-    for line in route(issues, state, args.lead, args.cap, now, open_prs, abandoned):
+    def liveness(n):
+        branch = common.ticket_branch(root, n)
+        state, pid, _wt, _reason = common.worker_liveness(root, branch) if branch else ("none", None, None, None)
+        return state, pid
+
+    for line in route(issues, state, args.lead, args.cap, now, open_prs, abandoned, liveness):
         print(line)
     return 0
 
