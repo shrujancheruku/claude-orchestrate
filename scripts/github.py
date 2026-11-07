@@ -36,9 +36,10 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         title
         url
         body
+        createdAt
         parent { number }
         subIssuesSummary { total completed }
-        labels(first: 20) { nodes { name } }
+        labels(first: 30) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
         userContentEdits(first: 20) { nodes { editedAt } }
@@ -185,7 +186,7 @@ def repo_info(cwd=None) -> dict:
 
 def open_issues(repo: dict, cwd=None) -> list:
     """Every open issue (all pages, newest created first: a cursor over creation order holds still while issues are edited) as raw GraphQL nodes, the one home of the issues query:
-    number, title, url, body, parent, sub-issue summary, labels, assignees (count), blockers, edits and comments.
+    number, title, url, body, creation time, parent, sub-issue summary, labels, assignees (count), blockers, edits and comments.
     `repo` is `repo_info`'s (or `gh repo view`'s) owner/name dict."""
     try:
         owner, name = repo["owner"]["login"], repo["name"]
