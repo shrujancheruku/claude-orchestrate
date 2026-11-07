@@ -25,7 +25,7 @@ jobs:
           python-version: ${{ matrix.python }}
       # Scripts with no test coverage still have to parse. The extensionless ones are found by shebang.
       - run: python3 -m py_compile hooks/*.py scripts/*.py $(grep -lE '^#!.*python' scripts/*)
-      - run: python3 -m unittest discover tests
+      - run: python3 tests/run_parallel.py
 
   validate:
     runs-on: ubuntu-latest
