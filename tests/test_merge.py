@@ -246,7 +246,7 @@ class MergeTest(unittest.TestCase):
         self.assertIn("NOT removed", p.stdout)
         self.assertTrue(wt.exists())
         self.assertTrue(self.local_branch())
-        self.assertIn("locked", git(self.env.repo, "worktree", "list", "--porcelain"))
+        self.assertIn("locked " + self.HARNESS_LOCK, git(self.env.repo, "worktree", "list", "--porcelain"))
 
     def test_other_lock_reason_is_not_unlocked(self):
         wt = self.locked_worktree("keep me")

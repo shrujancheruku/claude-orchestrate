@@ -13,7 +13,7 @@ the merge, then re-checks the PR until it is MERGED or --timeout runs out. Only 
 delete the remote branch (over `gh api`, so it works where origin is SSH) and the local one, unless it
 is the default branch, main/master or a fork's branch; close the PR's linked tickets that the host
 left open (a --ticket the PR does not link is only reported); remove --worktree (a "not a working tree" answer is fine: the harness may
-have removed it), and append one `merge` event (ref = the PR number, outcome merged|timeout|closed,
+have removed it; a harness-locked tree is unlocked first, then removed plainly, never forced), and append one `merge` event (ref = the PR number, outcome merged|timeout|closed,
 plus branch, branch_deleted, tickets). The merge passes --match-head-commit, so a push after
 review makes it a refusal (exit 1). Prints one line per step.
 After the cleanup it sweeps (see replay.py): each other open PR whose branch now conflicts with the
@@ -93,7 +93,8 @@ def harness_lock(path, cwd):
     Reuses common.parse_lock_reason; the pid is not checked for liveness: the lock is the orchestrator's own
     session's (ADR 0009), so a live pid proves nothing about the worker."""
     for wt in common.worktrees(cwd):
-        if Path(wt["path"]).resolve() == Path(path).resolve():
+        # git runs in `cwd`, so a relative path means relative to it (an absolute path overrides it)
+        if Path(wt["path"]).resolve() == (Path(cwd) / path).resolve():
             reason = wt["locked"]
             if reason and reason.startswith("claude agent ") and common.parse_lock_reason(reason):
                 return reason
@@ -120,8 +121,10 @@ def remove_worktree(path, cwd):
     w = run("git", "worktree", "remove", path, cwd=cwd)
     if w.returncode == 0:
         return f"worktree {path} unlocked (harness lock) and removed"
-    run("git", "worktree", "lock", "--reason", reason, path, cwd=cwd)
-    return f"worktree {path} NOT removed: {common.one_line(w.stderr)} (harness lock kept)"
+    refused = common.one_line(w.stderr)
+    l = run("git", "worktree", "lock", "--reason", reason, path, cwd=cwd)
+    state = "harness lock kept" if l.returncode == 0 else f"harness lock NOT restored: {common.one_line(l.stderr)}"
+    return f"worktree {path} NOT removed: {refused} ({state})"
 
 
 def say(msg):
