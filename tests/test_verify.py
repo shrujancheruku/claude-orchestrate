@@ -110,7 +110,7 @@ class VerifyConfigTest(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(len(groups[0]), 3)
         self.assertTrue(groups[0][0].startswith("python3 -m py_compile"))
-        self.assertEqual(groups[0][1:], ("python3 -m unittest discover tests", "claude plugin validate ."))
+        self.assertEqual(groups[0][1:], ("python3 tests/run_parallel.py", "claude plugin validate ."))
 
     def test_prose_and_nested_bullets_are_not_commands(self):
         self.config("## Verify\n\nFrom the repo root, run `rm -rf x`.\n\n- `true` (a remark with `rm -rf y`)\n"

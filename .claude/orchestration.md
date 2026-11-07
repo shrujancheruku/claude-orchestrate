@@ -19,7 +19,7 @@ Tickets run in parallel only when their touch maps don't overlap outside the sha
 From the repo root, the same steps as `.github/workflows/ci.yml`:
 
 - `python3 -m py_compile hooks/*.py scripts/*.py $(grep -lE '^#!.*python' scripts/*)`
-- `python3 -m unittest discover tests`
+- `python3 tests/run_parallel.py`
 - `claude plugin validate .` (errors fail; warnings don't)
 
 Code must stay Python 3.9 compatible; CI runs 3.9 and 3.x. No lint or codegen step.
