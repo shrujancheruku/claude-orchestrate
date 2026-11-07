@@ -71,7 +71,7 @@ Use greedy when the backlog has several independent tickets and you have plan he
 
 | Role | Refused |
 |---|---|
-| scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. The reviewer may post one comment review on a PR (`gh api .../reviews` or `gh pr review --comment`, after an optional plain `cd <path> &&`), in the shapes `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
+| scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. `gh api graphql` is read-only: a plain `query` (with `-f`/`-F` variables) is allowed; a `mutation` or `subscription`, a query read from a file or stdin, and a query holding an expansion are refused. The reviewer may post one comment review on a PR (`gh api .../reviews` or `gh pr review --comment`, after an optional plain `cd <path> &&`), in the shapes `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
 | worker | `gh pr merge`, `scripts/merge`, force-pushes, pushes to `main`/`master`, and `scripts/verify` run with `run_in_background` (a worker that backgrounds verify hands back before it finishes; run it in the foreground, and wait with a Monitor if the harness moves it to the background) |
 | any other `orchestrate:<role>` (retired, from another version, a typo) | the same as scout: the guard treats a role it doesn't know as read-only, and its refusals say so |
 
@@ -200,7 +200,7 @@ python3 -I ~/.claude/plugins/cache/claude-orchestrate/orchestrate/<version>/scri
 
 ## Development
 
-Tests: `python3 -m unittest discover tests` (Python 3.9 or later, stdlib only).
+Tests: `python3 tests/run_parallel.py` (one process per test module, in parallel) (Python 3.9 or later, stdlib only).
 
 **Behavioural tier (opt-in).** `ORCH_BEHAVIOUR=1 python3 -m unittest discover tests/behaviour` runs real headless `claude -p` agents against a temp repo with a fake `gh`, 3 runs per case (3/3 pass, 2/3 flaky, less fail), and prints a table with cost. Each run is capped at $1 and 40 turns, so a case costs at most $3; it is skipped without the variable, and CI never sets it. `ORCH_BEHAVIOUR_RUNS=1` cuts it to one run per case while you iterate. The cases (`tests/behaviour/test_*.py`) replace the phrase tests they match: the worker writes its PR body with the `:pr` skill (with and without the stub), cites a source for an external fact, and stops on a held path; the scout reports a PR one commit behind as behind; the reviewer posts one accepted review and returns its URL; and an S ticket is dispatched to a haiku worker.
 

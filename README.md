@@ -108,7 +108,7 @@ Each run is a **pass**: rebuild state from the tracker, review and merge finishe
 Plain Python 3.9+, standard library only, no build step.
 
 ```sh
-python3 -m unittest discover tests
+python3 tests/run_parallel.py   # one process per test module, in parallel
 ```
 
 The opt-in behavioural tier, the guard's regression corpus and the exit-code convention are in [Development](docs/guide.md#development) in the guide.

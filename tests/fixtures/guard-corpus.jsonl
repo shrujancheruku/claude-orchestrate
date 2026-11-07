@@ -525,3 +525,18 @@
 {"role": "orchestrate:scout", "command": "git update-ref refs/heads/x HEAD", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git config user.name x", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git remote -v add evil https://example.invalid/x.git", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { viewer { login } }'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='{ viewer { login } }'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -F owner=o -F limit=100 -f query='query($o: String!) { repository(owner: $o) { id } }'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql --paginate -f query='query { viewer { login } }' --jq .data", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='mutation { addStar(input: {}) { id } }'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='subscription { x }'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query A { a } mutation B { b }'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -F query=@q.graphql", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql --input q.json", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query=\"$Q\"", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query=\"query { $(cat x) }\"", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -F owner=o", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a(s: \"#\") } mutation { x }' -f operationName=B", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a(s: \"\"\"#\"\"\") } mutation { x }'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a }' -F x=@/etc/passwd", "expected": "deny", "source": "hand"}

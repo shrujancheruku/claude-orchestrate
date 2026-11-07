@@ -14,12 +14,16 @@ _Avoid_: settings, setup file
 One unit of build work in the backlog: a GitHub issue that a worker turns into a PR.
 _Avoid_: task, story, item
 
+**Parent**:
+An issue with sub-issues, open or closed. Its sub-issues are the tickets; the parent itself is never taken. A parent whose sub-issues have all closed is reported to the user to close. Source: `scripts/frontier`.
+_Avoid_: epic, umbrella, spec (a spec may be a parent; the word is for the issue itself)
+
 **Takeable**:
-A ticket that is open, `ready-for-agent`, unassigned, has every blocker closed, no `wayfinder:` label and no open sub-issues. Source: `skills/run/SKILL.md` (The backlog).
+A ticket a worker may take now: open, `ready-for-agent`, unassigned, with no open blocker, not a **Parent**, and carrying neither a `wayfinder:` label nor `lead`. Source: `scripts/frontier` (its docstring holds the clause list).
 _Avoid_: ready, available, unblocked (blocking is only one clause)
 
 **Frontier**:
-The takeable tickets, in ascending issue number. Source: `agents/scout.md`.
+The takeable tickets, in ascending issue number. Source: `scripts/frontier` (was `agents/scout.md`).
 _Avoid_: queue, ready list
 
 **Slot**:
