@@ -70,7 +70,7 @@ Use greedy when the backlog has several independent tickets and you have plan he
 
 | Role | Refused |
 |---|---|
-| scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. The reviewer may post one comment review on a PR (`gh api .../reviews` or `gh pr review --comment`, after an optional plain `cd <path> &&`), in the shapes `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
+| scout, reviewer | git writes, `gh` writes, file writes and redirects, builds and installs. `gh api graphql` is read-only: a plain `query` (with `-f`/`-F` variables) is allowed; a `mutation` or `subscription`, a query read from a file or stdin, and a query holding an expansion are refused. The reviewer may post one comment review on a PR (`gh api .../reviews` or `gh pr review --comment`, after an optional plain `cd <path> &&`), in the shapes `agents/reviewer.md` shows, and only when the config says `Post reviews: yes` |
 | worker | `gh pr merge`, `scripts/merge`, force-pushes, pushes to `main`/`master`, and `scripts/verify` run with `run_in_background` (a worker that backgrounds verify hands back before it finishes; run it in the foreground, and wait with a Monitor if the harness moves it to the background) |
 | any other `orchestrate:<role>` (retired, from another version, a typo) | the same as scout: the guard treats a role it doesn't know as read-only, and its refusals say so |
 
