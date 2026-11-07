@@ -85,3 +85,60 @@ def iso(dt: datetime | None) -> str | None:
 def first_line(text) -> str:
     """The first non-blank line of text, stripped; "" for none."""
     return (text or "").lstrip().split("\n", 1)[0].strip()
+
+
+def worktree_changes(path, base: str) -> list:
+    """Every path the worktree at `path` has changed against its merge-base with the default branch: committed (pushed
+    or not), staged, unstaged and untracked. A diff against the merge-base covers the tracked ones; `ls-files --others`
+    adds the untracked. A failed git call raises ValueError (could not run): an empty answer would hold nothing."""
+    ref = f"origin/{base}"
+    if common.run("git", "rev-parse", "--verify", "-q", ref, cwd=path).code != 0:
+        ref = base  # no remote-tracking ref (a clone that never fetched it): the local default branch
+    mb = common.run("git", "merge-base", "HEAD", ref, cwd=path)
+    if mb.code != 0 or not mb.stdout.strip():
+        raise ValueError(f"cannot find the merge-base of {path} with {ref}")
+    changed = common.run("git", "diff", "--name-only", "-z", mb.stdout.strip(), cwd=path)
+    untracked = common.run("git", "ls-files", "--others", "--exclude-standard", "-z", cwd=path)
+    if changed.code != 0 or untracked.code != 0:
+        raise ValueError(f"cannot list the changes in {path}")
+    return sorted({p for out in (changed.stdout, untracked.stdout) for p in out.split("\0") if p})
+
+
+def harness_lock(path, cwd):
+    """The lock reason when `path` is locked by the harness (`claude agent <id> (pid <n> start <time>)`), else None.
+
+    Reuses common.parse_lock_reason; the pid is not checked for liveness: the lock is the orchestrator's own
+    session's (ADR 0009), so a live pid proves nothing about the worker."""
+    for wt in common.worktrees(cwd):
+        # git runs in `cwd`, so a relative path means relative to it (an absolute path overrides it)
+        if Path(wt["path"]).resolve() == (Path(cwd) / path).resolve():
+            reason = wt["locked"]
+            if reason and reason.startswith("claude agent ") and common.parse_lock_reason(reason):
+                return reason
+    return None
+
+
+def remove_worktree(path, cwd):
+    """Remove the merged PR's worktree and say what happened; never raises, never forces.
+
+    A harness-locked tree is unlocked first, then removed plainly, so a dirty tree is still refused;
+    if that refusal comes after the unlock, the lock is put back so the tree is left as found."""
+    w = common.run("git", "worktree", "remove", path, cwd=cwd)
+    err = common.one_line(w.stderr)
+    if w.code == 0:
+        return f"worktree {path} removed"
+    if "not a working tree" in err:
+        return f"worktree {path} already removed"
+    reason = harness_lock(path, cwd) if "locked" in err else None
+    if reason is None:
+        return f"worktree {path} NOT removed: {err}"
+    u = common.run("git", "worktree", "unlock", path, cwd=cwd)
+    if u.code != 0:
+        return f"worktree {path} NOT removed: could not unlock: {common.one_line(u.stderr)}"
+    w = common.run("git", "worktree", "remove", path, cwd=cwd)
+    if w.code == 0:
+        return f"worktree {path} unlocked (harness lock) and removed"
+    refused = common.one_line(w.stderr)
+    l = common.run("git", "worktree", "lock", "--reason", reason, path, cwd=cwd)
+    state = "harness lock kept" if l.code == 0 else f"harness lock NOT restored: {common.one_line(l.stderr)}"
+    return f"worktree {path} NOT removed: {refused} ({state})"

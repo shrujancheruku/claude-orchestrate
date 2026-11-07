@@ -51,11 +51,11 @@ A claimed ticket whose worker ended on an API or usage-limit error. Source: `ski
 _Avoid_: suspended, rate-limited
 
 **Stalled**:
-A claimed ticket with no PR and no live worker in any session: none this session knows of, and none that is **Elsewhere**. Source: `scripts/claims`, `skills/run/SKILL.md`.
+A claimed ticket with no PR and no live worker in any session: none this session knows of, and none that is **Elsewhere**. It goes through the **Rescue** (`scripts/rescue`) before a new worker continues its branch. Source: `scripts/claims`, `scripts/rescue`, `skills/run/SKILL.md`.
 _Avoid_: stuck, orphaned, abandoned
 
 **Elsewhere**:
-A claimed ticket with no PR whose worker belongs to another live session. This session doesn't resume, rescue or redispatch it. Source: `scripts/claims`, `skills/run/SKILL.md`.
+A claimed ticket with no PR whose worker belongs to another live session. This session doesn't resume, rescue (`scripts/rescue` refuses its live lock) or redispatch it. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: foreign, orphaned
 
 **Rescue**:

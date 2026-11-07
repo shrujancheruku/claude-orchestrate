@@ -61,7 +61,7 @@ def _git(path, *args) -> str:
     return r.stdout
 
 
-def worktree_changes(path, branch) -> tuple:
+def worktree_state(path, branch) -> tuple:
     """(dirty paths, unpushed commits) in the worktree at `path`. A branch never pushed counts every commit that no
     remote has. A failed git call is ValueError (could not run): an empty answer would read as clean."""
     dirty = len([ln for ln in _git(path, "status", "--porcelain").splitlines() if ln.strip()])
@@ -81,7 +81,7 @@ def _lock(wt) -> tuple | None:
     return (state, pid)
 
 
-def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_changes) -> dict:
+def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state) -> dict:
     """{ticket: Claim} for each claimed open issue and each state-file ticket that is no longer open (done).
 
     issues: [{"number", "claimed", "labels"}] open issues. prs: [{"number", "headRefName", ...}] open PRs.
