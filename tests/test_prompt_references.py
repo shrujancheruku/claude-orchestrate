@@ -170,11 +170,11 @@ class ReconcileReadsClaims(unittest.TestCase):
         self.assertIn("check states", line)
         self.assertIn("`#<n> <PR> <check states>`", line)
 
-    def test_scout_reconcile_keeps_takeable_ready_for_human_and_closed_parents(self):
+    def test_scout_reconcile_leaves_the_frontier_to_the_script(self):
         line = scout_reconcile_line()
         for part in ("`takeable:`", "`ready-for-human:`", "parents whose sub-issues are all closed"):
             with self.subTest(part=part):
-                self.assertIn(part, line)
+                self.assertNotIn(part, line)
 
     def test_scout_hygiene_no_longer_lists_claims_facts(self):
         text = (ROOT / "agents/scout.md").read_text()
