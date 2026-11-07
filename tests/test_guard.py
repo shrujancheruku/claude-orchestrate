@@ -10,8 +10,10 @@ from pathlib import Path
 GUARD = Path(__file__).resolve().parent.parent / "hooks" / "guard.py"
 
 
-def decide(agent_type, command, cwd=None):
+def decide(agent_type, command, cwd=None, background=None):
     payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    if background is not None:
+        payload["tool_input"]["run_in_background"] = background
     if agent_type is not None:
         payload["agent_type"] = agent_type
     if cwd is not None:
@@ -453,6 +455,27 @@ class GuardTest(unittest.TestCase):
         for agent_type, command, expected in CASES:
             with self.subTest(agent=agent_type, command=command):
                 self.assertEqual(decide(agent_type, command), expected)
+
+    def test_verify_in_the_background_is_refused_for_workers_only(self):
+        quoted = "'/home/u/.claude/plugins/cache/x/orchestrate/0.7.0/scripts/verify' --config"
+        for command in (quoted, "scripts/verify --config", "bash ../plugin/scripts/verify --config",
+                        "cd x && VAR=1 timeout 300 '/p/scripts/verify' --config"):
+            with self.subTest(command=command):
+                self.assertEqual(decide("orchestrate:worker", command, background=True), "deny")
+                self.assertEqual(decide("orchestrate:worker", command, background=False), "allow")
+                self.assertEqual(decide("orchestrate:worker", command), "allow")
+                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
+                self.assertEqual(decide(None, command, background=True), "allow")
+        for command in ("scripts/watch-ci 12", "sleep 5", "python3 scripts/verify.py", "grep -n x scripts/verify",
+                        "git commit -m 'tweak scripts/verify'"):
+            with self.subTest(command=command):
+                self.assertEqual(decide("orchestrate:worker", command, background=True), "allow")
+
+    def test_verify_refusal_says_foreground_and_wait(self):
+        reason = self.run_guard({"agent_type": "orchestrate:worker",
+                                 "tool_input": {"command": "scripts/verify --config", "run_in_background": True}})
+        self.assertIn("foreground", reason)
+        self.assertIn("Monitor", reason)
 
     def run_guard(self, payload):
         out = subprocess.run(

@@ -1027,14 +1027,41 @@ def deny(reason: str) -> None:
     )
 
 
-def verdict(role: str, command: str, cwd: str) -> str | None:
-    """The reason to deny this command for this role, or None to let it run."""
+# The plugin's verify script, by any path ending in `scripts/verify`. Decided on lexed words (ADR 0002), so
+# quoting is resolved: the command word of a simple command, behind VAR=1 assignments, flags and the usual
+# wrappers or interpreters. `grep scripts/verify` or a commit message that names it is not a run of it.
+VERIFY_SCRIPT = re.compile(r"(?:^|/)scripts/verify$")
+VERIFY_WRAPPERS = {"env", "nohup", "time", "exec", "command", "timeout", "bash", "sh", "zsh", "python", "python3"}
+
+
+def runs_verify(parsed: "Parsed") -> bool:
+    for cmd in parsed.cmds:
+        for w in cmd.words:
+            if w.dynamic:
+                break
+            if re.fullmatch(r"\w+=.*|-.*|\d+[smhd]?", w.text) or basename(w) in VERIFY_WRAPPERS:
+                continue
+            if VERIFY_SCRIPT.search(w.text):
+                return True
+            break
+    return False
+
+
+def verdict(role: str, command: str, cwd: str, background: bool = False) -> str | None:
+    """The reason to deny this command for this role, or None to let it run.
+
+    `background` is the call's `run_in_background`: a worker that backgrounds verify ends its turn
+    mid-run and hands back a placeholder (#229), so that one combination is refused."""
     who, role = role_label(role), rules_role(role)
     try:
         parsed = Parsed(parse(command))
     except ParseError as err:
         return (f"the guard couldn't parse this command ({err}), so it can't check it. "
                 f"Rewrite it with balanced quotes and brackets. {NEXT_STEP[role]}")
+    if background and role == "worker" and runs_verify(parsed):
+        return (f"{who} can't run verify in the background (it would hand back before verify finishes). "
+                "Run it in the foreground and let it finish. If the harness moves it to the background "
+                "after a few minutes, wait for it to exit (a Monitor) before you go on.")
     if role == "reviewer":
         problem = review_post(parsed)
         if problem == "":
@@ -1069,7 +1096,7 @@ def main() -> None:
     try:
         if not isinstance(command, str):
             raise TypeError("command is not a string")
-        reason = verdict(role, command, data.get("cwd") or "")
+        reason = verdict(role, command, data.get("cwd") or "", tool_input.get("run_in_background") is True)
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
                   f"Rewrite it more simply. {NEXT_STEP[rules_role(role)]}")
