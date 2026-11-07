@@ -217,6 +217,48 @@ class MergeTest(unittest.TestCase):
         self.merge("--method", "rebase")
         self.assertEqual(self.called(["pr", "merge"])[0][:4], ["pr", "merge", "7", "--rebase"])
 
+    # A locked worktree holding the merged branch: the harness lock reason names the orchestrator's own live pid.
+    HARNESS_LOCK = "claude agent agent-abc123 (pid 1 start Sat Nov  7 06:14:20 2026)"
+
+    def locked_worktree(self, reason):
+        wt = self.env.repo.parent / "wt-locked"
+        git(self.env.repo, "worktree", "add", str(wt), "feat-br")
+        git(self.env.repo, "worktree", "lock", "--reason", reason, str(wt))
+        return wt
+
+    def merged(self, wt):
+        self.seq({"pr view": [pr("MERGED")], "issue view": CLOSED_ISSUE, REF_GET: [OK]})
+        p = self.merge("--worktree", str(wt))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p
+
+    def test_harness_locked_clean_worktree_is_unlocked_and_removed(self):
+        wt = self.locked_worktree(self.HARNESS_LOCK)
+        p = self.merged(wt)
+        self.assertIn("unlocked (harness lock) and removed", p.stdout)
+        self.assertFalse(wt.exists())
+        self.assertFalse(self.local_branch())
+
+    def test_harness_locked_dirty_worktree_is_kept_and_stays_locked(self):
+        wt = self.locked_worktree(self.HARNESS_LOCK)
+        (wt / "scratch.txt").write_text("untracked")
+        p = self.merged(wt)
+        self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(wt.exists())
+        self.assertTrue(self.local_branch())
+        self.assertIn("locked", git(self.env.repo, "worktree", "list", "--porcelain"))
+
+    def test_other_lock_reason_is_not_unlocked(self):
+        wt = self.locked_worktree("keep me")
+        p = self.merged(wt)
+        self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(wt.exists())
+        self.assertTrue(self.local_branch())
+
+    def test_never_forces_worktree_removal(self):
+        self.assertNotIn("--force", (Path(__file__).resolve().parent.parent / "scripts" / "merge").read_text()
+                         .split("def remove_worktree")[1].split("def say")[0])
+
 
 # Logs every git call (to $GIT_LOG) before running the real one, so tests can see what was pushed.
 GIT_WRAPPER = '''#!/bin/sh

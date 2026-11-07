@@ -32,6 +32,7 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
+from pathlib import Path
 import re
 import sys
 import time
@@ -84,6 +85,43 @@ def delete_local_branch(branch, cwd):
         return f"local branch {branch} kept: checked out in a worktree"
     d = run("git", "branch", "-D", branch, cwd=cwd)
     return f"local branch {branch} " + ("deleted" if d.returncode == 0 else f"NOT deleted: {common.one_line(d.stderr)}")
+
+
+def harness_lock(path, cwd):
+    """The lock reason when `path` is locked by the harness (`claude agent <id> (pid <n> start <time>)`), else None.
+
+    Reuses common.parse_lock_reason; the pid is not checked for liveness: the lock is the orchestrator's own
+    session's (ADR 0009), so a live pid proves nothing about the worker."""
+    for wt in common.worktrees(cwd):
+        if Path(wt["path"]).resolve() == Path(path).resolve():
+            reason = wt["locked"]
+            if reason and reason.startswith("claude agent ") and common.parse_lock_reason(reason):
+                return reason
+    return None
+
+
+def remove_worktree(path, cwd):
+    """Remove the merged PR's worktree and say what happened; never raises, never forces.
+
+    A harness-locked tree is unlocked first, then removed plainly, so a dirty tree is still refused;
+    if that refusal comes after the unlock, the lock is put back so the tree is left as found."""
+    w = run("git", "worktree", "remove", path, cwd=cwd)
+    err = common.one_line(w.stderr)
+    if w.returncode == 0:
+        return f"worktree {path} removed"
+    if "not a working tree" in err:
+        return f"worktree {path} already removed"
+    reason = harness_lock(path, cwd) if "locked" in err else None
+    if reason is None:
+        return f"worktree {path} NOT removed: {err}"
+    u = run("git", "worktree", "unlock", path, cwd=cwd)
+    if u.returncode != 0:
+        return f"worktree {path} NOT removed: could not unlock: {common.one_line(u.stderr)}"
+    w = run("git", "worktree", "remove", path, cwd=cwd)
+    if w.returncode == 0:
+        return f"worktree {path} unlocked (harness lock) and removed"
+    run("git", "worktree", "lock", "--reason", reason, path, cwd=cwd)
+    return f"worktree {path} NOT removed: {common.one_line(w.stderr)} (harness lock kept)"
 
 
 def say(msg):
@@ -258,14 +296,7 @@ def main(argv=None) -> int:
             say(f"ticket #{t} NOT closed: {e.message}")
 
     if args.worktree:
-        w = run("git", "worktree", "remove", args.worktree, cwd=cwd)
-        err = common.one_line(w.stderr)
-        if w.returncode == 0:
-            say(f"worktree {args.worktree} removed")
-        elif "not a working tree" in err:
-            say(f"worktree {args.worktree} already removed")
-        else:
-            say(f"worktree {args.worktree} NOT removed: {err}")
+        say(remove_worktree(args.worktree, cwd))
 
     # After the worktree is gone, so the branch it held is free to delete.
     if safe:
