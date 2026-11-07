@@ -145,8 +145,12 @@ The size class of a PR, S, M or L, from its diff and the config's thresholds (or
 _Avoid_: size class, level, review level
 
 **Round**:
-One review of a PR, numbered from 1; after three the ticket waits for the user. Source: `skills/run/SKILL.md`, `agents/reviewer.md`.
+One review of a PR, numbered from 1; after three the ticket waits for the user. A thread reopened in a round is a blocking finding of that round. Source: `skills/run/SKILL.md`, `agents/reviewer.md`.
 _Avoid_: iteration, pass (a pass is one orchestrator run)
+
+**Review thread**:
+A reviewer's finding or a human's inline comment on a PR, which stays open until whoever acts on it closes it with a reply saying fixed or left, and which the reviewer may reopen; the unit the merge checks before merging. Source: `scripts/threads`, `scripts/merge`, `agents/reviewer.md`, `agents/worker.md`.
+_Avoid_: comment, conversation, finding (a finding is what the reviewer writes; the thread is what it becomes on the PR)
 
 ### The lead
 
