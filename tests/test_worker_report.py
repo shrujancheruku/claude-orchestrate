@@ -62,7 +62,7 @@ class WorkerReport(unittest.TestCase):
 
     def test_stopped_with_a_listed_reason_is_valid(self):
         for reason in ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
-                       "verify-outside-ticket", "already-done", "no-primary-source"):
+                       "verify-outside-ticket", "already-done", "no-primary-source", "worktree-gone"):
             with self.subTest(reason):
                 self.assertEqual(self.verdict(f"status: stopped\nstop-reason: {reason}\n", ticket=reason),
                                  f"valid stopped {reason}")
