@@ -15,7 +15,7 @@ line and appends a `worker-report` event to the run log. The orchestrator applie
     limit [<reset time>]             no report, and the text names a usage limit
     error <gist>                     no report, and the text names another API error
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
-no-primary-source, permission-denied (which also needs the exact denied command in `denied-command:`; the event
+no-primary-source, worktree-gone, permission-denied (which also needs the exact denied command in `denied-command:`; the event
 carries it). Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
 run log): one line on stderr, run it again on the next wake. Stdlib only, Python 3.9+.
 """
@@ -32,7 +32,7 @@ import runlog
 import session
 
 STOP_REASONS = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
-                "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied")
+                "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied", "worktree-gone")
 STATUS = re.compile(r"^[ \t>*-]*status:[ \t]*(pr-opened|stopped)\b", re.I | re.M)
 STOP_REASON = re.compile(r"^[ \t>*-]*stop-reason:[ \t]*`?([\w-]+)", re.I | re.M)
 DENIED_COMMAND = re.compile(r"^[ \t>*-]*denied-command:[ \t]*`*([^\s`].*?)`*[ \t]*$", re.I | re.M)

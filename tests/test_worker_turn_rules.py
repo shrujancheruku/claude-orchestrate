@@ -25,6 +25,27 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("status: pr-opened | stopped", report)
         self.assertNotIn("changed:", report)
 
+    def test_continued_worker_confirms_its_worktree_and_never_builds_one(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        stop = s[s.index("## Stop and report"):s.index("## Discovered work")]
+        bullet = next(l for l in stop.splitlines() if "`stop-reason: worktree-gone`" in l)
+        for term in ("main checkout", "no longer exists", "never create a worktree", "scratchpad",
+                     "never edit the main checkout", "fresh worker"):
+            self.assertIn(term, bullet)
+        self.assertIn("Whenever you're continued, first confirm your working directory", s)
+
+    def test_run_skill_checks_the_worktree_before_continuing_a_no_pr_worker(self):
+        s = (ROOT / "skills/run/SKILL.md").read_text()
+        rule = next(l for l in s.splitlines() if l.startswith("- **Worktree check before any SendMessage"))
+        for term in ("answered `valid stopped`", "`RESUME`", "usage-limit resume", "`worktree`", "null",
+                     "`Build #<ticket>`", "stop question", "the answer"):
+            self.assertIn(term, rule)
+        backstop = next(l for l in s.splitlines() if l.startswith("- `valid stopped worktree-gone`"))
+        for term in ("fresh worker", "no label", "slot"):
+            self.assertIn(term, backstop)
+        # Each of the three continuation paths points at the check.
+        self.assertGreaterEqual(s.count("worktree check"), 3)
+
     def test_held_path_rule_defers_to_the_brief(self):
         s = (ROOT / "agents/worker.md").read_text()
         stop = s[s.index("## Stop and report"):]
@@ -38,7 +59,7 @@ class WorkerTurnRules(unittest.TestCase):
         report = s[s.index("## Report"):]
         line = next(l for l in report.splitlines() if l.startswith("stop-reason:"))
         reasons = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
-                   "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied")
+                   "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied", "worktree-gone")
         self.assertIn("denied-command:", report)
         for r in reasons:
             self.assertIn(r, line)
