@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""rescue <branch> [--title T] [--repo DIR] : save a stalled or stopped ticket's worktree, then retire it.
+
+The one place the rescue recipe lives (commit the work, push, unlock a dead lock, remove the worktree plainly, never
+force). It finds the worktree checked out on <branch> with `git worktree list`, never from the state file, and never
+calls `gh`: its only tracker contact is `holds`, run as a subprocess. Each step prints one line, in this order:
+
+1. liveness: a lock naming one of this process's ancestors is this session's own, a dead lock is stale; both are
+   unlocked. Another process's live pid, or a reason that does not parse, stops here (exit 3), nothing touched.
+2. changed paths: every path the worktree changed against the default branch (committed, staged, unstaged, untracked).
+3. commit: `chore(wip): <T>` (or `chore(wip): #<n> work in progress` without --title) when the tree is dirty.
+4. push: `git push -u origin <branch>` when commits are unpushed or the branch has no remote ref..
+5. remove: the worktree, plainly (the local branch is kept).
+6. overlap: `holds` on the changed paths against everything else that is held: `overlap: none`, its `overlap:` lines,
+   or `overlap: could not check (...)`.
+
+No worktree on the branch: `nothing to rescue: no worktree on <branch>`, exit 0 (the remote branch is the whole state).
+Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something held or that could not be checked
+(dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, nothing removed, a lock step 1 lifted put back);
+3 a live lock that is not this session's (`live <pid | ?> <worktree>`). Stdlib only, Python 3.9+.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import common
+import repo
+
+HOLDS = Path(__file__).resolve().parent / "holds"
+
+
+def say(msg):
+    print(msg, flush=True)
+
+
+# (root, path, reason) of a lock step 1 lifted: a later failure puts it back, so the worktree is left as found.
+LIFTED: list = []
+
+
+def fail(msg) -> int:
+    for lroot, path, reason in LIFTED:
+        common.run("git", "worktree", "lock", "--reason", reason, path, cwd=lroot)
+    LIFTED.clear()
+    print(f"rescue: {msg}", file=sys.stderr)
+    return 2
+
+
+def git(path, *args):
+    return common.run("git", *args, cwd=path)
+
+
+def default_base(root):
+    """The default branch's name from git alone (no `gh`): origin/HEAD, else main or master; None when none exists."""
+    r = git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if r.code == 0 and r.stdout.strip().startswith("origin/"):
+        return r.stdout.strip()[len("origin/"):]
+    for name in ("main", "master"):
+        if any(git(root, "rev-parse", "--verify", "-q", ref).code == 0 for ref in (f"origin/{name}", name)):
+            return name
+    return None
+
+
+def unpushed(path, branch) -> int | None:
+    """Commits no remote has: those past origin/<branch>, or every commit no remote ref has when the branch was never
+    pushed. None when git can't say."""
+    if git(path, "rev-parse", "--verify", "-q", f"origin/{branch}").code == 0:
+        r = git(path, "log", "--format=%H", f"origin/{branch}..")
+    else:
+        r = git(path, "rev-list", "HEAD", "--not", "--remotes")
+    return len(r.stdout.split()) if r.code == 0 else None
+
+
+def liveness(root, branch, wt):
+    """(exit code or None, line). Unlocks this session's own lock and a dead one; refuses any other."""
+    reason = wt["locked"]
+    if reason is None:
+        return None, "lock: none"
+    state, pid = common.lock_state(reason)
+    if state == "live" and pid is None:
+        return 3, f"live ? {wt['path']} (lock: {common.one_line(reason) or 'no reason given'})"
+    if state == "live" and pid not in common.ancestor_pids():
+        return 3, f"live {pid} {wt['path']}"
+    u = git(root, "worktree", "unlock", wt["path"])
+    if u.code != 0:
+        return 2, f"could not unlock {wt['path']}: {common.one_line(u.stderr)}"
+    LIFTED.append((root, wt["path"], reason))
+    return None, f"lock: {'this session' if state == 'live' else 'dead'} pid {pid}, unlocked"
+
+
+def overlap(root, changed, ticket) -> int:
+    if not changed:
+        say("overlap: none")
+        return 0
+    cmd = [str(HOLDS), "--touch-map", *changed, "--repo", str(root)]
+    if ticket is not None:
+        cmd += ["--ticket", str(ticket)]
+    r = common.run(*cmd, cwd=root)
+    if r.code == 0:
+        say("overlap: none")
+        return 0
+    if r.code == 1:
+        for line in r.stdout.splitlines():
+            if line.startswith("overlap:"):
+                say(line)
+        return 1
+    say(f"overlap: could not check ({repo.first_line(r.stderr) or 'no reason given'})")
+    return 1  # an unknown overlap is an overlap
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("branch", help="the ticket's branch, `<number>-<slug>`")
+    ap.add_argument("--title", help="the ticket title, for the wip commit message")
+    ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
+    args = ap.parse_args(argv)
+    root, branch = Path(args.repo), args.branch
+    ticket = repo.ticket_of_branch(branch)
+    if ticket is None:
+        return fail(f"{branch} is not named <number>-<slug>, so there is no ticket to check the overlap for")
+
+    wt = next((w for w in common.worktrees(root) if w["branch"] == branch), None)
+    if wt is None:
+        say(f"nothing to rescue: no worktree on {branch}")
+        return 0
+    path = wt["path"]
+    if Path(path).resolve() == repo.main_checkout(root).resolve():
+        return fail(f"{branch} is checked out in the main checkout {path}, not a linked worktree")
+
+    code, line = liveness(root, branch, wt)
+    if code == 2:
+        return fail(line)
+    say(line)
+    if code == 3:
+        return 3
+
+    base = default_base(root)
+    if base is None:
+        return fail("cannot find the default branch (no origin/HEAD, main or master)")
+    try:
+        changed = repo.worktree_changes(path, base)
+    except ValueError as e:
+        return fail(str(e))
+    say(f"changed {len(changed)} paths")
+
+    status = git(path, "status", "--porcelain")
+    if status.code != 0:
+        return fail(f"git status failed in {path}: {common.one_line(status.stderr)}")
+    if status.stdout.strip():
+        add = git(path, "add", "-A")
+        msg = f"chore(wip): {args.title}" if args.title else f"chore(wip): #{ticket} work in progress" if ticket is not None \
+            else "chore(wip): work in progress"
+        c = git(path, "commit", "--no-verify", "-m", msg) if add.code == 0 else add
+        if c.code != 0:
+            return fail(f"commit failed in {path}: {common.one_line(c.stderr or c.stdout)}")
+        k = len(git(path, "show", "--name-only", "--format=", "HEAD").stdout.split())
+        say(f"committed {k} paths {git(path, 'rev-parse', '--short', 'HEAD').stdout.strip()}")
+    else:
+        say("committed 0 paths: tree clean")
+
+    n = unpushed(path, branch)
+    if n is None:
+        return fail(f"cannot list the unpushed commits in {path}")
+    has_remote = git(path, "rev-parse", "--verify", "-q", f"origin/{branch}").code == 0
+    if n or not has_remote:
+        p = git(path, "push", "-u", "origin", branch)
+        if p.code != 0:
+            return fail(f"push of {branch} failed, worktree kept at {path}: {common.one_line(p.stderr)}")
+        say(f"pushed {n} commits")
+    else:
+        say("pushed 0 commits: up to date")
+
+    removed = repo.remove_worktree(path, root)
+    if "NOT removed" in removed:
+        say(removed)
+        return fail(removed)
+    say(f"removed {path}")
+
+    return overlap(root, changed, ticket)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

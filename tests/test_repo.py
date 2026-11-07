@@ -81,5 +81,67 @@ class MainCheckout(unittest.TestCase):
         self.assertIsNone(repo.ticket_branch(self.root, 8))
 
 
+class WorktreeHelpers(unittest.TestCase):
+    """worktree_changes and remove_worktree, on a temp repo with a linked worktree."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve() / "repo"
+        self.root.mkdir()
+        _vcs(self.root, "init", "-q", "-b", "main")
+        for k, v in (("user.name", "T"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            _vcs(self.root, "config", k, v)
+        (self.root / "a.txt").write_text("a\n")
+        _vcs(self.root, "add", "a.txt")
+        _vcs(self.root, "commit", "-q", "-m", "init")
+        self.wt = Path(tmp.name).resolve() / "wt"
+        _vcs(self.root, "worktree", "add", "-q", "-b", "7-x", str(self.wt))
+
+    def test_changes_cover_committed_staged_unstaged_and_untracked(self):
+        (self.wt / "committed.txt").write_text("c\n")
+        _vcs(self.wt, "add", "committed.txt")
+        _vcs(self.wt, "commit", "-q", "-m", "c")
+        (self.wt / "a.txt").write_text("changed\n")
+        (self.wt / "staged.txt").write_text("s\n")
+        _vcs(self.wt, "add", "staged.txt")
+        (self.wt / "untracked.txt").write_text("u\n")
+        self.assertEqual(repo.worktree_changes(self.wt, "main"),
+                         ["a.txt", "committed.txt", "staged.txt", "untracked.txt"])
+
+    def test_changes_of_a_clean_worktree_are_empty(self):
+        self.assertEqual(repo.worktree_changes(self.wt, "main"), [])
+
+    def test_changes_raise_when_git_cannot_say(self):
+        with self.assertRaises(ValueError):
+            repo.worktree_changes(self.wt, "no-such-branch")
+
+    def test_remove_clean_worktree(self):
+        self.assertIn("removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertFalse(self.wt.exists())
+        self.assertIn("already removed", repo.remove_worktree(str(self.wt), self.root))
+
+    def test_remove_dirty_worktree_is_refused_not_forced(self):
+        (self.wt / "u.txt").write_text("u\n")
+        self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertTrue(self.wt.exists())
+
+    def test_harness_lock_is_lifted_for_a_remove_and_restored_when_refused(self):
+        reason = "claude agent agent-abc (pid 1 start Sat Nov  7 06:14:20 2026)"
+        _vcs(self.root, "worktree", "lock", "--reason", reason, str(self.wt))
+        (self.wt / "u.txt").write_text("u\n")
+        self.assertIn("harness lock kept", repo.remove_worktree(str(self.wt), self.root))
+        listing = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=self.root,
+                                 capture_output=True, text=True).stdout
+        self.assertIn("locked", listing)
+        (self.wt / "u.txt").unlink()
+        self.assertIn("unlocked (harness lock) and removed", repo.remove_worktree(str(self.wt), self.root))
+
+    def test_another_lock_reason_is_left_alone(self):
+        _vcs(self.root, "worktree", "lock", "--reason", "keep me", str(self.wt))
+        self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertTrue(self.wt.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

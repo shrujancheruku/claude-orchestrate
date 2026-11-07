@@ -28,7 +28,7 @@ import claims
 import common
 import config
 import github
-from repo import STATE, ticket_of_branch
+from repo import STATE, ticket_of_branch, worktree_changes
 
 LINE_SUFFIX = re.compile(r":\d+(?:[-–,]\d+)*$")
 
@@ -37,23 +37,6 @@ def plain(entry: str) -> str:
     """A touch-map entry as a file path: no `:line` or line range, no leading `./`."""
     path = LINE_SUFFIX.sub("", entry.strip().strip("`"))
     return path[2:] if path.startswith("./") else path
-
-
-def worktree_changes(path, base: str) -> list:
-    """Every path the worktree at `path` has changed against its merge-base with the default branch: committed (pushed
-    or not), staged, unstaged and untracked. A diff against the merge-base covers the tracked ones; `ls-files --others`
-    adds the untracked. A failed git call raises ValueError (could not run): an empty answer would hold nothing."""
-    ref = f"origin/{base}"
-    if common.run("git", "rev-parse", "--verify", "-q", ref, cwd=path).code != 0:
-        ref = base  # no remote-tracking ref (a clone that never fetched it): the local default branch
-    mb = common.run("git", "merge-base", "HEAD", ref, cwd=path)
-    if mb.code != 0 or not mb.stdout.strip():
-        raise ValueError(f"cannot find the merge-base of {path} with {ref}")
-    changed = common.run("git", "diff", "--name-only", "-z", mb.stdout.strip(), cwd=path)
-    untracked = common.run("git", "ls-files", "--others", "--exclude-standard", "-z", cwd=path)
-    if changed.code != 0 or untracked.code != 0:
-        raise ValueError(f"cannot list the changes in {path}")
-    return sorted({p for out in (changed.stdout, untracked.stdout) for p in out.split("\0") if p})
 
 
 def claim_issues(nodes: list) -> list:

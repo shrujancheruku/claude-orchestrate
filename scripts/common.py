@@ -235,6 +235,17 @@ def worktrees(root) -> list:
     return found
 
 
+def ancestor_pids() -> set:
+    """The pids of this process and every ancestor, read through `ps`; what is known when `ps` can't say. A lock
+    naming one of these belongs to the session running this script (ADR 0009), so it is not another worker's."""
+    found, pid = set(), os.getpid()
+    while pid > 1 and pid not in found:
+        found.add(pid)
+        r = run("ps", "-o", "ppid=", "-p", str(pid))
+        pid = int(r.stdout.strip()) if r.code == 0 and r.stdout.strip().isdigit() else 0
+    return found
+
+
 def lock_state(reason):
     """('live' | 'dead', pid or None) for a lock reason. One that doesn't parse is live: a second worker costs more
     than a ticket left waiting, and the pass shows the reason so the user can unlock a stale one."""

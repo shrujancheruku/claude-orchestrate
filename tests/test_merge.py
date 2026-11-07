@@ -227,8 +227,8 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertTrue(self.local_branch())
 
     def test_never_forces_worktree_removal(self):
-        self.assertNotIn("--force", (Path(__file__).resolve().parent.parent / "scripts" / "merge").read_text()
-                         .split("def remove_worktree")[1].split("def say")[0])
+        self.assertNotIn("--force", (Path(__file__).resolve().parent.parent / "scripts" / "repo.py").read_text()
+                         .split("def remove_worktree")[1])
 
     def test_gh_missing_at_the_merge_call_is_could_not_run(self):
         self.seq({"pr view": [pr("OPEN")], "pr merge": [{"exit": 127, "stderr": "gh: command not found"}]})
