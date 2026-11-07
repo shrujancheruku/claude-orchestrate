@@ -2,15 +2,16 @@
 """holds (--touch-map PATH... --ticket N | --pr N) [--repo DIR] [--state FILE] : what is held, and does this overlap it.
 
 The one place the overlap rule lives. A path is held by an open PR (its diff, through `gh`), by a
-building ticket (its touch map in the state file) or by an exclusive hold (the config). Paths are compared
+building ticket (its touch map in the state file), by an Elsewhere ticket (a live worker in another session:
+the changes in its worktree, ADR 0009) or by an exclusive hold (the config). Paths are compared
 as files: any `:line` or line range is stripped, so a different section of one file still overlaps.
 The ticket's own PR and touch map are left out: --ticket N leaves out the PR whose branch starts `N-`;
 --pr N leaves out PR N and the ticket its branch names.
 
-Output: one line per held path, `path (held by open PR #9, building #12, an exclusive hold)` (the form of the
-brief's `Held paths:` line), or `none`. Then `overlap: <path> (held by ...)` per counted overlap, `shared (not
+Output: one line per held path, `path (held by open PR #9, building #12, elsewhere #13, an exclusive hold)` (the form
+of the brief's `Held paths:` line), or `none`. Then `overlap: <path> (held by ...)` per counted overlap, `shared (not
 counted): ...` per overlap on a config shared file, or `overlap: none`. A missing state file means no building
-tickets. Exit codes: 0 nothing overlaps; 1 an overlap; 2 could not run (no `gh`, a failed `gh` call, an
+tickets. Exit codes: 0 nothing overlaps; 1 an overlap; 2 could not run (no `gh`, a failed `gh` or `git` call, an
 unreadable state file). Stdlib only, Python 3.9+.
 """
 
@@ -81,13 +82,53 @@ def still_building(tickets: dict, with_open_pr: set, base: str, repo: Path) -> d
     return out
 
 
+def worktree_changes(path, base: str) -> list:
+    """Every path the worktree at `path` has changed against its merge-base with the default branch: committed (pushed
+    or not), staged, unstaged and untracked. A diff against the merge-base covers the tracked ones; `ls-files --others`
+    adds the untracked. A failed git call raises ValueError (could not run): an empty answer would hold nothing."""
+    ref = f"origin/{base}"
+    if common.run("git", "rev-parse", "--verify", "-q", ref, cwd=path).code != 0:
+        ref = base  # no remote-tracking ref (a clone that never fetched it): the local default branch
+    mb = common.run("git", "merge-base", "HEAD", ref, cwd=path)
+    if mb.code != 0 or not mb.stdout.strip():
+        raise ValueError(f"cannot find the merge-base of {path} with {ref}")
+    changed = common.run("git", "diff", "--name-only", "-z", mb.stdout.strip(), cwd=path)
+    untracked = common.run("git", "ls-files", "--others", "--exclude-standard", "-z", cwd=path)
+    if changed.code != 0 or untracked.code != 0:
+        raise ValueError(f"cannot list the changes in {path}")
+    return sorted({p for out in (changed.stdout, untracked.stdout) for p in out.split("\0") if p})
+
+
+def elsewhere(root: Path, base: str, skip: set) -> dict:
+    """{ticket: [paths]} for each Elsewhere ticket (ADR 0009): a claimed, open ticket with no PR this session is building,
+    whose worktree the liveness helper says a live session's worker holds. Its changes are held. A dead, missing or
+    unlocked worker holds nothing, and so does a live one that has changed nothing yet. `skip` holds the tickets
+    already held through a PR or the state file, and this ticket's own. Worktrees come from `git worktree list`,
+    never the state file."""
+    out = {}
+    for wt in common.worktrees(root):
+        n = ticket_of_branch(wt["branch"])
+        if n is None or n in skip or wt["locked"] is None:
+            continue
+        if common.worker_liveness(root, wt["branch"])[0] != "live":
+            continue
+        # The tracker decides: a closed or unclaimed ticket whose worktree lingers holds nothing.
+        issue_state, claimed = github.issue_claim(n, cwd=root)
+        if issue_state.upper() != "OPEN" or not claimed:
+            continue
+        paths = worktree_changes(wt["path"], base)
+        if paths:
+            out[n] = paths
+    return out
+
+
 def covers(held: str, path: str) -> bool:
     """A held entry covers a path when it is that file, or a directory (`db/`) containing it."""
     return path == held or (held.endswith("/") and path.startswith(held))
 
 
-def held_paths(cfg, prs: dict, tickets: dict) -> dict:
-    """{path: [holder, ...]} in a stable order."""
+def held_paths(cfg, prs: dict, tickets: dict, others: dict) -> dict:
+    """{path: [holder, ...]} in a stable order. `others` is {ticket: [paths]} for the Elsewhere tickets."""
     held: dict = {}
     for n, paths in sorted(prs.items()):
         for p in paths:
@@ -95,6 +136,9 @@ def held_paths(cfg, prs: dict, tickets: dict) -> dict:
     for n, paths in sorted(tickets.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
         for p in paths:
             held.setdefault(p, []).append(f"building #{n}")
+    for n, paths in sorted(others.items()):
+        for p in paths:
+            held.setdefault(p, []).append(f"elsewhere #{n}")
     for p in cfg.exclusive_holds:
         held.setdefault(plain(p), []).append("an exclusive hold")
     return held
@@ -158,13 +202,17 @@ def main(argv=None) -> int:
             prs[pr["number"]] = github.pr_files(pr["number"], cwd=repo)
         tickets = still_building(building(Path(args.state) if args.state else repo / STATE, own_ticket),
                                  {ticket_of_branch(h) for h in open_heads}, base, repo)
+        # Tickets already held through a PR or the state file, and this ticket's own: a live worker on one of
+        # those is not a second hold.
+        skip = {ticket_of_branch(h) for h in open_heads} | {own_ticket} | {int(n) for n in tickets if str(n).isdigit()}
+        others = elsewhere(repo, base, skip)
     except github.GhError as e:
         print(f"holds: gh: {e.message}", file=sys.stderr)
         return 2
     except ValueError as e:
         print(f"holds: {e}", file=sys.stderr)
         return 2
-    return report(held_paths(cfg, prs, tickets), candidates, cfg)
+    return report(held_paths(cfg, prs, tickets, others), candidates, cfg)
 
 
 if __name__ == "__main__":
