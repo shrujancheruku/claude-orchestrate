@@ -10,16 +10,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv  # noqa: E402
 import runlog  # noqa: E402
 
+HEAD = "a1b2c3d4" * 5
+CLEAN_DIFF = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+
+
+def added_file(path, line="x = 1"):
+    return (f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{line}\n")
+
+
 class GateTest(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def prime(self, title="feat(x): add y", mergeable="MERGEABLE", behind=0):
-        view = {"title": title, "mergeable": mergeable, "baseRefName": "main", "headRefName": "br"}
+    def prime(self, title="feat(x): add y", mergeable="MERGEABLE", behind=0, head="br", base="main", body="",
+              diff=CLEAN_DIFF, blockers=0, ticket=270, others=(), behind_reply=None, view_reply=None):
+        """Canned gh replies for the gate and for the `holds --pr` subprocess it runs: one PR view serves both."""
+        view = {"title": title, "mergeable": mergeable, "baseRefName": base, "headRefName": head, "headRefOid": HEAD,
+                "body": body, "files": [{"path": "src/a.py"}]}
         self.env.set_gh([
-            {"args": ["pr", "view"], "stdout": json.dumps(view)},
-            {"args": ["api"], "stdout": f"{behind}\n"},
+            view_reply or {"args": ["pr", "view"], "stdout": json.dumps(view)},
+            {"args": ["pr", "diff"], "stdout": diff},
+            {"args": ["pr", "list"], "stdout": json.dumps(list(others))},
+            {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": "main"}})},
+            {"args": ["api", f"repos/{{owner}}/{{repo}}/issues/{ticket}"], "stdout": f"{blockers}\n"},
+            behind_reply or {"args": ["api"], "stdout": f"{behind}\n"},
         ])
 
     def config(self, line):
@@ -41,13 +56,14 @@ class GateTest(unittest.TestCase):
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         lines = r.stdout.splitlines()
-        self.assertEqual(len(lines), 3)
-        self.assertTrue(all(l.startswith("pass") for l in lines), lines)
-        self.assertIn("behind_by 0", lines[1])
+        self.assertEqual(lines[0], f"PR #7 head {HEAD}")
+        self.assertEqual(len(lines), 8)  # head, title, mergeable, overlap, dependencies, secrets, lockfiles, run:
+        self.assertTrue(all(l.startswith("pass") for l in lines[1:]), lines)
+        self.assertIn("behind_by 0", lines[2])
         e = self.event()
-        self.assertEqual((e["outcome"], e["failed"], e["behind_by"]), ("pass", [], 0))
+        self.assertEqual((e["outcome"], e["failed"], e["behind_by"], e["head"]), ("pass", [], 0, HEAD))
         # the compare call used the PR's base and head
-        self.assertIn("repos/{owner}/{repo}/compare/main...br", self.env.gh_calls()[1])
+        self.assertIn(["api", "repos/{owner}/{repo}/compare/main...br", "--jq", ".behind_by"], self.env.gh_calls())
 
     def run_from(self, cwd):
         return self.env.run("gate", "7", "--retry-delay", "0", cwd=cwd, check=False)
@@ -72,7 +88,7 @@ class GateTest(unittest.TestCase):
         self.prime(title="Add the thing")
         r = self.gate()
         self.assertEqual(r.returncode, 1)
-        self.assertTrue(r.stdout.splitlines()[0].startswith("fail"))
+        self.assertTrue(r.stdout.splitlines()[1].startswith("fail"))
         self.assertIn("Add the thing", r.stdout)
         e = self.event()
         self.assertEqual(e["outcome"], "fail")
@@ -111,7 +127,7 @@ class GateTest(unittest.TestCase):
                     "user's config scripts (degrade instead).")
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len(r.stdout.splitlines()), 2)  # title + mergeable only
+        self.assertEqual(len(r.stdout.splitlines()), 7)  # the built-in checks only
         self.assertNotIn("README.md", r.stdout)
 
     def test_missing_cwd_exits_2_before_any_check(self):
@@ -131,7 +147,7 @@ class GateTest(unittest.TestCase):
         r = self.gate("--cwd", str(other))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("pwd", r.stdout)
-        self.assertEqual(len(r.stdout.splitlines()), 3)
+        self.assertEqual(len(r.stdout.splitlines()), 8)
 
     def test_several_markers_in_one_item_all_run(self):
         self.prime()
@@ -198,34 +214,27 @@ class GateTest(unittest.TestCase):
         self.assertEqual((e["outcome"], e["behind_by"]), ("unknown", 3))
 
     def test_unreadable_behind_by_on_mergeable_passes_with_null(self):
-        self.env.set_gh([
-            {"args": ["pr", "view"], "stdout": json.dumps(
-                {"title": "feat(x): add y", "mergeable": "MERGEABLE", "baseRefName": "main", "headRefName": "br"})},
-            {"args": ["api"], "stdout": "null\n"},
-        ])
+        self.prime(behind_reply={"args": ["api"], "stdout": "null\n"})
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("behind_by ?", r.stdout)
         self.assertIsNone(self.event()["behind_by"])
 
     def test_unknown_with_unreadable_behind_alone_exits_3(self):
-        self.env.set_gh([
-            {"args": ["pr", "view"], "stdout": json.dumps(
-                {"title": "feat(x): add y", "mergeable": "UNKNOWN", "baseRefName": "main", "headRefName": "br"})},
-            {"args": ["api"], "stderr": "HTTP 502", "exit": 1},
-        ])
+        self.prime(mergeable="UNKNOWN", behind_reply={"args": ["api"], "stderr": "HTTP 502", "exit": 1})
         r = self.gate()
         self.assertEqual(r.returncode, 3, r.stdout)
         self.assertEqual(self.event()["outcome"], "unknown")
 
     def test_unknown_settles_to_mergeable_on_retry(self):
-        views = [json.dumps({"title": "feat(x): add y", "mergeable": m, "baseRefName": "main", "headRefName": "br"})
+        views = [json.dumps({"title": "feat(x): add y", "mergeable": m, "baseRefName": "main", "headRefName": "br",
+                             "headRefOid": HEAD, "body": "", "files": [{"path": "src/a.py"}]})
                  for m in ("UNKNOWN", "MERGEABLE")]
-        self.env.set_gh([{"args": ["pr", "view"], "seq": [{"stdout": v} for v in views]},
-                         {"args": ["api"], "stdout": "0\n"}])
+        self.prime(view_reply={"args": ["pr", "view"], "seq": [{"stdout": views[0]}, {"stdout": views[1]},
+                                                              {"stdout": views[1]}, {"stdout": views[1]}]})
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len([c for c in self.env.gh_calls() if c[:2] == ["pr", "view"]]), 2)
+        self.assertEqual(self.env.gh_calls()[1][:2], ["pr", "view"])
         self.assertEqual(self.event()["outcome"], "pass")
 
     def test_gh_failure_exits_2(self):
@@ -238,7 +247,7 @@ class GateTest(unittest.TestCase):
         self.prime()
         r = self.gate()
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(len(r.stdout.splitlines()), 2)
+        self.assertEqual(len(r.stdout.splitlines()), 7)
 
     def test_missing_gh_is_could_not_run(self):
         r = self.env.run("gate", "7", "--retry-delay", "0", check=False, no_gh=True)
@@ -270,6 +279,99 @@ class GateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("timed out", r.stdout)
         self.assertEqual(self.event()["outcome"], "fail")
+
+    # --- the checks before review (#270) ---
+
+    def failed_only(self, r, name):
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.event()["failed"], [name])
+        return r.stdout
+
+    def test_overlap_with_a_held_path_fails_with_holds_output(self):
+        self.prime(others=[{"number": 9, "headRefName": "other"}])
+        out = self.failed_only(self.gate(), "no overlap with held paths")
+        self.assertIn("overlap: src/a.py (held by open PR #9)", out)
+
+    def test_holds_that_cannot_run_is_gate_exit_2_not_a_failure(self):
+        self.prime()
+        self.env.set_gh([{"args": ["pr", "list"], "stderr": "HTTP 502", "exit": 1}] + json.loads(self.env.gh_state.read_text())["responses"])
+        r = self.gate()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("holds could not run", r.stderr)
+        self.assertEqual(self.env.events(), [])
+
+    def test_open_blocker_fails_dependencies(self):
+        self.prime(head="270-slug", blockers=2)
+        out = self.failed_only(self.gate(), "dependencies merged")
+        self.assertIn("#270 has 2 open blocker", out)
+
+    def test_ticket_with_no_open_blocker_passes(self):
+        self.prime(head="270-slug", blockers=0)
+        self.assertEqual(self.gate().returncode, 0)
+        self.assertIn(["api", "repos/{owner}/{repo}/issues/270", "--jq", ".issue_dependencies_summary.blocked_by"],
+                      self.env.gh_calls())
+
+    def test_ticket_comes_from_the_closing_reference_without_a_ticket_branch(self):
+        self.prime(body="Closes #41\n", ticket=41, blockers=1)
+        self.failed_only(self.gate(), "dependencies merged")
+
+    def test_base_that_is_not_the_default_branch_fails_dependencies(self):
+        self.prime(head="270-slug", base="feature-x")
+        out = self.failed_only(self.gate(), "dependencies merged")
+        self.assertIn("based on feature-x, not main", out)
+
+    def test_no_ticket_passes_dependencies(self):
+        self.prime()
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("no ticket", r.stdout)
+
+    def test_secret_paths_fail(self):
+        for path in (".env", "cfg/.env.local", "k.pem", "a/b.key", "c.p12", "d.pfx", "e.keystore", "id_rsa", "id_rsa.pub",
+                     "id_ed25519", "gcp-credentials.json", "credentials.json"):
+            with self.subTest(path=path):
+                self.prime(diff=added_file(path))
+                out = self.failed_only(self.gate(), "no secrets added")
+                self.assertIn(f"path {path}", out)
+                runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
+
+    def test_secret_lines_fail(self):
+        for line in ("-----BEGIN RSA PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----", "k = AKIAABCDEFGHIJKLMNOP",
+                     "t = ghp_" + "a" * 20, "t = github_pat_11ABC", "t = xoxb-123", "t = xoxa-1", "t = xoxp-1"):
+            with self.subTest(line=line):
+                self.prime(diff=added_file("src/ok.py", line))
+                self.failed_only(self.gate(), "no secrets added")
+                runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
+
+    def test_a_removed_secret_line_or_deleted_secret_file_passes(self):
+        diff = ("diff --git a/.env b/.env\ndeleted file mode 100644\n--- a/.env\n+++ /dev/null\n@@ -1 +0,0 @@\n-K=v\n"
+                "diff --git a/s.py b/s.py\n--- a/s.py\n+++ b/s.py\n@@ -1 +1 @@\n-t = ghp_" + "a" * 20 + "\n+t = 1\n")
+        self.prime(diff=diff)
+        self.assertEqual(self.gate().returncode, 0)
+
+    def test_a_renamed_to_secret_path_fails(self):
+        diff = "diff --git a/old.txt b/.env\nsimilarity index 100%\nrename from old.txt\nrename to .env\n"
+        self.prime(diff=diff)
+        self.failed_only(self.gate(), "no secrets added")
+
+    def test_lockfile_without_its_manifest_fails(self):
+        pairs = {"package-lock.json": "package.json", "yarn.lock": "package.json", "pnpm-lock.yaml": "package.json",
+                 "poetry.lock": "pyproject.toml", "uv.lock": "pyproject.toml", "Cargo.lock": "Cargo.toml",
+                 "Gemfile.lock": "Gemfile", "go.sum": "go.mod", "composer.lock": "composer.json"}
+        for lock, manifest in pairs.items():
+            with self.subTest(lock=lock):
+                self.prime(diff=added_file(f"web/{lock}", "{}"))
+                out = self.failed_only(self.gate(), "lockfile changes have a manifest change")
+                self.assertIn(f"web/{lock} changed but {manifest} did not", out)
+                runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
+                # the same lockfile with its manifest beside it passes
+                self.prime(diff=added_file(f"web/{lock}", "{}") + added_file(f"web/{manifest}", "{}"))
+                self.assertEqual(self.gate().returncode, 0)
+                runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
+
+    def test_manifest_in_another_directory_does_not_count(self):
+        self.prime(diff=added_file("a/package-lock.json", "{}") + added_file("b/package.json", "{}"))
+        self.failed_only(self.gate(), "lockfile changes have a manifest change")
 
 
 if __name__ == "__main__":

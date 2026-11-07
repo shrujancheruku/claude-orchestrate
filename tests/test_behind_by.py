@@ -18,10 +18,11 @@ class BehindBy(unittest.TestCase):
         self.assertNotIn("read `behind_by`", s)
         self.assertNotIn("Post-approval risk guard:", s)
 
-    def test_scout_no_longer_checks_behind_by_in_its_checklist(self):
+    def test_scout_has_no_pre_merge_checklist(self):
+        # The gate script owns those checks (#270); the scout's behind_by job is a fact lookup only.
         s = read("agents/scout.md")
-        checklist = s.split("## Pre-merge checklist")[1].split("##")[0]
-        self.assertNotIn("behind_by", checklist)
+        self.assertNotIn("Pre-merge", s)
+        self.assertNotIn("checklist", s)
 
 
 if __name__ == "__main__":

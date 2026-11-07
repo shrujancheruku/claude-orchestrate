@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 r"""gate <pr> [--cwd DIR] [--base BRANCH] : the mechanical checks that run before any reviewer.
 
-Checks a PR's mergeability with its base (conflicts only: a branch that is merely behind passes, and
-`merge` updates it, exit 5), its title against Conventional Commits, and each command the config's
-`Repo-specific checks` entry carries (a `run: \`cmd\``-marked span). Prints one line per check, with the
-last ~40 lines of a failure's output, in the same format as `verify`. Appends one `gate` event (ref = the
-PR number, outcome pass|fail, failed = the names of the failed checks). Exit codes: 0 every check passed;
+The one mechanical check before review. Prints `PR #<n> head <sha>` first (the join key with `watch-ci`'s
+line), then one line per check, with the last ~40 lines of a failure's output, in the same format as `verify`:
+the PR's title against Conventional Commits; its mergeability with its base (conflicts only: a branch that is
+merely behind passes, and `merge` updates it, exit 5); no overlap with held paths (`holds --pr`, run as a
+subprocess from --cwd: its exit 1 fails the check, its exit 2 is gate exit 2); dependencies merged (the PR's
+ticket has no open blocker and the PR is based on the default branch; no ticket passes); no secrets added
+(env, key and credential paths, private-key and token lines in the diff); a changed lockfile has a changed
+manifest; and each command the config's `Repo-specific checks` entry carries (a `run: \`cmd\``-marked span).
+CI is never checked: that is `watch-ci`'s. Appends one `gate` event (ref = the PR number, head = the PR's head
+commit, outcome pass|fail, failed = the names of the failed checks). Exit codes: 0 every check passed;
 1 a check failed (send the output to the worker); 2 the gate could not run (bad --cwd, `gh` missing or
 failed, unreadable `gh` output); 3 GitHub still reports the PR's mergeability as UNKNOWN after retries
 and nothing else failed (run the gate again; not the worker's fault); UNKNOWN with another failure exits
@@ -17,6 +22,7 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
+import fnmatch
 import re
 import sys
 import time
@@ -26,7 +32,20 @@ import checks
 import common
 import config
 import github
+import repo
 import runlog
+
+HOLDS = Path(__file__).resolve().parent / "holds"
+# Paths (by file name) that hold secrets, and added lines that are secrets.
+SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "id_rsa*", "id_ed25519*",
+                "*credentials*.json")
+SECRET_LINE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|github_pat_|xox[abp]-")
+# A lockfile and the manifest that must change with it (same directory).
+LOCKFILES = {"package-lock.json": "package.json", "yarn.lock": "package.json", "pnpm-lock.yaml": "package.json",
+             "poetry.lock": "pyproject.toml", "uv.lock": "pyproject.toml", "Cargo.lock": "Cargo.toml",
+             "Gemfile.lock": "Gemfile", "go.sum": "go.mod", "composer.lock": "composer.json"}
+CLOSES = re.compile(r"\bcloses\s+#(\d+)", re.I)
+DIFF_HEADER = re.compile(r"^diff --git a/.* b/(.*)$")
 
 TITLE_RE = re.compile(
     r"^(feat|fix|docs|refactor|test|chore|build|ci|perf|style|revert)(\([^()\s][^()]*\))?!?: \S")
@@ -36,12 +55,79 @@ def check(name, ok, why=""):
     return checks.Result(name, "pass" if ok else "fail", 0.0, None if ok else 1, why)
 
 
-def pr_checks(pr, base_override, retries=4, delay=2.5):
-    """The built-in checks: title convention, then mergeability (conflicts; behind_by is informational)."""
+def parse_diff(diff):
+    """(changed, added, lines) of a unified diff: every changed path, the paths added or renamed to (not deleted),
+    and the added lines."""
+    changed, added, lines, current, deleted = [], [], [], None, False
+    for line in diff.splitlines():
+        m = DIFF_HEADER.match(line)
+        if m:
+            if current is not None and not deleted:
+                added.append(current)
+            current, deleted = m.group(1), False
+            changed.append(current)
+        elif line.startswith("deleted file mode"):
+            deleted = True
+        elif line.startswith("+") and not line.startswith("+++"):
+            lines.append(line[1:])
+    if current is not None and not deleted:
+        added.append(current)
+    return changed, added, lines
+
+
+def secrets_found(added, lines):
+    found = [f"path {p}" for p in added if any(fnmatch.fnmatch(p.rsplit("/", 1)[-1], g) for g in SECRET_NAMES)]
+    found += [f"added line matching {m.group(0)!r}" for m in map(SECRET_LINE.search, lines) if m]
+    return found
+
+
+def lockfiles_without_manifest(changed):
+    paths = set(changed)
+    out = []
+    for p in sorted(paths):
+        head, _, name = p.rpartition("/")
+        manifest = LOCKFILES.get(name)
+        if manifest and (f"{head}/{manifest}" if head else manifest) not in paths:
+            out.append(f"{p} changed but {manifest} did not")
+    return out
+
+
+def dependencies_check(view):
+    """Pass when the PR's ticket has no open blocker and the PR is based on the default branch."""
+    name = "dependencies merged"
+    ticket = repo.ticket_of_branch(view.get("headRefName"))
+    if ticket is None:
+        m = CLOSES.search(view.get("body") or "")
+        ticket = int(m.group(1)) if m else None
+    if ticket is None:
+        return check(f"{name} (no ticket)", True)
+    problems = []
+    blockers = github.open_blockers(ticket)
+    if blockers:
+        problems.append(f"#{ticket} has {blockers} open blocker(s)")
+    default = github.default_branch()
+    if view.get("baseRefName") != default:
+        problems.append(f"based on {view.get('baseRefName')}, not {default}: a dependency is not merged")
+    return check(name, not problems, "\n".join(problems))
+
+
+def overlap_check(pr, cwd):
+    """The `holds --pr` verdict as a check, or an error string when holds could not run (its exit 2)."""
+    p = common.run(sys.executable, str(HOLDS), "--pr", str(pr), cwd=cwd)
+    if p.code == 0:
+        return check("no overlap with held paths", True)
+    if p.code == 1:
+        return check("no overlap with held paths", False, p.stdout.strip())
+    return f"holds could not run (exit {p.code}): {common.one_line(p.stderr or p.stdout)}"
+
+
+def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
+    """The built-in checks: title, mergeability (conflicts; behind_by is informational), overlap, dependencies,
+    secrets and lockfiles. Returns (results, (behind, unknown, head)) or (None, why) when a check could not run."""
     # GitHub computes mergeability lazily: UNKNOWN right after a push usually settles in seconds.
     for attempt in range(retries + 1):
         try:
-            view = github.pr_view(pr, "title,mergeable,baseRefName,headRefName")
+            view = github.pr_view(pr, "title,mergeable,baseRefName,headRefName,headRefOid,body")
         except github.GhError as e:
             if e.kind == github.MALFORMED:
                 return None, "gh pr view returned malformed JSON"
@@ -68,7 +154,21 @@ def pr_checks(pr, base_override, retries=4, delay=2.5):
     # Being behind is not a failure: `merge --approved-head` updates the branch (exit 5) and CI reruns (#230).
     label = f"mergeable with {base} (behind_by {behind if behind is not None else '?'})"
     results.append(check(label, not problems, "\n".join(problems)))
-    return results, (behind, mergeable == "UNKNOWN")
+    overlap = overlap_check(pr, cwd)
+    if isinstance(overlap, str):
+        return None, overlap
+    results.append(overlap)
+    try:
+        results.append(dependencies_check(view))
+        diff = github.call("pr", "diff", str(pr), cwd=cwd)
+    except github.GhError as e:
+        return None, e.message if e.kind == github.MALFORMED else f"gh failed: {e.message}"
+    changed, added, lines = parse_diff(diff)
+    found = secrets_found(added, lines)
+    results.append(check("no secrets added", not found, "\n".join(found)))
+    bad = lockfiles_without_manifest(changed)
+    results.append(check("lockfile changes have a manifest change", not bad, "\n".join(bad)))
+    return results, (behind, mergeable == "UNKNOWN", view.get("headRefOid"))
 
 
 def main(argv=None) -> int:
@@ -88,24 +188,25 @@ def main(argv=None) -> int:
         return 2
     pr, ref = common.pr_ref(args.pr)
 
-    results, extra = pr_checks(pr, args.base, delay=args.retry_delay)
+    results, extra = pr_checks(pr, args.base, delay=args.retry_delay, cwd=args.cwd)
     if results is None:
         print(f"gate: {extra}", file=sys.stderr)
         return 2
-    behind, unknown = extra
+    behind, unknown, head = extra
     cfg = config.Config.load(args.cwd)
     malformed = cfg.problems_of(config.RUN)  # only a bad `run:` fails the gate; other problems are not its business
     results += checks.run_stages([list(cfg.check_commands)], args.cwd, args.timeout)
     if malformed:
         results.append(check("repo-specific checks: malformed run: marker", False,
                              f"{len(malformed)} `run:` marker(s) without a single `backticked` command"))
+    print(f"PR #{pr} head {head}")
     print(checks.format_results(results))
     failed = [r.command for r in results if r.status == "fail"]
     # An UNKNOWN mergeability that was the only failure is not a verdict: rerun, don't send to the worker.
     undecided = unknown and len(failed) == 1
     outcome = "unknown" if undecided else "fail" if failed else "pass"
     # The event lands in the main checkout's run log, beside the pass log.
-    runlog.append_event(args.cwd, "gate", outcome, ref=ref, failed=failed, behind_by=behind)
+    runlog.append_event(args.cwd, "gate", outcome, ref=ref, failed=failed, behind_by=behind, head=head)
     return 3 if undecided else 1 if failed else 0
 
 

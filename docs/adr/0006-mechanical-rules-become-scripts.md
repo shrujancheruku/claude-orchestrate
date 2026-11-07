@@ -7,7 +7,7 @@ The plugin's behaviour lives in two kinds of module: prompts (skills and agent d
 - **The overlap rule was restated six times in five files.** "Compare held paths by file, with any `:line` stripped" is written twice in `skills/run/SKILL.md` (The state lives outside you, and a pass's step 4) and once each in `skills/run/brief.md`, `agents/worker.md`, `agents/scout.md` and `GLOSSARY.md`. Three fixes each corrected a different copy: the orchestrator's check (#92), the worker's stop rule (#114) and the brief's held-paths line (#150).
 - **`behind_by` was read in three places.** The scout's checklist item 3, `scripts/gate`, and the orchestrator's re-check before a merge (`skills/run/SKILL.md`, review loop step 6), after scouts called a behind branch up to date (#64, #96).
 - **A prompt rule can only be tested by running an agent.** The behaviour harness is opt-in and capped (#122), so a regression in prose shows up in a trial run, not in CI (inferred from the fixes above, each found in a run).
-- **The scripts that replaced prose held.** `scripts/gate` (#72), `scripts/merge` (#75) and `scripts/rebuild-state` (#69) each took a mechanical job out of the orchestrator's prompt and are pinned by CLI tests.
+- **The scripts that replaced prose held.** `scripts/gate` (#72), `scripts/merge` (#75) and `scripts/rebuild-state` (#69) each took a mechanical job out of the orchestrator's prompt and are pinned by CLI tests; so did the gate as the one check before review (#237).
 
 ## Decision
 
