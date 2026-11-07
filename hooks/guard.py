@@ -448,10 +448,18 @@ def parse_gh(words: list, k: int) -> Call:
     return Call("gh", sub=found[0] if found else None, verb=found[1] if len(found) > 1 else None, args=words[j:])
 
 
-def api_writes(args: list) -> bool:
-    """True when `gh api`'s flags make it a write: a method other than GET (`-X V`, `-XV`, `--method V`,
-    `--method=V`), any field flag (gh POSTs on `-f` and `-F`, attached or separate), or `--input`."""
-    j = 0
+class ApiScan:
+    """What `gh api`'s flags say: `other` is a write by method or `--input`; `fields` holds each `-f`/`-F`
+    value as a Word (gh POSTs on any of them); `endpoint` is the first operand."""
+
+    def __init__(self):
+        self.other, self.fields, self.endpoint = False, [], None
+
+
+def scan_api(args: list) -> ApiScan:
+    """Walk `gh api`'s arguments: a method other than GET (`-X V`, `-XV`, `--method V`, `--method=V`),
+    `--input`, and the field flags (attached or separate)."""
+    scan, j = ApiScan(), 0
     while j < len(args):
         w = args[j]
         t = w.text
@@ -466,24 +474,67 @@ def api_writes(args: list) -> bool:
                     value, dynamic = args[j].text, args[j].dynamic
                     j += 1
                 if dynamic or value.casefold() != "get":
-                    return True
+                    scan.other = True
+            elif name == "--input":
+                scan.other = True
             elif name in API_FIELD_FLAGS:
-                return True
+                if not eq and j < len(args):
+                    scan.fields.append(args[j])
+                    j += 1
+                elif eq:
+                    scan.fields.append(Word(value, w.dynamic, w.quoted))
+                else:
+                    scan.other = True
             elif name in API_LONG_VALUE and not eq:
                 j += 1
         elif t.startswith("-") and len(t) > 1:
             for pos, ch in enumerate(t[1:], 1):  # a cluster such as `-iXPOST` or `-ftitle=x`
-                if ch in "fF":
-                    return True
                 if ch in API_SHORT_VALUE:
-                    value, dynamic = t[pos + 1:], w.dynamic
+                    value, dynamic, quoted = t[pos + 1:], w.dynamic, w.quoted
                     if not value and j < len(args):
-                        value, dynamic = args[j].text, args[j].dynamic
+                        value, dynamic, quoted = args[j].text, args[j].dynamic, args[j].quoted
                         j += 1
-                    if ch == "X" and (dynamic or value.casefold() != "get"):
-                        return True
+                    if ch in "fF":
+                        scan.fields.append(Word(value, dynamic, quoted))
+                    elif ch == "X" and (dynamic or value.casefold() != "get"):
+                        scan.other = True
                     break
-    return False
+        elif scan.endpoint is None:
+            scan.endpoint = w
+    return scan
+
+
+def api_writes(args: list) -> bool:
+    """True when `gh api`'s flags make it a write: a method other than GET, any field flag (gh POSTs on
+    `-f` and `-F`), or `--input`."""
+    scan = scan_api(args)
+    return scan.other or bool(scan.fields)
+
+
+def graphql_refusal(args: list) -> str | None:
+    """For `gh api graphql`: None when it is a plain read (one `query` operation whose text is literal),
+    else why not. The field flags carry the query and its variables, so they aren't writes here; the
+    query's text decides. Not a graphql call: "" (the caller applies the ordinary rule)."""
+    scan = scan_api(args)
+    if scan.endpoint is None or scan.endpoint.dynamic or scan.endpoint.text != "graphql":
+        return ""
+    if scan.other:
+        return "writes through the GitHub API (graphql with a method or --input)"
+    queries = [f for f in scan.fields if f.text.startswith("query=")]
+    if len(queries) != 1:
+        return "writes through the GitHub API (graphql without exactly one query field)"
+    q = queries[0]
+    text = q.text[len("query="):]
+    if q.dynamic:
+        return "writes through the GitHub API (graphql query the guard can't read: it holds an expansion)"
+    if text.startswith("@"):
+        return "writes through the GitHub API (graphql query read from a file or stdin)"
+    bare = "\n".join(line.split("#", 1)[0] for line in text.splitlines()).strip()
+    if re.search(r"\b(mutation|subscription)\b", bare):
+        return "writes through the GitHub API (graphql mutation or subscription)"
+    if not (bare.startswith("{") or re.match(r"query\b", bare)):
+        return "writes through the GitHub API (graphql query the guard can't read as a query)"
+    return None
 
 
 def is_subsequence(part: str, whole: str) -> bool:
@@ -761,8 +812,14 @@ def rule_gh_writes(p: Parsed, cwd: str) -> str | None:
 
 def rule_gh_api_writes(p: Parsed, cwd: str) -> str | None:
     for call in p.tool("gh"):
-        if call.is_sub("api") and api_writes(call.args):
-            return "writes through the GitHub API"
+        if call.is_sub("api"):
+            gql = graphql_refusal(call.args)
+            if gql is None:
+                continue
+            if gql:
+                return gql
+            if api_writes(call.args):
+                return "writes through the GitHub API"
     return None
 
 
