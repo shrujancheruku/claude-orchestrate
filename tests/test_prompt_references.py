@@ -143,6 +143,63 @@ class LeadDocs(unittest.TestCase):
         self.assertIn("projects-board", anchors)
 
 
+def reconcile_step():
+    """The run skill's step 1 (Reconcile), up to step 2."""
+    text = (ROOT / "skills/run/SKILL.md").read_text()
+    start = text.index("1. **Reconcile.**")
+    return text[start:text.index("\n2. **", start)]
+
+
+def scout_reconcile_line():
+    """The scout's Reconcile report line, the one that names the shape."""
+    return next(l for l in (ROOT / "agents/scout.md").read_text().splitlines() if l.startswith("- **Reconcile:**"))
+
+
+class ReconcileReadsClaims(unittest.TestCase):
+    """The claims script carries each claimed ticket's state, worktree and change, so the scout reports none of it (#266)."""
+
+    def test_scout_reconcile_has_no_per_claimed_ticket_line(self):
+        line = scout_reconcile_line()
+        self.assertNotIn("claimed ticket", line)
+        self.assertNotIn("dirty", line)
+        self.assertNotIn("worktree", line)
+
+    def test_scout_reconcile_reports_check_states_of_in_review_tickets(self):
+        line = scout_reconcile_line()
+        self.assertIn("in-review", line)
+        self.assertIn("check states", line)
+        self.assertIn("`#<n> <PR> <check states>`", line)
+
+    def test_scout_reconcile_keeps_takeable_ready_for_human_and_closed_parents(self):
+        line = scout_reconcile_line()
+        for part in ("`takeable:`", "`ready-for-human:`", "parents whose sub-issues are all closed"):
+            with self.subTest(part=part):
+                self.assertIn(part, line)
+
+    def test_scout_hygiene_no_longer_lists_claims_facts(self):
+        text = (ROOT / "agents/scout.md").read_text()
+        hygiene = next(l for l in text.splitlines() if l.startswith("- **Hygiene:**"))
+        self.assertNotIn("merged PRs whose tickets", hygiene)
+        self.assertNotIn("state files out of step", hygiene)
+
+    def test_step_one_runs_rebuild_then_claims_then_the_scout(self):
+        step = reconcile_step()
+        order = [step.index(s) for s in ("rebuild-state", "scripts/claims", "One scout call")]
+        self.assertEqual(order, sorted(order), "step 1 must rebuild, then read claims, then call the scout")
+
+    def test_step_one_asks_the_scout_for_nothing_a_claim_line_carries(self):
+        # The scout call's sentence only: the rest of step 1 (lead routing) may name a worktree's unpushed work.
+        step = reconcile_step()
+        call = step[step.index("One scout call"):step.index("Done when every claimed ticket has a state.")]
+        for phrase in ("merged PRs whose tickets", "branch's last pushed commit", "dirty", "unpushed"):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, call)
+
+    def test_haiku_hand_over_reads_the_claim_change_field(self):
+        text = (ROOT / "skills/run/SKILL.md").read_text()
+        self.assertNotIn("as the scout does for no-PR tickets", text)
+
+
 class GlossaryTerms(unittest.TestCase):
     """The two mechanical check points have their own terms, and the retired "Pre-merge check" is gone (#272)."""
 
