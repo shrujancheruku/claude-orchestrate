@@ -256,8 +256,8 @@ class StuckJob(unittest.TestCase):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def stuck_watch(self, jobs, after, ticks=3):
-        rows = [dict(running(), number=5)] * ticks + [dict(view("SUCCESS", head="5555555aaa"), number=5)]
+    def stuck_watch(self, jobs, after, ticks=3, url=RUN_URL):
+        rows = [dict(running(url), number=5)] * ticks + [dict(view("SUCCESS", head="5555555aaa"), number=5)]
         self.env.set_gh([{"args": ["pr", "list"], "seq": [{"stdout": json.dumps([r])} for r in rows]}, jobs])
         return self.env.run("watch-ci", "--interval", "0", "--stuck-after", str(after), "5")
 
@@ -266,8 +266,23 @@ class StuckJob(unittest.TestCase):
         self.assertEqual(r.stdout.splitlines(), [
             "PR #5: job validate stuck in_progress with all steps done; rerun with gh run rerun 900 --job 901",
             "PR #5 pass CLEAN 5555555"])
-        self.assertIn(["api", "repos/{owner}/{repo}/actions/runs/900/jobs"],
+        self.assertIn(["api", "repos/{owner}/{repo}/actions/runs/900/jobs?per_page=100"],
                       self.env.gh_calls())
+
+    def test_a_reported_run_is_not_read_again_until_its_checks_change(self):
+        self.stuck_watch(jobs_reply(["completed"]), 0, ticks=4)
+        reads = [c for c in self.env.gh_calls() if c[0] == "api"]
+        self.assertEqual(reads, [["api", "repos/{owner}/{repo}/actions/runs/900/jobs?per_page=100"]])
+
+    def test_a_check_without_a_run_id_makes_no_jobs_call(self):
+        for url in ("", "https://ci.example.com/build/7"):
+            self.stuck_watch(jobs_reply(["completed"]), 0, url=url)
+            self.assertEqual([c for c in self.env.gh_calls() if c[0] == "api"], [])
+
+    def test_a_settled_pr_makes_no_jobs_call(self):
+        self.env.set_gh([{"args": ["pr", "list"], "stdout": json.dumps([dict(view("SUCCESS"), number=5)])}, jobs_reply(["completed"])])
+        self.env.run("watch-ci", "--interval", "0", "5")
+        self.assertEqual([c for c in self.env.gh_calls() if c[0] == "api"], [])
 
     def test_nothing_is_reported_before_the_wait_is_over(self):
         r = self.stuck_watch(jobs_reply(["completed"]), 3600)

@@ -6,8 +6,9 @@ Run it as a Monitor command so the orchestrator never sleeps or polls. Each line
 Each settle also appends one `ci` event (ref = the PR number). A PR with no checks yet counts as
 pending (checks may not be registered right after a push); the Monitor's timeout bounds the wait. A PR
 that is merged or closed settles at once.
-A run that stays `in_progress` is also read once per tick (`GET actions/runs/<id>/jobs`, only while a watched
-PR has a check in progress): a job whose steps are all `completed` yet whose status has stayed `in_progress` for
+A run that stays `in_progress` is also read each tick (`GET actions/runs/<id>/jobs`: one request per
+in-progress run of a watched PR, so the count grows with those runs; a run is not read again once its stuck jobs
+are reported, until its checks change): a job whose steps are all `completed` yet whose status has stayed `in_progress` for
 5 minutes (`--stuck-after` overrides) prints once
     PR #<n>: job <name> stuck in_progress with all steps done; rerun with gh run rerun <run id> --job <job id>
 and the watch carries on. Nothing is rerun; the orchestrator decides. A failed jobs read is skipped for that tick.
@@ -94,13 +95,15 @@ def view_prs(root):
 
 
 def in_progress_runs(view: dict):
-    """Ids of the workflow runs behind the PR's checks that are still in progress."""
-    runs = []
+    """{run id: the detailsUrls of its in-progress checks}. A rerun gives a check a new URL, so a changed value
+    means the run changed."""
+    runs = {}
     for c in view.get("statusCheckRollup") or []:
-        m = RUN_URL.search(c.get("detailsUrl") or "")
-        if m and c.get("status") == "IN_PROGRESS" and m.group(1) not in runs:
-            runs.append(m.group(1))
-    return runs
+        url = c.get("detailsUrl") or ""
+        m = RUN_URL.search(url)
+        if m and c.get("status") == "IN_PROGRESS":
+            runs.setdefault(m.group(1), []).append(url)
+    return {run: tuple(urls) for run, urls in runs.items()}
 
 
 def finished_in_progress(job: dict) -> bool:
@@ -111,14 +114,15 @@ def finished_in_progress(job: dict) -> bool:
 
 def check_stuck(root, pr, run_id, first_seen, reported, stuck_after):
     """Print one line per job of the run that has been finished-but-in_progress for stuck_after seconds.
-    first_seen {job id: monotonic time first seen so}; reported: job ids already printed. Best-effort: a failed
-    read is skipped, the next tick tries again."""
+    first_seen {(run, job id): monotonic time first seen so}; reported: keys already printed. Best-effort: a
+    failed read is skipped, the next tick tries again. True when the run has stuck jobs and all are reported."""
     try:
-        data = github.call_json("api", f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs", cwd=root)
+        data = github.call_json("api", f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs?per_page=100", cwd=root)
     except github.GhError as e:
         print(f"watch-ci: could not read jobs of run {run_id}: {e.message}", file=sys.stderr, flush=True)
-        return
+        return False
     now = time.monotonic()
+    stuck = []
     for job in data.get("jobs") or []:
         if not isinstance(job, dict):
             continue
@@ -126,11 +130,13 @@ def check_stuck(root, pr, run_id, first_seen, reported, stuck_after):
         if not finished_in_progress(job):
             first_seen.pop(key, None)
             continue
+        stuck.append(key)
         since = first_seen.setdefault(key, now)
         if now - since >= stuck_after and key not in reported:
             reported.add(key)
             print(f"PR #{pr}: job {job.get('name')} stuck in_progress with all steps done; "
                   f"rerun with gh run rerun {run_id} --job {job.get('id')}", flush=True)
+    return bool(stuck) and all(k in reported for k in stuck)
 
 
 def main(argv=None) -> int:
@@ -151,7 +157,7 @@ def main(argv=None) -> int:
     misses = {pr: 0 for pr in pending}
     failures = 0
     errored = False
-    first_seen, reported = {}, set()
+    first_seen, reported, done = {}, set(), set()  # done: (run, its in-progress URLs) with every stuck job reported
 
     def give_up(pr, reason):
         nonlocal errored
@@ -183,8 +189,10 @@ def main(argv=None) -> int:
                 result = judge(view)
                 if result is None:
                     if not view.get("isDraft"):
-                        for run_id in in_progress_runs(view):
-                            check_stuck(root, pr, run_id, first_seen, reported, args.stuck_after)
+                        for run_id, urls in in_progress_runs(view).items():
+                            if (run_id, urls) not in done and check_stuck(
+                                    root, pr, run_id, first_seen, reported, args.stuck_after):
+                                done.add((run_id, urls))
                     continue
                 pending.remove(pr)
                 merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
