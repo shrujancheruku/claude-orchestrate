@@ -10,6 +10,10 @@ A Claude Code plugin that runs a repo's ticket backlog: an orchestrator dispatch
 The repo's `.claude/orchestration.md`: the single source for the backlog, slots, verify commands, gates and merge rule, and it wins over the skills. Source: `skills/run/SKILL.md` (Before the first pass), `skills/setup/config-template.md`.
 _Avoid_: settings, setup file
 
+**Out of the box**:
+A plugin feature works on install from the plugin's own files and the repo's `.claude/`; where it needs user config the plugin cannot ship, it degrades with one message naming the setting, and setup writes only the repo's own files (`.claude/orchestration.md`, `.worktreeinclude`, the board line, and on an explicit yes `.claude/settings.local.json` plus its `.gitignore` line), never `~/.claude`. Source: `docs/adr/0013-plugin-features-work-out-of-the-box.md`.
+_Avoid_: zero-config, manual step, install instructions
+
 **Ticket**:
 One unit of build work in the backlog: a GitHub issue that a worker turns into a PR.
 _Avoid_: task, story, item
