@@ -159,6 +159,50 @@ class RetryTest(unittest.TestCase):
         fake, sleeps, _, err = self.run_call(fail(text), OK)  # the fake clock stands still, so each wait is 40 s
         self.assertEqual((sleeps, fake.calls, err.kind), ([40.0], 1, github.RATELIMITED))
 
+    def test_the_budget_is_per_call_so_a_second_hit_after_a_success_waits(self):
+        # One process, as in a watch-ci loop: hit, wait, success, hit again. The second hit must wait, not exit 2.
+        text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 60"
+        fake, sleeps, now = FakeGh(fail(text), OK, OK, fail(text), OK), [], [1000.0]
+
+        def sleep(seconds):  # time passes, so the reset the first hit recorded is over by the second
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        with unittest.mock.patch.object(common, "run", fake), \
+                unittest.mock.patch.object(github, "sleep", sleep), \
+                unittest.mock.patch.object(github, "clock", lambda: now[0]), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            outs = []
+            for _ in range(3):
+                outs.append(github.call("api", "x", cwd=self.dir.name))
+                now[0] += 600  # a polling loop's interval
+        self.assertEqual((outs, sleeps), (["done\n"] * 3, [60, 60]))
+
+    def test_a_new_call_starts_with_a_fresh_budget_even_after_an_over_budget_one(self):
+        text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 40"
+        fake, sleeps, _, err = self.run_call(fail(text))  # waits 40, then the next 40 is over 75
+        self.assertEqual((sleeps, err.kind), ([40], github.RATELIMITED))
+        fake, sleeps, out, _ = self.run_call(fail(text), OK, clock=5000.0)  # later: the recorded reset is past
+        self.assertEqual((out, sleeps), ("done\n", [40]))
+
+    def test_the_over_budget_message_and_its_time_format_are_pinned(self):
+        # skills/run/SKILL.md keys on `rate limit until <time>`
+        self.assertEqual(github._utc(1300.0), "1970-01-01T00:21:40Z")
+        text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300"
+        _, _, _, err = self.run_call(fail(text))
+        self.assertEqual(err.message, "rate limit until 1970-01-01T00:21:40Z")
+
+    def test_quota_empty_with_a_reset_inside_the_budget_waits_not_raises(self):
+        text = "gh: API rate limit exceeded (HTTP 403)\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 1060"
+        _, sleeps, out, err = self.run_call(fail(text), OK)
+        self.assertEqual((out, err, sleeps), ("done\n", None, [60.0]))
+
+    def test_quota_empty_with_a_far_reset_raises_without_waiting(self):
+        text = "gh: API rate limit exceeded (HTTP 403)\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 1121"
+        _, sleeps, _, err = self.run_call(fail(text), OK)
+        self.assertEqual((sleeps, err.kind), ([], github.RATELIMITED))
+        self.assertIn("hourly quota used up", err.message)
+
     def test_env_overrides_the_budget(self):
         os.environ["ORCHESTRATE_GH_WAIT"] = "5"
         text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 20"

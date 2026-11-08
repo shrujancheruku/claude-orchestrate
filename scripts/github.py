@@ -154,11 +154,11 @@ clock = time.time
 # Where that can't be written it falls back to <git common dir>/orchestrate-ratelimit.json.
 FALLBACK_FILE = "orchestrate-ratelimit.json"
 DEFAULT_PAUSE = 60  # no retry-after or reset header: assume a minute
-# The most one process sleeps in total, across the shared-file wait and every retry. The orchestrator runs these
+# The most one `call` sleeps in total, across the shared-file wait and every retry. The orchestrator runs these
 # scripts through Bash (two-minute default timeout) and neither `merge --timeout` nor the watch-ci deadline sees a
 # sleep, so a longer wait is returned as `rate limit until <time>` (exit 2) for the caller to retry later.
 DEFAULT_WAIT_BUDGET = 75
-waited = 0.0  # seconds this process has slept so far
+waited = 0.0  # seconds the current call has slept so far; reset at the start of each call, so a long-lived loop gets a fresh budget per call
 
 
 def wait_budget() -> float:
@@ -171,7 +171,7 @@ def wait_budget() -> float:
 
 
 def _wait_until(reset: float, cwd=None, shared: bool = False) -> None:
-    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the process's wait budget.
+    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the current call's wait budget.
 
     `shared` marks a wait for a reset another process recorded, not this process's own hit; it is logged so the
     profile shows how much waiting one hit multiplied across scripts."""
@@ -415,6 +415,8 @@ def call(*args, cwd=None) -> str:
     `gh api` runs with --include (paginated calls excepted): the headers are split off before the body is returned,
     and each attempt, with its status and rate-limit headers, is logged (see the call log above).
     """
+    global waited
+    waited = 0.0  # the budget is for this call alone: watch-ci and merge --interval loop for hours in one process
     _wait_for_shared_reset(cwd)
     # `gh api` prints the response headers only with --include; they carry the status and the rate-limit evidence.
     # A paginated reply holds one header block per page, so that one runs without them.
