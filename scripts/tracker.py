@@ -28,6 +28,8 @@ ROLES = {"ready-for-agent": "ready", "ready-for-human": "human"}
 # required, so prose like "Blocked by the outage, see #12" or "Blocked by #12" is not a blocker (it would hold a ticket silently).
 BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*:(.*)$", re.I)
 ISSUE_REF = re.compile(r"#(\d+)")
+# release-please's open PR holds nothing (scripts/holds), so nothing needs its file list either.
+RELEASE_PLEASE_PREFIX = "release-please--"
 
 
 def label_strings(root: Path) -> dict:
@@ -161,6 +163,9 @@ class Snapshot:
     def __init__(self, cwd=None, **parts):
         self.cwd = cwd
         self._parts = {k: v for k, v in parts.items() if k in self.PARTS and v is not None}
+        # {PR number as text: {"sha": head commit, "files": [paths]}}: the open PRs' file lists, one REST read per PR per
+        # pass (there is no bulk endpoint), keyed by head SHA so a pushed PR refreshes its one entry (#446).
+        self._pr_files = dict(parts.get("pr_files") or {})
 
     @classmethod
     def open(cls, path, cwd=None):
@@ -181,6 +186,7 @@ class Snapshot:
 
     def write(self, path) -> None:
         data = {k: getattr(self, k) for k in self.PARTS}
+        data["pr_files"] = self._pr_files
         data["issues"] = [dict(i, labels=sorted(i["labels"])) for i in data["issues"]]
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(json.dumps(data), encoding="utf-8")
@@ -217,6 +223,25 @@ class Snapshot:
     def abandoned(self) -> list:
         """Numbers of closed `wontfix` tickets that still have an assignee."""
         return self._part("abandoned", lambda: github.abandoned_tickets(self.repo, cwd=self.cwd))
+
+    def pr_files(self, pr: dict) -> list:
+        """The paths an open PR (a row of `prs`) changes: from the cache when its head commit is the cached one, else
+        fetched through `github.pr_files` and cached."""
+        key, sha = str(pr["number"]), pr.get("headRefOid")
+        hit = self._pr_files.get(key)
+        if isinstance(hit, dict) and hit.get("sha") == sha and isinstance(hit.get("files"), list):
+            return list(hit["files"])
+        files = github.pr_files(pr["number"], cwd=self.cwd)
+        self._pr_files[key] = {"sha": sha, "files": files}
+        return list(files)
+
+    def cache_pr_files(self) -> None:
+        """Read the file list of every open PR whose files a reader may need (not release-please's), so `write` stores
+        them and the readers of the file fetch nothing."""
+        for pr in self.prs:
+            if isinstance(pr, dict) and isinstance(pr.get("number"), int) \
+                    and not str(pr.get("headRefName") or "").startswith(RELEASE_PLEASE_PREFIX):
+                self.pr_files(pr)
 
     def blockers(self, issue) -> list:
         """(number, from_body) for each open blocker of an issue (a dict, or a number: absent means closed, so none)."""
