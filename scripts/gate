@@ -18,6 +18,9 @@ and nothing else failed (run the gate again; not the worker's fault); UNKNOWN wi
 that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's
 worktree, so they see the PR's code); default is the current directory. Each runs for at most --timeout
 seconds (default 1800); one that outlives it is killed and fails with "timed out after Ns".
+Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word:
+`review <head>` (exit 0) | `send-back <pr>` (exit 1; the lines above it are what the worker gets) |
+`rerun-after-ci` (exit 3) | `could-not-run` (exit 2, the reason on stderr).
 Stdlib only, Python 3.9+.
 """
 
@@ -37,6 +40,7 @@ import repo
 import runlog
 import tracker
 
+NEXT = {}  # what main() needs for the `next:` line: the PR and its head
 HOLDS = Path(__file__).resolve().parent / "holds"
 # Paths (by file name) that hold secrets, and added lines that are secrets.
 SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "id_rsa*", "id_ed25519*",
@@ -195,6 +199,20 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
 
 
 def main(argv=None) -> int:
+    """Run the gate, then print the one `next:` line (see the module docstring)."""
+    NEXT.clear()
+    try:
+        code = run_gate(argv)
+    except SystemExit as e:  # an argparse usage error (2); --help (0) prints no verdict
+        if e.code in (0, None):
+            raise
+        code = e.code if isinstance(e.code, int) else 2
+    pr, head = NEXT.get("pr", "?"), NEXT.get("head")
+    print("next: " + {0: f"review {head}", 1: f"send-back {pr}", 3: "rerun-after-ci"}.get(code, "could-not-run"))
+    return code
+
+
+def run_gate(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("pr", help="PR number")
     ap.add_argument("--cwd", default=".", help="directory holding the PR's code and the config")
@@ -210,12 +228,14 @@ def main(argv=None) -> int:
         print(f"gate: --cwd {args.cwd} does not exist", file=sys.stderr)
         return 2
     pr, ref = common.pr_ref(args.pr)
+    NEXT["pr"] = pr
 
     results, extra = pr_checks(pr, args.base, delay=args.retry_delay, cwd=args.cwd)
     if results is None:
         print(f"gate: {extra}", file=sys.stderr)
         return 2
     behind, unknown, head = extra
+    NEXT["head"] = head
     cfg = config.Config.load(args.cwd)
     malformed = cfg.problems_of(config.RUN)  # only a bad `run:` fails the gate; other problems are not its business
     results += checks.run_stages([list(cfg.check_commands)], args.cwd, args.timeout)
