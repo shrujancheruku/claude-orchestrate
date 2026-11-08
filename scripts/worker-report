@@ -16,7 +16,8 @@ line and appends a `worker-report` event to the run log. The orchestrator applie
     error <gist>                     no report, and the text names another API error
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
 no-primary-source, worktree-gone, permission-denied (which also needs the exact denied command in `denied-command:`; the event
-carries it). Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
+carries it). A report's `refused:` lines (one per tool call the harness or guard refused) ride in the event as
+`refused: [...]` (`refused: none` is `[]`, no line leaves the field out); the verdict never depends on them. Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
 run log): one line on stderr, run it again on the next wake. Stdlib only, Python 3.9+.
 """
 
@@ -36,6 +37,7 @@ STOP_REASONS = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only
 STATUS = re.compile(r"^[ \t>*-]*status:[ \t]*(pr-opened|stopped)\b", re.I | re.M)
 STOP_REASON = re.compile(r"^[ \t>*-]*stop-reason:[ \t]*`?([\w-]+)", re.I | re.M)
 DENIED_COMMAND = re.compile(r"^[ \t>*-]*denied-command:[ \t]*`*([^\s`].*?)`*[ \t]*$", re.I | re.M)
+REFUSED = re.compile(r"^[ \t>*-]*refused:[ \t]*`*(.*?)`*[ \t]*$", re.I | re.M)
 REPORT_PR = re.compile(r"^[ \t>*-]*pr:[ \t]*\S*?/pull/(\d+)", re.I | re.M)
 # The harness's own wrapper elements say nothing about the worker's work: a completion with only these is bare.
 NOTICE = re.compile(r"<(task-id|tool-use-id|output-file|worktreePath|worktreeBranch|status|summary|usage)>.*?</\1>", re.S)
@@ -61,8 +63,25 @@ def find_pr(prs: list, report_pr: str | None, branch: str):
     return None
 
 
+def refused_calls(text: str):
+    """The report's `refused:` lines as a list of strings; [] for `refused: none`; None when the report has no such line
+    (an older worker prompt), so the event can tell "none refused" from "not reported"."""
+    found = [m.group(1).strip() for m in REFUSED.finditer(text)]
+    if not found:
+        return None
+    return [l for l in found if l and l.lower().rstrip(".") != "none"]
+
+
 def classify(text: str, branch: str, lookup) -> tuple:
     """(verdict words, event fields). `lookup()` fetches the open PRs and is called only when a PR matters."""
+    words, fields = _classify(text, branch, lookup)
+    refused = refused_calls(text) if STATUS.search(text) else None
+    if refused is not None:
+        fields = dict(fields, refused=refused)
+    return words, fields
+
+
+def _classify(text: str, branch: str, lookup) -> tuple:
     m = STATUS.search(text)
     if not m:
         if session.LIMIT_TEXT.search(text):

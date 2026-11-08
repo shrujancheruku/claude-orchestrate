@@ -134,7 +134,7 @@ Each finding names a `path:line` and either a concrete failure or the rule it br
 Defined by `agents/scout.md`. It runs on Haiku at low effort with a turn cap, is read-only by the guard, and does not load the repo's `CLAUDE.md`. It answers the questions the orchestrator would otherwise dig for itself, each in a fixed shape so the orchestrator reads conclusions rather than evidence:
 
 - **Reconcile:** the check states of the in-review tickets. The takeable tickets, the `ready-for-human` ones and the parents whose sub-issues have all closed come from `scripts/frontier`. Each claimed ticket's state, worktree and unpushed work come from `scripts/claims`, not the scout.
-- **Touch map:** the files a ticket will most likely change, each as `path:line` of its entry point. A prediction, not a fence.
+- **Touch map:** the files a ticket will most likely change, one line of `path:L-L (a few words)` entries, the grammar of `scripts/touchmap.py`. A prediction, not a fence.
 - **CI and PRs:** each check's state by name, the failing step of a failed run, how far a branch is behind its base, and unresolved review comments.
 - **Environment:** build and test commands, tool versions, anything that would collide across parallel worktrees.
 

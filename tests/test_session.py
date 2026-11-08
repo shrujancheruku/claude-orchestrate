@@ -8,6 +8,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import session  # noqa: E402
+import touchmap  # noqa: E402
 from transcripts import bash, completion, dispatch, main_path, reply, write_jsonl, write_session  # noqa: E402
 
 
@@ -64,18 +65,23 @@ class SessionReader(unittest.TestCase):
         self.assertEqual(self.load().completions(), {"aaa": "/w/last", "bbb": "/w/b"})
 
     def test_brief_fields_read_the_label_on_its_own_line(self):
-        brief = "Build #3.\n- **Touch map:** scripts/x.py:4, scripts/y.py (reading). A prediction, not a fence.\nBranch: 3-slug. Go."
-        self.assertEqual(session.touch_map(brief), ["scripts/x.py:4", "scripts/y.py (reading)"])
+        brief = "Build #3.\n- **Touch map:** scripts/x.py:4, scripts/y.py (reading)\nA prediction, not a fence.\nBranch: 3-slug. Go."
+        self.assertEqual(touchmap.format(session.touch_map(brief)), "scripts/x.py:4, scripts/y.py (reading)")
         self.assertEqual(session.branch_of(brief), "3-slug")
         self.assertEqual(session.touch_map("Touch map is mentioned mid-sentence: a.py"), [])
         self.assertEqual(session.touch_map(None), [])
-        self.assertEqual(session.touch_map("Touch map: a.py:1; b.py:2 and none"), ["a.py:1", "b.py:2 and none"])
-        self.assertEqual(session.touch_map("Touch map: none."), [])
-        self.assertEqual(session.touch_map("Touch map: a.py:1 (x, y), b.py:2 (p; q). Branch: 5-x."),
-                         ["a.py:1 (x, y)", "b.py:2 (p; q)"])
-        self.assertEqual(session.touch_map("Touch map: a.py (open, b.py"), ["a.py (open, b.py"])
+        self.assertEqual(session.touch_map("Touch map: none"), [])
         self.assertIsNone(session.branch_of("no brief here"))
 
+    def test_the_templates_trailing_sentence_is_not_an_entry(self):
+        self.assertEqual(touchmap.format(session.touch_map("Touch map: a.py:1, b.py:2 (x). A prediction, not a fence.")),
+                         "a.py:1, b.py:2 (x)")
+
+    def test_an_off_grammar_touch_map_raises_never_half_reads(self):
+        with self.assertRaises(touchmap.TouchMapError):
+            session.touch_map("Touch map: a.py:10, 20")
+        with self.assertRaises(touchmap.TouchMapError):
+            session.touch_map("Touch map: a.py:1; b.py:2 and none")
 
 if __name__ == "__main__":
     unittest.main()

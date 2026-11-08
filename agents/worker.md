@@ -80,6 +80,7 @@ ticket: <url>
 pr: <url | none>
 branch: <name>
 verify: <pass | fail, with the failing command>
+refused: <tool> — <command or path, first 120 chars> — <refusal text, first 80 chars>   (one line per tool call the harness or the guard refused during the run; `refused: none` when there were none; prompts the developer approved are invisible to you and not reported)
 discovered: <n> — <one-line gist per item; leave the line out when there is none>
 adr-conflicts: <ADR -> how this PR departs from it, and why; omit when none>
 stop-reason: <required when stopped: held-path | no-spec | ambiguous | adr-conflict | human-only | verify-outside-ticket | already-done | no-primary-source | permission-denied | worktree-gone>
