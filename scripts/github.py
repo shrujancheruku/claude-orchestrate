@@ -125,7 +125,30 @@ clock = time.time
 # Where that can't be written it falls back to <git common dir>/orchestrate-ratelimit.json.
 FALLBACK_FILE = "orchestrate-ratelimit.json"
 DEFAULT_PAUSE = 60  # no retry-after or reset header: assume a minute
-WAIT_BUDGET = 120   # the longest a call waits for the shared reset before exiting 2
+# The most one process sleeps in total, across the shared-file wait and every retry. The orchestrator runs these
+# scripts through Bash (two-minute default timeout) and neither `merge --timeout` nor the watch-ci deadline sees a
+# sleep, so a longer wait is returned as `rate limit until <time>` (exit 2) for the caller to retry later.
+DEFAULT_WAIT_BUDGET = 75
+waited = 0.0  # seconds this process has slept so far
+
+
+def wait_budget() -> float:
+    """ORCHESTRATE_GH_WAIT seconds when it is a non-negative number, else DEFAULT_WAIT_BUDGET."""
+    try:
+        value = float(os.environ.get("ORCHESTRATE_GH_WAIT", ""))
+    except ValueError:
+        return DEFAULT_WAIT_BUDGET
+    return value if value >= 0 else DEFAULT_WAIT_BUDGET
+
+
+def _wait_until(reset: float) -> None:
+    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the process's wait budget."""
+    global waited
+    seconds = max(reset - clock(), 0)
+    if waited + seconds > wait_budget():
+        raise GhError(RATELIMITED, f"rate limit until {_utc(reset)}")
+    waited += seconds
+    sleep(seconds)
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 
 
@@ -193,9 +216,7 @@ def _wait_for_shared_reset(cwd) -> None:
     reset = _shared_reset(cwd)
     if not reset:
         return
-    if reset - clock() > WAIT_BUDGET:
-        raise GhError(RATELIMITED, f"rate limit until {_utc(reset)}")
-    sleep(max(reset - clock(), 0))
+    _wait_until(reset)
 
 
 def _rate_limit(text: str):
@@ -224,7 +245,7 @@ def call(*args, cwd=None) -> str:
     """Run `gh <args>` and return stdout; raise GhError (missing, failed or ratelimited).
 
     Before the first try it waits out a reset another process recorded in STATE_FILE (or raises `ratelimited`
-    when that is over WAIT_BUDGET away). A secondary rate limit is then retried up to TRIES times, sleeping the
+    when that would pass the wait budget). A secondary rate limit is then retried up to TRIES times, sleeping the
     `retry-after` seconds when gh shows them, else until the reset it just recorded (DEFAULT_PAUSE), and recording its reset in
     STATE_FILE for the others. The hourly quota (remaining 0, reset far off) raises `ratelimited` at once with the
     reset time, since waiting for it would stall the caller. A rate-limit message carries the HTTP status and headers.
@@ -250,8 +271,9 @@ def call(*args, cwd=None) -> str:
         _record_reset(cwd, clock() + pause)
         if attempt == TRIES:
             raise GhError(RATELIMITED, message)
+        # The reset is recorded above, so a wait over the budget is returned, not slept; the caller retries after it.
         print(f"github: rate limited, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
-        sleep(pause)
+        _wait_until(clock() + pause)
 
 
 def call_json(*args, shape=dict, cwd=None):
