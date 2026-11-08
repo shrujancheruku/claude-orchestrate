@@ -97,6 +97,11 @@ class Grammar(unittest.TestCase):
         self.assertTrue(touchmap.overlaps(touchmap.parse("db/")[0], touchmap.parse("db/schema.sql:1")[0]))
         self.assertTrue(touchmap.overlaps(touchmap.parse("db/schema.sql")[0], touchmap.parse("db/")[0]))
 
+    def test_an_unparsed_marker_overlaps_every_path(self):
+        every = touchmap.Entry(touchmap.HOLDS_ALL)
+        self.assertTrue(touchmap.overlaps(every, touchmap.parse("x/y.py")[0]))
+        self.assertTrue(touchmap.overlaps(touchmap.parse("x/y.py")[0], every))
+
 
 if __name__ == "__main__":
     unittest.main()
