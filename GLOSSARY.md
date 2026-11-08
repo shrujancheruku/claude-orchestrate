@@ -168,6 +168,10 @@ _Avoid_: iteration, pass (a pass is one orchestrator run)
 A reviewer's finding or a human's inline comment on a PR, which stays open until whoever acts on it closes it with a reply saying fixed or left, and which the reviewer may reopen; the unit the merge checks before merging. Source: `scripts/threads`, `scripts/merge`, `agents/reviewer.md`, `agents/worker.md`.
 _Avoid_: comment, conversation, finding (a finding is what the reviewer writes; the thread is what it becomes on the PR)
 
+**Out of the box**:
+A plugin feature works on install from the plugin's own files and the repo's `.claude/`; where it needs user config the plugin cannot ship, it degrades with one message naming the setting, and setup writes only `.claude/settings.local.json` on an explicit yes. Source: `docs/adr/0013-plugin-features-work-out-of-the-box.md`.
+_Avoid_: zero-config, manual step, install instructions
+
 ### The lead
 
 **Lead**:
