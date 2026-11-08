@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import timedelta, timezone
 from pathlib import Path
 
@@ -202,6 +203,17 @@ class Holds(unittest.TestCase):
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 2)
         self.assertIn("holds: gh:", r.stderr)
+
+    def test_rate_limit_over_the_wait_budget_exits_two_with_the_reset_time(self):
+        # retry-after 300 is over the 75 s budget: the script must not sleep, and prints the time to retry.
+        self.env.set_gh([{"args": ["repo", "view"], "exit": 1,
+                          "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
+        with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            r = self.holds("--touch-map", "a.py", "--ticket", "7")
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertRegex(r.stderr, r"holds: gh: rate limit until \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+            self.assertTrue(list(Path(cache).glob("orchestrate/github-ratelimit-*.json")))  # the others wait too
+        self.assertEqual(len(self.env.gh_calls()), 1)
 
     def test_missing_state_file_means_no_building_tickets(self):
         self.gh({9: ["a.py"]})

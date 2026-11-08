@@ -152,6 +152,13 @@ class RetryTest(unittest.TestCase):
         fake, sleeps, _, err = self.run_call(fail(text))
         self.assertEqual((sleeps, fake.calls, err.kind), ([40], 2, github.RATELIMITED))
 
+    def test_the_budget_is_shared_by_the_file_wait_and_the_retries(self):
+        self.state.parent.mkdir()
+        self.state.write_text(json.dumps({"reset": 1040.0}))
+        text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 40"
+        fake, sleeps, _, err = self.run_call(fail(text), OK)  # the fake clock stands still, so each wait is 40 s
+        self.assertEqual((sleeps, fake.calls, err.kind), ([40.0], 1, github.RATELIMITED))
+
     def test_env_overrides_the_budget(self):
         os.environ["ORCHESTRATE_GH_WAIT"] = "5"
         text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 20"
