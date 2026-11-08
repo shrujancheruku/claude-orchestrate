@@ -832,7 +832,7 @@ def gh_metrics(events: list | None, passes: list) -> dict:
 
 
 def gh_lines(g: dict) -> list:
-    """The summary's GitHub lines: one for the run, then one per pass when there is more than one."""
+    """The summary's GitHub line: the run's totals and its busiest scripts."""
     if not g.get("available"):
         return ["GitHub calls: not recorded"]
     def line(b):
@@ -841,11 +841,9 @@ def gh_lines(g: dict) -> list:
         return (f"{b['calls']} calls, {b['writes']} writes (peak {b['peak_writes_per_minute']}/min), {b['graphql']} GraphQL, "
                 f"{b['retries']} retries, lowest remaining {low}{wait}")
     t = g["total"]
-    out = [f"GitHub calls: {line(t)}",
-           "  by script: " + (", ".join(f"{k} {v}" for k, v in list(t["by_script"].items())[:6]) or "none")]
-    if len(g["passes"]) > 1:
-        out += [f"  pass {r['pass'] if r['pass'] is not None else 'after'}: {line(r)}" for r in g["passes"]]
-    return out
+    top = ", ".join(f"{k} {v}" for k, v in list(t["by_script"].items())[:4])
+    # One line however long the run: the per-pass blocks live in the saved JSON (metrics.gh_calls.passes).
+    return [f"GitHub calls: {line(t)}" + (f" · top: {top}" if top else "")]
 
 
 def windows(usage: list, passes: list, threshold: float, now: datetime) -> list:

@@ -771,8 +771,14 @@ class OrchestratorTest(unittest.TestCase):
         self.fx.events(self.gh_events())
         out = prof.summary(self.fx.run(), Path("x.json"))
         self.assertIn("GitHub calls: 5 calls, 3 writes", out)
-        self.assertIn("by script: merge 3, gate 1, watch-ci 1", out)
-        self.assertIn("pass 1: 4 calls", out)
+        self.assertIn("top: merge 3, gate 1, watch-ci 1", out)
+
+    def test_the_summary_stays_six_lines_however_many_passes_there_are(self):
+        self.fx.passes([{"ts": at(m), "slots": 2, "free": 1} for m in range(2, 40)])
+        self.fx.events(self.gh_events())
+        out = prof.summary(self.fx.run(), Path("x.json"))
+        self.assertEqual(len(out.splitlines()), 6)
+        self.assertGreater(len(self.fx.run()["metrics"]["gh_calls"]["passes"]), 1)
 
     def test_an_older_events_log_without_gh_calls_is_not_recorded(self):
         self.fx.events([MERGED_50])

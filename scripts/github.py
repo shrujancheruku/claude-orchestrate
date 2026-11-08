@@ -258,7 +258,7 @@ STATUS_LINE = re.compile(r"HTTP/\S+\s+(\d{3})")
 # `gh api` flags that take a value, so the endpoint is the first argument that is neither a flag nor a value.
 API_VALUE_FLAGS = {"-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header", "--jq", "-q",
                    "--template", "-t", "--hostname", "--input", "--cache", "-p", "--preview"}
-READ_VERBS = {"view", "list", "status", "diff", "checks"}
+READ_VERBS = {"view", "list", "status", "diff", "checks", "field-list", "item-list"}
 _roots = {}  # cwd -> the main checkout that owns the run log, or None
 
 
@@ -423,7 +423,9 @@ def call(*args, cwd=None) -> str:
             raise GhError(RATELIMITED, f"{message} (hourly quota used up; resets at {_utc(reset)})")
         # gh shows no headers on a plain failure, so a bare rate limit waits out the recorded reset (a minute),
         # not a short ladder that would burn all the tries inside one limit window.
-        pause = after if after is not None else (reset - clock() if reset is not None and reset > clock() else DEFAULT_PAUSE)
+        # The reset header names the hourly bucket unless the quota is empty: a secondary limit with quota left and no
+        # retry-after waits a minute, never the (up to an hour away) reset.
+        pause = after if after is not None else (reset - clock() if empty and reset is not None and reset > clock() else DEFAULT_PAUSE)
         _record_reset(cwd, clock() + pause)
         if attempt == TRIES:
             raise GhError(RATELIMITED, message)

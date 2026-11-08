@@ -329,6 +329,25 @@ class CallLogTest(unittest.TestCase):
         self.assertEqual(argvs[0], ("gh", "api", "--paginate", "x", "--jq", ".[]"))
         self.assertEqual(self.events()[0]["headers"], "unavailable")
 
+    def test_project_listings_are_reads(self):
+        self.assertFalse(github.describe(["project", "item-list", "1"])["write"])
+        self.assertFalse(github.describe(["project", "field-list", "1"])["write"])
+        self.assertTrue(github.describe(["project", "item-edit", "1"])["write"])
+
+    def test_secondary_limit_with_quota_left_waits_a_minute_not_the_hourly_reset(self):
+        text = common.Run(1, reply(403, "{}", x_ratelimit_remaining=4000, x_ratelimit_reset=1000 + 2400),
+                          "gh: You have exceeded a secondary rate limit. (HTTP 403)")
+        os.environ["ORCHESTRATE_GH_WAIT"] = "1000"
+        sleeps = []
+        with unittest.mock.patch.object(common, "run", FakeGh(text, common.Run(0, reply(200, "ok"), ""))), \
+                unittest.mock.patch.object(github, "sleep", sleeps.append), \
+                unittest.mock.patch.object(github, "clock", lambda: 1000.0), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            github.call("api", "x", cwd=str(self.root))
+        self.assertEqual(sleeps, [60])
+        state = Path(self.dir.name) / "orchestrate" / "github-ratelimit-github.com.json"
+        self.assertEqual(json.loads(state.read_text())["reset"], 1060.0)
+
     def test_graphql_reads_and_mutations(self):
         self.assertEqual(github.describe(["api", "graphql", "-f", "query=query { a }", "-F", "n=1"])["write"], False)
         mutation = github.describe(["api", "graphql", "-f", "query=mutation { resolve }"])
