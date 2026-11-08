@@ -274,6 +274,23 @@ class Holds(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
         self.assertEqual(r.stderr.splitlines(), ["ignored: (note)"])
 
+    def test_none_is_an_empty_touch_map(self):
+        for args in (("none",), ("None",), ("none", "none")):
+            with self.subTest(args):
+                self.gh()
+                r = self.holds("--touch-map", *args, "--ticket", "7")
+                self.assertEqual((r.returncode, r.stdout.splitlines(), r.stderr), (0, ["none", "overlap: none"], ""))
+
+    def test_a_line_list_leaves_no_stray_number(self):
+        self.assertEqual(session.split_entries("a.py:10,20, b.py:3"), ["a.py:10", "b.py:3"])
+
+    def test_literal_arguments_are_not_split(self):
+        self.gh(open_tickets=[12])
+        self.state({12: ["a,b.py"]})
+        r = self.holds("--literal", "--touch-map", "a,b.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("overlap: a,b.py (held by building #12)", r.stdout)
+
     def test_usage(self):
         self.assertEqual(self.holds().returncode, 2)
         self.assertEqual(self.holds("--touch-map", "a.py").returncode, 2)

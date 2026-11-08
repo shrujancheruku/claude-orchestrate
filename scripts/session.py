@@ -250,7 +250,7 @@ def branch_of(prompt) -> str | None:
 
 
 def split_entries(value) -> list:
-    """The entries of a touch-map string as written, split on commas or semicolons outside parentheses; blanks dropped, `none` kept."""
+    """The entries of a touch-map string as written, split on commas or semicolons outside parentheses; blanks and bare numbers (`a.py:10,20`) dropped, `none` kept."""
     # Split only at separators outside parentheses: a note like `(main, new checks)` stays in its entry.
     entries, depth, current = [], 0, ""
     for ch in value or "":
@@ -261,7 +261,8 @@ def split_entries(value) -> list:
         depth = max(0, depth + (ch == "(") - (ch == ")"))
         current += ch
     entries.append(current)
-    return [entry.strip() for entry in entries if entry.strip()]
+    # A bare number is the tail of a line list (`a.py:10,20`), not a path.
+    return [entry.strip() for entry in entries if entry.strip() and not entry.strip().isdigit()]
 
 
 def touch_map(prompt) -> list:

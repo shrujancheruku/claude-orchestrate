@@ -42,18 +42,22 @@ def plain(entry: str) -> str:
     return path[2:] if path.startswith("./") else path
 
 
-def candidate_paths(args: list) -> list:
-    """The paths of the `--touch-map` arguments: each is split into entries (commas and semicolons outside parentheses, as
-    `session.touch_map` does), so one quoted string and separate arguments give the same paths. An argument that yields
-    no path (empty, only notes, `none`) is reported on stderr as `ignored: <arg>`."""
-    paths = []
+def candidate_paths(args: list, literal: bool = False) -> tuple:
+    """(paths, ignored) for the `--touch-map` arguments. Each is split into entries (commas and semicolons outside
+    parentheses, as `session.touch_map` does), so one quoted string and separate arguments give the same paths; with
+    `literal`, each argument is one path, unsplit. `none` is an empty touch map, not an ignored argument. An argument
+    that yields no path (empty, only notes) is reported on stderr as `ignored: <arg>` and counted."""
+    paths, ignored = [], 0
     for arg in args:
-        found = [plain(e) for e in session.split_entries(arg)]
-        found = [p for p in found if p and p.lower() != "none"]
+        entries = [arg] if literal else session.split_entries(arg)
+        if not literal and any(e.lower() == "none" for e in entries) and len(entries) == 1:
+            continue
+        found = [p for p in (plain(e) for e in entries) if p]
         if not found:
             print(f"ignored: {arg}", file=sys.stderr)
+            ignored += 1
         paths.extend(found)
-    return paths
+    return paths, ignored
 
 
 def claimed_paths(found: dict, own, base: str) -> tuple:
@@ -133,6 +137,7 @@ def report(held: dict, candidates: list, cfg) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--touch-map", nargs="+", metavar="ENTRIES", help="the ticket's touch-map entries (`path:line` is fine); an argument may hold several, comma-separated")
+    ap.add_argument("--literal", action="store_true", help="with --touch-map: each argument is one path, never split (a path may hold a comma)")
     ap.add_argument("--ticket", type=int, help="the ticket number, to leave out its own PR and touch map")
     ap.add_argument("--pr", help="check this PR's diff against the others (the gate's overlap check)")
     ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
@@ -145,8 +150,8 @@ def main(argv=None) -> int:
         ap.error("--touch-map needs --ticket")
     candidates = None
     if args.touch_map is not None:
-        candidates = candidate_paths(args.touch_map)
-        if not candidates:
+        candidates, ignored = candidate_paths(args.touch_map, args.literal)
+        if not candidates and ignored:
             print("holds: --touch-map yields no path", file=sys.stderr)
             return 2
     repo = Path(args.repo)
