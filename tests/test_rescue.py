@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from harness import ScriptEnv, gh_pr_list, gh_repo_view, git, rest_pull
@@ -234,6 +235,188 @@ class Rescue(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(r.stdout.splitlines()[-1], "overlap: none")
         self.assertEqual(self.env.gh_calls(), [])
+
+    def harness_worktree(self, agent="x1"):
+        """What a worker that stopped before Orient's branch step leaves: the harness's branch and path."""
+        self.wt = self.wt.parent / f"agent-{agent}"
+        git(self.env.repo, "worktree", "add", "-b", f"worktree-agent-{agent}", str(self.wt), "main")
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.write_text(json.dumps({"tickets": {"42": {"agent_id": agent, "model": "m"}}}))
+
+    def remote_log_of(self, branch):
+        return git(self.env.origin, "log", "--format=%s", f"main..{branch}")
+
+    def test_a_ticket_number_rescues_a_worktree_with_no_ticket_branch_yet(self):
+        self.harness_worktree()
+        (self.wt / "new.txt").write_text("n\n")
+        r = self.env.run("rescue", "42", "--title", "The ticket!", check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertIn("branch: created 42-the-ticket", lines)
+        self.assertEqual(self.remote_log_of("42-the-ticket").splitlines(), ["chore(wip): rescue #42"])
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(lines[-1], "overlap: none")
+        # the harness branch is left alone
+        self.assertIn("worktree-agent-x1", git(self.env.repo, "branch", "--list", "worktree-agent-x1"))
+
+    def rescue_n(self, *args):
+        return self.env.run("rescue", "42", *args, check=False)
+
+    def test_a_second_rescue_reuses_the_first_branch_whatever_the_title(self):
+        for agent, title in (("x1", ["--title", "The ticket"]), ("x2", ["--title", "The ticket"]),
+                             ("x3", ["--title", "A different title"]), ("x4", [])):
+            self.harness_worktree(agent)
+            (self.wt / f"{agent}.txt").write_text("n\n")
+            r = self.rescue_n(*title)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("branch: created 42-the-ticket" if agent == "x1" else "branch: reused 42-the-ticket",
+                          r.stdout.splitlines())
+        self.assertEqual(self.remote_log_of("42-the-ticket").splitlines(), ["chore(wip): rescue #42"] * 4)
+        self.assertEqual(git(self.env.repo, "branch", "--list", "42-*").split(), ["42-the-ticket"])
+
+    def test_a_branch_that_exists_only_on_origin_is_reused(self):
+        git(self.env.repo, "branch", "42-remote-only", "main")
+        git(self.env.repo, "push", "origin", "42-remote-only")
+        git(self.env.repo, "branch", "-D", "42-remote-only")
+        self.harness_worktree()
+        (self.wt / "n.txt").write_text("n\n")
+        r = self.rescue_n("--title", "Other")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("branch: reused 42-remote-only", r.stdout.splitlines())
+        self.assertEqual(self.remote_log_of("42-remote-only").splitlines(), ["chore(wip): rescue #42"])
+        self.assertEqual(git(self.env.repo, "branch", "--list", "42-*").split(), ["42-remote-only"])
+
+    def test_two_branches_for_the_ticket_exit_2_naming_both_and_touch_nothing(self):
+        git(self.env.repo, "branch", "42-a", "main")
+        git(self.env.repo, "branch", "42-b", "main")
+        self.harness_worktree()
+        (self.wt / "n.txt").write_text("n\n")
+        r = self.rescue_n()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("42-a", r.stderr)
+        self.assertIn("42-b", r.stderr)
+        self.assertTrue((self.wt / "n.txt").exists())
+        self.assertIn("worktree-agent-x1", git(self.wt, "branch", "--show-current"))
+
+    def lock_dead(self):
+        self.lock(f"claude agent agent-abc (pid {dead_pid()} start Sat Nov  7 06:14:20 2026)")
+
+    def test_a_branch_checked_out_in_another_worktree_exits_2_before_unlocking(self):
+        other = self.wt.parent / "other"
+        git(self.env.repo, "worktree", "add", "-b", "42-busy", str(other), "main")
+        self.harness_worktree()
+        self.lock_dead()
+        r = self.rescue_n()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn(str(other), r.stderr)
+        self.assertTrue(self.locked())
+        self.assertNotIn("lock:", r.stdout)  # liveness never ran
+        self.assertTrue(self.wt.exists())
+
+    def test_a_failed_switch_puts_the_lock_back(self):
+        git(self.env.repo, "switch", "-c", "42-conflict", "main")
+        (self.env.repo / "clash.txt").write_text("on the branch\n")
+        git(self.env.repo, "add", "clash.txt")
+        git(self.env.repo, "commit", "-m", "feat: clash")
+        git(self.env.repo, "switch", "main")
+        self.harness_worktree()
+        (self.wt / "clash.txt").write_text("untracked here\n")  # the switch would overwrite it
+        self.lock_dead()
+        r = self.rescue_n()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("cannot switch", r.stderr)
+        self.assertTrue(self.locked())
+        self.assertTrue((self.wt / "clash.txt").exists())
+
+    def test_a_worktree_on_another_branch_is_refused_and_untouched(self):
+        self.harness_worktree()
+        git(self.wt, "switch", "-c", "7-other")
+        (self.wt / "n.txt").write_text("n\n")
+        r = self.rescue_n()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("7-other", r.stderr)
+        self.assertEqual(git(self.wt, "branch", "--show-current").strip(), "7-other")
+        self.assertEqual(git(self.env.repo, "branch", "--list", "42-*").split(), [])
+
+    def test_a_detached_head_is_refused_and_untouched(self):
+        self.harness_worktree()
+        git(self.wt, "switch", "--detach")
+        r = self.rescue_n()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("detached", r.stderr)
+        self.assertTrue(self.wt.exists())
+
+    def test_a_ticket_number_without_a_title_uses_a_plain_slug(self):
+        self.harness_worktree()
+        (self.wt / "new.txt").write_text("n\n")
+        r = self.env.run("rescue", "42", check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("branch: created 42-rescue", r.stdout.splitlines())
+
+    def test_a_ticket_number_finds_the_worktree_on_the_ticket_branch(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        r = self.env.run("rescue", "42", "--title", "T", check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("branch: created", r.stdout)
+        self.assertEqual(self.remote_log().splitlines()[0], "chore(wip): T")
+
+    def test_a_ticket_number_with_no_worktree_has_nothing_to_rescue(self):
+        r = self.env.run("rescue", "42", check=False)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "nothing to rescue: no worktree on #42"))
+
+    def test_a_rate_limit_over_the_budget_leaves_the_overlap_unchecked_and_exits_0(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        self.env.set_gh([{"args": ["api"], "exit": 1,
+                          "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
+        with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            r = self.rescue()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines()[-1],
+                         "overlap: unchecked (rate limited; re-run holds before dispatching into these files)")
+        self.assertFalse(self.wt.exists())
+
+    def load_rescue(self):
+        import importlib.machinery
+        import importlib.util
+        sys.path.insert(0, str(SCRIPT.parent))
+        loader = importlib.machinery.SourceFileLoader("rescue_mod", str(SCRIPT))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("rescue_mod", loader))
+        loader.exec_module(mod)
+        return mod
+
+    def overlap_with(self, replies):
+        mod = self.load_rescue()
+        waits = []
+        with unittest.mock.patch.object(mod.common, "run", side_effect=lambda *a, **k: replies.pop(0)), \
+                unittest.mock.patch.object(mod.github, "_wait_for_shared_reset", side_effect=waits.append), \
+                unittest.mock.patch("builtins.print") as out:
+            code = mod.overlap(Path("."), ["a.py"], 42)
+        return code, waits, out
+
+    def test_a_rate_limited_overlap_check_is_retried_then_succeeds(self):
+        mod = self.load_rescue()
+        limited = mod.common.Run(2, "", "holds: gh: rate limit until 2026-01-01T00:00:00Z")
+        replies = [limited, mod.common.Run(0, "", "")]
+        code, waits, out = self.overlap_with(replies)
+        self.assertEqual((code, len(waits), replies), (0, 1, []))
+        out.assert_called_with("overlap: none", flush=True)
+
+    def test_githubs_secondary_limit_and_abuse_detection_text_count_as_rate_limited(self):
+        mod = self.load_rescue()
+        for text in ("You have exceeded a secondary rate limit", "abuse detection mechanism triggered"):
+            self.assertTrue(mod.rate_limited(mod.common.Run(2, "", text)), text)
+        self.assertFalse(mod.rate_limited(mod.common.Run(2, "", "HTTP 502")))
+        self.assertFalse(mod.rate_limited(mod.common.Run(1, "", "secondary rate limit")))
+
+    def test_an_overlap_check_that_stays_rate_limited_is_unchecked_after_the_tries(self):
+        mod = self.load_rescue()
+        limited = mod.common.Run(2, "", "holds: gh: rate limit until 2026-01-01T00:00:00Z")
+        code, waits, out = self.overlap_with([limited] * mod.OVERLAP_TRIES)
+        self.assertEqual((code, len(waits)), (0, mod.OVERLAP_TRIES - 1))
+        out.assert_called_with("overlap: unchecked (rate limited; re-run holds before dispatching into these files)",
+                               flush=True)
 
     def test_rescue_never_calls_gh_itself_or_forces(self):
         src = SCRIPT.read_text()
