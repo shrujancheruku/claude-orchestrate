@@ -35,6 +35,8 @@ class MergeTest(MergeMixin, unittest.TestCase):
         e = self.env.events()
         self.assertEqual([(x["kind"], x["ref"], x["outcome"]) for x in e], [("merge", 7, "merged")])
         self.assertTrue(e[0]["branch_deleted"])
+        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+        self.assertEqual(p.stdout.count("next:"), 1)
 
     def test_no_session_refuses_before_the_merge(self):
         # The merged event is written after the merge; refusing then would exit 2 on a merge that happened.
@@ -44,6 +46,7 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertEqual(self.called(list(PR_MERGE)), [])
         self.assertEqual(len(p.stderr.strip().splitlines()), 1, p.stderr)
+        self.assertEqual(p.stdout, "next: could-not-run\n")
 
     def test_head_moved_is_a_refusal(self):
         self.seq({PR_VIEW: [pr("OPEN")], ISSUE_VIEW: OPEN_ISSUE,
@@ -51,6 +54,7 @@ class MergeTest(MergeMixin, unittest.TestCase):
         p = self.merge()
         self.assertEqual(p.returncode, 1)
         self.assertIn("sha=abc123", self.called(list(PR_MERGE))[0])
+        self.assertRegex(p.stdout.splitlines()[-1], r"^next: ask-user merge refused for PR #7: ")
         self.assertEqual(self.deletes(), [])
         self.assertEqual(self.called(list(ISSUE_CLOSE)[:3]), [])
         self.assertTrue(self.local_branch())
@@ -167,6 +171,7 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertEqual(self.deletes(), [])
         self.assertEqual(self.called(list(ISSUE_CLOSE)[:3]), [])
         self.assertEqual(self.env.events()[0]["outcome"], "timeout")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: retry")
 
     def test_refused_merge_fails(self):
         self.seq({PR_VIEW: [pr("OPEN")], PR_MERGE: [{"exit": 1, "stderr": "Pull request is not mergeable"}]})
@@ -181,10 +186,13 @@ class MergeTest(MergeMixin, unittest.TestCase):
         p = self.merge()
         self.assertEqual(p.returncode, 1)
         self.assertEqual(self.env.events()[0]["outcome"], "closed")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user PR #7 closed without merging")
 
     def test_unreadable_pr(self):
         self.seq({PR_VIEW: [{"exit": 1, "stderr": "boom"}]})
-        self.assertEqual(self.merge().returncode, 2)
+        p = self.merge()
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(p.stdout, "next: could-not-run\n")
 
     def test_unlinked_ticket_reported_not_closed(self):
         self.seq({PR_VIEW: [pr("MERGED", issues=(5,))], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
@@ -278,11 +286,12 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertEqual(p.returncode, 2, p.stdout)
         self.assertNotIn("refused", p.stdout)
         self.assertIn("could not run gh", p.stderr)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: could-not-run")
 
     def test_missing_gh_is_could_not_run(self):
         p = self.env.run("merge", "7", check=False, no_gh=True)
         self.assertEqual(p.returncode, 2)
-        self.assertEqual(p.stdout, "")
+        self.assertEqual(p.stdout, "next: could-not-run\n")
         self.assertEqual(len(p.stderr.strip().splitlines()), 1, p.stderr)
         self.assertNotIn("Traceback", p.stderr)
         self.assertEqual(self.env.events(), [])
@@ -293,10 +302,15 @@ class MergeTest(MergeMixin, unittest.TestCase):
                 self.seq({PR_VIEW: [{"stdout": reply}]})
                 p = self.merge()
                 self.assertEqual(p.returncode, 2, p.stdout)
-                self.assertEqual(p.stdout, "")
+                self.assertEqual(p.stdout, "next: could-not-run\n")
                 self.assertEqual(len(p.stderr.strip().splitlines()), 1, p.stderr)
                 self.assertNotIn("Traceback", p.stderr)
                 self.assertEqual(self.called(list(PR_MERGE)), [])
+
+    def test_help_prints_no_verdict(self):
+        p = self.env.run("merge", "--help", check=False)
+        self.assertEqual(p.returncode, 0)
+        self.assertNotIn("\nnext: ", p.stdout)
 
 
 if __name__ == "__main__":
