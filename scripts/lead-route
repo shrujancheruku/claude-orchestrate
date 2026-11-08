@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""lead-route --lead live|none --cap <n> [--repo PATH] [--state FILE] [--now ISO] : route the lead's stops.
+"""lead-route --lead live|none --cap <n> [--repo PATH] [--state FILE] [--snapshot FILE] [--now ISO] : route the lead's stops.
 
 Decides, and prints one verdict per line; it writes nothing to the tracker or the state file. Run it once
-per pass, after reconcile, and the orchestrator applies each line word for word. Reads the open issues
-(newest 100 by update, one `gh api graphql`), the open and merged PRs and the claims (scripts/claims.py, which reads
+per pass, after reconcile, and the orchestrator applies each line word for word. Reads the tracker as one
+Snapshot (scripts/tracker.py: every open issue, the open and merged PRs; --snapshot FILE reads the file `snapshot`
+wrote instead of fetching) and the claims (scripts/claims.py, which reads
 the state file and the worktrees); the stop comment is the newest comment whose first line is the marker
 `> *Stopped for the lead.*`. Verdicts, in ticket order:
     RESUME #<n> <agent-id>   claimed, no needs-lead, a worker in the state file, stop comment newer than its last report
@@ -16,7 +17,7 @@ the state file and the worktrees); the stop comment is the newest comment whose 
                              Do nothing; the ticket still counts against the cap (ADR 0009)
     FALLBACK #<n>            needs-lead with --lead none: the lead is gone; the ticket is handed back
     UNCAP #<n>               needs-lead, claimed, live lead, stop comment more than 30 minutes old
-    HANDBACK #<n> blocked-by #<m>...  claimed, open blockers (the lead split it): hand it back, keep the branch
+    HANDBACK #<n> blocked-by #<m>...  claimed, open blockers, native or on the body's `Blocked by:` line (the lead split it): hand it back, keep the branch
     ABANDON #<n>             closed `wontfix` while still claimed: stop the worker, close its PR unmerged, keep the branch
     HOLD-PR #<n> <pr>        needs-lead from an ADR conflict, an open non-draft PR, live lead: hold the PR before merge, no time limit
     ASK-DEV #<n> <pr>        the same with --lead none: the developer decides; the PR stays held
@@ -45,6 +46,7 @@ from pathlib import Path
 import claims
 import common
 import github
+import tracker
 from repo import STATE, first_line, parse_ts, ticket_of_branch
 
 STOP_MARKER = "> *Stopped for the lead.*"  # the first line of every stop comment; run posts it verbatim
@@ -59,57 +61,21 @@ NEEDS_LEAD = "needs-lead"
 LEAD_LABEL = "lead"  # a ticket the lead owns: its PR is the pipeline's, and no worker is dispatched for it
 UNCAP_AFTER = timedelta(minutes=30)
 
-# Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
-ABANDON_QUERY = """query($owner: String!, $name: String!) {
-  repository(owner: $owner, name: $name) {
-    issues(first: 30, states: CLOSED, labels: ["wontfix"], orderBy: {field: UPDATED_AT, direction: DESC}) {
-      nodes { number assignees(first: 1) { totalCount } }
-    }
-  }
-}"""
-
-
-def edit_times(node) -> list:
-    nodes = ((node or {}).get("userContentEdits") or {}).get("nodes") or []
-    return [t for t in (parse_ts(n.get("editedAt")) for n in nodes) if t]
-
-
 def malformed(what):
     common.die(f"lead-route: cannot run: gh returned an unexpected reply ({what})")
 
 
-def load_repo(root):
-    return github.repo_info(root)
-
-
-def load_abandoned(root, repo):
-    """Numbers of closed `wontfix` tickets that are still assigned."""
-    data = github.call_json("api", "graphql", "-f", f"query={ABANDON_QUERY}",
-                            "-F", f"owner={repo['owner']['login']}", "-F", f"name={repo['name']}", cwd=root)
-    try:
-        nodes = data["data"]["repository"]["issues"]["nodes"]
-        return {int(n["number"]) for n in nodes if ((n.get("assignees") or {}).get("totalCount") or 0) > 0}
-    except (KeyError, TypeError, ValueError):
-        malformed("closed issues")
-
-
-def load_issues(root, repo):
-    """Open issues as plain dicts: number, claimed, labels, blockers, body_edits, comments (body, created, edits)."""
-    nodes = github.open_issues(repo, cwd=root)
-    try:
-        issues = []
-        for node in nodes:
-            comments = [{"body": c.get("body") or "", "created": parse_ts(c.get("createdAt")),
-                         "edits": edit_times(c)} for c in (node.get("comments") or {}).get("nodes") or []]
-            issues.append({"number": int(node["number"]),
-                           "claimed": ((node.get("assignees") or {}).get("totalCount") or 0) > 0,
-                           "labels": {x["name"] for x in (node.get("labels") or {}).get("nodes") or []},
-                           "blockers": sorted(int(b["number"]) for b in (node.get("blockedBy") or {}).get("nodes") or []
-                                              if str(b.get("state") or "").upper() == "OPEN"),
-                           "body_edits": edit_times(node), "comments": comments})
-    except (KeyError, TypeError, ValueError):
-        malformed("issues")
-    return issues
+def load_issues(snap):
+    """The Snapshot's open issues as route() takes them: the Snapshot's own dicts, with the blockers its one rule finds
+    (native or body), and the edit and comment times parsed."""
+    def times(ts):
+        return [t for t in (parse_ts(x) for x in ts) if t]
+    out = []
+    for i in snap.issues:
+        comments = [{"body": c["body"], "created": parse_ts(c["created"]), "edits": times(c["edits"])} for c in i["comments"]]
+        out.append(dict(i, blockers=sorted(n for n, _ in snap.blockers(i)), body_edits=times(i["body_edits"]),
+                        comments=comments))
+    return out
 
 
 def open_pr_heads(prs):
@@ -246,6 +212,7 @@ def main(argv=None) -> int:
     ap.add_argument("--cap", required=True, type=int, help="the slot cap in force (config slots, or the greedy cap)")
     ap.add_argument("--repo", default=".", help="repo root; gh runs there and the state file is read under it")
     ap.add_argument("--state", default=None, help="state file (default: <repo>/.claude/orchestrate-state.json)")
+    ap.add_argument("--snapshot", default=None, help="read the tracker from this file (scripts/snapshot) instead of fetching")
     ap.add_argument("--now", default=None, help="the time now, as ISO 8601 (tests; default: the current time)")
     args = ap.parse_args(argv)
     if args.cap < 1:
@@ -256,14 +223,10 @@ def main(argv=None) -> int:
     root = Path(args.repo).resolve()
     state_path = Path(args.state) if args.state else root / STATE
     try:
-        repo = load_repo(root)
-        base = (repo.get("defaultBranchRef") or {}).get("name")
-        if not isinstance(base, str):
-            raise github.GhError(github.MALFORMED, "gh returned no default branch")
-        issues = load_issues(root, repo)
-        abandoned = load_abandoned(root, repo)
-        prs = github.open_prs_with_heads(cwd=root)
-        merged = github.merged_prs(base, cwd=root)
+        snap = tracker.Snapshot.open(args.snapshot, root)
+        issues = load_issues(snap)
+        abandoned = set(snap.abandoned)
+        prs, merged = snap.prs, snap.merged
         # The claims are read once here (the state file, the worktrees, the PRs); `changes` is a no-op because routing
         # never needs the dirty and unpushed counts, and a git failure there would stop a pass that never needed them.
         # So Claim.changes is None here: route() must never read claim.changes.

@@ -6,19 +6,25 @@ Each function runs one `gh` call and returns parsed data or raises `GhError`, wh
   missing    no `gh` on PATH (retrying cannot help)
   failed     `gh` exited non-zero (message = its stderr, else stdout, on one line)
              (one whose message says git has no repository or working directory counts as could not run)
+             (a secondary rate limit is retried with backoff first; primary-quota exhaustion is not)
+  ratelimited a rate limit that retrying here did not clear (hourly quota, a wait over the budget, or every try used)
   malformed  `gh` printed unparseable JSON, or JSON of the wrong shape for the call (a `[]` for a PR)
-`could_not_run(e)` maps missing and malformed to each script's "could not run" exit (2).
+`could_not_run(e)` maps missing, malformed and ratelimited to each script's "could not run" exit (2).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
+import time
 import urllib.parse
+from pathlib import Path
 
 import common
 
-MISSING, FAILED, MALFORMED = "missing", "failed", "malformed"
+MISSING, FAILED, MALFORMED, RATELIMITED = "missing", "failed", "malformed", "ratelimited"
 # A 404/422 on a branch ref: the host already removed it.
 GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exist", re.I)
 
@@ -49,6 +55,15 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
   }
 }"""
 
+
+# Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
+ABANDON_QUERY = """query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 30, states: CLOSED, labels: ["wontfix"], orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number assignees(first: 1) { totalCount } }
+    }
+  }
+}"""
 
 THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -88,17 +103,155 @@ class GhError(Exception):
 
 def could_not_run(e: GhError) -> bool:
     """True when the script should exit 2 ("could not run") rather than treat the call as one more failure."""
-    return e.kind in (MISSING, MALFORMED) or (e.kind == FAILED and bool(NO_REPO.search(e.message)))
+    return e.kind in (MISSING, MALFORMED, RATELIMITED) or (e.kind == FAILED and bool(NO_REPO.search(e.message)))
+
+
+# GitHub's secondary rate limit (too many concurrent or back-to-back requests), and the "API rate limit
+# (already) exceeded" wording it shares with the hourly quota. gh prints these on stderr (with `-i`, the headers too).
+RATE_LIMITED = re.compile(r"secondary rate limit|abuse detection|API rate limit (?:already )?exceeded", re.I)
+RETRY_AFTER = re.compile(r"retry-after:?\s*(\d+)", re.I)
+QUOTA_EMPTY = re.compile(r"x-ratelimit-remaining:?\s*0\b", re.I)
+QUOTA_RESET = re.compile(r"x-ratelimit-reset:?\s*(\d+)", re.I)
+TRIES = 5
+# A reset further off than this is the hourly quota running out: waiting it out here would stall the script.
+PRIMARY_RESET_AFTER = 120
+
+# Injectable so tests need not wait.
+sleep = time.sleep
+clock = time.time
+
+# Written on a rate-limit reply so every other process waits too. The limit is per GitHub user, so the file is
+# machine-wide per host: $XDG_CACHE_HOME/orchestrate/github-ratelimit-<host>.json (~/.cache when unset).
+# Where that can't be written it falls back to <git common dir>/orchestrate-ratelimit.json.
+FALLBACK_FILE = "orchestrate-ratelimit.json"
+DEFAULT_PAUSE = 60  # no retry-after or reset header: assume a minute
+WAIT_BUDGET = 120   # the longest a call waits for the shared reset before exiting 2
+HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
+
+
+def _utc(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+_paths = {}  # (cwd, cache dir, host) -> the file, resolved once so the fallback is announced once
+
+
+def _state_path(cwd) -> Path:
+    key = (str(cwd), os.environ.get("XDG_CACHE_HOME"), os.environ.get("GH_HOST"))
+    if key not in _paths:
+        _paths[key] = _resolve_state_path(cwd)
+    return _paths[key]
+
+
+def _resolve_state_path(cwd) -> Path:
+    cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    host = os.environ.get("GH_HOST") or "github.com"
+    path = Path(cache) / "orchestrate" / f"github-ratelimit-{host}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if os.access(path.parent, os.W_OK):
+            return path
+    except OSError:
+        pass
+    p = common.run("git", "rev-parse", "--git-common-dir", cwd=cwd)
+    if p.returncode != 0 or not p.stdout.strip():
+        return path  # no repository either: reads find nothing and writes are dropped
+    fallback = Path(cwd or ".") / p.stdout.strip() / FALLBACK_FILE
+    print(f"github: {path.parent} is not writable; sharing the rate-limit backoff through {fallback}", file=sys.stderr)
+    return fallback
+
+
+def _shared_reset(cwd) -> float:
+    """The reset epoch another process recorded, or 0 when there is none or it has passed (the file is then removed)."""
+    path = _state_path(cwd)
+    try:
+        reset = float(json.loads(path.read_text())["reset"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+    if reset > clock():
+        return reset
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return 0
+
+
+def _record_reset(cwd, reset: float) -> None:
+    """Keep the later of the recorded reset and `reset`; best effort, a write failure only loses the sharing."""
+    path = _state_path(cwd)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"reset": max(reset, _shared_reset(cwd))}))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _wait_for_shared_reset(cwd) -> None:
+    reset = _shared_reset(cwd)
+    if not reset:
+        return
+    if reset - clock() > WAIT_BUDGET:
+        raise GhError(RATELIMITED, f"rate limit until {_utc(reset)}")
+    sleep(max(reset - clock(), 0))
+
+
+def _rate_limit(text: str):
+    """None when `text` is no rate limit; else (retry-after seconds or None, reset epoch or None, quota empty)."""
+    if not RATE_LIMITED.search(text):
+        return None
+    after, reset = RETRY_AFTER.search(text), QUOTA_RESET.search(text)
+    return (int(after.group(1)) if after else None, int(reset.group(1)) if reset else None,
+            bool(QUOTA_EMPTY.search(text)))
+
+
+def _evidence(text: str) -> str:
+    """Which limit fired: the HTTP status, the rate-limit headers gh showed, then the first line of the body."""
+    status = HTTP_STATUS.search(text)
+    parts = [f"HTTP {status.group(1)}"] if status else []
+    for name in ("retry-after", "x-ratelimit-remaining", "x-ratelimit-reset"):
+        m = re.search(rf"{name}:?\s*(\d+)", text, re.I)
+        if m:
+            parts.append(f"{name}: {m.group(1)}")
+    first = next((ln.strip() for ln in text.splitlines()
+                  if ln.strip() and not re.match(r"(retry-after|x-ratelimit-\S+):", ln.strip(), re.I)), "")
+    return f"{first} [{', '.join(parts)}]" if parts else first
 
 
 def call(*args, cwd=None) -> str:
-    """Run `gh <args>` and return stdout; raise GhError (missing or failed)."""
-    p = common.run("gh", *args, cwd=cwd)
-    if p.returncode == common.NOT_FOUND:
-        raise GhError(MISSING, common.one_line(p.stderr))
-    if p.returncode != 0:
-        raise GhError(FAILED, common.one_line(p.stderr or p.stdout))
-    return p.stdout
+    """Run `gh <args>` and return stdout; raise GhError (missing, failed or ratelimited).
+
+    Before the first try it waits out a reset another process recorded in STATE_FILE (or raises `ratelimited`
+    when that is over WAIT_BUDGET away). A secondary rate limit is then retried up to TRIES times, sleeping the
+    `retry-after` seconds when gh shows them, else until the reset it just recorded (DEFAULT_PAUSE), and recording its reset in
+    STATE_FILE for the others. The hourly quota (remaining 0, reset far off) raises `ratelimited` at once with the
+    reset time, since waiting for it would stall the caller. A rate-limit message carries the HTTP status and headers.
+    """
+    _wait_for_shared_reset(cwd)
+    for attempt in range(1, TRIES + 1):
+        p = common.run("gh", *args, cwd=cwd)
+        if p.returncode == common.NOT_FOUND:
+            raise GhError(MISSING, common.one_line(p.stderr))
+        if p.returncode == 0:
+            return p.stdout
+        text = f"{p.stderr}\n{p.stdout}"
+        limit = _rate_limit(text)
+        if limit is None:
+            raise GhError(FAILED, common.one_line(p.stderr or p.stdout))
+        message = common.one_line(_evidence(text))
+        after, reset, empty = limit
+        if empty and reset is not None and reset - clock() > PRIMARY_RESET_AFTER:
+            raise GhError(RATELIMITED, f"{message} (hourly quota used up; resets at {_utc(reset)})")
+        # gh shows no headers on a plain failure, so a bare rate limit waits out the recorded reset (a minute),
+        # not a short ladder that would burn all the tries inside one limit window.
+        pause = after if after is not None else (reset - clock() if reset is not None and reset > clock() else DEFAULT_PAUSE)
+        _record_reset(cwd, clock() + pause)
+        if attempt == TRIES:
+            raise GhError(RATELIMITED, message)
+        print(f"github: rate limited, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
+        sleep(pause)
 
 
 def call_json(*args, shape=dict, cwd=None):
@@ -166,14 +319,6 @@ def issue_state(issue, cwd=None) -> str:
     return str(call_json("issue", "view", str(issue), "--json", "state", cwd=cwd).get("state"))
 
 
-def open_blockers(issue, cwd=None) -> int:
-    """How many open issues block `issue` (the tracker's own dependency summary)."""
-    out = call("api", f"repos/{{owner}}/{{repo}}/issues/{issue}", "--jq", ".issue_dependencies_summary.blocked_by", cwd=cwd)
-    if not out.strip().isdigit():
-        raise GhError(MALFORMED, f"blocked_by is not a number: {common.one_line(out) or 'empty reply'}")
-    return int(out.strip())
-
-
 # Check results that block a merge: failed ones, and ones still going (a missing result counts as going).
 CI_BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
 CI_PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
@@ -212,14 +357,14 @@ def close_issue(issue, cwd=None) -> None:
 
 
 def open_prs(base: str, cwd=None) -> list:
-    return call_json("pr", "list", "--state", "open", "--base", base, "--json",
+    return call_json("pr", "list", "--state", "open", "--base", base, "--limit", "200", "--json",
                      "number,headRefName,isCrossRepository,isDraft", shape=list, cwd=cwd)
 
 
 def open_prs_with_heads(cwd=None) -> list:
     """Every open PR (any base) with its number, branch and head commit: what a worker's report is checked against."""
     return call_json("pr", "list", "--state", "open", "--limit", "200", "--json",
-                     "number,headRefName,headRefOid,isDraft", shape=list, cwd=cwd)
+                     "number,headRefName,headRefOid,isDraft,baseRefName", shape=list, cwd=cwd)
 
 
 def merged_prs(base: str, cwd=None) -> list:
@@ -341,3 +486,26 @@ def pr_commit_shas(pr, cwd=None) -> list:
     out = call("api", "--paginate", f"repos/{{owner}}/{{repo}}/pulls/{str(pr).lstrip('#')}/commits",
                "--jq", ".[].sha", cwd=cwd)
     return out.split()
+
+
+def abandoned_tickets(repo: dict, cwd=None) -> list:
+    """Numbers of closed `wontfix` tickets that are still assigned (the newest 30 closed ones)."""
+    try:
+        owner, name = repo["owner"]["login"], repo["name"]
+    except (KeyError, TypeError):
+        raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
+    data = call_json("api", "graphql", "-f", f"query={ABANDON_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}", cwd=cwd)
+    try:
+        nodes = data["data"]["repository"]["issues"]["nodes"]
+        return sorted(int(n["number"]) for n in nodes if ((n.get("assignees") or {}).get("totalCount") or 0) > 0)
+    except (KeyError, TypeError, ValueError):
+        raise GhError(MALFORMED, "gh returned an unexpected reply (closed issues)") from None
+
+
+def add_blocked_by(child, blocker, cwd=None) -> None:
+    """Add the native `blocked_by` edge: issue `child` is blocked by issue `blocker` (the tracker doc's Blocking command)."""
+    out = call("api", f"repos/{{owner}}/{{repo}}/issues/{blocker}", "--jq", ".id", cwd=cwd).strip()
+    if not out.isdigit():
+        raise GhError(MALFORMED, f"issue id is not a number: {common.one_line(out) or 'empty reply'}")
+    call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{child}/dependencies/blocked_by",
+         "-F", f"issue_id={out}", cwd=cwd)

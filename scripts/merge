@@ -51,6 +51,7 @@ import github
 import replay
 import repo
 import runlog
+import tracker
 from repo import remove_worktree
 
 # "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
@@ -142,12 +143,13 @@ def merge_rule(cwd, pr, v, head):
     if ticket is None:
         return None  # no ticket, no dependency to wait for
     try:
-        blockers = github.open_blockers(ticket, cwd)
-    except github.GhError as e:
-        say(f"merge: could not read the blockers of #{ticket} for PR #{pr}: {e.message}")
+        blockers = tracker.Snapshot(cwd).blockers(ticket)
+    except (github.GhError, KeyError, TypeError, ValueError) as e:
+        say(f"merge: could not read the blockers of #{ticket} for PR #{pr}: {getattr(e, 'message', e)}")
         return 2
     if blockers:
-        say(f"PR #{pr} is not ready: ticket #{ticket} has {blockers} open blocker(s)")
+        say(f"PR #{pr} is not ready: ticket #{ticket} has {len(blockers)} open blocker(s): "
+            + " ".join(f"#{n} (body)" if from_body else f"#{n}" for n, from_body in blockers))
         return 1
     return None
 

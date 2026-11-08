@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv, git  # noqa: E402
+import github  # noqa: E402
 
 
 READY_CONFIG = ("## Review\n\n- **Risk paths** (any PR touching them is reviewed as L): `auth/*`\n"
@@ -18,6 +19,14 @@ GREEN = [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"},
 
 THREADS_NONE = {"stdout": json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
     "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}})}
+
+
+def issues_reply(ticket, blockers=(), body="", open_others=()):
+    """The open-issues reply: the ticket (native `blockers` as (number, state), `body`) and other open issues."""
+    nodes = [{"number": ticket, "body": body, "blockedBy": {"nodes": [{"number": n, "state": st} for n, st in blockers]}}]
+    nodes += [{"number": n} for n in open_others]
+    return {"stdout": json.dumps({"data": {"repository": {"issues": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}})}
 
 
 def threads_reply(*nodes):
@@ -52,8 +61,8 @@ class ReadinessTest(unittest.TestCase):
         git(self.repo, "checkout", "-q", "main")
         return sha
 
-    def merge(self, head, behind="0", update=None, approved="", flag=True, checks=GREEN, blockers="0\n",
-              branch="feat-br", closing=(), ticket=9, threads=None):
+    def merge(self, head, behind="0", update=None, approved="", flag=True, checks=GREEN, blockers=(),
+              branch="feat-br", closing=(), ticket=9, threads=None, issues=None):
         pr_json = {"state": "OPEN", "headRefName": branch, "headRefOid": head, "statusCheckRollup": checks,
                    "isCrossRepository": False, "closingIssuesReferences": [{"number": n} for n in closing]}
         view = {"stdout": json.dumps(pr_json)}
@@ -61,11 +70,11 @@ class ReadinessTest(unittest.TestCase):
         self.env.set_gh([
             {"args": ["pr", "view"], "seq": [view, merged]},
             {"args": ["repo", "view"], "stdout": '{"defaultBranchRef":{"name":"main"},"owner":{"login":"o"},"name":"r"}'},
+            {"args": ["api", "graphql", "-f", "query=" + github.ISSUES_QUERY],
+             **(issues if issues is not None else issues_reply(ticket, blockers))},
             {"args": ["api", "graphql"], **(threads if threads is not None else THREADS_NONE)},
             {"args": ["api", f"repos/{{owner}}/{{repo}}/compare/main...{branch}", "--jq", ".behind_by"],
              "stdout": behind + "\n"},
-            {"args": ["api", f"repos/{{owner}}/{{repo}}/issues/{ticket}", "--jq", ".issue_dependencies_summary.blocked_by"],
-             "stdout": blockers},
             {"args": ["pr", "update-branch"], **(update or {"exit": 0})},
             {"args": ["pr", "merge"], "exit": 0},
             {"args": ["pr", "list"], "stdout": "[]"},
@@ -177,37 +186,42 @@ class ReadinessTest(unittest.TestCase):
 
     def test_open_blocker_on_the_closing_reference_refuses(self):
         head = self.push({"b.txt": "x\n"})
-        p = self.merge(head, closing=[9], blockers="2\n")
+        p = self.merge(head, closing=[9], blockers=[(1, "OPEN"), (2, "OPEN")])
         self.refused(p, "ticket #9 has 2 open blocker(s)")
 
     def test_open_blocker_on_the_branch_number_refuses(self):
         head = self.push({"b.txt": "x\n"})
-        p = self.merge(head, branch="9-feat", blockers="1\n")
+        p = self.merge(head, branch="9-feat", blockers=[(1, "OPEN")])
         self.refused(p, "ticket #9 has 1 open blocker(s)")
 
     def test_branch_number_wins_over_a_closing_reference(self):
         head = self.push({"b.txt": "x\n"})
-        p = self.merge(head, branch="9-feat", closing=[4], blockers="1\n")
+        p = self.merge(head, branch="9-feat", closing=[4], blockers=[(1, "OPEN")])
         self.refused(p, "ticket #9")
-        self.assertEqual([c for c in self.env.gh_calls() if "issues/4" in " ".join(c)], [])
 
     def test_unreadable_blockers_exit_2_and_merge_nothing(self):
         head = self.push({"b.txt": "x\n"})
-        p = self.merge(head, closing=[9], blockers="lots\n")
+        p = self.merge(head, closing=[9], issues={"stdout": "lots"})
         self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
         self.assertIn("blockers of #9", p.stdout + p.stderr)
         self.assertEqual(self.called(["pr", "merge"]), [])
 
     def test_closed_blockers_pass(self):
         head = self.push({"b.txt": "x\n"})
-        p = self.merge(head, closing=[9], blockers="0\n")
+        p = self.merge(head, closing=[9], blockers=[(8, "CLOSED")])
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(len(self.called(["pr", "merge"])), 1)
 
     def test_no_ticket_passes_without_asking_for_blockers(self):
         head = self.push({"b.txt": "x\n"})
-        self.assertEqual(self.merge(head, blockers="3\n").returncode, 0)
-        self.assertEqual([c for c in self.env.gh_calls() if "issues" in " ".join(c)], [])
+        self.assertEqual(self.merge(head, blockers=[(3, "OPEN")]).returncode, 0)
+        self.assertEqual([c for c in self.env.gh_calls() if "query=" + github.ISSUES_QUERY in c], [])
+
+    def test_a_body_only_blocker_refuses_too(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, closing=[9], issues=issues_reply(9, body="Blocked by: #5", open_others=[5]))
+        self.refused(p, "ticket #9 has 1 open blocker(s): #5 (body)")
+        self.assertEqual(self.called(["pr", "merge"]), [])
 
     def test_without_the_flag_ci_is_not_checked(self):
         head = self.push({"b.txt": "x\n"})

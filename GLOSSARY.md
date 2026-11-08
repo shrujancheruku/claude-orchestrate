@@ -101,7 +101,7 @@ The files a ticket is expected to change, as a prediction rather than a fence. S
 _Avoid_: file list, change set
 
 **Held path**:
-A file that another ticket holds: in an open PR's diff, in a building ticket's touch map, in the changed files of an **Elsewhere** ticket's live worktree, or under an exclusive hold. A ticket may not change one. `scripts/holds` is the one source of the rule: it decides what is held and whether a ticket overlaps it, and the brief's `Held paths:` line is its output. Source: `scripts/holds`, `skills/run/SKILL.md`.
+A file that another ticket holds: in an open PR's diff, in a building ticket's touch map (or, for this session's own worker with no record, its worktree's changes), in the changed files of an **Elsewhere** ticket's live worktree, or under an exclusive hold. A ticket may not change one. `scripts/holds` is the one source of the rule: it decides what is held and whether a ticket overlaps it, and the brief's `Held paths:` line is its output. Source: `scripts/holds`, `skills/run/SKILL.md`.
 _Avoid_: locked file, reserved path, blocked path
 
 **Exclusive hold**:

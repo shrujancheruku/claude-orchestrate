@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,10 +28,13 @@ RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
 def run_module(tests_dir, module):
     """Return (module, ok, seconds, output)."""
     path = os.pathsep.join(filter(None, [str(tests_dir), os.environ.get("PYTHONPATH", "")]))
-    env = dict(os.environ, PYTHONPATH=path)
     start = time.monotonic()
-    p = subprocess.run([sys.executable, "-m", "unittest", module], cwd=str(tests_dir), env=env,
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+    # A temp XDG_CACHE_HOME per module: tests that reach scripts/github.py must never read or write the
+    # developer's real rate-limit backoff file.
+    with tempfile.TemporaryDirectory() as cache:
+        env = dict(os.environ, PYTHONPATH=path, XDG_CACHE_HOME=cache)
+        p = subprocess.run([sys.executable, "-m", "unittest", module], cwd=str(tests_dir), env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
     out = p.stdout
     ran = RAN.search(out)
     ok = p.returncode == 0

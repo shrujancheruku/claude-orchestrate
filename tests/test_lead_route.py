@@ -6,6 +6,7 @@ Also the prompt side: `run` calls lead-route and restates neither the 30-minute 
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -152,8 +153,17 @@ class LeadRoute(unittest.TestCase):
     def test_elsewhere_when_another_sessions_worker_is_live_and_it_still_counts(self):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
         self.state({})
-        wt = self.lock_worktree(own_start_reason())
-        self.assertEqual(self.route(), (0, [f"ELSEWHERE #1 pid {os.getpid()} {wt}", "counted: 1 of 2"]))
+        other = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        wt = self.lock_worktree(own_start_reason(other.pid))
+        self.assertEqual(self.route(), (0, [f"ELSEWHERE #1 pid {other.pid} {wt}", "counted: 1 of 2"]))
+
+    def test_own_unrecorded_worker_is_building_so_nothing_is_redispatched_and_it_counts(self):
+        self.serve([issue(1, claimed=True, comments=[stop(10)])])
+        self.state({})
+        self.lock_worktree(own_start_reason())
+        self.assertEqual(self.route(), (0, ["counted: 1 of 2"]))
 
     def test_elsewhere_for_a_lock_that_does_not_parse_names_the_reason(self):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
@@ -354,7 +364,7 @@ class RouteFromClaims(unittest.TestCase):
     def test_elsewhere_claim_prints_pid_worktree_and_reason_when_unparsed(self):
         issues = [{"number": 1, "claimed": True, "labels": set(), "blockers": [], "body_edits": [],
                    "comments": [{"body": MARKER, "created": T0, "edits": []}]}]
-        found = {1: self.claim(1, "elsewhere", worktree="/wt/1-x", lock=("live", None, "held by hand"))}
+        found = {1: self.claim(1, "elsewhere", worktree="/wt/1-x", lock=("foreign-live", None, "held by hand"))}
         self.assertEqual(self.mod.route(issues, found, "live", 2, T0 + timedelta(minutes=60)),
                          ["ELSEWHERE #1 pid ? /wt/1-x (lock: held by hand)", "counted: 1 of 2"])
 
