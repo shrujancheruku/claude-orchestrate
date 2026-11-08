@@ -584,24 +584,6 @@ class Parsed:
         return [c for c in self.calls if c.tool == name]
 
 
-# The plugin's merge script, run as a command: at the start of the command or after `;`, `&`, `|`
-# or `(`, optionally behind python3 and in quotes (the script path is usually a quoted
-# "${CLAUDE_SKILL_DIR}/../../scripts/merge"). Checked on the raw command, because the quoted path
-# is exactly what a plain-word check would miss; anchoring at command position keeps
-# `grep scripts/merge` allowed.
-# Wrappers that still run it: VAR=1 assignments, env/nohup/time/exec/command/timeout <n>, an
-# interpreter (bash, sh, zsh, python3 [-I]) with its flags, and `sh -c '...'`. A bare `./merge`
-# counts after `cd <...>scripts &&`. A renamed or copied script is out of scope (a guardrail).
-_WRAP = (r"(?:(?:\w+=\S*|(?:\S*/)?(?:env|nohup|time|exec|command|timeout|bash|sh|zsh|python3?)"
-         r"(?:\s+-[-\w=]+)*(?:\s+\d+[smhd]?)?)\s+)*")
-_END = r"[\"']?(?=[\s\"';&|)]|$)"
-MERGE_SCRIPT = re.compile(
-    r"(?:^|[;&|(]|\s-c\s+[\"'])\s*(?:"
-    + _WRAP + r"[\"']?[^\s\"']*\bscripts/merge" + _END
-    + r"|cd\s+[^\s;&|]*scripts/?[\"']?\s*&&\s*" + _WRAP + r"[\"']?\./merge" + _END
-    + r")"
-)
-
 # The writes a reviewer may make: a comment review posted through the API (its JSON on a
 # heredoc) or through `gh pr review --comment`. The aimed command must be exactly one of
 # these shapes (see review_post); the payload is checked separately. A heredoc delimiter must be
@@ -1134,6 +1116,34 @@ def script_call(parsed: "Parsed", script: "re.Pattern", dynamic_ok: bool = False
     return None
 
 
+# The plugin's merge script, run as a command. Judged on the lexed command like verify and threads, so
+# words that merely name it (a heredoc body, a quoted argument, a commit message, a path given to grep)
+# are not a run of it (#327). The wrappers script_call skips (env, timeout, bash, python3 ...) still
+# count, and so do the two forms it can't see: a bare `./merge` after `cd <...>scripts &&`, and the
+# script inside `sh -c '...'`. A renamed or copied script is out of scope (a guardrail).
+MERGE_SCRIPT = re.compile(r"(?:^|/)scripts/merge$")
+
+
+def runs_merge(parsed: "Parsed", depth: int = 0) -> bool:
+    if script_call(parsed, MERGE_SCRIPT, dynamic_ok=True) is not None:
+        return True
+    cd_scripts = False
+    for cmd in parsed.cmds:
+        words = cmd.words
+        if cd_scripts and script_call(Parsed([cmd]), re.compile(r"^\./merge$")) is not None:
+            return True
+        cd_scripts = len(words) == 2 and basename(words[0]) == "cd" and re.search(r"scripts/?$", words[1].text) is not None
+        # `sh -c '<command>'`: the quoted text is a command line of its own.
+        for k, w in enumerate(words[:-1]):
+            if w.text == "-c" and k and basename(words[k - 1]) in ("sh", "bash", "zsh") and not words[k + 1].dynamic and depth < 3:
+                try:
+                    if runs_merge(Parsed(parse(words[k + 1].text)), depth + 1):
+                        return True
+                except ParseError:
+                    return True  # fail closed
+    return False
+
+
 def runs_verify(parsed: "Parsed") -> bool:
     return script_call(parsed, VERIFY_SCRIPT) is not None
 
@@ -1228,7 +1238,7 @@ def verdict(role: str, command: str, cwd: str, background: bool = False, timeout
     refused = threads_refusal(role, parsed)
     if refused:
         return refused
-    if MERGE_SCRIPT.search(command):
+    if runs_merge(parsed):
         return (f"{who} can't run a command that merges a PR (merging belongs to the orchestrator). "
                 f"{NEXT_STEP[role]}")
     for rule in RULES[role]:
