@@ -168,6 +168,8 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
         diff = github.call("pr", "diff", str(pr), cwd=cwd)
     except github.GhError as e:
         return None, e.message if e.kind == github.MALFORMED else f"gh failed: {e.message}"
+    except (KeyError, TypeError, ValueError) as e:  # a malformed issues reply: could not run, not a failed check
+        return None, f"gh returned a malformed issues reply ({e!r})"
     changed, added, lines = parse_diff(diff)
     found = secrets_found(added, lines)
     results.append(check("no secrets added", not found, "\n".join(found)))

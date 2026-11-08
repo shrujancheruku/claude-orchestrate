@@ -74,16 +74,15 @@ def render(issues, scope, labels, show_all) -> list:
     return out
 
 
-def fix_drift(issues, scope, root) -> list:
-    """Add the native edge for each drift in `scope`, record it in the issue dict, and return the lines to print."""
+def fix_drift(issues, scope, root) -> None:
+    """Add the native edge for each drift in `scope` and record it in the issue dict. Each `added` line prints as its
+    edge lands, so a later failure still says what was changed."""
     in_scope = {i["number"] for i in scope}
-    added = []
     for issue, n in tracker.drift(issues):
         if issue["number"] in in_scope:
             github.add_blocked_by(issue["number"], n, cwd=root)
             issue["blockers"] = sorted(issue["blockers"] + [n])
-            added.append(f"added #{issue['number']} blocked by #{n}")
-    return added
+            print(f"added #{issue['number']} blocked by #{n}", flush=True)
 
 
 def main(argv=None) -> int:
@@ -110,7 +109,8 @@ def main(argv=None) -> int:
         common.die(f"frontier: cannot run: malformed reply from gh ({e!r})")
     try:
         scope = tracker.scoped(issues, args.parent, args.ticket)
-        added = fix_drift(issues, scope, root) if args.fix_drift else []
+        if args.fix_drift:
+            fix_drift(issues, scope, root)
     except github.GhError as e:
         common.die(f"frontier: cannot run: gh failed: {e.message}")
     lines = render(issues, scope, labels, args.all)
@@ -120,7 +120,7 @@ def main(argv=None) -> int:
         # A named ticket always answers: its line, or the reason it is not takeable.
         reason = tracker.why_not(scope[0], labels, issues) if labels["ready"] in scope[0]["labels"] else None
         lines = [f"#{args.ticket} {reason or 'not ' + labels['ready']}"]
-    for line in added + lines:
+    for line in lines:
         print(line)
     runlog.append_event(root, "frontier", "ran", takeable=len(tracker.takeable(issues, labels)))
     return 0

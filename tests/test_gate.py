@@ -316,6 +316,18 @@ class GateTest(unittest.TestCase):
         self.prime(head="270-slug", blockers=0)
         self.assertEqual(self.gate().returncode, 0)
 
+    def test_a_malformed_issues_reply_is_gate_exit_2_not_a_failure(self):
+        self.prime(head="270-slug")
+        # `holds` (a subprocess) reads the issues first and gets a good reply; the gate's own read gets a bad node.
+        def reply(nodes):
+            return {"stdout": json.dumps({"data": {"repository": {"issues": {"nodes": nodes}}}})}
+        responses = json.loads(self.env.gh_state.read_text())["responses"]
+        self.env.set_gh([{"args": ["api", "graphql"], "seq": [reply([]), reply([{"title": "no number"}])]}] + responses)
+        r = self.gate()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("malformed issues reply", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
     def test_a_body_only_blocker_fails_dependencies(self):
         self.prime(head="270-slug", ticket_body="Blocked by: #5", body_blocked_by=[5])
         out = self.failed_only(self.gate(), "dependencies merged")
