@@ -132,8 +132,23 @@ def own_changes(cwd, approved, head, default):
 
 def merge_rule(cwd, pr, v, head):
     """Exit code 1 (or 2: could not read) when CI is not green on the head or the PR's ticket has an open blocker, else None."""
-    verdict, names = github.ci_verdict(v.get("statusCheckRollup"))
-    if verdict != "pass":
+    rollup = v.get("statusCheckRollup")
+    verdict, names = github.ci_verdict(rollup)
+    if not rollup:
+        # An empty rollup is green only when the head has no workflow files (ADR-0012): a repo that cannot
+        # report checks passes, one that can but has not reported yet stays pending. One contents call, only here.
+        try:
+            configured = github.has_workflows(head, cwd=cwd)
+        except github.GhError as e:
+            say(f"merge: could not read the workflow files of {head[:12]} for PR #{pr}: {e.message}")
+            return 2
+        if not configured:
+            say(f"PR #{pr}: ci: none configured (no workflow files on {head[:12]})")
+            verdict = "pass"
+        else:
+            say(f"PR #{pr} is not ready: ci: pending on {head[:12]}: workflows exist but no checks reported yet")
+            return 1
+    elif verdict != "pass":
         say(f"PR #{pr} is not ready: CI {verdict} on {head[:12]}: {', '.join(names) or 'no checks'}")
         return 1
     ticket = repo.ticket_of_branch(v.get("headRefName"))
