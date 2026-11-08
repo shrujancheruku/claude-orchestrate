@@ -6,8 +6,8 @@ first decides readiness and merges nothing unless the PR is ready: CI not green 
 pending, failed, cancelled or missing, or no checks at all while the head has workflow files; no checks and no workflow files is green, `ci: none configured`) or an open blocker on the PR's ticket (the
 branch's `<number>-` prefix, else the PR's closing reference), or an unresolved review thread (outdated or not, any author; the count line, then one
 `  <author> <url>` line each), is a refusal (exit 1, the clause named); a PR behind the default branch is
-updated with `gh pr update-branch` (exit 5); the worker's own change since the approved head, not counting
-what merges of the default branch brought in, that touches a config risk path or exceeds the S thresholds
+updated with `gh pr update-branch` (exit 5); the PR's own change since the approved head (what it adds to the
+default branch at each head, compared, so merges of the default branch count for nothing) that touches a config risk path or exceeds the S thresholds
 needs re-review (exit 6). Without the flag it merges as before.
 
 `gh pr merge`'s exit is unreliable (a 502 can hide a merge that landed; a retry can answer "merge
@@ -26,7 +26,7 @@ merge main into the branch (a plain push); rebase rebases it and pushes with --f
 A conflict the script can't resolve (a file that isn't shared, or overlapping words) aborts that
 branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
 After the sweep, each --also-approved PR=SHA (a PR the reviewer approved at that head, still waiting to merge)
-that is open, still at that head and behind the default branch is brought up to date with `gh pr update-branch`
+that is open, at that head (or with only merges of the default branch since) and behind the default branch is brought up to date with `gh pr update-branch`
 too, so their CI runs at the same time instead of one merge after another: one `PR #<n> updated (behind by <k>);
 wait for CI` line each. A PR that is behind and DIRTY is not updated: its line says to hand it back. An
 unapproved PR, or one pushed to since its approval, is left alone. None of this changes the exit code.
@@ -40,6 +40,7 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
+import difflib
 from pathlib import Path
 import re
 import sys
@@ -103,31 +104,65 @@ def say(msg):
 
 
 def own_changes(cwd, approved, head, default):
-    """(files, lines) the worker changed from `approved` to `head`, or None when git can't say.
+    """(files, lines) the PR changed from `approved` to `head`, or None when git can't say.
 
-    Counts only the worker's non-merge commits that the default branch lacks, so a merge of the default
-    branch (the sweep's, or update-branch) adds nothing; --cherry-pick drops commits a rebase re-made
-    with the same patch. The sum is per commit, so a line added and removed again still counts: the
-    guard errs towards re-review.
+    Compares what the PR adds to the default branch at each head (see pr_patch), so a merge of the
+    default branch (the sweep's, or update-branch) contributes nothing, even in a file the PR also
+    changes far from the PR's hunks; a rebase that kept the same change counts nothing either. Every
+    file whose patch differs between the two heads counts as a file (so it meets the risk-path check),
+    even when only its mode changed or it is an empty file added or removed; its lines are the patch
+    +/- lines that differ (context fixes where each sits, so a moved line counts), at least one. (set(), 0) means the PR's
+    own change is the same at both heads. An unknown SHA or a failed git call gives None, which callers
+    treat as needing re-review.
     """
     run("git", "fetch", "--quiet", "origin", cwd=cwd)
-    revs = run("git", "rev-list", "--no-merges", "--right-only", "--cherry-pick", f"{approved}...{head}",
-               "--not", f"origin/{default}", cwd=cwd)
-    if revs.returncode != 0:
-        return None
-    shas = revs.stdout.split()
-    if not shas:
-        return set(), 0
-    stat = run("git", "show", "--no-renames", "--numstat", "--format=", *shas, cwd=cwd)
-    if stat.returncode != 0:
+    old, new = pr_patch(cwd, approved, default), pr_patch(cwd, head, default)
+    if old is None or new is None:
         return None
     files, lines = set(), 0
-    for row in stat.stdout.splitlines():
-        parts = row.split("\t", 2)
-        if len(parts) == 3:
-            files.add(parts[2])
-            lines += sum(int(n) for n in parts[:2] if n.isdigit())
+    for path in set(old) | set(new):
+        a, b = old.get(path, ()), new.get(path, ())
+        if a == b:
+            continue
+        files.add(path)
+        # Changed lines only (not context, mode or file-name rows); a file that differs counts at least one,
+        # so a moved block (same +/- rows, other context) is one line with its file counted.
+        n = sum(1 for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+                if tag != "equal" for row in a[i1:i2] + b[j1:j2]
+                if row[:1] in ("+", "-") and not row.startswith(("+++ ", "--- ")))
+        lines += max(n, 1)
     return files, lines
+
+
+def pr_patch(cwd, sha, default):
+    """{file: tuple of patch lines} the PR adds on top of `origin/<default>` at `sha`, or None.
+
+    The diff from the merge base of `sha` and the default branch to `sha`, so what the default branch
+    brought in is not in it. Each file's tuple is its patch with the context lines, the mode lines and
+    a bare `@@` for each hunk header: the line numbers (which shift when the default branch edits the
+    file elsewhere) and blob hashes are dropped, the position of every change is kept by its context.
+    """
+    base = run("git", "merge-base", f"origin/{default}", sha, cwd=cwd)
+    if base.returncode != 0 or not base.stdout.strip():
+        return None
+    diff = run("git", "diff", "--no-renames", "--no-color", "--no-ext-diff", "-U3", "--src-prefix=a/", "--dst-prefix=b/", base.stdout.strip(), sha, cwd=cwd)
+    if diff.returncode != 0:
+        return None
+    files, cur, index = {}, None, ""
+    for row in diff.stdout.splitlines():
+        if row.startswith("diff --git "):
+            cur = files.setdefault(row.rpartition(" b/")[2], [])
+        elif cur is None:
+            continue
+        elif row.startswith("index "):
+            index = row  # a blob hash: kept only for a binary file, whose change shows nowhere else
+        elif row.startswith("Binary files"):
+            cur += [index, row]
+        elif row.startswith("@@"):
+            cur.append("@@")
+        else:
+            cur.append(row)
+    return {path: tuple(rows) for path, rows in files.items()}
 
 
 def merge_rule(cwd, pr, v, head):
@@ -372,8 +407,12 @@ def update_approved(cwd, merged_pr, default, specs):
             continue  # the PR just landed, or the default branch is unknown: nothing to update
         try:
             v = github.pr_view(n, "state,headRefName,headRefOid,isCrossRepository,mergeStateStatus", cwd)
-            if v.get("state") != "OPEN" or v.get("isCrossRepository") or v.get("headRefOid") != sha:
-                say(f"PR #{n} left alone: not open, a fork, or its head is no longer the approved one (pushed to, or updated by the sweep)")
+            if v.get("state") != "OPEN" or v.get("isCrossRepository"):
+                say(f"PR #{n} left alone: not open or a fork")
+                continue
+            if v.get("headRefOid") != sha and own_changes(cwd, sha, v.get("headRefOid") or "", default) != (set(), 0):
+                # The re-review rule: merges of the default branch (update-branch) are not a push.
+                say(f"PR #{n} left alone: its head is no longer the approved one (pushed to since the approval)")
                 continue
             behind = github.behind_by(default, v.get("headRefName") or sha, cwd)
             if not behind:
