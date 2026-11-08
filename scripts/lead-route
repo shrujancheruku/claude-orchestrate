@@ -21,8 +21,8 @@ the state file and the worktrees); the stop comment is the newest comment whose 
     ABANDON #<n>             closed `wontfix` while still claimed: stop the worker, close its PR unmerged, keep the branch
     HOLD-PR #<n> <pr>        needs-lead from an ADR conflict, an open non-draft PR, live lead: hold the PR before merge, no time limit
     ASK-DEV #<n> <pr>        the same with --lead none: the developer decides; the PR stays held
-    LEAD-TICKET #<n>         claimed `lead` ticket with no open PR: the lead's work; no worker, never stalled
-    LEAD-PR #<n> <pr>        claimed `lead` ticket with its open PR: the PR joins the pipeline (CI, gate, review, merge)
+    LEAD-TICKET #<n>         open `lead` ticket (claimed or not) with no open PR: the lead's work; no worker, never stalled
+    LEAD-PR #<n> <pr>        open `lead` ticket with its open PR: the PR joins the pipeline (CI, gate, review, merge)
     RESEND #<n> <pr>         live lead, a lead PR whose newest `> *Waiting on lead (not delivered).*` names its current
                              head and no `> *Resent to lead.*` names that head yet: send the failure again, once per head
 A narrowed or reworded ticket needs no verdict of its own: it is a RESUME. The ADR-conflict comment is the one
@@ -152,11 +152,12 @@ def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
             # The lead's own ticket: no worker is ever dispatched for it, so it never holds a slot and is never stalled.
             # Its PR, once open, is the pipeline's: CI, gate, review and merge run on it like any other PR.
             pr = prs.get(n)
-            if issue["claimed"] and pr:
+            # Claimed or not: the lead's tickets are rarely assigned, and the board (scripts/board) reads these lines.
+            if pr:
                 lines.append(f"LEAD-PR #{n} {pr['number']}")
                 if lead == "live" and resend_due(issue, pr["head"]):
                     lines.append(f"RESEND #{n} {pr['number']}")
-            elif issue["claimed"]:
+            else:
                 lines.append(f"LEAD-TICKET #{n}")
             continue
         if issue["claimed"]:

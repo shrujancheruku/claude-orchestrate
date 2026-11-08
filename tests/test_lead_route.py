@@ -267,7 +267,7 @@ class LeadRoute(unittest.TestCase):
         self.assertEqual(self.route(), (0, ["counted: 1 of 2"]))
 
     def test_lead_none_with_nothing_to_route_prints_only_the_summary(self):
-        self.serve([issue(1, labels=["lead"], comments=[])])
+        self.serve([issue(1, labels=["ready-for-agent"], comments=[])])
         self.state({})
         self.assertEqual(self.route(lead="none", cap=3), (0, ["counted: 0 of 3"]))
 
@@ -286,10 +286,10 @@ class LeadRoute(unittest.TestCase):
         self.state({})
         self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "counted: 0 of 2"]))
 
-    def test_an_unclaimed_lead_ticket_has_no_verdict(self):
-        self.serve([issue(1, labels=["lead"])], open_branches=["1-decision"])
+    def test_an_unclaimed_lead_ticket_is_routed_like_a_claimed_one_for_the_board(self):
+        self.serve([issue(1, labels=["lead"]), issue(2, labels=["lead"])], open_branches=["1-decision"])
         self.state({})
-        self.assertEqual(self.route(), (0, ["counted: 0 of 2"]))
+        self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "LEAD-TICKET #2", "counted: 0 of 2"]))
 
     def test_a_lead_pr_failure_not_delivered_is_resent_once_per_head(self):
         self.serve([issue(1, labels=["lead"], claimed=True, comments=[failure(10, UNDELIVERED, HEAD)])],

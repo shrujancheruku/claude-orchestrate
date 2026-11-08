@@ -52,6 +52,21 @@ class Takeable(unittest.TestCase):
         self.assertEqual(tracker.why_not(issues[0], LABELS, issues), "blocked-by #2 #3 (body)")
 
 
+class Backlog(unittest.TestCase):
+    def test_takeable_first_then_held_by_number_and_no_claimed_parent_lead_or_wayfinder(self):
+        issues = [issue(9), issue(2, blockers=[40]), issue(3), issue(1, blockers=[40]), issue(5, claimed=True),
+                  issue(6, total=2), issue(7, labels=("ready-for-agent", "lead")),
+                  issue(8, labels=("ready-for-agent", "wayfinder:task")), issue(4, labels=("ready-for-human",))]
+        self.assertEqual([i["number"] for i in tracker.backlog(issues, LABELS)], [3, 9, 1, 2])
+
+
+class LabelStrings(unittest.TestCase):
+    def test_defaults_when_the_table_is_missing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(tracker.label_strings(Path(d)), tracker.DEFAULTS)
+
+
 class WhyNot(unittest.TestCase):
     def test_takeable_has_no_reason(self):
         self.assertIsNone(tracker.why_not(issue(1), LABELS, [issue(1)]))
