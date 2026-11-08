@@ -47,7 +47,7 @@ class Takeable(unittest.TestCase):
         self.assertEqual(numbers([issue(1, body="Blocked by: #2")]), [1])
 
     def test_a_native_edge_plus_a_different_body_only_blocker_is_still_blocked(self):
-        issues = [issue(1, blockers=[2], body="Blocked by #3"), issue(3, labels=())]
+        issues = [issue(1, blockers=[2], body="Blocked by: #3"), issue(3, labels=())]
         self.assertEqual(numbers(issues), [])
         self.assertEqual(tracker.why_not(issues[0], LABELS, issues), "blocked-by #2 #3 (body)")
 
@@ -103,7 +103,8 @@ class Drift(unittest.TestCase):
 
     def test_prose_starting_blocked_by_is_not_a_blocker(self):
         self.assertEqual(tracker.body_blockers(issue(1, body="Blocked by the outage, see #12")), [])
-        self.assertEqual(tracker.body_blockers(issue(1, body="**Blocked by** #12\nBlocked by #13")), [12, 13])
+        self.assertEqual(tracker.body_blockers(issue(1, body="**Blocked by**: #12\n- blocked by: #13")), [12, 13])
+        self.assertEqual(tracker.body_blockers(issue(1, body="Blocked by #14")), [])  # no colon, no blocker
 
     def test_a_self_reference_is_not_drift(self):
         self.assertEqual(tracker.drift([issue(1, body="Blocked by: #1")]), [])
