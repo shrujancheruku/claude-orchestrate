@@ -120,6 +120,36 @@ class Threads(unittest.TestCase):
         ev = self.env.events()[-1]
         self.assertEqual((ev["kind"], ev["outcome"], ev["ref"], ev["thread"], ev["author"]), ("threads", "resolved", 12, "T1", "rev"))
 
+    def test_no_pr_argument_resolves_the_thread_on_the_current_branchs_pr(self):
+        self.gh(reply([thread("T1")]), extra=[{"args": ["pr", "view", "--json", "number"], "stdout": "12\n"}])
+        r = self.env.run("threads", "resolve", "T1", "--fixed", SHA[:10])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(["pr", "view", "--json", "number", "--jq", ".number"], self.env.gh_calls())
+        self.assertEqual(len(self.mutations()), 2)
+        self.assertEqual(self.env.events()[-1]["ref"], 12)
+
+    def test_no_pr_argument_lists_the_current_branchs_threads(self):
+        self.gh(reply([thread("T1")]), extra=[{"args": ["pr", "view", "--json", "number"], "stdout": "12\n"}])
+        r = self.env.run("threads")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("T1 rev a.py:3"))
+
+    def test_no_pr_argument_on_a_branch_with_no_pr_is_could_not_run_with_no_fallback(self):
+        self.env.set_gh([gh_repo_view(), {"args": ["pr", "view"], "stderr": "no pull requests found", "exit": 1}])
+        r = self.env.run("threads", "resolve", "T1", "--fixed", SHA[:10], check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no pull requests found", r.stderr)
+        self.assertEqual(self.mutations(), [])
+        self.assertFalse(any(c[:3] == ["api", "graphql", "-f"] for c in self.env.gh_calls()))
+
+    def test_flags_are_not_abbreviated(self):
+        r = self.env.run("threads", "12", "resolve", "T1", "--fix", SHA[:10], check=False)
+        self.assertEqual(r.returncode, 2)
+
+    def test_a_word_that_is_neither_a_pr_nor_an_action_is_a_usage_error(self):
+        r = self.env.run("threads", "nonsense", check=False)
+        self.assertEqual(r.returncode, 2)
+
     def test_three_ids_make_one_reply_request_and_one_resolve_request_with_aliased_mutations(self):
         self.gh(reply([thread("T1"), thread("T2"), thread("T3")]),
                 extra=[{"args": ["api", "graphql", "-f", "query=" + aliased(f, 3, body)], "stdout": "{}"}
@@ -219,7 +249,7 @@ class Prompts(unittest.TestCase):
     def test_worker_resolves_threads_after_the_push_and_names_human_only(self):
         s = self.text("agents/worker.md")
         para = s[s.index('For "address review"'):]
-        self.assertIn("threads <pr>", para)
+        self.assertIn("threads resolve <id>", para)
         self.assertIn("--fixed <the pushed sha>", para)
         self.assertIn("stop-reason: human-only", para)
         self.assertNotIn("reviews/<id>/comments", s)

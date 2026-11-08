@@ -68,14 +68,14 @@ def rows():
 class Decider:
     """Runs the guard's main() in-process on the hook's JSON input, so 500 calls take a second."""
 
-    def __init__(self, cwd):
+    def __init__(self, cwd, worker_cwd=None):
         spec = importlib.util.spec_from_file_location("guard_under_test", GUARD)
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
-        self.cwd = cwd
+        self.cwd, self.worker_cwd = cwd, worker_cwd or cwd
 
     def __call__(self, role, command, background=False, timeout=None):
-        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.cwd}
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" else self.cwd}
         if background:
             payload["tool_input"]["run_in_background"] = True
         if timeout is not None:
@@ -102,7 +102,18 @@ class GuardCorpus(unittest.TestCase):
         cls.addClassCleanup(cls.tmp.cleanup)
         # The same cwd the extract script snapshots with: a config that turns review posting on.
         load_extract().write_config(cls.tmp.name)
-        cls.decide = Decider(cls.tmp.name)
+        # A worker's routine writes are approved only from inside its own worktree (`.claude/worktrees/agent-*`
+        # of a checkout on a ticket branch), so the worker rows run from a fake one, built as RoutineApprovalTest does.
+        main = Path(cls.tmp.name) / "main"
+        git_dir = main / ".git" / "worktrees" / "agent-abc"
+        git_dir.mkdir(parents=True)
+        (git_dir / "commondir").write_text("../..\n")
+        (git_dir / "HEAD").write_text("ref: refs/heads/358-ticket\n")
+        work = main / ".claude" / "worktrees" / "agent-abc"
+        work.mkdir(parents=True)
+        (work / ".git").write_text(f"gitdir: {git_dir}\n")
+        (main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
+        cls.decide = Decider(cls.tmp.name, str(work.resolve()))
 
     def test_corpus_is_seeded_and_well_formed(self):
         self.assertGreater(len(self.rows), 400)

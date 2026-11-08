@@ -83,7 +83,7 @@ One run of `/orchestrate:run`: reconcile, resume, review, fill slots, report. So
 _Avoid_: iteration, cycle
 
 **Run log**:
-The events log (`events.jsonl`: one line per gate, CI, merge or replay) plus the pass log (`passes.jsonl`), both in `.claude/orchestrate-profiles/` of the main checkout, whichever subdirectory or linked worktree a script or the profile runs from. Owned by `scripts/runlog.py`; the profile reads it. Logs that landed in a worktree before this are not migrated.
+The events log (`events.jsonl`: one line per gate, CI, merge or replay, and per `gh` call or rate-limit wait: `gh_call`) plus the pass log (`passes.jsonl`), both in `.claude/orchestrate-profiles/` of the main checkout, whichever subdirectory or linked worktree a script or the profile runs from. Owned by `scripts/runlog.py`; the profile reads it. Logs that landed in a worktree before this are not migrated.
 _Avoid_: events file, pass file, profile data
 
 **Brief**:
