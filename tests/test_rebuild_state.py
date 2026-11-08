@@ -131,13 +131,13 @@ class RebuildState(unittest.TestCase):
         self.assertEqual(state["tickets"]["5"]["touch_map"], "scripts/a.py:10, scripts/b.py:20 (the join, twice)")
         self.assertEqual(state["tickets"]["6"]["touch_map"], "none")
 
-    def test_an_unparseable_touch_map_is_reported_and_empty(self):
+    def test_an_unparseable_touch_map_is_reported_and_kept_as_unparsed(self):
         brief = "Build #5.\nTouch map: a.py:10, 20\nBranch: 5-slug."
         self.main_records += [dispatch("t1", "Build #5", prompt=brief)]
         self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z")])
         res, state = self.rebuild()
-        self.assertEqual(state["tickets"]["5"]["touch_map"], "none")
-        self.assertIn("#5 touch map not read: bad touch-map entry: '20'", res.stdout)
+        self.assertEqual(state["tickets"]["5"]["touch_map"], "unparsed:a.py:10, 20")
+        self.assertIn("#5 touch map not read, held as every path: bad touch-map entry: '20'", res.stdout)
 
     def test_latest_dispatch_for_a_ticket_wins(self):
         self.main_records += [dispatch("t1", "Build #5"), dispatch("t2", "Build #5")]

@@ -250,10 +250,14 @@ def branch_of(prompt) -> str | None:
     return value.split()[0] if value else None
 
 
+def touch_map_text(prompt) -> str:
+    """The raw text of a brief's `Touch map:` line, the template's trailing "A prediction, not a fence." sentence cut; "" when absent."""
+    line = brief_field(prompt, "Touch map", whole=True)
+    return re.sub(r"\.?\s*A prediction, not a fence\.?\s*$", "", line or "")
+
+
 def touch_map(prompt) -> list:
     """The entries of a brief's `Touch map:` line (touchmap.Entry); [] when there is none or it says `none`.
 
-    The line is one touch map in canonical form (see touchmap.py). The template's trailing "A prediction, not a fence."
-    sentence is not an entry and is cut. Raises touchmap.TouchMapError when the line is off the grammar."""
-    line = brief_field(prompt, "Touch map", whole=True)
-    return touchmap.parse(re.sub(r"\.?\s*A prediction, not a fence\.?\s*$", "", line or ""))
+    The line is one touch map in canonical form (see touchmap.py). Raises touchmap.TouchMapError when the line is off the grammar."""
+    return touchmap.parse(touch_map_text(prompt))

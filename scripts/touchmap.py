@@ -17,6 +17,11 @@ import re
 from dataclasses import dataclass
 
 
+# A stored map the grammar rejects is kept as `unparsed:<raw>`, never as `none`: `holds` reads it as holding every path.
+UNPARSED = "unparsed:"
+HOLDS_ALL = "*"  # the one held path an unparsed map stands for; `overlaps` treats it as covering every path
+
+
 class TouchMapError(ValueError):
     """An entry outside the grammar; the message names it."""
 
@@ -111,5 +116,5 @@ def format(entries) -> str:
 
 def overlaps(a: Entry, b: Entry) -> bool:
     """Whether two entries name the same file (a `dir/` entry covers what is under it); lines are ignored."""
-    return a.path == b.path or (a.path.endswith("/") and b.path.startswith(a.path)) or \
+    return HOLDS_ALL in (a.path, b.path) or a.path == b.path or (a.path.endswith("/") and b.path.startswith(a.path)) or \
         (b.path.endswith("/") and a.path.startswith(b.path))
