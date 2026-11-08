@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run the brief's verify commands and keep their output small.
 
-    verify [--cwd DIR] [--timeout SECONDS] CMD [CMD ...] [--then CMD [CMD ...]] ...
-    verify [--cwd DIR] [--timeout SECONDS] --config
+    verify [--cwd DIR] [--branch BRANCH] [--timeout SECONDS] CMD [CMD ...] [--then CMD [CMD ...]] ...
+    verify [--cwd DIR] [--branch BRANCH] [--timeout SECONDS] --config
+    verify --help
 
 `--config` takes the commands from the repo's .claude/orchestration.md **Verify** section (found from --cwd
 or the current directory, searching upward) and runs each exactly as written there, so no caller's shell
@@ -11,16 +12,21 @@ config template): a top-level bullet that opens with a backticked span is one co
 the span is a remark; every other line is prose. A bullet whose span is `--then` starts a dependent group,
 like the `--then` argument. A missing config, a missing section or one with no commands exits 2.
 
+`--branch BRANCH` makes verify refuse (exit 2, one line) unless --cwd (default: the current directory) is a
+linked worktree with BRANCH checked out. A worker whose shell cwd was reset to the main checkout would
+otherwise verify main's clean tree and pass; the brief's Verify line passes the brief's branch.
+
 Each CMD is one shell command. Commands in a group are independent, so all of
 them run. `--then` starts the next group, which depends on the one before: if
 anything in a group fails, later groups are skipped. Prints one line per
 command (pass/fail/skip and duration), and the last ~40 lines of a failure's
 output. A command still running after --timeout seconds (default 1800) is killed with its process
 group and fails with "timed out after Ns". Exit codes: 0 every command passed; 1 a command failed;
-2 verify could not run (no commands, a missing --cwd, a bad option).
+2 verify could not run (no commands, a missing --cwd, a bad option, or --branch not met).
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +37,7 @@ import config
 
 def parse(argv):
     cwd = None
+    branch = None
     timeout = checks.DEFAULT_TIMEOUT
     stages = [[]]
     from_config = False
@@ -44,6 +51,10 @@ def parse(argv):
             cwd = next(it, None)
             if cwd is None:
                 common.die("verify: --cwd needs a directory")
+        elif arg == "--branch":
+            branch = next(it, None)
+            if not branch:
+                common.die("verify: --branch needs a branch name")
         elif arg == "--timeout":
             raw = next(it, None)
             try:
@@ -54,7 +65,7 @@ def parse(argv):
                 common.die("verify: --timeout must be above 0")
         else:
             stages[-1].append(arg)
-    return cwd, timeout, [s for s in stages if s], from_config
+    return cwd, branch, timeout, [s for s in stages if s], from_config
 
 
 def config_stages(cwd):
@@ -73,16 +84,43 @@ def config_stages(cwd):
     return [list(g) for g in cfg.verify_groups]
 
 
+def git_out(cwd, *args):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def check_branch(cwd, branch):
+    """Die unless `cwd` is a linked worktree with `branch` checked out."""
+    where = os.path.abspath(cwd or os.getcwd())
+    gitdir = git_out(cwd, "rev-parse", "--path-format=absolute", "--git-dir")
+    common_dir = git_out(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if gitdir is None or common_dir is None:
+        common.die(f"verify: {where} is not a git worktree; refusing to verify for branch {branch}")
+    if gitdir == common_dir:
+        common.die(f"verify: {where} is a main checkout, not the linked worktree for branch {branch}; "
+                   "your cwd was reset, so run from your worktree")
+    current = git_out(cwd, "branch", "--show-current")
+    if current != branch:
+        common.die(f"verify: {where} has {current or 'no branch'} checked out, not {branch}; "
+                   "refusing to verify the wrong tree")
+
+
 def main(argv=None):
-    cwd, timeout, stages, from_config = parse(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cwd, branch, timeout, stages, from_config = parse(argv)
     if cwd is not None and not os.path.isdir(cwd):
         common.die(f"verify: --cwd {cwd} is not a directory")
+    if branch is not None:
+        check_branch(cwd, branch)
     if from_config:
         if stages:
             common.die("verify: --config takes the commands from the config; don't pass CMD arguments with it")
         stages = config_stages(cwd)
     if not stages:
-        common.die("usage: verify [--cwd DIR] [--timeout SECONDS] (CMD [CMD ...] [--then CMD ...] | --config)")
+        common.die("usage: verify [--cwd DIR] [--branch BRANCH] [--timeout SECONDS] (CMD [CMD ...] [--then CMD ...] | --config)")
     results = checks.run_stages(stages, cwd, timeout)
     print(checks.format_results(results))
     return 0 if checks.ok(results) else 1
