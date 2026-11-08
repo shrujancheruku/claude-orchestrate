@@ -50,6 +50,9 @@ LEAKS = re.compile(
 )
 
 
+ORCHESTRATOR = "orchestrate:orchestrator"
+
+
 def load_extract():
     # The script does `import common`; run by path it has its own directory on sys.path, a loader doesn't.
     if str(EXTRACT.parent) not in sys.path:
@@ -75,12 +78,17 @@ class Decider:
         self.cwd, self.worker_cwd = cwd, worker_cwd or cwd
 
     def __call__(self, role, command, background=False, timeout=None):
+        # `orchestrate:orchestrator` is the main session, which has no agent type. An orchestrator row names the
+        # plugin's scripts under the placeholder prefix every row uses; it is pointed at the real directory here,
+        # because only the plugin's own script is approved.
+        if role == ORCHESTRATOR:
+            command = command.replace("/p/orchestrate/0.7.0/scripts/", f"{ROOT / 'scripts'}/")
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" else self.cwd}
         if background:
             payload["tool_input"]["run_in_background"] = True
         if timeout is not None:
             payload["tool_input"]["timeout"] = timeout
-        if role:
+        if role and role != ORCHESTRATOR:
             payload["agent_type"] = role
         stdin, stdout = sys.stdin, sys.stdout
         sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()

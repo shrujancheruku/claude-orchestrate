@@ -1020,6 +1020,40 @@ class RoutineApprovalTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertIsNone(raw(None, command, self.main))
 
+    def test_orchestrator_threads_calls_are_approved_only_in_the_exact_forms_naming_a_pr(self):
+        for command in (f"{SCRIPTS}/threads 12", f"{SCRIPTS}/threads 12 --all", f"{SCRIPTS}/threads 12 --verbose",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x --left 'the worker finished; left for a follow-up'",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --verbose",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y --left x",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y PRRT_z --fixed abc1234",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed abc1234"):
+            with self.subTest(command):
+                self.assertTrue(approved(None, command, self.main))
+        # A false allow here would resolve a thread on the wrong PR or repository, or run a chain.
+        for command in (
+            f"{SCRIPTS}/threads resolve PRRT_x --left x",  # no PR number: the branch form is the worker's
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --repo /other",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --rep /other",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --lef x", f"{SCRIPTS}/threads 12 resolve PRRT_x --left=x",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left", f"{SCRIPTS}/threads 12 resolve PRRT_x",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --fixed y",
+            f"{SCRIPTS}/threads 12 resolve --left x --fixed y",
+            f"{SCRIPTS}/threads 12 resolve --left x",  # no thread id
+            f"{SCRIPTS}/threads 12 resolve PRRT_x -y --left x",  # an id starting with a dash
+            f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y --left x --repo /other",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left --repo",
+            f"{SCRIPTS}/threads 12 reopen PRRT_x --why x", f"{SCRIPTS}/threads 12 --repo /other",
+            f"{SCRIPTS}/threads 12 --all extra", f"{SCRIPTS}/threads PRRT_x resolve 12 --left x",
+            f"GH_REPO=o/r {SCRIPTS}/threads 12 resolve PRRT_x --left x",
+            f"env {SCRIPTS}/threads 12 resolve PRRT_x --left x",
+            f"bash {SCRIPTS}/threads 12 resolve PRRT_x --left x",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left x && rm -rf x",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left $WHY",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left x > /tmp/out",
+        ):
+            with self.subTest(command):
+                self.assertFalse(approved(None, command, self.main))
+
     def test_orchestrator_is_not_approved_without_the_config_or_for_another_plugins_agent(self):
         self.assertIsNone(raw(None, "gh issue close 5", self.root))
         self.assertIsNone(raw("other:agent", "gh issue close 5", self.main))

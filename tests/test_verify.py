@@ -163,6 +163,10 @@ class VerifyConfigTest(unittest.TestCase):
         r = self.env.run("verify", "--branch", "other", "true", cwd=wt, check=False)
         self.assertEqual(r.returncode, 2)
         self.assertIn("not other", r.stderr)
+        self.assertIn("git switch -c other origin/<default branch>", r.stderr)
+        git(self.env.repo, "update-ref", "refs/remotes/origin/other", "HEAD")
+        r = self.env.run("verify", "--branch", "other", "true", cwd=wt, check=False)
+        self.assertIn("git switch -C other origin/other", r.stderr)
         r = self.env.run("verify", "--branch", "feat", "true", cwd=wt, check=False)
         self.assertEqual(r.returncode, 0, r.stderr)
 

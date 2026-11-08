@@ -13,7 +13,7 @@ whoever acts on it" lives here, not in the prompts).
     threads <pr> resolve <thread>... --left <why>    replies `left: <why>`, then resolves
     threads <pr> reopen <thread>... --why <why>      replies `reopened: <why>`, then unresolves
 
-Leave <pr> out and the PR is the one of the checked-out branch (one `gh pr view --json number`): `threads`,
+Leave <pr> out and the PR is the one of the checked-out branch (one pulls lookup by head branch): `threads`,
 `threads resolve <thread>... --fixed <sha>`. That is the worker's form, so the guard can allow it without knowing which
 PR it names; the orchestrator, the reviewer and the lead give the number.
 
@@ -139,8 +139,8 @@ def main(argv=None) -> int:
     sent = 0
     try:
         if pr is None:
-            # The current-branch form (a worker's): gh resolves the PR from the checked-out branch.
-            pr = github.call("pr", "view", "--json", "number", "--jq", ".number", cwd=cwd).strip()
+            # The current-branch form (a worker's): the open PR whose head is the checked-out branch.
+            pr = github.current_pr_number(cwd)
             if not pr.isdigit():
                 common.die("threads: could not read the current branch's PR number from gh")
         pr, ref = common.pr_ref(pr)

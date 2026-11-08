@@ -34,7 +34,9 @@ if "-" in args:  # a body or payload on stdin (`--body-file -`, `--input -`): ke
     with open(state + ".stdin", "a") as f:
         f.write(json.dumps({"args": args, "stdin": sys.stdin.read()}) + "\\n")
 for i, r in enumerate(json.load(open(state))["responses"]):
-    if args[: len(r["args"])] == r["args"]:
+    # A canned arg that starts with "~" matches any call arg that starts with the rest (a REST path with its query).
+    want = r["args"]
+    if len(args) >= len(want) and all(a.startswith(w[1:]) if w.startswith("~") else a == w for a, w in zip(args, want)):
         if "seq" in r:
             try:
                 counts = json.load(open(state + ".counts"))
@@ -92,20 +94,69 @@ def _template():
     return _TEMPLATE
 
 
-# Named canned `gh` replies, for ScriptEnv.set_gh.
-def gh_repo_view(owner="o", name="r"):
-    """`gh repo view --json owner,name`."""
-    return {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": owner}, "name": name})}
+# Named canned `gh` replies, for ScriptEnv.set_gh. The plugin reads GitHub through REST (`gh api`, #449): these
+# take the field names `gh pr view/list --json` used and answer in REST's.
+def rest_pull(merged=False, **v):
+    """A REST pull object from gh-style fields (state, mergeable, mergeStateStatus, headRefName, headRefOid,
+    baseRefName, isDraft, isCrossRepository, mergedAt, title, body, number)."""
+    state = v.get("state", "MERGED" if merged else "OPEN")
+    cross = v.get("isCrossRepository", False)
+    return {"number": v.get("number"), "title": v.get("title"), "body": v.get("body"),
+            "state": "open" if state == "OPEN" else "closed",
+            "merged_at": v.get("mergedAt") or ("2026-01-01T00:00:00Z" if state == "MERGED" else None),
+            "draft": bool(v.get("isDraft", False)),
+            "mergeable": {"MERGEABLE": True, "CONFLICTING": False}.get(v.get("mergeable", "UNKNOWN")),
+            "mergeable_state": str(v.get("mergeStateStatus", "UNKNOWN")).lower(),
+            "head": {"ref": v.get("headRefName"), "sha": v.get("headRefOid"),
+                     "repo": {"full_name": "x/r" if cross else "o/r", "fork": cross}},
+            "base": {"ref": v.get("baseRefName", "main"), "repo": {"full_name": "o/r"}}}
+
+
+def gh_pulls(prs, state, **kw):
+    """`GET pulls?state=<open|closed>` replying with `prs` (gh-style rows). Closed rows are merged ones."""
+    rows = [rest_pull(merged=state == "closed", **p) for p in prs]
+    return {"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls?state={state}"], "stdout": json.dumps(rows), **kw}
+
+
+def gh_pr_view(n, view, **kw):
+    """`GET pulls/<n>` replying with the REST form of the gh-style `view` fields."""
+    return {"args": ["api", f"repos/{{owner}}/{{repo}}/pulls/{n}"], "stdout": json.dumps(rest_pull(**view)), **kw}
+
+
+def pr_graphql_reply(view):
+    """The explicit GraphQL pull-request query's reply for gh-style `view` fields (closingIssuesReferences, statusCheckRollup)."""
+    node = {k: view[k] for k in ("state", "headRefName", "headRefOid", "isCrossRepository") if k in view}
+    node["closingIssuesReferences"] = {"nodes": view.get("closingIssuesReferences") or []}
+    contexts = [dict(c, __typename="CheckRun" if "status" in c else "StatusContext")
+                for c in view.get("statusCheckRollup") or []]
+    node["commits"] = {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": contexts}}}}]}
+    return json.dumps({"data": {"repository": {"pullRequest": node}}})
+
+
+PR_GRAPHQL = ["api", "graphql", "-f", "~query=query($owner: String!, $name: String!, $number: Int!)"]
+
+
+def gh_repo_view(owner="o", name="r", default="main"):
+    """`GET repos/{owner}/{repo}`: owner, name and default branch."""
+    return {"args": ["api", "repos/{owner}/{repo}"],
+            "stdout": json.dumps({"owner": {"login": owner}, "name": name, "default_branch": default})}
+
+
+def gh_repo_rest(repo):
+    """`GET repos/{owner}/{repo}` replying with the REST form of a gh-style `repo view` dict."""
+    return {"args": ["api", "repos/{owner}/{repo}"], "stdout": json.dumps(
+        {"owner": repo.get("owner"), "name": repo.get("name"),
+         "default_branch": (repo.get("defaultBranchRef") or {}).get("name", "main")})}
 
 
 def gh_default_branch(name="main"):
-    """`gh repo view --json defaultBranchRef`."""
-    return {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": name}})}
+    """`GET repos/{owner}/{repo}` for the default branch."""
+    return gh_repo_view(default=name)
 
 
 def gh_pr_list(prs, *prefix):
-    """`gh pr list` (optionally only calls starting with `prefix`, e.g. "--state", "open") replying with `prs`."""
-    return {"args": ["pr", "list", *prefix], "stdout": json.dumps(prs)}
+    """The open (prefix "--state", "open") or merged pulls list replying with gh-style `prs`."""
+    return gh_pulls(prs, "open" if "open" in prefix else "closed")
 
 
 class ScriptEnv:

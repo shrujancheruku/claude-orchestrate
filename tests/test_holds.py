@@ -10,7 +10,7 @@ import unittest.mock
 from datetime import timedelta, timezone
 from pathlib import Path
 
-from harness import ScriptEnv, gh_pr_list, git
+from harness import ScriptEnv, gh_pr_list, gh_repo_view, git, rest_pull
 
 import common
 
@@ -41,12 +41,6 @@ def dead_pid():
     return p.pid
 
 
-def gh_repo_view(name="main"):
-    """`gh repo view --json owner,name,defaultBranchRef`: the owner and name the issues query needs, and the default branch."""
-    return {"args": ["repo", "view"], "stdout": json.dumps(
-        {"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": name}})}
-
-
 class Holds(unittest.TestCase):
     def setUp(self):
         self.env = ScriptEnv()
@@ -72,12 +66,11 @@ class Holds(unittest.TestCase):
             {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": nodes}}}})},
         ]
         for n, files in prs.items():
-            responses.append({"args": ["pr", "view", str(n), "--json", "files"],
-                              "stdout": json.dumps({"files": [{"path": p} for p in files]})})
-            responses.append({"args": ["pr", "view", str(n), "--json", "headRefName"],
-                              "stdout": json.dumps({"headRefName": branches.get(n, f"b{n}")})})
-        responses.append({"args": ["pr", "list", "--state", "merged"],
-                          "stdout": json.dumps([{"number": 1, "headRefName": b} for b in merged])})
+            responses.append({"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{n}/files"],
+                              "stdout": json.dumps([{"filename": p} for p in files])})
+            responses.append({"args": ["api", f"repos/{{owner}}/{{repo}}/pulls/{n}"],
+                              "stdout": json.dumps(rest_pull(headRefName=branches.get(n, f"b{n}")))})
+        responses.append(gh_pr_list([{"number": 1, "headRefName": b} for b in merged], "--state", "merged"))
         self.env.set_gh(responses)
 
     def state(self, tickets):
@@ -212,7 +205,7 @@ class Holds(unittest.TestCase):
         self.state({12: ["a.py"]})
         self.env.set_gh([
             gh_repo_view(),
-            {"args": ["pr", "list"], "stdout": "[]"},
+            {"args": ["api", "~repos/{owner}/{repo}/pulls?state=open"], "stdout": "[]"},
             {"args": ["api", "graphql"], "stderr": "HTTP 502\n", "exit": 1}])
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 2)
@@ -220,7 +213,7 @@ class Holds(unittest.TestCase):
 
     def test_rate_limit_over_the_wait_budget_exits_two_with_the_reset_time(self):
         # retry-after 300 is over the 75 s budget: the script must not sleep, and prints the time to retry.
-        self.env.set_gh([{"args": ["repo", "view"], "exit": 1,
+        self.env.set_gh([{"args": ["api", "repos/{owner}/{repo}"], "exit": 1,
                           "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
         with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
             r = self.holds("--touch-map", "a.py", "--ticket", "7")
@@ -248,7 +241,7 @@ class Holds(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
 
     def test_gh_failure_could_not_run(self):
-        self.env.set_gh([{"args": ["repo", "view"], "stderr": "HTTP 502\n", "exit": 1}])
+        self.env.set_gh([{"args": ["api", "repos/{owner}/{repo}"], "stderr": "HTTP 502\n", "exit": 1}])
         self.assertEqual(self.holds("--touch-map", "a.py", "--ticket", "7").returncode, 2)
 
     def test_comma_separated_touch_map_is_split_into_entries(self):
@@ -461,10 +454,10 @@ class Holds(unittest.TestCase):
     def test_merged_pr_read_failure_could_not_run(self):
         self.env.set_gh([
             gh_repo_view(),
-            {"args": ["pr", "list", "--state", "open"], "stdout": "[]"},
+            {"args": ["api", "~repos/{owner}/{repo}/pulls?state=open"], "stdout": "[]"},
             {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": [
                 {"number": 12, "labels": {"nodes": []}, "assignees": {"totalCount": 1}}]}}}})},
-            {"args": ["pr", "list", "--state", "merged"], "stderr": "HTTP 502\n", "exit": 1}])
+            {"args": ["api", "~repos/{owner}/{repo}/pulls?state=closed"], "stderr": "HTTP 502\n", "exit": 1}])
         self.dirty(self.worktree("12-widget", reason=live_reason()))
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 2)
