@@ -23,6 +23,8 @@ import urllib.parse
 from pathlib import Path
 
 import common
+import runlog
+from repo import STATE
 
 MISSING, FAILED, MALFORMED, RATELIMITED = "missing", "failed", "malformed", "ratelimited"
 # A 404/422 on a branch ref: the host already removed it.
@@ -141,13 +143,17 @@ def wait_budget() -> float:
     return value if value >= 0 else DEFAULT_WAIT_BUDGET
 
 
-def _wait_until(reset: float) -> None:
-    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the process's wait budget."""
+def _wait_until(reset: float, cwd=None, shared: bool = False) -> None:
+    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the process's wait budget.
+
+    `shared` marks a wait for a reset another process recorded, not this process's own hit; it is logged so the
+    profile shows how much waiting one hit multiplied across scripts."""
     global waited
     seconds = max(reset - clock(), 0)
     if waited + seconds > wait_budget():
         raise GhError(RATELIMITED, f"rate limit until {_utc(reset)}")
     waited += seconds
+    _log({"outcome": "wait", "seconds": round(seconds, 1), "shared": shared}, cwd)
     sleep(seconds)
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 
@@ -216,7 +222,7 @@ def _wait_for_shared_reset(cwd) -> None:
     reset = _shared_reset(cwd)
     if not reset:
         return
-    _wait_until(reset)
+    _wait_until(reset, cwd, shared=True)
 
 
 def _rate_limit(text: str):
@@ -241,6 +247,135 @@ def _evidence(text: str) -> str:
     return f"{first} [{', '.join(parts)}]" if parts else first
 
 
+# --- The call log ---------------------------------------------------------------------------------------------
+# Every gh attempt appends one `gh_call` event to the run's events log, so a rate-limit hit can be traced to the
+# script and call that spent the budget. An event never holds a body, a query or a token. Logging is best effort:
+# any failure is swallowed and it never changes what `call` returns or raises. It reads the state file and appends
+# with plain file I/O (no `git` subprocess). ORCHESTRATE_GH_LOG=off turns it off.
+
+HEADER_BLOCK = re.compile(r"\r?\n\r?\n")
+STATUS_LINE = re.compile(r"HTTP/\S+\s+(\d{3})")
+# `gh api` flags that take a value, so the endpoint is the first argument that is neither a flag nor a value.
+API_VALUE_FLAGS = {"-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header", "--jq", "-q",
+                   "--template", "-t", "--hostname", "--input", "--cache", "-p", "--preview"}
+READ_VERBS = {"view", "list", "status", "diff", "checks"}
+_roots = {}  # cwd -> the main checkout that owns the run log, or None
+
+
+def split_headers(out: str) -> tuple:
+    """(status or None, {lowercase header: value}, body) from `gh api --include` output; text that does not open
+    with a status line is all body. Exactly one header block is removed."""
+    m = STATUS_LINE.match(out)
+    if not m:
+        return None, {}, out
+    parts = HEADER_BLOCK.split(out, 1)
+    headers = {}
+    for line in parts[0].splitlines()[1:]:
+        name, colon, value = line.partition(":")
+        if colon:
+            headers[name.strip().lower()] = value.strip()
+    return int(m.group(1)), headers, parts[1] if len(parts) > 1 else ""
+
+
+def _log_root(cwd):
+    """The main checkout for `cwd`, found by walking up to `.git` (a linked worktree's `.git` file leads to the
+    common dir), or None. File reads only: `repo.main_checkout` runs git, which a test's fake `gh` would count."""
+    start = Path(cwd or os.getcwd()).resolve()
+    if start not in _roots:
+        root = None
+        for d in (start, *start.parents):
+            git = d / ".git"
+            if git.is_dir():
+                root = d
+            elif git.is_file():
+                root = d
+                text = git.read_text(encoding="utf-8").strip()
+                if text.startswith("gitdir:"):
+                    gitdir = (d / text[7:].strip()).resolve()
+                    try:
+                        gitdir = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+                    except OSError:
+                        pass
+                    if gitdir.name == ".git":
+                        root = gitdir.parent
+            else:
+                continue
+            break
+        _roots[start] = root
+    return _roots[start]
+
+
+def _int(headers: dict, name: str):
+    try:
+        return int(headers[name])
+    except (KeyError, ValueError):
+        return None
+
+
+def describe(args) -> dict:
+    """What a call is, without its content: `method` (GET or the HTTP method; WRITE for a changing subcommand),
+    `write`, `path` (the endpoint without its query string, `graphql`, or `pr view`) and `graphql`."""
+    args = [str(a) for a in args]
+    if args[:1] != ["api"]:
+        write = not (len(args) > 1 and args[1] in READ_VERBS)
+        # Subcommands (pr, issue, repo) run on GraphQL underneath.
+        return {"method": "WRITE" if write else "GET", "write": write, "path": " ".join(args[:2]), "graphql": True}
+    method, fields, path, i = None, False, None, 1
+    while i < len(args):
+        a = args[i]
+        if a in ("-X", "--method") and i + 1 < len(args):
+            method, i = args[i + 1].upper(), i + 2
+        elif a in ("-f", "--raw-field", "-F", "--field") and i + 1 < len(args):
+            fields, i = True, i + 2
+        elif a in API_VALUE_FLAGS:
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            path, i = path or a, i + 1
+    path = (path or "").split("?", 1)[0]
+    if path == "graphql":
+        # A query is a read; only a mutation changes anything.
+        mutation = any(a.startswith("query=") and a[6:].lstrip().startswith("mutation") for a in args)
+        return {"method": "POST", "write": mutation, "path": path, "graphql": True}
+    method = method or ("POST" if fields else "GET")
+    return {"method": method, "write": method != "GET", "path": path, "graphql": False}
+
+
+def _log(event: dict, cwd=None, args=None) -> None:
+    """Append one `gh_call` event; any failure is swallowed (a log must never fail or slow a gh call)."""
+    try:
+        if os.environ.get("ORCHESTRATE_GH_LOG", "").lower() in ("off", "0", "false", "no"):
+            return
+        root = _log_root(cwd)
+        if root is None:
+            return
+        session = json.loads((root / STATE).read_text(encoding="utf-8")).get("session")
+        if not isinstance(session, str) or not session:
+            return
+        record = {"ts": runlog._now(), "session": session, "kind": runlog.GH_CALL, "ref": None,
+                  "script": Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ""}
+        if args is not None:
+            record.update(describe(args))
+        record.update(event)
+        path = root / runlog.PROFILES / runlog.EVENTS_LOG
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception:  # noqa: BLE001 - best effort by design
+        pass
+
+
+def _log_attempt(args, cwd, attempt, ms, outcome, status, headers) -> None:
+    event = {"attempt": attempt, "outcome": outcome, "ms": ms, "status": status}
+    if headers is None:
+        event["headers"] = "unavailable"  # a subcommand, or a paginated api call: gh shows none
+    else:
+        event.update(remaining=_int(headers, "x-ratelimit-remaining"), used=_int(headers, "x-ratelimit-used"),
+                     retry_after=_int(headers, "retry-after"))
+    _log(event, cwd, args)
+
+
 def call(*args, cwd=None) -> str:
     """Run `gh <args>` and return stdout; raise GhError (missing, failed or ratelimited).
 
@@ -249,19 +384,40 @@ def call(*args, cwd=None) -> str:
     `retry-after` seconds when gh shows them, else until the reset it just recorded (DEFAULT_PAUSE), and recording its reset in
     STATE_FILE for the others. The hourly quota (remaining 0, reset far off) raises `ratelimited` at once with the
     reset time, since waiting for it would stall the caller. A rate-limit message carries the HTTP status and headers.
+
+    `gh api` runs with --include (paginated calls excepted): the headers are split off before the body is returned,
+    and each attempt, with its status and rate-limit headers, is logged (see the call log above).
     """
     _wait_for_shared_reset(cwd)
+    # `gh api` prints the response headers only with --include; they carry the status and the rate-limit evidence.
+    # A paginated reply holds one header block per page, so that one runs without them.
+    api = bool(args) and args[0] == "api"
+    include = api and not {"-i", "--include", "--paginate"} & set(args)
+    argv = ("api", "--include", *args[1:]) if include else args
     for attempt in range(1, TRIES + 1):
-        p = common.run("gh", *args, cwd=cwd)
+        started = time.monotonic()
+        p = common.run("gh", *argv, cwd=cwd)
+        ms = int((time.monotonic() - started) * 1000)
+        stdout, status, headers = p.stdout, None, None
+        if include:
+            status, headers, stdout = split_headers(p.stdout)
+        if status is None:
+            m = HTTP_STATUS.search(p.stderr or "")
+            status = int(m.group(1)) if m else None
         if p.returncode == common.NOT_FOUND:
             raise GhError(MISSING, common.one_line(p.stderr))
         if p.returncode == 0:
-            return p.stdout
+            _log_attempt(args, cwd, attempt, ms, "ok", status, headers)
+            return stdout
         text = f"{p.stderr}\n{p.stdout}"
         limit = _rate_limit(text)
         if limit is None:
-            raise GhError(FAILED, common.one_line(p.stderr or p.stdout))
+            _log_attempt(args, cwd, attempt, ms, "failed", status, headers)
+            raise GhError(FAILED, common.one_line(p.stderr or stdout))
+        _log_attempt(args, cwd, attempt, ms, "ratelimited", status, headers)
         message = common.one_line(_evidence(text))
+        if not api and not (RETRY_AFTER.search(text) or QUOTA_EMPTY.search(text) or QUOTA_RESET.search(text)):
+            message += " [headers unavailable: gh shows none for this command]"
         after, reset, empty = limit
         if empty and reset is not None and reset - clock() > PRIMARY_RESET_AFTER:
             raise GhError(RATELIMITED, f"{message} (hourly quota used up; resets at {_utc(reset)})")
@@ -273,7 +429,7 @@ def call(*args, cwd=None) -> str:
             raise GhError(RATELIMITED, message)
         # The reset is recorded above, so a wait over the budget is returned, not slept; the caller retries after it.
         print(f"github: rate limited, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
-        _wait_until(clock() + pause)
+        _wait_until(clock() + pause, cwd)
 
 
 def call_json(*args, shape=dict, cwd=None):

@@ -210,5 +210,158 @@ class RetryTest(unittest.TestCase):
         self.assertEqual((fake.calls, err.kind), (1, github.MISSING))
 
 
+def reply(status, body, **headers):
+    """What `gh api --include` prints on stdout: a status line, headers, a blank line, then the body."""
+    lines = [f"HTTP/2.0 {status} X"] + [f"{k.replace('_', '-')}: {v}" for k, v in headers.items()]
+    return "\n".join(lines) + "\n\n" + body
+
+
+class CallLogTest(unittest.TestCase):
+    """Every gh attempt appends one `gh_call` event to the run's events log (and never changes the call)."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name).resolve() / "repo"
+        (self.root / ".git").mkdir(parents=True)
+        (self.root / ".claude").mkdir()
+        (self.root / ".claude" / "orchestrate-state.json").write_text(json.dumps({"session": "sess-9"}))
+        self.log = self.root / ".claude" / "orchestrate-profiles" / "events.jsonl"
+        env = unittest.mock.patch.dict("os.environ", {"XDG_CACHE_HOME": self.dir.name})
+        env.start()
+        self.addCleanup(env.stop)
+        for k in ("GH_HOST", "ORCHESTRATE_GH_WAIT", "ORCHESTRATE_GH_LOG"):
+            os.environ.pop(k, None)
+        github._paths.clear()
+        github._roots.clear()
+        github.waited = 0.0
+        self.addCleanup(github._paths.clear)
+        self.addCleanup(github._roots.clear)
+
+    def run_call(self, replies, *args):
+        argvs, sleeps = [], []
+        queue = list(replies)
+
+        def fake(*cmd, **kw):
+            argvs.append(cmd)
+            return queue.pop(0) if len(queue) > 1 else queue[0]
+
+        with unittest.mock.patch.object(common, "run", fake), \
+                unittest.mock.patch.object(github, "sleep", sleeps.append), \
+                unittest.mock.patch.object(github, "clock", lambda: 1000.0), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            try:
+                return argvs, github.call(*args, cwd=str(self.root)), None
+            except github.GhError as e:
+                return argvs, None, e
+
+    def events(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def test_a_canned_reply_writes_one_event_with_the_fields_and_returns_only_the_body(self):
+        ok = common.Run(0, reply(200, '{"id": 1}', x_ratelimit_remaining=4321, x_ratelimit_used=679), "")
+        argvs, out, err = self.run_call([ok], "api", "repos/{owner}/{repo}/pulls/7?per_page=1")
+        self.assertEqual((out, err), ('{"id": 1}', None))
+        self.assertEqual(argvs[0], ("gh", "api", "--include", "repos/{owner}/{repo}/pulls/7?per_page=1"))
+        [e] = self.events()
+        self.assertEqual((e["kind"], e["session"], e["outcome"], e["status"]), ("gh_call", "sess-9", "ok", 200))
+        self.assertEqual((e["method"], e["write"], e["graphql"], e["path"]), ("GET", False, False, "repos/{owner}/{repo}/pulls/7"))
+        self.assertEqual((e["remaining"], e["used"], e["retry_after"], e["attempt"]), (4321, 679, None, 1))
+        self.assertIsInstance(e["ms"], int)
+        self.assertTrue(e["script"])
+        self.assertNotIn('"id"', self.log.read_text())  # no body
+
+    def test_a_retried_call_writes_one_event_per_attempt_and_a_wait(self):
+        limited = common.Run(1, reply(403, "{}", retry_after=2, x_ratelimit_remaining=0),
+                             "gh: You have exceeded a secondary rate limit. (HTTP 403)")
+        ok = common.Run(0, reply(200, "[]"), "")
+        _, out, _ = self.run_call([limited, ok], "api", "x")
+        self.assertEqual(out, "[]")
+        first, wait, second = self.events()
+        self.assertEqual((first["attempt"], first["outcome"], first["status"]), (1, "ratelimited", 403))
+        self.assertEqual((wait["outcome"], wait["seconds"], wait["shared"]), ("wait", 2.0, False))
+        self.assertEqual((second["attempt"], second["outcome"]), (2, "ok"))
+
+    def test_a_403_with_retry_after_gives_status_and_retry_after_and_the_message_carries_them(self):
+        limited = common.Run(1, reply(403, '{"message":"x"}', retry_after=7, x_ratelimit_remaining=12),
+                             "gh: You have exceeded a secondary rate limit. (HTTP 403)")
+        os.environ["ORCHESTRATE_GH_WAIT"] = "0"
+        _, _, err = self.run_call([limited], "api", "--method", "POST", "x")
+        events = self.events()
+        self.assertEqual((events[0]["status"], events[0]["retry_after"], events[0]["remaining"]), (403, 7, 12))
+        self.assertEqual((events[0]["method"], events[0]["write"]), ("POST", True))
+        self.assertEqual(err.kind, github.RATELIMITED)
+        self.assertIn("rate limit until", err.message)  # the wait is over the budget: the stable text
+
+    def test_a_failed_api_call_reports_gh_stderr_not_the_headers(self):
+        notfound = common.Run(1, reply(404, '{"message":"Not Found"}'), "gh: Not Found (HTTP 404)")
+        _, _, err = self.run_call([notfound], "api", "x")
+        self.assertEqual((err.kind, err.message), (github.FAILED, "gh: Not Found (HTTP 404)"))
+        self.assertEqual((self.events()[0]["outcome"], self.events()[0]["status"]), ("failed", 404))
+
+    def test_a_subcommand_failure_has_no_headers(self):
+        fail_ = common.Run(1, "", "gh: You have exceeded a secondary rate limit. (HTTP 403)")
+        os.environ["ORCHESTRATE_GH_WAIT"] = "0"
+        argvs, _, err = self.run_call([fail_], "pr", "merge", "7", "--squash")
+        self.assertEqual(argvs[0], ("gh", "pr", "merge", "7", "--squash"))  # no --include on a subcommand
+        [e] = self.events()
+        self.assertEqual((e["headers"], e["graphql"], e["write"], e["path"]), ("unavailable", True, True, "pr merge"))
+        self.assertNotIn("remaining", e)
+
+    def test_a_subcommand_rate_limit_message_says_headers_are_unavailable(self):
+        fail_ = common.Run(1, "", "gh: You have exceeded a secondary rate limit. (HTTP 403)")
+        os.environ["ORCHESTRATE_GH_WAIT"] = "1000"
+        _, _, err = self.run_call([fail_], "pr", "view", "7")
+        self.assertEqual(err.kind, github.RATELIMITED)
+        self.assertIn("headers unavailable", err.message)
+
+    def test_an_empty_body_after_the_headers_is_as_before(self):
+        _, out, _ = self.run_call([common.Run(0, reply(204, ""), "")], "api", "-X", "DELETE", "x")
+        self.assertEqual(out, "")
+        self.assertEqual(self.events()[0]["method"], "DELETE")
+
+    def test_output_without_headers_is_returned_untouched(self):
+        _, out, _ = self.run_call([common.Run(0, "HTTP is a protocol\n\nbody", "")], "api", "x")
+        self.assertEqual(out, "HTTP is a protocol\n\nbody")
+
+    def test_paginated_calls_run_without_include(self):
+        argvs, _, _ = self.run_call([common.Run(0, "a\n", "")], "api", "--paginate", "x", "--jq", ".[]")
+        self.assertEqual(argvs[0], ("gh", "api", "--paginate", "x", "--jq", ".[]"))
+        self.assertEqual(self.events()[0]["headers"], "unavailable")
+
+    def test_graphql_reads_and_mutations(self):
+        self.assertEqual(github.describe(["api", "graphql", "-f", "query=query { a }", "-F", "n=1"])["write"], False)
+        mutation = github.describe(["api", "graphql", "-f", "query=mutation { resolve }"])
+        self.assertEqual((mutation["graphql"], mutation["write"], mutation["path"]), (True, True, "graphql"))
+        self.assertEqual(github.describe(["api", "-F", "issue_id=1", "x"])["method"], "POST")  # fields imply POST
+        self.assertEqual(github.describe(["api", "x", "--jq", ".id"])["path"], "x")
+
+    def test_a_log_write_failure_is_swallowed(self):
+        (self.root / ".claude" / "orchestrate-profiles").write_text("not a directory")
+        _, out, err = self.run_call([common.Run(0, reply(200, "ok"), "")], "api", "x")
+        self.assertEqual((out, err), ("ok", None))
+
+    def test_no_session_no_event(self):
+        (self.root / ".claude" / "orchestrate-state.json").unlink()
+        self.run_call([common.Run(0, reply(200, "ok"), "")], "api", "x")
+        self.assertEqual(self.events(), [])
+
+    def test_the_log_can_be_turned_off(self):
+        os.environ["ORCHESTRATE_GH_LOG"] = "off"
+        self.run_call([common.Run(0, reply(200, "ok"), "")], "api", "x")
+        self.assertEqual(self.events(), [])
+
+    def test_a_linked_worktree_logs_to_the_main_checkout(self):
+        gitdir = self.root / ".git" / "worktrees" / "w"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n")
+        wt = self.root.parent / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text(f"gitdir: {gitdir}\n")
+        with unittest.mock.patch.object(common, "run", lambda *a, **k: common.Run(0, reply(200, "ok"), "")):
+            github.call("api", "x", cwd=str(wt))
+        self.assertEqual(len(self.events()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

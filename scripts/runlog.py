@@ -25,6 +25,7 @@ PASS_LOG = "passes.jsonl"
 # (tests/test_runlog.py checks they agree); gate, watch-ci and merge write the others.
 GATE, CI, MERGE, REPLAY, WORKER_REPORT, FRONTIER = "gate", "ci", "merge", "replay", "worker-report", "frontier"
 THREADS = "threads"
+GH_CALL = "gh_call"  # scripts/github.py: one per `gh` attempt (ok|failed|ratelimited), or "wait" for a sleep
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
@@ -35,6 +36,7 @@ OUTCOMES = {
     WORKER_REPORT: ("valid", "interim", "not-a-stop", "not-a-pr-opened", "duplicate", "missing-report", "limit", "error"),
     THREADS: ("resolved", "reopened"),  # scripts/threads: the thread id and its author ride as extra fields
     FRONTIER: ("ran",),  # scripts/frontier: the takeable count rides as an extra field
+    GH_CALL: ("ok", "failed", "ratelimited", "wait"),
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"

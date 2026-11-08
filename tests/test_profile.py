@@ -401,7 +401,7 @@ class ProfileTest(unittest.TestCase):
         self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
         self.fx.events([MERGED_50])
         out = prof.summary(self.fx.run(), Path("x.json"))
-        self.assertEqual(len(out.splitlines()), 5)
+        self.assertEqual(len(out.splitlines()), 6)  # header, $, slots, plan, GitHub calls, saved
         self.assertIn("per merged ticket (1 merged)", out)
         self.assertIn("opus", out)
 
@@ -740,10 +740,45 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("events log", out.stdout)
 
-    def test_summary_stays_five_lines(self):
-        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
+    def gh_events(self):
+        call = lambda minute, script, **kw: {"ts": at(minute), "session": SESSION, "kind": "gh_call", "ref": None,
+                                             "script": script, "method": "GET", "write": False, "path": "graphql",
+                                             "graphql": True, "attempt": 1, "outcome": "ok", "status": 200, "ms": 5, **kw}
+        return [
+            call(1, "gate", remaining=4000),
+            call(2, "merge", write=True, method="PUT", graphql=False, path="repos/{owner}/{repo}/pulls/1/merge", remaining=3990),
+            call(3, "merge", write=True, method="PUT", graphql=False, outcome="ratelimited", status=403, remaining=0, retry_after=7),
+            call(3, "merge", write=True, method="PUT", graphql=False, attempt=2),
+            {"ts": at(3), "session": SESSION, "kind": "gh_call", "script": "merge", "outcome": "wait", "seconds": 7.0, "shared": True},
+            call(9, "watch-ci", remaining=3000),
+        ]
+
+    def test_github_calls_block_counts_per_pass_and_for_the_run(self):
+        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}, {"ts": at(10), "slots": 2, "free": 1}])
+        self.fx.events(self.gh_events())
+        g = self.fx.run()["metrics"]["gh_calls"]
+        self.assertTrue(g["available"])
+        t = g["total"]
+        self.assertEqual((t["calls"], t["writes"], t["graphql"], t["retries"], t["rate_limited"]), (5, 3, 2, 1, 1))
+        self.assertEqual((t["by_script"], t["lowest_remaining"]), ({"merge": 3, "gate": 1, "watch-ci": 1}, 0))
+        self.assertEqual((t["peak_writes_per_minute"], t["waited_s"], t["waited_shared_s"]), (2, 7.0, 7.0))  # the minute-2 and minute-3 writes are 60 s apart
+        first, second = g["passes"]
+        self.assertEqual((first["pass"], first["calls"], first["writes"]), (1, 4, 3))
+        self.assertEqual((second["pass"], second["calls"], second["writes"]), (2, 1, 0))
+
+    def test_github_calls_appear_in_the_summary(self):
+        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}, {"ts": at(10), "slots": 2, "free": 1}])
+        self.fx.events(self.gh_events())
+        out = prof.summary(self.fx.run(), Path("x.json"))
+        self.assertIn("GitHub calls: 5 calls, 3 writes", out)
+        self.assertIn("by script: merge 3, gate 1, watch-ci 1", out)
+        self.assertIn("pass 1: 4 calls", out)
+
+    def test_an_older_events_log_without_gh_calls_is_not_recorded(self):
         self.fx.events([MERGED_50])
-        self.assertEqual(len(prof.summary(self.fx.run(), Path("x.json")).splitlines()), 5)
+        p = self.fx.run()
+        self.assertEqual(p["metrics"]["gh_calls"], {"available": False})
+        self.assertIn("GitHub calls: not recorded", prof.summary(p, Path("x.json")))
 
 
 class CommandTest(unittest.TestCase):

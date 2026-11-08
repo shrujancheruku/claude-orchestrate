@@ -776,6 +776,78 @@ def event_metrics(events: list | None, review: dict) -> dict:
     }
 
 
+def peak_per_minute(times: list) -> int:
+    """The most events in any 60-second span of the sorted datetimes `times`."""
+    peak, lo = 0, 0
+    for hi, t in enumerate(times):
+        while (t - times[lo]).total_seconds() >= 60:
+            lo += 1
+        peak = max(peak, hi - lo + 1)
+    return peak
+
+
+def gh_block(events: list) -> dict:
+    """The counts for one stretch of `gh_call` events: attempts (a retry is its own attempt), writes, GraphQL,
+    attempts by script, retries (attempts after the first), rate-limited replies, the lowest `remaining` seen,
+    the busiest minute of writes, and the seconds slept (of which `shared` waits for another process's hit)."""
+    calls = [e for e in events if e.get("outcome") != "wait"]
+    waits = [e for e in events if e.get("outcome") == "wait"]
+    by_script = {}
+    for e in calls:
+        name = str(e.get("script") or "?")
+        by_script[name] = by_script.get(name, 0) + 1
+    remaining = [e["remaining"] for e in calls if isinstance(e.get("remaining"), int)]
+    writes = sorted(t for t in (parse_ts(e.get("ts")) for e in calls if e.get("write")) if t)
+    seconds = lambda es: round(sum(e.get("seconds") or 0 for e in es), 1)
+    return {
+        "calls": len(calls),
+        "writes": sum(1 for e in calls if e.get("write")),
+        "graphql": sum(1 for e in calls if e.get("graphql")),
+        "by_script": dict(sorted(by_script.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "retries": sum(1 for e in calls if (e.get("attempt") or 1) > 1),
+        "rate_limited": sum(1 for e in calls if e.get("outcome") == "ratelimited"),
+        "lowest_remaining": min(remaining) if remaining else None,
+        "peak_writes_per_minute": peak_per_minute(writes),
+        "waited_s": seconds(waits),
+        "waited_shared_s": seconds([e for e in waits if e.get("shared")]),
+    }
+
+
+def gh_metrics(events: list | None, passes: list) -> dict:
+    """GitHub use from the helper's `gh_call` events: a run total and one block per pass (the calls made up to
+    that pass's record, after the previous one). `{"available": False}` for a log written before the call log."""
+    calls = [e for e in events or [] if e.get("kind") == runlog.GH_CALL]
+    if not calls:
+        return {"available": False}
+    bounds = [(p.get("n") or i + 1, parse_ts(p.get("ts"))) for i, p in enumerate(passes)]
+    bounds = [(n, t) for n, t in bounds if t]
+    buckets = [[] for _ in bounds] + [[]]  # the last holds calls after the final pass record
+    for e in calls:
+        ts = parse_ts(e.get("ts"))
+        buckets[next((i for i, (_, t) in enumerate(bounds) if ts and ts <= t), len(bounds))].append(e)
+    rows = [{"pass": n, **gh_block(b)} for (n, _), b in zip(bounds, buckets) if b]
+    if buckets[-1]:
+        rows.append({"pass": None, **gh_block(buckets[-1])})  # outside any recorded pass
+    return {"available": True, "total": gh_block(calls), "passes": rows}
+
+
+def gh_lines(g: dict) -> list:
+    """The summary's GitHub lines: one for the run, then one per pass when there is more than one."""
+    if not g.get("available"):
+        return ["GitHub calls: not recorded"]
+    def line(b):
+        low = "–" if b["lowest_remaining"] is None else b["lowest_remaining"]
+        wait = f" · waited {fmt_dur(b['waited_s'])} ({fmt_dur(b['waited_shared_s'])} for another script's hit)" if b["waited_s"] else ""
+        return (f"{b['calls']} calls, {b['writes']} writes (peak {b['peak_writes_per_minute']}/min), {b['graphql']} GraphQL, "
+                f"{b['retries']} retries, lowest remaining {low}{wait}")
+    t = g["total"]
+    out = [f"GitHub calls: {line(t)}",
+           "  by script: " + (", ".join(f"{k} {v}" for k, v in list(t["by_script"].items())[:6]) or "none")]
+    if len(g["passes"]) > 1:
+        out += [f"  pass {r['pass'] if r['pass'] is not None else 'after'}: {line(r)}" for r in g["passes"]]
+    return out
+
+
 def windows(usage: list, passes: list, threshold: float, now: datetime) -> list:
     """Each 5-hour window the samples saw: its peak, and whether it reset with room left under pressure."""
     by_reset = {}
@@ -970,6 +1042,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "depth2": depth2,
             **orchestrator_metrics(main, agents, passes, len(merged), events),
             "events": event_metrics(events, review),
+            "gh_calls": gh_metrics(events, passes),
         },
         "recommendation": recommend(slots, occupancy, wins, limits),
     }
@@ -1010,6 +1083,7 @@ def summary(p: dict, saved: Path) -> str:
         f"proxy $ {spend}",
         f"slots   occupied {m['occupancy']:.0%}  (building {m['building_share']:.0%}, review/merge {m['review_share']:.0%})  idle: {idle}",
         f"plan    {plan}",
+        *gh_lines(m.get("gh_calls") or {"available": False}),
     ]
     for w in p["warnings"]:
         lines.append(f"WARNING {w}")
