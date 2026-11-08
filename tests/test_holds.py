@@ -210,7 +210,7 @@ class Holds(unittest.TestCase):
 
     def test_unreadable_state_file_could_not_run(self):
         self.gh()
-        (self.env.repo / ".claude").mkdir()
+        (self.env.repo / ".claude").mkdir(exist_ok=True)  # the harness stamps a state file here
         (self.env.repo / ".claude/orchestrate-state.json").write_text("{nope")
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 2)

@@ -74,16 +74,23 @@ class HarnessSmoke(unittest.TestCase):
         self.assertEqual(e.run(cli, "b").stdout, "three\n")
         self.assertEqual(e.run(cli, "C").stdout, "None\n")
 
-    def test_session_default_from_env(self):
+    def test_session_default_from_the_state_file_not_the_environment(self):
         e = self.env
         cli = self.cli("section.py", SECTION_CLI)
         saved = os.environ.get("CLAUDE_SESSION_ID")
         self.addCleanup(lambda: os.environ.__setitem__("CLAUDE_SESSION_ID", saved) if saved else os.environ.pop("CLAUDE_SESSION_ID", None))
         os.environ["CLAUDE_SESSION_ID"] = "abc"
         e.run(cli, "A")
-        del os.environ["CLAUDE_SESSION_ID"]
-        e.run(cli, "A")
-        self.assertEqual([x["session"] for x in e.events()], ["abc", None])
+        self.assertEqual([x["session"] for x in e.events()], ["test-session"])
+
+    def test_no_state_file_and_no_session_is_refused_in_one_line(self):
+        e = self.env
+        (e.repo / ".claude" / "orchestrate-state.json").unlink()
+        cli = self.cli("section.py", SECTION_CLI)
+        res = e.run(cli, "A", check=False)
+        self.assertEqual(res.returncode, 2)
+        self.assertEqual(len(res.stderr.strip().splitlines()), 1, res.stderr)
+        self.assertEqual(e.events(), [])
 
 
 if __name__ == "__main__":

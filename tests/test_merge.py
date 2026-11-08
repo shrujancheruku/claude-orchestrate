@@ -34,6 +34,15 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertEqual([(x["kind"], x["ref"], x["outcome"]) for x in e], [("merge", 7, "merged")])
         self.assertTrue(e[0]["branch_deleted"])
 
+    def test_no_session_refuses_before_the_merge(self):
+        # The merged event is written after the merge; refusing then would exit 2 on a merge that happened.
+        (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
+        self.seq({"pr view": [pr("OPEN")], "pr merge": [OK]})
+        p = self.merge()
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(self.called(["pr", "merge"]), [])
+        self.assertEqual(len(p.stderr.strip().splitlines()), 1, p.stderr)
+
     def test_head_moved_is_a_refusal(self):
         self.seq({"pr view": [pr("OPEN")], "issue view": OPEN_ISSUE,
                   "pr merge": [{"exit": 1, "stderr": "Head branch was modified. Review and try the merge again."}]})

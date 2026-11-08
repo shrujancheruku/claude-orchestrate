@@ -231,6 +231,11 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     pr, ref = common.pr_ref(args.pr)
     cwd = args.cwd
+    # Before the irreversible step: the merged event is written after the merge, and a missing session
+    # would otherwise exit 2 on a merge that happened, before the sweep ran (#341).
+    if not runlog.current_session(cwd):
+        common.die(f"merge: no session in {runlog.STATE} under {runlog.main_checkout(cwd)}; "
+                          "run rebuild-state first")
 
     v, why = view(pr, cwd)
     if v is None:
