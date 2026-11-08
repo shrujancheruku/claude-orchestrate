@@ -115,6 +115,13 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(self.called(MERGE), [])
         self.assertEqual(p.stdout.splitlines()[-1], f"next: wait-ci 7 {head}")
 
+    def test_an_upper_case_yml_workflow_name_counts_as_a_workflow_file(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, checks=[], approved=head, workflows={"stdout": '[{"name": "ci.YML"}]'})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("ci: pending", p.stdout)
+        self.assertEqual(self.called(MERGE), [])
+
     def test_unreadable_workflows_exit_2(self):
         head = self.push({"b.txt": "x\n"})
         p = self.merge(head, checks=[], approved=head, workflows={"exit": 1, "stderr": "gh: Server Error (HTTP 500)"})

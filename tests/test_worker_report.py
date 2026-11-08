@@ -70,8 +70,7 @@ class WorkerReport(unittest.TestCase):
         cmd = 'gh pr create --title "feat: x" --body-file /tmp/b.md --base main --head 260-x'
         self.assertEqual(self.verdict(f"status: stopped\nstop-reason: permission-denied\ndenied-command: {cmd}\n"),
                          "valid stopped permission-denied")
-        events = [json.loads(l) for l in (self.env.repo / ".claude/orchestrate-profiles/events.jsonl").read_text().splitlines()]
-        self.assertEqual(events[-1]["denied_command"], cmd)
+        self.assertEqual(self.env.events()[-1]["denied_command"], cmd)
 
     def test_a_second_permission_denied_with_another_command_is_not_a_duplicate(self):
         a = "status: stopped\nstop-reason: permission-denied\ndenied-command: gh pr create --head x\n"
