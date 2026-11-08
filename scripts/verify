@@ -101,9 +101,13 @@ def check_branch(cwd, branch):
                    "your cwd was reset, so run from your worktree")
     current = git_out(cwd, "branch", "--show-current")
     if current != branch:
+        # A continuation must start from the remote branch's commits, not the default branch.
+        if git_out(cwd, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"):
+            hint = f"git switch -C {branch} origin/{branch}"
+        else:
+            hint = f"git switch -c {branch} origin/<default branch>"
         common.die(f"verify: {where} has {current or 'no branch'} checked out, not {branch}; "
-                   "refusing to verify the wrong tree; "
-                   f"switch to it first: git switch -c {branch} origin/<default branch>")
+                   f"refusing to verify the wrong tree; switch to it first: {hint}")
 
 
 def main(argv=None):
