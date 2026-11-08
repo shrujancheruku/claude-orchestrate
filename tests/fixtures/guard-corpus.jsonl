@@ -583,7 +583,7 @@
 {"role": "orchestrate:worker", "command": "bash ./evil/scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "/tmp/x/scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git -c credential.helper='!gh auth git-credential' push https://github.com/owner/repo.git feat", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create -d --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
@@ -612,3 +612,34 @@
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID1 ID2 --left 'the worker finished; left for a follow-up'", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve --left 'x'", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID -y --left 'x'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file .claude/pr-body.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit -F /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file=-", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file -", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file ../../.env", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file ~/secret/key", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file '~/secret/key'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit -F /etc/passwd", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file=/etc/passwd", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file /private/tmp/other/pr.md", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --method squash --approved-head abc1234 --ticket 5 --ticket 6 --worktree /w/agent-x", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --cwd /other", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --method", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge --method squash", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --method squash --method merge", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --appr abc", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 *", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --ticket {5,6}", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge ~", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --dry-run --verbose", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo /other", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board extra", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left *", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left ?", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left [a]", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left {a,b}", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left ~", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'why *'", "expected": "approve", "source": "hand"}

@@ -1054,6 +1054,49 @@ class RoutineApprovalTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertFalse(approved(None, command, self.main))
 
+    def test_orchestrator_merge_and_board_calls_are_approved_only_in_their_argument_shape(self):
+        for command in (f"{SCRIPTS}/merge 12", f"{SCRIPTS}/merge 12 --method rebase --approved-head abc --ticket 5 --ticket 6",
+                        f"{SCRIPTS}/merge 12 --also-approved 13=abc --also-approved 14=def --worktree /w --timeout=60",
+                        f"{SCRIPTS}/board", f"{SCRIPTS}/board --dry-run --verbose"):
+            with self.subTest(command):
+                self.assertTrue(approved(None, command, self.main))
+        for command in (f"{SCRIPTS}/merge", f"{SCRIPTS}/merge --method squash", f"{SCRIPTS}/merge x",
+                        f"{SCRIPTS}/merge 12 --cwd /other", f"{SCRIPTS}/merge 12 --cw /other",
+                        f"{SCRIPTS}/merge 12 --method", f"{SCRIPTS}/merge 12 --method --ticket 5",
+                        f"{SCRIPTS}/merge 12 --method squash --method merge", f"{SCRIPTS}/merge 12 extra",
+                        f"GH_REPO=o/r {SCRIPTS}/merge 12", f"{SCRIPTS}/merge 12 --ticket *",
+                        f"{SCRIPTS}/board --repo /other", f"{SCRIPTS}/board --dry-run --dry-run", f"{SCRIPTS}/board x",
+                        f"{SCRIPTS}/board *"):
+            with self.subTest(command):
+                self.assertFalse(approved(None, command, self.main))
+
+    def test_unquoted_glob_brace_and_tilde_words_are_not_plain_words(self):
+        for word in ("*", "?", "[a]", "{a,b}", "{1..3}", "~", "~/x", "a*", "$"):
+            with self.subTest(word):
+                self.assertFalse(approved(None, f"{SCRIPTS}/threads 12 resolve ID --left {word}", self.main))
+        for word in ("'*'", '"?"', "'{a,b}'", "'~'", '"a $"', "{owner}"):
+            with self.subTest(word):
+                self.assertTrue(approved(None, f"{SCRIPTS}/threads 12 resolve ID --left {word}", self.main))
+
+    def test_worker_body_file_is_approved_only_inside_its_worktree_or_the_scratchpad(self):
+        scratch = "/private/tmp/claude-0/-proj/00000000-0000-0000-0000-000000000000/scratchpad"
+        for command in ("gh pr edit --body-file b.md", f"gh pr edit --body-file {self.work}/sub/b.md",
+                        f"gh pr edit -F {scratch}/b.md", f"gh pr edit --body-file={scratch}/b.md",
+                        "gh pr edit --body-file -", "gh pr edit --body-file=-",
+                        f"gh pr create --draft --title t --body-file {scratch}/b.md", "gh pr edit --body-file '~/x'"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+        for command in ("gh pr edit --body-file ~/.ssh/id_ed25519", "gh pr edit --body-file ../../.env",
+                        "gh pr edit --body-file /etc/passwd", "gh pr edit -F /etc/passwd", "gh pr edit --body-file=/etc/passwd",
+                        f"gh pr edit --body-file {self.main}/.env", "gh pr edit --body-file /private/tmp/other/b.md",
+                        f"gh pr edit --body-file {scratch}/../../x", "gh pr create --draft --title t --body-file /etc/passwd"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+
+    def test_worker_body_file_symlink_out_of_the_worktree_is_not_approved(self):
+        (self.work / "link.md").symlink_to("/etc/passwd")
+        self.assertFalse(approved("orchestrate:worker", "gh pr edit --body-file link.md", self.work))
+
     def test_orchestrator_is_not_approved_without_the_config_or_for_another_plugins_agent(self):
         self.assertIsNone(raw(None, "gh issue close 5", self.root))
         self.assertIsNone(raw("other:agent", "gh issue close 5", self.main))

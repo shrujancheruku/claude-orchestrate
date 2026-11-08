@@ -89,12 +89,13 @@ class ParseError(Exception):
 
 class Word:
     """One shell word with its quoting resolved. `dynamic`: it holds a `$x`, `${x}`, `$(...)`, `$((...))`
-    or backtick expansion (each shows as EXP in `text`). `quoted`: part of it was quoted or escaped."""
+    or backtick expansion (each shows as EXP in `text`). `quoted`: part of it was quoted or escaped.
+    `glob`: it holds an unquoted `*`, `?`, `[`, `{`, `~` or `$`, which the shell expands to other words (#441)."""
 
-    __slots__ = ("text", "dynamic", "quoted")
+    __slots__ = ("text", "dynamic", "quoted", "glob")
 
-    def __init__(self, text: str, dynamic: bool, quoted: bool):
-        self.text, self.dynamic, self.quoted = text, dynamic, quoted
+    def __init__(self, text: str, dynamic: bool, quoted: bool, glob: bool = False):
+        self.text, self.dynamic, self.quoted, self.glob = text, dynamic, quoted, glob
 
 
 class Heredoc:
@@ -117,7 +118,7 @@ class Command:
 
 class WordBuilder:
     def __init__(self):
-        self.parts, self.dynamic, self.quoted = [], False, False
+        self.parts, self.dynamic, self.quoted, self.glob, self.brace = [], False, False, False, False
 
     def lit(self, text: str) -> None:
         self.parts.append(text)
@@ -127,7 +128,9 @@ class WordBuilder:
         self.dynamic = True
 
     def done(self) -> Word:
-        return Word("".join(self.parts), self.dynamic, self.quoted)
+        text = "".join(self.parts)
+        # A brace word only expands with a comma or a `..` inside (`{a,b}`, `{1..3}`); `{owner}/{repo}` is literal.
+        return Word(text, self.dynamic, self.quoted, self.glob or (self.brace and ("," in text or ".." in text)))
 
 
 REDIRECT_OPS = ("<<<", "<<-", "<<", "<&", "<>", "<", ">>", ">&", ">|", ">")
@@ -257,7 +260,10 @@ class Lexer:
                 elif self.nested:
                     return
             else:
-                self.word().lit(c)
+                wb = self.word()
+                wb.lit(c)
+                wb.glob = wb.glob or c in "*?[~"
+                wb.brace = wb.brace or c == "{"
                 self.i += 1
         if self.nested:
             raise ParseError("unterminated $( )")
@@ -354,6 +360,7 @@ class Lexer:
             wb.exp()
             return m.end()
         wb.lit("$")
+        wb.glob = wb.glob or not in_dq
         return i + 1
 
     def backtick(self, i: int, wb: WordBuilder) -> int:
@@ -1017,7 +1024,9 @@ def role_label(role: str) -> str:
 
 
 def only_plain_words(cmd: Command) -> bool:
-    return not cmd.redirects and not any(w.dynamic for w in cmd.words)
+    """No redirect, no expansion, and no unquoted glob, brace or tilde word: the shell would turn that into
+    other words before the script sees them (#441)."""
+    return not cmd.redirects and not any(w.dynamic or w.glob for w in cmd.words)
 
 
 def review_shape(cmd: Command) -> str | None:
@@ -1439,6 +1448,43 @@ def own_script(cmd: Command, args: list, cwd: str, name: str) -> bool:
     return Path(os.path.realpath(os.path.join(cwd or ".", word))) == PLUGIN_SCRIPTS / name
 
 
+# The flags the orchestrator's merge call may carry, spelled in full (argparse accepts abbreviations, and
+# `--cwd` aims the script at another repository), each taking one value. `--also-approved` and `--ticket`
+# repeat; the rest are given once (#441).
+MERGE_VALUE_FLAGS = ("--method", "--approved-head", "--ticket", "--also-approved", "--worktree", "--timeout", "--interval")
+MERGE_REPEATABLE = ("--ticket", "--also-approved")
+
+
+def orchestrator_merge_form(cmd: Command, args: list) -> bool:
+    """True when the orchestrator's merge call is `<pr> [flags]`: the script first (no env prefix, no wrapper),
+    a PR number, then only MERGE_VALUE_FLAGS, each with one value, in full (`--flag value` or `--flag=value`)."""
+    words = [w.text for w in args]
+    if len(cmd.words) - len(args) != 1 or not words or not words[0].isdigit():
+        return False
+    seen, j = set(), 1
+    while j < len(words):
+        name, eq, _ = words[j].partition("=")
+        if name not in MERGE_VALUE_FLAGS or (name in seen and name not in MERGE_REPEATABLE):
+            return False
+        if not eq:
+            j += 1
+            if j >= len(words) or words[j].startswith("-"):
+                return False
+        seen.add(name)
+        j += 1
+    return True
+
+
+BOARD_FLAGS = ("--dry-run", "--verbose")
+
+
+def orchestrator_board_form(cmd: Command, args: list) -> bool:
+    """True when the orchestrator's board call carries only BOARD_FLAGS, each once, in full: no `--repo`, which
+    aims the sync at another repository, and no positional word (#441)."""
+    words = [w.text for w in args]
+    return len(cmd.words) - len(args) == 1 and len(set(words)) == len(words) and all(w in BOARD_FLAGS for w in words)
+
+
 def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
     """A worker's `git add`, `git commit` or push of its own ticket branch, from inside its worktree."""
     worktree = worker_worktree(cwd)
@@ -1475,13 +1521,50 @@ def numberless_edit(args: list) -> bool:
     return bool(args)
 
 
-def routine_pr(call: Call) -> bool:
+# The session scratchpad: `<tmp>/claude-<uid>/<project>/<session>/scratchpad/...` under a temp root.
+SCRATCHPAD = re.compile(r"/claude-[^/]+/[^/]+/[^/]+/scratchpad(?:/.+)?")
+
+
+def body_file_ok(value: str, cwd: str) -> bool:
+    """A worker's `--body-file` is `-` (stdin) or a path that, resolved against cwd with symlinks followed, sits
+    inside its own worktree or the session scratchpad: any other readable file (a key, `../../.env`) would
+    become a PR body (#434). The word is literal (an unquoted `~` is not a plain word), so it is not expanded."""
+    if value == "-":
+        return True
+    worktree = worker_worktree(cwd)
+    if worktree is None or not value:
+        return False
+    target = Path(os.path.realpath(os.path.join(cwd, value)))
+    if worktree in target.parents:
+        return True
+    return any(str(target).startswith(t + "/") and SCRATCHPAD.fullmatch(str(target)[len(t):]) for t in TEMP_ROOTS)
+
+
+def body_files_ok(args: list, cwd: str) -> bool:
+    """Every `--body-file`, `--body-file=<path>` and `-F <path>` word of a `gh pr` call passes body_file_ok."""
+    j = 0
+    while j < len(args):
+        name, eq, value = args[j].partition("=") if args[j].startswith("--") else (args[j], "", "")
+        j += 1
+        if name in ("--body-file", "-F"):
+            if not eq:
+                if j >= len(args):
+                    return False
+                value, j = args[j], j + 1
+            if not body_file_ok(value, cwd):
+                return False
+    return True
+
+
+def routine_pr(call: Call, cwd: str = "") -> bool:
     """A worker's draft PR, or its own PR made ready or edited. Ready and edit are approved only in the
     current-branch form, with no PR number (#379): `gh` resolves the PR from the checked-out branch, and the
     guard can't tell which PR a number names, so a call naming one is left to the permission layer."""
     if not call.is_sub("pr") or any(a.dynamic for a in call.args):
         return False
     args = [a.text for a in call.args]
+    if not body_files_ok(args, cwd):
+        return False
     if call.is_verb("create"):
         return "--draft" in args
     if call.is_verb("ready"):
@@ -1517,12 +1600,14 @@ def approval(role: str | None, command: str, cwd: str) -> bool:
         if found is not None:
             # Only the current-branch form (no PR number) is approved: the script resolves the PR from the branch.
             return numberless_threads_form(found[0], found[1]) is not None and own_script(found[0], found[1], cwd, "threads")
-        return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0]))
+        return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0], cwd))
     if role is None and config_path(cwd):
         for pattern, name in ((MERGE_SCRIPT, "merge"), (THREADS_SCRIPT, "threads"), (BOARD_SCRIPT, "board")):
             found = script_call(parsed, pattern)
             if found is not None:
-                if name == "threads" and not orchestrator_threads_form(found[0], found[1]):
+                form = {"threads": orchestrator_threads_form, "merge": orchestrator_merge_form,
+                        "board": orchestrator_board_form}[name]
+                if not form(found[0], found[1]):
                     return False
                 return own_script(found[0], found[1], cwd, name)
         return plain_gh and parsed.calls[0].is_sub("issue") and parsed.calls[0].is_verb("edit", "comment", "create", "close")
