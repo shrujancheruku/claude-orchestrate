@@ -199,6 +199,15 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
         self.assertIn("changed 11 line(s) in 1 file(s)", p.stdout)
 
+    def test_a_file_added_and_removed_after_approval_plus_one_line_fix_is_one_line(self):
+        # The #411 shape after a main update: the leak never reaches the head, so only the fix is left.
+        self.update_from_main("big.txt", "x\n" * 50)
+        self.on_br(lambda r: (r / "leak.txt").write_text("x\n" * 60))
+        self.on_br(lambda r: (r / "leak.txt").unlink())
+        head = self.on_br(lambda r: (r / "c.txt").write_text("y\n"))
+        p = self.merge(head)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
     def test_a_revert_is_in_the_delta(self):
         approved = self.on_br(lambda r: (r / "auth" / "x.py").parent.mkdir(exist_ok=True) or (r / "auth" / "x.py").write_text("1\n"))
         head = self.on_br(lambda r: (r / "auth" / "x.py").unlink())
