@@ -114,6 +114,17 @@ CASES = [
     ("orchestrate:worker", "grep -n x scripts/merge", "allow"),
     ("orchestrate:worker", "sh -c 'cat scripts/merge'", "allow"),
     (None, '"${CLAUDE_SKILL_DIR}/../../scripts/merge" 12', "allow"),  # the orchestrator's own session
+    # #327: words that only name the script are data, not a run of it.
+    ("orchestrate:worker", "python3 - <<'EOF'\np = 'scripts/merge'\nprint('`merge` run')\nEOF\ngit add x && git commit -q -m 'docs(merge): x'", "allow"),
+    ("orchestrate:worker", 'git commit -m "fix: x" -m "(scripts/merge)"', "allow"),
+    ("orchestrate:worker", "gh pr create --body-file - <<'EOF'\nuses scripts/merge\nEOF", "allow"),
+    ("orchestrate:worker", 'printf "%s" "x | scripts/merge"', "allow"),
+    ("orchestrate:worker", "python3 - <<'EOF'\nx\nEOF\nscripts/merge 12", "deny"),
+    ("orchestrate:worker", "sh -c 'echo hi; scripts/merge 12'", "deny"),
+    ("orchestrate:worker", "cd scripts && sh -c './merge 1'", "deny"),
+    ("orchestrate:worker", "cd scripts && sh -c ./merge", "deny"),
+    ("orchestrate:worker", 'cd scripts && sh -c "./merge 1" && cd -', "deny"),
+    ("orchestrate:worker", 'cd scripts && sh -c "./merge 1"; cd /tmp', "deny"),
     ("orchestrate:scout", "git -C /repo checkout main", "deny"),
     ("orchestrate:scout", "git worktree add ../x", "deny"),
     ("orchestrate:scout", "gh issue comment 5 --body hi", "deny"),
@@ -810,6 +821,189 @@ class GuardTest(unittest.TestCase):
                     config.parent.mkdir()
                     config.write_text(text)
                 self.assertEqual(decide("orchestrate:reviewer", post, root), "deny")
+
+
+SCRIPTS = str(GUARD.parent.parent / "scripts")
+
+
+def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None):
+    """The guard's decision JSON as a dict (None for silence)."""
+    payload = {"tool_name": tool_name, "tool_input": tool_input if tool_input is not None else {"command": command}}
+    if agent_type is not None:
+        payload["agent_type"] = agent_type
+    if cwd is not None:
+        payload["cwd"] = str(cwd)
+    out = run_hook(payload)
+    return json.loads(out)["hookSpecificOutput"] if out else None
+
+
+def approved(agent_type, command, cwd=None):
+    out = raw(agent_type, command, cwd)
+    return bool(out) and out["permissionDecision"] == "allow"
+
+
+class RoutineApprovalTest(unittest.TestCase):
+    """The guard answers an explicit `allow` for each role's routine writes (#358), and nothing else."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.main = self.root / "main"
+        (self.main / ".git" / "worktrees" / "agent-abc").mkdir(parents=True)
+        (self.main / ".git" / "worktrees" / "agent-abc" / "commondir").write_text("../..\n")
+        (self.main / ".git" / "worktrees" / "agent-abc" / "HEAD").write_text("ref: refs/heads/358-ticket\n")
+        self.work = self.main / ".claude" / "worktrees" / "agent-abc"
+        self.work.mkdir(parents=True)
+        (self.work / ".git").write_text(f"gitdir: {self.main}/.git/worktrees/agent-abc\n")
+        (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** yes\n")
+        (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
+
+    def test_the_allow_json_shape(self):
+        out = raw("orchestrate:worker", "gh pr ready 12")
+        self.assertEqual(out, {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                               "permissionDecisionReason": "orchestrate guard: routine worker step"})
+
+    def test_worker_routine_writes_are_approved(self):
+        for command in (
+            "git push origin 358-ticket", "git push -u origin 358-ticket", "git push origin 358-ticket:358-ticket",
+            "git push https://github.com/o/r.git 358-ticket",
+            "git -c credential.helper='!gh auth git-credential' push https://github.com/o/r.git 358-ticket",
+            "git add hooks/guard.py", "git commit -m 'feat: x'",
+            "gh pr create --draft --title 't' --body 'b'", "gh pr ready 12", "gh pr edit 12 --body-file b.md",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed abc1234", f"{SCRIPTS}/threads 12 reopen PRRT_x --why nope",
+        ):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+    def test_worker_calls_the_rules_refuse_never_get_an_allow(self):
+        for command in ("git push origin main", "git push --force origin 358-ticket", "gh pr merge 12",
+                        "scripts/merge 12"):
+            with self.subTest(command):
+                self.assertEqual(raw("orchestrate:worker", command, self.work)["permissionDecision"], "deny")
+
+    def test_worker_calls_outside_the_routine_shapes_stay_silent(self):
+        for command in (
+            "git push origin other-branch",  # not its ticket branch
+            "git push origin 358-ticket && gh pr edit 12 --body-file b.md",  # a chain is read as no routine step
+            "git push",  # no explicit ref
+            "git push origin HEAD:358-ticket",
+            "git -c core.hooksPath=/x push origin 358-ticket",
+            "git push $REMOTE 358-ticket",
+            "git push ext 358-ticket",
+            "gh pr create --title t",  # not a draft
+            "gh pr edit $N --body-file b.md",
+            "gh pr ready --undo 12",
+            "gh pr close 12",
+            "gh issue close 5",
+            "scripts/threads 12",
+            "git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\"",
+        ):
+            with self.subTest(command):
+                self.assertIsNone(raw("orchestrate:worker", command, self.work))
+
+    def test_push_outside_a_worktree_stays_silent(self):
+        self.assertIsNone(raw("orchestrate:worker", "git push origin 358-ticket", self.main))
+        self.assertIsNone(raw("orchestrate:worker", "git commit -m x", self.main))
+
+    def test_push_of_the_default_branch_checked_out_in_the_worktree_is_refused(self):
+        (self.main / ".git" / "worktrees" / "agent-abc" / "HEAD").write_text("ref: refs/heads/main\n")
+        self.assertEqual(raw("orchestrate:worker", "git push origin main", self.work)["permissionDecision"], "deny")
+
+    def test_reviewer_post_is_approved_only_in_the_accepted_shape_and_with_posting_on(self):
+        self.assertTrue(approved("orchestrate:reviewer", "gh pr review 12 --comment --body 'x'", self.main))
+        self.assertFalse(approved("orchestrate:reviewer", "gh pr review 12 --comment --body 'x' && ls", self.main))
+        self.assertFalse(approved("orchestrate:reviewer", "gh pr review 12 --approve", self.main))
+        self.assertIsNone(raw("orchestrate:reviewer", "gh pr view 12", self.main))
+        (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** no\n")
+        self.assertEqual(raw("orchestrate:reviewer", "gh pr review 12 --comment --body 'x'", self.main)
+                         ["permissionDecision"], "deny")
+
+    def test_scout_is_never_approved(self):
+        self.assertIsNone(raw("orchestrate:scout", "gh pr view 12", self.main))
+        self.assertEqual(raw("orchestrate:scout", "gh pr ready 12", self.main)["permissionDecision"], "deny")
+
+    def test_orchestrator_routine_steps_in_a_repo_with_the_config(self):
+        for command in (f"{SCRIPTS}/merge 12 --approved-head abc", f"{SCRIPTS}/board", f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed a",
+                        "gh issue edit 5 --add-label x", "gh issue comment 5 --body hi", "gh issue create --title t",
+                        "gh issue close 5"):
+            with self.subTest(command):
+                out = raw(None, command, self.main)
+                self.assertEqual(out["permissionDecisionReason"], "orchestrate guard: routine orchestrator step")
+        for command in ("gh pr merge 12", "gh issue delete 5", "scripts/merge 12 && rm -rf x", "git push origin main",
+                        "gh issue edit $N"):
+            with self.subTest(command):
+                self.assertIsNone(raw(None, command, self.main))
+
+    def test_orchestrator_is_not_approved_without_the_config_or_for_another_plugins_agent(self):
+        self.assertIsNone(raw(None, "gh issue close 5", self.root))
+        self.assertIsNone(raw("other:agent", "gh issue close 5", self.main))
+
+    def test_gh_aimed_at_another_repo_stays_silent(self):
+        for command in ("gh pr create --draft --repo evil/repo --title x", "gh -R evil/repo pr edit 5 --title x",
+                        "gh pr ready 5 --repo=evil/repo", "gh pr edit 5 -Revil/repo --title x"):
+            with self.subTest(command):
+                self.assertIsNone(raw("orchestrate:worker", command, self.work))
+        self.assertIsNone(raw(None, "gh issue close 5 --repo evil/repo", self.main))
+        self.assertIsNone(raw(None, "gh -R evil/repo issue close 5", self.main))
+
+    def test_a_same_named_script_elsewhere_stays_silent(self):
+        for command in ("bash ./evil/scripts/threads 12 resolve PRRT_x --fixed a", "/tmp/x/scripts/threads 12 resolve ID --fixed a",
+                        "scripts/threads 12 resolve ID --fixed a"):  # relative: the worktree's own copy, not the plugin's
+            with self.subTest(command):
+                self.assertIsNone(raw("orchestrate:worker", command, self.work))
+        for command in ("bash ./evil/scripts/merge 12", "/tmp/x/scripts/board", "./scripts/merge 12"):
+            with self.subTest(command):
+                self.assertIsNone(raw(None, command, self.main))
+
+    def test_edits_to_permission_settings_and_git_internals_keep_their_prompt(self):
+        for rel in (".claude/settings.json", ".claude/settings.local.json", ".git", ".git/hooks/pre-push"):
+            with self.subTest(rel):
+                self.assertIsNone(raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)}))
+        for rel in (".claude/pr-body.md", "settings.json", ".claude/agents/x.md"):
+            with self.subTest(rel):
+                out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
+                self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_https_push_url_must_name_origin(self):
+        (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
+        cred = "git -c credential.helper='!gh auth git-credential' push {} 358-ticket"
+        self.assertTrue(approved("orchestrate:worker", cred.format("https://github.com/o/r.git"), self.work))
+        self.assertIsNone(raw("orchestrate:worker", cred.format("https://github.com/other/repo.git"), self.work))
+
+
+    def test_worker_edit_inside_its_worktree_is_approved(self):
+        for tool, key in (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"),
+                          ("NotebookEdit", "notebook_path")):
+            with self.subTest(tool):
+                out = raw("orchestrate:worker", None, self.work, tool, {key: str(self.work / "hooks" / "guard.py")})
+                self.assertEqual(out["permissionDecision"], "allow")
+        out = raw("orchestrate:worker", None, self.work, "Edit", {"file_path": "docs/x.md"})
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_worker_edit_outside_its_worktree_is_denied(self):
+        for path in (str(self.main / "README.md"), str(self.work / ".." / ".." / ".." / "README.md"),
+                     "/Users/someone/elsewhere.txt", "../../../README.md"):
+            with self.subTest(path):
+                out = raw("orchestrate:worker", None, self.work, "Edit", {"file_path": path})
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("outside your worktree", out["permissionDecisionReason"])
+
+    def test_worker_edit_of_a_symlink_out_of_the_worktree_is_denied(self):
+        (self.work / "link").symlink_to(self.main / "README.md")
+        out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / "link")})
+        self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_worker_edit_in_scratch_space_outside_every_checkout_stays_silent(self):
+        self.assertIsNone(raw("orchestrate:worker", None, self.work, "Write", {"file_path": "/private/tmp/scratch/body.md"}))
+
+    def test_other_roles_and_other_cwds_are_silent_for_edits(self):
+        path = {"file_path": str(self.main / "README.md")}
+        self.assertIsNone(raw("orchestrate:reviewer", None, self.work, "Edit", path))
+        self.assertIsNone(raw(None, None, self.work, "Edit", path))
+        self.assertIsNone(raw("orchestrate:worker", None, self.main, "Edit", path))
+        self.assertIsNone(raw("orchestrate:worker", None, self.work, "Edit", {}))
+        self.assertIsNone(raw("orchestrate:worker", None, self.work, "Read", {"file_path": "/etc/passwd"}))
 
 
 class GuardEntryPoint(unittest.TestCase):

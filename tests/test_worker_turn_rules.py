@@ -25,14 +25,15 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("status: pr-opened | stopped", report)
         self.assertNotIn("changed:", report)
 
-    def test_continued_worker_confirms_its_worktree_and_never_builds_one(self):
+    def test_worktree_gone_follows_a_verify_refusal_and_never_builds_one(self):
         s = (ROOT / "agents/worker.md").read_text()
         stop = s[s.index("## Stop and report"):s.index("## Discovered work")]
         bullet = next(l for l in stop.splitlines() if "`stop-reason: worktree-gone`" in l)
         for term in ("main checkout", "no longer exists", "never create a worktree", "scratchpad",
                      "never edit the main checkout", "fresh worker"):
             self.assertIn(term, bullet)
-        self.assertIn("Whenever you're continued, first confirm your working directory", s)
+        self.assertIn("Verify refuses with exit 2 when run outside your worktree", bullet)
+        self.assertNotIn("Whenever you're continued, first confirm", s)
 
     def test_run_skill_checks_the_worktree_before_continuing_a_no_pr_worker(self):
         s = (ROOT / "skills/run/SKILL.md").read_text()
