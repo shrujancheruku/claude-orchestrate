@@ -31,6 +31,7 @@ def main(argv=None) -> int:
     out = Path(args.out) if args.out else root / SNAPSHOT
     try:
         snap = tracker.Snapshot(root)
+        snap.use_cache(out)  # entries whose PR head is unchanged are kept, not read again
         snap.cache_pr_files()  # one read per open PR for the whole pass: `holds` reads them from the file
         snap.write(out)
     except github.GhError as e:

@@ -177,6 +177,9 @@ def main(argv=None) -> int:
     state_file = Path(args.state) if args.state else repo / STATE
     try:
         snap = tracker.Snapshot.open(args.snapshot, repo)
+        # The PR file lists are cached in the snapshot file whether or not the tracker is read from it (#446): a PR whose
+        # head SHA matches its entry costs no call, and the misses are written back for the next call in the pass.
+        snap.use_cache(args.snapshot or repo / tracker.SNAPSHOT_FILE)
         base = snap.default_branch
         own_pr, own_ticket = None, args.ticket
         if args.pr:
@@ -194,6 +197,7 @@ def main(argv=None) -> int:
             if str(pr.get("headRefName") or "").startswith(RELEASE_PLEASE_PREFIX):
                 continue  # the release PR's files are never a real overlap, and its diff is not fetched
             prs[pr["number"]] = snap.pr_files(pr)  # cached in the snapshot, keyed by head SHA (#446)
+        snap.save_cache()
         # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
         # `changes` is a no-op: holds needs each worktree's changed paths, not the dirty and unpushed counts claims
         # would take, and a git failure there would stop a pass that never needed them.
