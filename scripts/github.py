@@ -141,6 +141,10 @@ RATE_LIMITED = re.compile(r"secondary rate limit|abuse detection|API rate limit 
 RETRY_AFTER = re.compile(r"retry-after:?\s*(\d+)", re.I)
 QUOTA_EMPTY = re.compile(r"x-ratelimit-remaining:?\s*0\b", re.I)
 QUOTA_RESET = re.compile(r"x-ratelimit-reset:?\s*(\d+)", re.I)
+# A GitHub 5xx (500-504) is transient: retried like a secondary limit, on a short ladder (seconds) since no
+# reset is involved. A 4xx other than a rate limit is never retried.
+SERVER_ERROR = re.compile(r"\bHTTP 50[0-4]\b")
+SERVER_ERROR_PAUSES = (2, 4, 8, 16)
 TRIES = 5
 # A reset further off than this is the hourly quota running out: waiting it out here would stall the script.
 PRIMARY_RESET_AFTER = 120
@@ -441,8 +445,20 @@ def call(*args, cwd=None) -> str:
         text = f"{p.stderr}\n{p.stdout}"
         limit = _rate_limit(text)
         if limit is None:
+            server = status in (500, 501, 502, 503, 504) or bool(SERVER_ERROR.search(text))
             _log_attempt(args, cwd, attempt, ms, "failed", status, headers)
-            raise GhError(FAILED, common.one_line(p.stderr or stdout))
+            if not server:
+                raise GhError(FAILED, common.one_line(p.stderr or stdout))
+            message = common.one_line(_evidence(text))
+            if attempt == TRIES:
+                raise GhError(FAILED, message)
+            pause = SERVER_ERROR_PAUSES[min(attempt, len(SERVER_ERROR_PAUSES)) - 1]
+            print(f"github: HTTP {status or 502}, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
+            try:
+                _wait_until(clock() + pause, cwd)
+            except GhError as e:  # over the call's wait budget: say what failed, not only when to retry
+                raise GhError(e.kind, f"{message}; {e.message}")
+            continue
         _log_attempt(args, cwd, attempt, ms, "ratelimited", status, headers)
         message = common.one_line(_evidence(text))
         if not api and not (RETRY_AFTER.search(text) or QUOTA_EMPTY.search(text) or QUOTA_RESET.search(text)):

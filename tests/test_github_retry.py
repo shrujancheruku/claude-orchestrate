@@ -86,6 +86,40 @@ class RetryTest(unittest.TestCase):
         fake, sleeps, out, _ = self.run_call(fail(text), OK)
         self.assertEqual((out, len(sleeps)), ("done\n", 1))
 
+    def test_a_502_waits_then_succeeds(self):
+        fake, sleeps, out, err = self.run_call(fail("gh: HTTP 502"), OK)
+        self.assertEqual((out, err, sleeps, fake.calls), ("done\n", None, [2], 2))
+
+    def test_a_502_every_time_fails_after_the_tries_naming_the_5xx(self):
+        fake, sleeps, _, err = self.run_call(fail("gh: HTTP 502"))
+        self.assertEqual((fake.calls, sleeps, err.kind), (5, [2, 4, 8, 16], github.FAILED))
+        self.assertIn("HTTP 502", err.message)
+
+    def test_a_502_past_the_wait_budget_raises_naming_the_5xx(self):
+        os.environ["ORCHESTRATE_GH_WAIT"] = "3"
+        fake, sleeps, _, err = self.run_call(fail("gh: HTTP 502"))
+        self.assertEqual((fake.calls, sleeps), (2, [2]))
+        self.assertIn("HTTP 502", err.message)
+        self.assertIn("rate limit until", err.message)
+
+    def test_a_503_in_a_rest_reply_with_headers_is_retried(self):
+        rest = common.Run(1, "HTTP/2.0 503 Service Unavailable\n\n{}", "gh: Service Unavailable (HTTP 503)")
+        fake, sleeps, out, _ = self.run_call(rest, OK)
+        self.assertEqual((out, sleeps), ("done\n", [2]))
+
+    def test_a_502_in_a_graphql_call_is_retried(self):
+        fake = FakeGh(fail("gh: HTTP 502"), OK)
+        with unittest.mock.patch.object(common, "run", fake), \
+                unittest.mock.patch.object(github, "sleep", lambda s: None), \
+                unittest.mock.patch.object(github, "clock", lambda: 1000.0), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            out = github.call("api", "graphql", "-f", "query=query{viewer{login}}", cwd=self.dir.name)
+        self.assertEqual((out, fake.calls), ("done\n", 2))
+
+    def test_a_404_is_not_retried(self):
+        fake, sleeps, _, err = self.run_call(fail("gh: Not Found (HTTP 404)"))
+        self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
+
     def test_other_failures_are_not_retried(self):
         fake, sleeps, _, err = self.run_call(fail("gh: Not Found (HTTP 404)"))
         self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
