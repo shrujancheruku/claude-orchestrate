@@ -270,3 +270,29 @@ class VerdictLines(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewerChecksOutByHash(unittest.TestCase):
+    """#416: the reviewer reads the PR head by hash and runs the suite in the foreground, the way verify does."""
+
+    REVIEWER = (ROOT / "agents" / "reviewer.md").read_text()
+    RUN = (ROOT / "skills" / "run" / "SKILL.md").read_text()
+
+    def test_head_is_fetched_by_hash_never_by_the_pull_ref(self):
+        self.assertIn("headRefOid", self.REVIEWER)
+        self.assertIn("git fetch origin <hash>", self.REVIEWER)
+        self.assertNotIn("git fetch origin pull/", self.REVIEWER)
+        self.assertNotIn("FETCH_HEAD`\n", self.REVIEWER.split("## Tiers")[0].split("headRefOid")[0])
+
+    def test_suite_runs_in_the_pr_tree_through_verify_in_the_foreground(self):
+        self.assertIn("scripts/verify --config --cwd <scratch>/pr-<n>", self.REVIEWER)
+        self.assertIn("never `run_in_background`", self.REVIEWER)
+        self.assertIn("600000", self.REVIEWER)
+
+    def test_reports_carry_head_and_suite(self):
+        self.assertEqual(self.REVIEWER.count("suite: pass | fail <n> | not run (<reason>)"), 2)
+        self.assertIn("head: <hash reviewed>", self.REVIEWER)
+
+    def test_run_skill_sends_back_a_report_without_a_suite_reason(self):
+        self.assertIn("`suite: not run` with no reason", self.RUN)
+        self.assertIn("same agent, SendMessage", self.RUN)
