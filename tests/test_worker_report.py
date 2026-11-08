@@ -127,6 +127,23 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual((ev[1]["status"], ev[1]["stop_reason"]), ("stopped", "ambiguous"))
         self.assertNotIn("status", ev[2])
 
+    def refused_of(self, text, ticket="260"):
+        self.verdict(text, ticket=ticket)
+        return [e for e in self.env.events() if e["kind"] == "worker-report"][-1].get("refused", "absent")
+
+    def test_refused_lines_ride_in_the_event(self):
+        a = "Bash — git push origin x — denied by the guard"
+        b = "Edit — /a/b.py — permission denied"
+        self.assertEqual(self.refused_of(f"status: pr-opened\nrefused: {a}\nrefused: {b}\n"), [a, b])
+
+    def test_refused_none_is_an_empty_list_and_no_line_leaves_the_field_out(self):
+        self.assertEqual(self.refused_of("status: pr-opened\nrefused: none\n"), [])
+        self.assertEqual(self.refused_of("status: stopped\nstop-reason: ambiguous\n", ticket="261"), "absent")
+        self.assertEqual(self.verdict("status: pr-opened\n", ticket="262"), "valid pr-opened 12 " + HEAD)
+
+    def test_refused_lines_do_not_change_the_verdict(self):
+        self.assertEqual(self.verdict("status: pr-opened\nrefused: Bash — x — y\n"), "valid pr-opened 12 " + HEAD)
+
     def test_a_repeat_is_a_duplicate_and_a_new_head_is_valid(self):
         text = "status: pr-opened\n"
         self.assertEqual(self.verdict(text), f"valid pr-opened 12 {HEAD}")
@@ -134,7 +151,7 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual(self.verdict(text), f"duplicate valid pr-opened 12 {HEAD}")
         self.env.set_gh(prs((12, BRANCH, HEAD2)))
         self.assertEqual(self.verdict(text), f"valid pr-opened 12 {HEAD2}")
-        self.assertEqual([e["outcome"] for e in self.env.events()],
+        self.assertEqual([e["outcome"] for e in self.env.events() if e["kind"] == "worker-report"],
                          ["valid", "duplicate", "duplicate", "valid"])
 
     def test_a_repeated_stop_is_a_duplicate_only_with_the_same_reason(self):
@@ -152,7 +169,7 @@ class WorkerReport(unittest.TestCase):
         self.env.set_gh([{"args": ["pr", "list"], "stderr": "HTTP 502", "exit": 1}])
         r = self.report("status: pr-opened\n", check=False)
         self.assertEqual((r.returncode, len(r.stderr.strip().splitlines())), (2, 1))
-        self.assertEqual(self.env.events(), [])
+        self.assertEqual([e for e in self.env.events() if e["kind"] == "worker-report"], [])
 
     def test_exit_2_on_an_unwritable_run_log(self):
         log = self.env.repo / ".claude" / "orchestrate-profiles"
