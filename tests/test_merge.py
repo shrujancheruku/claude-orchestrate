@@ -246,6 +246,35 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertTrue(wt.exists())
         self.assertTrue(self.local_branch())
 
+    def test_worktree_on_another_branch_is_not_unlocked_or_removed(self):
+        wt = self.env.repo.parent / "wt-other"
+        git(self.env.repo, "worktree", "add", "-b", "someone-else", str(wt))
+        git(self.env.repo, "worktree", "lock", "--reason", self.HARNESS_LOCK, str(wt))
+        p = self.merged(wt)
+        self.assertIn("NOT removed: it is on someone-else", p.stdout)
+        self.assertTrue(wt.exists())
+        self.assertIn("locked " + self.HARNESS_LOCK, git(self.env.repo, "worktree", "list", "--porcelain"))
+
+    def test_main_checkout_is_never_removed(self):
+        p = self.merged(self.env.repo)
+        self.assertIn("NOT removed: it is the main checkout", p.stdout)
+        self.assertTrue((self.env.repo / ".git").exists())
+
+    def test_worker_branch_of_the_agent_directory_is_removed(self):
+        wt = self.env.repo.parent / "agent-abc123"
+        git(self.env.repo, "worktree", "add", "-b", "worktree-agent-abc123", str(wt))
+        p = self.merged(wt)
+        self.assertIn("worktree", p.stdout)
+        self.assertNotIn("NOT removed", p.stdout)
+        self.assertFalse(wt.exists())
+
+    def test_worker_branch_of_a_different_directory_is_kept(self):
+        wt = self.env.repo.parent / "agent-abc123"
+        git(self.env.repo, "worktree", "add", "-b", "worktree-agent-zzz", str(wt))
+        p = self.merged(wt)
+        self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(wt.exists())
+
     def scratch(self, name, *flags):
         wt = self.env.repo.parent / "scratch" / name
         git(self.env.repo, "worktree", "add", *flags, str(wt))

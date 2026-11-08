@@ -15,7 +15,7 @@ already in progress"; the branch can survive), so the PR's state is the only tru
 the merge, then re-checks the PR until it is MERGED or --timeout runs out. Only once MERGED does it:
 delete the remote branch (over `gh api`, so it works where origin is SSH) and the local one, unless it
 is the default branch, main/master or a fork's branch; close the PR's linked tickets that the host
-left open (a --ticket the PR does not link is only reported); remove --worktree (a "not a working tree" answer is fine: the harness may
+left open (a --ticket the PR does not link is only reported); remove --worktree only when it is a linked worktree on the PR's branch or its `worktree-agent-<id>` branch (else one `NOT removed` line; a "not a working tree" answer is fine: the harness may
 have removed it; a harness-locked tree is unlocked first, then removed plainly, never forced), and append one `merge` event (ref = the PR number, outcome merged|timeout|closed,
 plus branch, branch_deleted, tickets). The merge passes the approved head as `sha`, so a push after
 review is a refusal (a 409; exit 1). Prints one line per step.
@@ -97,6 +97,27 @@ def delete_remote_branch(branch, cwd):
         return True, github.delete_branch(branch, cwd)
     except github.GhError as e:
         return False, f"NOT deleted: {e.message}"
+
+
+def worktree_refusal(path, branch, cwd):
+    """Why `path` is not the merged PR's worktree (so merge must not unlock or remove it), or None when it is.
+
+    Only a linked worktree of this repo, not the main checkout, on the PR's branch or on the harness's
+    `worktree-agent-<id>` branch of the `agent-<id>` directory, is removed. A wrong --worktree is a skip, not
+    a failure: the merge has already happened."""
+    here = (Path(cwd) / path).resolve()
+    trees = common.worktrees(cwd)
+    if not trees:
+        return "cannot list worktrees"
+    if here == Path(trees[0]["path"]).resolve():
+        return "it is the main checkout"
+    wt = next((t for t in trees if Path(t["path"]).resolve() == here), None)
+    if wt is None:
+        return None  # not registered: git answers "not a working tree", which remove_worktree reports as gone
+    ours = {branch, f"worktree-{here.name}" if here.name.startswith("agent-") else None} - {None}
+    if wt["branch"] not in ours:
+        return f"it is on {wt['branch'] or 'a detached HEAD'}, not {branch or 'the PR branch'} or its worker branch"
+    return None
 
 
 def delete_local_branch(branch, cwd):
@@ -441,7 +462,8 @@ def run_merge(argv=None) -> int:
             say(f"ticket #{t} NOT closed: {e.message}")
 
     if args.worktree:
-        say(remove_worktree(args.worktree, cwd))
+        refusal = worktree_refusal(args.worktree, branch, cwd)
+        say(f"worktree {args.worktree} NOT removed: {refusal}" if refusal else remove_worktree(args.worktree, cwd))
     # The reviewer's pr-<n> scratch trees: the guard refuses it `git worktree remove`, so the merge does (ADR-0004).
     for line in remove_scratch(pr, cwd):
         say(f"scratch {line}")
