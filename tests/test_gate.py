@@ -1,6 +1,8 @@
 """CLI tests for scripts/gate, driven through the harness with a fake gh."""
 
 import json
+import shutil
+import tempfile
 import subprocess
 import sys
 import unittest
@@ -41,7 +43,7 @@ class GateTest(unittest.TestCase):
             {"args": ["api", "~" + PULL + "/files"], "stdout": json.dumps([{"filename": "src/a.py"}])},
             *[{"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{o['number']}/files"],
                "stdout": json.dumps([{"filename": "src/a.py"}])} for o in others],
-            {"args": ["pr", "diff"], "stdout": diff},
+            {"args": ["api", "-H", "Accept: application/vnd.github.diff", PULL], "stdout": diff},
             {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": nodes}}}})},
             gh_pulls(list(others), "open"),
             gh_pulls([], "closed"),
@@ -101,6 +103,21 @@ class GateTest(unittest.TestCase):
         issue_reads = [c for c in self.env.gh_calls() if c[:2] == ["api", "graphql"]]
         self.assertEqual(len(issue_reads), 1, issue_reads)
         self.assertEqual(self.env.gh_unmatched(), [])
+
+    def test_every_gh_call_runs_in_cwd_not_the_process_directory(self):
+        # The fake gh is moved aside and a wrapper takes its place: it logs its directory, then hands over.
+        real = Path(self.env.bin) / "gh"
+        real.rename(real.with_name("gh-real"))
+        log = Path(self.env.bin) / "cwds"
+        real.write_text(f'#!/bin/sh\npwd -P >> "{log}"\nexec "{real.with_name("gh-real")}" "$@"\n')
+        real.chmod(0o755)
+        elsewhere = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        self.prime(blockers=0)
+        r = self.env.run("gate", "7", "--cwd", str(self.env.repo), "--retry-delay", "0", check=False, cwd=elsewhere)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        seen = set(log.read_text().split())
+        self.assertEqual(seen, {str(self.env.repo.resolve())})
 
     def test_passing_gate(self):
         self.prime()
