@@ -25,6 +25,7 @@ from pathlib import Path
 
 import common
 import session
+import touchmap
 from repo import STATE, main_checkout
 
 
@@ -56,6 +57,16 @@ def worktree_of(agent_id: str, branch, repo: Path, completions: dict) -> str | N
     return found if found and Path(found).is_dir() else None
 
 
+def touch_map_of(agent: dict) -> str:
+    """The brief's touch map in canonical form (touchmap.format). One that doesn't parse is reported on one line and
+    stored as `none`: a map is whole or absent, never partial."""
+    try:
+        return touchmap.format(session.touch_map(agent["prompt"]))
+    except touchmap.TouchMapError as e:
+        print(common.one_line(f"#{agent['ticket']} touch map not read: {e}"))
+        return "none"
+
+
 def rebuild(main_path: Path, repo: Path) -> dict:
     main = session.Transcript(main_path)
     sid = next((r["sessionId"] for r in main.records if r.get("sessionId")), main_path.stem)
@@ -71,7 +82,7 @@ def rebuild(main_path: Path, repo: Path) -> dict:
             "worktree": worktree_of(a["id"], session.branch_of(a["prompt"]), repo, completions),
             "model": model_of(records, a["dispatch_model"], a["meta_model"]),
             "last_report": session.iso(a["last_record"]),
-            "touch_map": session.touch_map(a["prompt"]),
+            "touch_map": touch_map_of(a),
         }
     return {"session": sid, "tickets": {str(n): tickets[n] for n in sorted(tickets)}}
 
