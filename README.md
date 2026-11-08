@@ -277,7 +277,7 @@ Every mechanical rule the prompts once restated is a script under `scripts/`, fo
 | `rescue` | orchestrator, for a stalled or stopped ticket | Commits, pushes and removes the ticket's worktree, then checks the saved paths for overlap |
 | `holds` | orchestrator and `gate` | Decides what is held and whether a ticket or PR overlaps it |
 | `worker-report` | orchestrator, on each worker completion | Classifies the completion text into one verdict and logs it |
-| `threads` | worker, reviewer, orchestrator | Lists a PR's review threads, and resolves or reopens one with a reply (`fixed in <sha>`, `left: <why>`, `reopened: <why>`) |
+| `threads` | worker, reviewer, orchestrator | Lists a PR's review threads, and resolves or reopens one or several (one request for all) with a reply (`fixed in <sha>`, `left: <why>`, `reopened: <why>`) |
 | `verify` | worker | Runs the config's verify commands, one line per result |
 | `watch-ci` | orchestrator, via a Monitor | Prints one line per PR as its checks settle, with the head commit |
 | `gate` | orchestrator, before review | Title, mergeability, held paths, dependencies, secrets, lockfiles and the config's `run:` checks |
