@@ -72,6 +72,8 @@ def view_prs(root):
     """({number: view}, None) on success, (None, reason) after a `gh` failure to retry. One request covers every
     PR; merged and closed ones are listed too (--state all) so they settle at once. Raises GhError when
     retrying cannot help: `gh` missing, no repository, or a reply that is not a list."""
+    # Trade-off: this reads statusCheckRollup for up to 200 PRs per tick, a heavier reply than one `pr view`, but
+    # still one request instead of one per PR. Watched PRs are pending, so they are among the newest.
     try:
         rows = github.call_json("pr", "list", "--state", "all", "--limit", "200", "--json", FIELDS,
                                 shape=list, cwd=root)
