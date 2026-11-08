@@ -274,6 +274,23 @@ class StuckJob(unittest.TestCase):
         reads = [c for c in self.env.gh_calls() if c[0] == "api"]
         self.assertEqual(reads, [["api", "repos/{owner}/{repo}/actions/runs/900/jobs?per_page=100"]])
 
+    def test_a_sibling_job_that_sticks_on_a_later_tick_is_reported_too(self):
+        def job(i, steps):
+            return {"id": i, "name": f"job{i}", "status": "in_progress", "steps": [{"status": x} for x in steps]}
+        urls = [f"https://github.com/o/r/actions/runs/900/job/{i}" for i in (901, 902)]
+        pending = dict(view(None), number=5, statusCheckRollup=[
+            {"status": "IN_PROGRESS", "conclusion": "", "detailsUrl": u} for u in urls])
+        rows = [pending] * 4 + [dict(view("SUCCESS", head="5555555aaa"), number=5)]
+        first = {"stdout": json.dumps({"jobs": [job(901, ["completed"]), job(902, ["completed", "in_progress"])]})}
+        later = {"stdout": json.dumps({"jobs": [job(901, ["completed"]), job(902, ["completed", "completed"])]})}
+        self.env.set_gh([{"args": ["pr", "list"], "seq": [{"stdout": json.dumps([r])} for r in rows]},
+                         {"args": ["api"], "seq": [first, later]}])
+        r = self.env.run("watch-ci", "--interval", "0", "--stuck-after", "0", "5")
+        self.assertEqual(r.stdout.splitlines(), [
+            "PR #5: job job901 stuck in_progress with all steps done; rerun with gh run rerun 900 --job 901",
+            "PR #5: job job902 stuck in_progress with all steps done; rerun with gh run rerun 900 --job 902",
+            "PR #5 pass CLEAN 5555555"])
+
     def test_a_check_without_a_run_id_makes_no_jobs_call(self):
         for url in ("", "https://ci.example.com/build/7"):
             self.stuck_watch(jobs_reply(["completed"]), 0, url=url)

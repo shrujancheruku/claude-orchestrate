@@ -115,28 +115,31 @@ def finished_in_progress(job: dict) -> bool:
 def check_stuck(root, pr, run_id, first_seen, reported, stuck_after):
     """Print one line per job of the run that has been finished-but-in_progress for stuck_after seconds.
     first_seen {(run, job id): monotonic time first seen so}; reported: keys already printed. Best-effort: a
-    failed read is skipped, the next tick tries again. True when the run has stuck jobs and all are reported."""
+    failed read is skipped, the next tick tries again. True when every in_progress job of the run is stuck and reported."""
     try:
         data = github.call_json("api", f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs?per_page=100", cwd=root)
     except github.GhError as e:
         print(f"watch-ci: could not read jobs of run {run_id}: {e.message}", file=sys.stderr, flush=True)
         return False
     now = time.monotonic()
-    stuck = []
+    running = []  # keys of every job still in_progress, stuck or not
     for job in data.get("jobs") or []:
         if not isinstance(job, dict):
             continue
         key = (run_id, job.get("id"))
+        if job.get("status") == "in_progress":
+            running.append(key)
         if not finished_in_progress(job):
             first_seen.pop(key, None)
             continue
-        stuck.append(key)
         since = first_seen.setdefault(key, now)
         if now - since >= stuck_after and key not in reported:
             reported.add(key)
             print(f"PR #{pr}: job {job.get('name')} stuck in_progress with all steps done; "
                   f"rerun with gh run rerun {run_id} --job {job.get('id')}", flush=True)
-    return bool(stuck) and all(k in reported for k in stuck)
+    # A sibling still working normally may stick later under the same checks, so the run is done only when
+    # every in_progress job of it is stuck and reported.
+    return bool(running) and all(k in reported for k in running)
 
 
 def main(argv=None) -> int:
