@@ -19,18 +19,25 @@ import common  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 URL = "https://github.com/orgs/acme/projects/7"
-OPTIONS = ["Building", "In review", "Needs lead", "Waiting on you", "Done"]
+OPTIONS = ["Backlog", "Building", "In review", "Needs lead", "Waiting on you", "Done"]
 FIELD = {"id": "F1", "name": "Stage", "options": [{"id": "o" + str(i), "name": n} for i, n in enumerate(OPTIONS)]}
 OPT = {n: "o" + str(i) for i, n in enumerate(OPTIONS)}
+REPO = {"owner": {"login": "acme"}, "name": "r", "defaultBranchRef": {"name": "main"}}
+# A board made before Backlog existed: the old five options, with colors the upgrade must keep.
+OLD_OPTIONS = [{"id": "old" + str(i), "name": n, "color": "BLUE", "description": f"d{i}"}
+               for i, n in enumerate(OPTIONS[1:])]
+OLD_FIELD = {"id": "F1", "name": "Stage", "options": [{"id": o["id"], "name": o["name"]} for o in OLD_OPTIONS]}
 
 
 def ago(**kw):
     return (datetime.now(timezone.utc) - timedelta(**kw)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def ticket(n, labels=(), claimed=False):
-    return {"number": n, "url": f"https://github.com/acme/r/issues/{n}",
-            "labels": [{"name": x} for x in labels], "assignees": [{"login": "me"}] if claimed else []}
+def ticket(n, labels=(), claimed=False, blocked_by=()):
+    """An open issue as the tracker's GraphQL query returns it."""
+    return {"number": n, "title": f"t{n}", "url": f"https://github.com/acme/r/issues/{n}",
+            "labels": {"nodes": [{"name": x} for x in labels]}, "assignees": {"totalCount": 1 if claimed else 0},
+            "blockedBy": {"nodes": [{"number": b, "state": "OPEN"} for b in blocked_by]}}
 
 
 def card(n, stage=None, item="I"):
@@ -60,19 +67,36 @@ class Board(unittest.TestCase):
         (self.env.repo / ".claude").mkdir(exist_ok=True)
         (self.env.repo / ".claude" / "orchestration.md").write_text("# Orchestration config\n\n## Backlog\n\n" + line)
 
-    def gh(self, tickets=(), prs=(), cards=(), fields=(FIELD,), extra=()):
+    def gh(self, tickets=(), prs=(), cards=(), fields=(FIELD,), extra=(), new_ids=("NEW",), graphql=()):
+        """Canned gh. The graphql replies come in call order: the tracker's issues first, then `graphql` (a field
+        upgrade's two calls, then one empty reply for every card position written)."""
+        issues = out({"data": {"repository": {"issues": {"nodes": list(tickets)}}}})
         self.env.set_gh([
+            *extra,
+            {"args": ["repo", "view"], **out(REPO)},
+            {"args": ["api", "graphql"], "seq": [issues, *graphql, out({"data": {}})]},
             {"args": ["project", "view"], **out({"id": "P1"})},
             {"args": ["project", "field-list"], **out({"fields": list(fields)})},
             {"args": ["project", "field-create"], **out(FIELD)},
-            {"args": ["issue", "list"], **out(list(tickets))},
             {"args": ["pr", "list"], **out(list(prs))},
             {"args": ["project", "item-list"], **out({"items": list(cards)})},
-            {"args": ["project", "item-add"], **out({"id": "NEW"})},
+            {"args": ["project", "item-add"], "seq": [out({"id": i}) for i in new_ids]},
             {"args": ["project", "item-edit"]},
             {"args": ["project", "item-archive"]},
-            *extra,
+            {"args": ["project", "item-delete"]},
         ])
+
+    def graphql_writes(self):
+        """The mutation queries sent through `gh api graphql`, in order."""
+        found = []
+        for c in self.env.gh_calls():
+            q = next((a[len("query="):] for a in c if a.startswith("query=mutation")), None)
+            if c[:2] == ["api", "graphql"] and q:
+                found.append(q)
+        return found
+
+    def deletes(self):
+        return [c[c.index("--id") + 1] for c in self.env.gh_calls() if c[:2] == ["project", "item-delete"]]
 
     def edits(self):
         """{item id: stage name} for each item-edit call."""
@@ -84,8 +108,9 @@ class Board(unittest.TestCase):
         return found
 
     def writes(self):
-        return [c for c in self.env.gh_calls() if c[:2] in (["project", "item-edit"], ["project", "item-add"],
-                                                            ["project", "item-archive"])]
+        calls = [c for c in self.env.gh_calls() if c[:2] in (["project", "item-edit"], ["project", "item-add"],
+                                                             ["project", "item-archive"], ["project", "item-delete"])]
+        return calls + self.graphql_writes()
 
     def test_no_board_line_is_silent_and_calls_nothing(self):
         self.config("- **Slots:** 2\n")
@@ -175,10 +200,98 @@ class Board(unittest.TestCase):
         create = next(c for c in self.env.gh_calls() if c[:2] == ["project", "field-create"])
         self.assertEqual(create[create.index("--single-select-options") + 1], ",".join(OPTIONS))
 
+    # The Backlog fixture: 10, 11, 12 takeable; 15 and 20 held by the open blocker 21; 1 building; 8 merged.
+    BACKLOG_TICKETS = [ticket(10, ["ready-for-agent"]), ticket(11, ["ready-for-agent"]), ticket(12, ["ready-for-agent"]),
+                       ticket(15, ["ready-for-agent"], blocked_by=[21]), ticket(20, ["ready-for-agent"], blocked_by=[21]),
+                       ticket(21), ticket(1, ["ready-for-agent"], claimed=True)]
+    MERGED = [{"number": 9, "headRefName": "8-a", "state": "MERGED", "mergedAt": ago(hours=2)}]
+
+    def test_backlog_cards_follow_frontier_order_then_held_by_number_one_write_per_misplaced_card(self):
+        self.config()
+        self.gh(tickets=self.BACKLOG_TICKETS, prs=self.MERGED, new_ids=["N11", "N20"],
+                cards=[card(12, "Backlog"), card(10, "Backlog"), card(15, "Backlog"), card(1, "Building"),
+                       card(8, "In review")])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        adds = [c[c.index("--url") + 1] for c in self.env.gh_calls() if c[:2] == ["project", "item-add"]]
+        self.assertEqual(adds, ["https://github.com/acme/r/issues/11", "https://github.com/acme/r/issues/20"])
+        self.assertEqual(self.edits(), {"N11": "Backlog", "N20": "Backlog", "I8": "Done"})
+        # Items sit I12 I10 I15 N11 N20; wanted I10 N11 I12 I15 N20: I10 goes first, N11 after it, nothing else.
+        moves = self.graphql_writes()
+        self.assertEqual(len(moves), 2)
+        self.assertIn('itemId: "I10"', moves[0])
+        self.assertNotIn("afterId", moves[0])
+        self.assertIn('itemId: "N11"', moves[1])
+        self.assertIn('afterId: "I10"', moves[1])
+        self.assertTrue(all("updateProjectV2ItemPosition" in m and 'projectId: "P1"' in m for m in moves))
+
+    def test_an_ordered_backlog_makes_no_write_on_a_second_run(self):
+        self.config()
+        self.gh(tickets=self.BACKLOG_TICKETS, prs=self.MERGED,
+                cards=[card(10, "Backlog"), card(11, "Backlog"), card(12, "Backlog"), card(15, "Backlog"),
+                       card(20, "Backlog"), card(1, "Building"), card(8, "Done")])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(self.writes(), [])
+
+    def test_parents_wayfinder_and_lead_tickets_are_not_in_backlog(self):
+        self.config()
+        self.gh(tickets=[ticket(30, ["ready-for-agent", "wayfinder:task"]), ticket(31, ["ready-for-agent", "lead"]),
+                         ticket(32, ["ready-for-agent"])])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        adds = [c[c.index("--url") + 1] for c in self.env.gh_calls() if c[:2] == ["project", "item-add"]]
+        # 31 is the lead's: it gets a card as a lead ticket (Building), never as Backlog.
+        self.assertEqual(adds, ["https://github.com/acme/r/issues/31", "https://github.com/acme/r/issues/32"])
+
+    def test_a_backlog_card_that_stops_qualifying_is_deleted_and_a_claimed_one_moves(self):
+        self.config()
+        self.gh(tickets=[ticket(7), ticket(8, ["ready-for-agent"], claimed=True), ticket(5, ["ready-for-human"])],
+                cards=[card(7, "Backlog"), card(8, "Backlog"), card(9, "Backlog"), card(5, "Backlog")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        # 7 lost its label, 5 became human work (unclaimed), 9 is closed: all leave. 8 was claimed: Building.
+        self.assertEqual(sorted(self.deletes()), ["I5", "I7", "I9"])
+        self.assertEqual(self.edits(), {"I8": "Building"})
+
+    def test_lead_tickets_get_cards_building_without_a_pr_and_in_review_with_a_ready_one(self):
+        self.config()
+        self.gh(tickets=[ticket(30, ["lead"]), ticket(31, ["lead"]), ticket(32, ["lead"])],
+                prs=[{"number": 55, "headRefName": "31-x", "state": "OPEN", "isDraft": False},
+                     {"number": 56, "headRefName": "32-y", "state": "OPEN", "isDraft": True}],
+                new_ids=["N30", "N31", "N32"])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(self.edits(), {"N30": "Building", "N31": "In review", "N32": "Building"})
+
+    def test_an_old_board_gets_backlog_in_one_field_write_keeping_ids_and_colors(self):
+        self.config()
+        node = out({"data": {"node": {"options": OLD_OPTIONS}}})
+        new = [{"id": "oB", "name": "Backlog"}] + [{"id": o["id"], "name": o["name"]} for o in OLD_OPTIONS]
+        mutated = out({"data": {"updateProjectV2Field": {"projectV2Field": {"options": new}}}})
+        self.gh(tickets=[ticket(1, claimed=True)], fields=[OLD_FIELD], cards=[card(1, "Done")], graphql=[node, mutated])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        writes = self.graphql_writes()
+        self.assertEqual(len(writes), 1)
+        q = writes[0]
+        self.assertIn("updateProjectV2Field", q)
+        self.assertLess(q.index('name: "Backlog"'), q.index('id: "old0"'))
+        for o in OLD_OPTIONS:
+            self.assertIn(f'id: "{o["id"]}", name: "{o["name"]}", color: BLUE, description: "{o["description"]}"', q)
+        self.assertIn("color: GRAY", q)
+        # The upgraded field serves the same sync: the claimed ticket moves to Building by its kept option id.
+        edit = next(c for c in self.env.gh_calls() if c[:2] == ["project", "item-edit"])
+        self.assertEqual(edit[edit.index("--single-select-option-id") + 1], "old0")
+
+    def test_a_board_that_already_matches_gets_no_field_write(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True)], cards=[card(1, "Building")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual(self.graphql_writes(), [])
+
     def test_a_failure_is_one_line_and_exit_1(self):
         self.config()
-        self.gh(extra=[])
-        self.env.set_gh([{"args": ["project", "view"], "stderr": "error: your authentication token is missing the 'project' scope\nmore\n", "exit": 1}])
+        self.gh(extra=[{"args": ["project", "view"], "exit": 1,
+                        "stderr": "error: your authentication token is missing the 'project' scope\nmore\n"}])
         r = self.env.run("board", check=False)
         self.assertEqual(r.returncode, 1)
         self.assertEqual(r.stdout, "")
@@ -198,8 +311,10 @@ class Prompts(unittest.TestCase):
         for phrase in ("! gh auth refresh -h <host> -s project", "`origin`", "`github.com`",
                        "- **Board:** <project URL>", "gh project create", "gh project link",
                        "@me", "retry or skip", "gh project list --owner @me", "skip with one line",
-                       "lacks the `project` scope", "stays unlinked", "write the line"):
+                       "lacks the `project` scope", "stays unlinked", "write the line",
+                       "Board layout, grouped by `Stage`"):
             self.assertIn(phrase, text)
+        self.assertIn("Board** layout, grouped by `Stage`", (ROOT / "docs" / "guide.md").read_text())
 
     def test_no_prompt_or_doc_gives_the_refresh_command_without_a_host(self):
         # Without -h, gh refuses to run under `!` (no TTY): "--hostname required when not running interactively".

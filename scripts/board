@@ -2,7 +2,10 @@
 """board [--repo PATH] : sync the opt-in GitHub Projects board from tracker and PR state.
 
 Reads the config's `- **Board:** <project URL>` line; with none it does nothing (exit 0, silent). Otherwise it
-rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a second run changes nothing:
+rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a second run changes nothing. The columns
+read left to right as a ticket's life:
+    Backlog          open, unclaimed `ready-for-agent` tickets that are not parents, `lead` or `wayfinder:`: the
+                     takeable ones in `frontier` order, then the held ones by number (tracker.backlog)
     Building         claimed, and `claims` says building, elsewhere, stalled or with-lead (a draft PR is building)
     In review        claimed, and `claims` says in-review (a ready PR)
     Needs lead       labelled `needs-lead`
@@ -10,16 +13,23 @@ rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a s
                      `worker-report` in the run log for it is a `permission-denied` stop (the user must act)
                      (it stays there after the user allows the command, until the PR exists)
     Done             the ticket's PR merged; the card is archived a day after the merge
-A card is added when its ticket is first claimed; a ticket that is merely labelled gets no card of its own.
+A card is added when its ticket first qualifies for Backlog, is first claimed, or is a `lead` ticket (which is never
+assigned: no PR is Building, a ready PR In review, as `lead-route`'s LEAD-TICKET and LEAD-PR lines say). A Backlog card
+whose ticket stops qualifying without being claimed (relabelled, closed) is deleted; one that gets claimed moves on. Cards in Backlog are put in order with `updateProjectV2ItemPosition`, writing only where a card's predecessor
+differs, so an ordered column makes no write.
 The column is the custom single-select field `Stage`, created on first sync: GitHub's built-in `Status` options
-are not editable through `gh`. Needs lead stays empty without a lead. The lead never reads or writes the board.
+are not editable through `gh`. A field that lacks an option, or has them out of order, is upgraded in place through
+`updateProjectV2Field`, keeping every existing option's id and color. Needs lead stays empty without a lead. The lead
+never reads or writes the board. One tracker Snapshot serves the whole sync (and `lead-route`): no per-ticket calls.
 Exit codes: 0 synced or no board; 1 any failure, one line on stderr (`run` carries on: the board never fails a pass).
 Stdlib only, Python 3.9+.
 """
 
 import argparse
+import json
 import re
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,15 +38,20 @@ import common
 import config
 import github
 import runlog
+import tracker
 from repo import STATE, parse_ts, ticket_of_branch
 
+LEAD_ROUTE = Path(__file__).resolve().parent / "lead-route"
 FIELD = "Stage"
-BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE = "Building", "In review", "Needs lead", "Waiting on you", "Done"
-STAGES = [BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE]
+BACKLOG, BUILDING, REVIEW = "Backlog", "Building", "In review"
+NEEDS_LEAD, WAITING, DONE = "Needs lead", "Waiting on you", "Done"
+STAGES = [BACKLOG, BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE]  # left to right on the board layout
+NEW_OPTION_COLOR = "GRAY"
 ARCHIVE_AFTER = timedelta(days=1)
 PROJECT_URL = re.compile(r"^https://[^/]+/(?:orgs|users)/([^/]+)/projects/(\d+)/?")
+LEAD_LINE = re.compile(r"^LEAD-(TICKET|PR) #(\d+)(?: (\d+))?$")
 # The board is the coarse view: every claim state that is not in review or done is Building. Liveness and stalls
-# stay in the pass table (`claims`), and a new column would break every existing board (sync refuses a missing option).
+# stay in the pass table (`claims`).
 CLAIM_STAGE = {"building": BUILDING, "elsewhere": BUILDING, "stalled": BUILDING, "with-lead": BUILDING,
                "in-review": REVIEW, "done": DONE}
 
@@ -54,27 +69,137 @@ def permission_denied(repo, found) -> set:
     return out
 
 
-def desired(issues, found, denied=()):
-    """{ticket: (stage, issue, claimed)} for the open tickets that belong on the board. found: claims.claims' {ticket:
-    Claim}, which holds every claimed open ticket."""
+def desired(issues, found, denied=(), backlog=(), lead=None):
+    """{ticket: (stage, issue, addable)} for the open tickets that belong on the board. found: claims.claims' {ticket:
+    Claim}, which holds every claimed open ticket. backlog: the Backlog tickets' numbers. lead: {ticket: stage} for the
+    lead's tickets (lead_stages). addable: the ticket gets a card when it has none (it is claimed, a lead ticket, or
+    in Backlog); a labelled ticket that is none of those only moves an existing card."""
+    lead = lead or {}
     out = {}
     for issue in issues:
-        labels = {x["name"] for x in issue.get("labels") or []}
-        claimed = bool(issue.get("assignees"))
+        n = issue["number"]
+        labels = issue["labels"]
+        claimed = issue["claimed"]
         if "needs-lead" in labels:
-            stage = NEEDS_LEAD
-        elif labels & {"ready-for-human", "needs-info"} or issue["number"] in denied:
-            stage = WAITING
+            stage, addable = NEEDS_LEAD, claimed
+        elif labels & {"ready-for-human", "needs-info"} or n in denied:
+            stage, addable = WAITING, claimed
+        elif n in lead:
+            stage, addable = lead[n], True
         elif claimed:
-            stage = CLAIM_STAGE[found[issue["number"]].state]
+            stage, addable = CLAIM_STAGE[found[n].state], True
+        elif n in backlog:
+            stage, addable = BACKLOG, True
         else:
             continue
-        out[issue["number"]] = (stage, issue, claimed)
+        out[n] = (stage, issue, addable)
     return out
+
+
+def lead_stages(lines, open_prs) -> dict:
+    """{ticket: stage} from lead-route's LEAD-TICKET and LEAD-PR lines: no PR or a draft is Building, a ready PR In
+    review. open_prs: {PR number: isDraft}."""
+    out = {}
+    for line in lines:
+        m = LEAD_LINE.match(line.strip())
+        if m:
+            kind, n, pr = m.group(1), int(m.group(2)), m.group(3)
+            out[n] = REVIEW if kind == "PR" and not open_prs.get(int(pr), True) else BUILDING
+    return out
+
+
+def lead_lines(snapshot_file, root) -> list:
+    """lead-route's output for this snapshot. It decides which open tickets are the lead's and where their PRs are;
+    the board decides nothing of that itself. --lead none and --cap 1 only satisfy its arguments: the lines used here
+    do not depend on them."""
+    r = common.run(sys.executable, str(LEAD_ROUTE), "--lead", "none", "--cap", "1", "--repo", str(root),
+                   "--snapshot", str(snapshot_file), cwd=root)
+    if r.code != 0:
+        raise github.GhError(github.FAILED, (r.stderr.strip().splitlines() or ["lead-route failed"])[0])
+    return r.stdout.splitlines()
+
+
+def literal_options(options) -> str:
+    """The GraphQL literal for updateProjectV2Field's singleSelectOptions. An existing option keeps its id, color and
+    description (so a card keeps its column); names are JSON strings, which GraphQL reads the same."""
+    parts = []
+    for o in options:
+        if not re.fullmatch(r"[A-Z_]+", o["color"]):
+            raise github.GhError(github.MALFORMED, "board field has an unreadable option color")
+        id_part = f"id: {json.dumps(o['id'])}, " if o.get("id") else ""
+        parts.append("{" + f"{id_part}name: {json.dumps(o['name'])}, color: {o['color']}, "
+                     f"description: {json.dumps(o['description'])}" + "}")
+    return "[" + ", ".join(parts) + "]"
+
+
+def upgrade_field(field, repo):
+    """Add the missing options to an existing Stage field and put them in STAGES order, in one updateProjectV2Field
+    call that keeps every existing option's id and color. No write when the field already matches. Returns the field's
+    {option name: id}."""
+    current = field.get("options") or []
+    names = [o["name"] for o in current]
+    if [n for n in names if n in STAGES] == STAGES:
+        return {o["name"]: o["id"] for o in current}
+    node = github.call_json("api", "graphql", "-f", "query=query($id: ID!) { node(id: $id) { ... on "
+                            "ProjectV2SingleSelectField { options { id name color description } } } }",
+                            "-f", f"id={field['id']}", cwd=repo)
+    have = node["data"]["node"]["options"]
+    by_name = {o["name"]: o for o in have}
+    wanted = [by_name.get(s) or {"name": s, "color": NEW_OPTION_COLOR, "description": ""} for s in STAGES]
+    wanted += [o for o in have if o["name"] not in STAGES]  # an option someone added by hand stays, after ours
+    query = ("mutation { updateProjectV2Field(input: {fieldId: " + json.dumps(field["id"]) + ", singleSelectOptions: "
+             + literal_options(wanted) + "}) { projectV2Field { ... on ProjectV2SingleSelectField "
+             "{ options { id name } } } } }")
+    reply = github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo)
+    return {o["name"]: o["id"] for o in reply["data"]["updateProjectV2Field"]["projectV2Field"]["options"]}
+
+
+def move_after(project_id, item_id, after_id, repo):
+    """Put a card right after another (the first card when after_id is None): the Board layout orders cards inside a
+    column by this position, and `gh project item-edit` cannot change it."""
+    after = f", afterId: {json.dumps(after_id)}" if after_id else ""
+    query = ("mutation { updateProjectV2ItemPosition(input: {projectId: " + json.dumps(project_id)
+             + ", itemId: " + json.dumps(item_id) + after + "}) { clientMutationId } }")
+    github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo)
+
+
+def order_backlog(want_ids, current_ids, project_id, repo):
+    """Move the Backlog cards into want_ids order, writing only where a card's predecessor differs. current_ids is
+    their present order; a card is only moved when it is not already where the order puts it."""
+    cur = list(current_ids)
+    for i, item in enumerate(want_ids):
+        if cur[i] == item:
+            continue
+        move_after(project_id, item, want_ids[i - 1] if i else None, repo)
+        cur.remove(item)
+        cur.insert(i, item)
 
 
 def sync(owner, number, repo):
     own = ["--owner", owner]
+    root = Path(repo).resolve()
+    # One tracker read serves the whole sync: the issues (Backlog, claims, labels), the PRs (claims, the archive, the
+    # lead's tickets) and, through a file, lead-route. No call per ticket.
+    try:
+        labels = tracker.label_strings(root)
+    except ValueError as e:
+        raise github.GhError(github.FAILED, str(e)) from None
+    snap = tracker.Snapshot(root)
+    issues = snap.issues
+    prs = github.call_json("pr", "list", "--state", "all", "--limit", "100", "--json",
+                           "number,headRefName,headRefOid,baseRefName,state,mergedAt,isDraft", shape=list, cwd=repo)
+    open_prs = [p for p in prs if p.get("state") == "OPEN"]
+    merged_prs = [p for p in prs if p.get("state") == "MERGED"]
+    try:
+        found = claims.claims(root, root / STATE, issues, open_prs, merged_prs)
+    except ValueError as e:  # claims could not run (an unreadable state file, a failed git call)
+        raise github.GhError(github.FAILED, str(e)) from None
+    with tempfile.TemporaryDirectory() as tmp:
+        shared = Path(tmp) / "snapshot.json"
+        tracker.Snapshot(root, repo=snap.repo, issues=issues, prs=open_prs, merged=merged_prs, abandoned=[]).write(shared)
+        lead = lead_stages(lead_lines(shared, root), {p.get("number"): bool(p.get("isDraft")) for p in open_prs})
+    in_backlog = tracker.backlog(issues, labels)
+
     proj = github.call_json("project", "view", str(number), *own, "--format", "json", cwd=repo)
     fields = github.call_json("project", "field-list", str(number), *own, "--format", "json", cwd=repo)
     field = next((f for f in fields.get("fields", []) if f.get("name") == FIELD), None)
@@ -82,25 +207,8 @@ def sync(owner, number, repo):
         field = github.call_json("project", "field-create", str(number), *own, "--name", FIELD, "--data-type",
                                  "SINGLE_SELECT", "--single-select-options", ",".join(STAGES), "--format", "json",
                                  cwd=repo)
-    options = {o["name"]: o["id"] for o in field.get("options") or []}
-    missing = [s for s in STAGES if s not in options]
-    if missing:
-        raise github.GhError(github.FAILED, f"board field {FIELD} lacks options: {', '.join(missing)}")
-
-    issues = github.call_json("issue", "list", "--state", "open", "--limit", "200",
-                              "--json", "number,url,labels,assignees", shape=list, cwd=repo)
-    prs = github.call_json("pr", "list", "--state", "all", "--limit", "100",
-                           "--json", "number,headRefName,state,mergedAt,isDraft", shape=list, cwd=repo)
-    # One PR read serves both claims (open and merged PRs) and the archive below.
-    root = Path(repo).resolve()
-    try:
-        found = claims.claims(root, root / STATE,
-                              [{"number": int(i["number"]), "claimed": bool(i.get("assignees")),
-                                "labels": {x["name"] for x in i.get("labels") or []}} for i in issues],
-                              [p for p in prs if p.get("state") == "OPEN"],
-                              [p for p in prs if p.get("state") == "MERGED"])
-    except ValueError as e:  # claims could not run (an unreadable state file, a failed git call)
-        raise github.GhError(github.FAILED, str(e)) from None
+    # A board made before a column existed is upgraded in place, never refused.
+    options = upgrade_field(field, repo)
     merged = {}
     for p in prs:
         t, at = ticket_of_branch(p.get("headRefName")), parse_ts(p.get("mergedAt"))
@@ -114,15 +222,26 @@ def sync(owner, number, repo):
         github.call("project", "item-edit", "--id", card_id, "--project-id", proj["id"], "--field-id", field["id"],
                     "--single-select-option-id", options[stage], cwd=repo)
 
-    want = desired(issues, found, permission_denied(repo, found))
-    for t, (stage, issue, claimed) in sorted(want.items()):
+    def delete(card_id):
+        github.call("project", "item-delete", str(number), *own, "--id", card_id, cwd=repo)
+
+    want = desired(issues, found, permission_denied(repo, found), {i["number"] for i in in_backlog}, lead)
+    ids = {}  # ticket -> card id, for the Backlog ordering below
+    for t, (stage, issue, addable) in sorted(want.items()):
         card = cards.get(t)
         if card is None:
-            if not claimed:
+            if not addable:
                 continue
             added = github.call_json("project", "item-add", str(number), *own, "--url", issue["url"],
                                      "--format", "json", cwd=repo)
             card = {"id": added["id"]}
+            cards[t] = card
+        elif not addable and card.get(FIELD.lower()) == BACKLOG:
+            # It no longer qualifies (relabelled) and nobody claimed it: it leaves the board.
+            delete(card["id"])
+            del cards[t]
+            continue
+        ids[t] = card["id"]
         if card.get(FIELD.lower()) != stage:
             set_stage(card["id"], stage)
     now = datetime.now(timezone.utc)
@@ -134,6 +253,18 @@ def sync(owner, number, repo):
             github.call("project", "item-archive", str(number), *own, "--id", card["id"], cwd=repo)
         elif card.get(FIELD.lower()) != DONE:
             set_stage(card["id"], DONE)
+        cards.pop(t)
+    for t, card in sorted(cards.items()):
+        # A Backlog card whose ticket is no longer open (closed without a merged PR) leaves the board.
+        if t not in want and card.get(FIELD.lower()) == BACKLOG:
+            delete(card["id"])
+
+    order = [t for t in (i["number"] for i in in_backlog) if want.get(t, (None,))[0] == BACKLOG]
+    wanted_ids = [ids[t] for t in order]
+    # The cards' present order is the project's item order; a card added just now is last.
+    current = [c["id"] for c in items if c["id"] in wanted_ids]
+    current += [i for i in wanted_ids if i not in current]
+    order_backlog(wanted_ids, current, proj["id"], repo)
 
 
 def main(argv=None) -> int:
