@@ -302,6 +302,23 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertIn("NOT removed: its HEAD is not the PR head", p.stdout)
         self.assertTrue(wt.exists())
 
+    def test_an_untracked_pr_body_alone_does_not_block_the_removal(self):
+        wt = self.agent_tree()
+        (wt / ".claude").mkdir()
+        (wt / ".claude" / "pr-body.md").write_text("body\n")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertNotIn("NOT removed", p.stdout)
+        self.assertFalse(wt.exists())
+
+    def test_another_untracked_file_beside_the_pr_body_still_blocks_the_removal(self):
+        wt = self.agent_tree()
+        (wt / ".claude").mkdir()
+        (wt / ".claude" / "pr-body.md").write_text("body\n")
+        (wt / "other.txt").write_text("x\n")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(wt.exists())
+
     def test_worker_branch_of_a_different_directory_is_kept(self):
         wt = self.agent_tree("worktree-agent-zzz")
         p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
@@ -433,9 +450,11 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertIn("NOT removed: its lock is held by another live session", p.stdout)
         self.assertTrue(wt.exists())
 
-    def test_never_forces_worktree_removal(self):
-        self.assertNotIn("--force", (Path(__file__).resolve().parent.parent / "scripts" / "repo.py").read_text()
-                         .split("def remove_worktree")[1])
+    def test_forces_worktree_removal_only_past_a_lone_pr_body(self):
+        body = (Path(__file__).resolve().parent.parent / "scripts" / "repo.py").read_text().split("def remove_worktree")[1]
+        self.assertEqual(body.count("--force"), 1)
+        guarded = body.split("only_pr_body_untracked(path):")[1].split("return w")[0]
+        self.assertIn("--force", guarded)
 
     def test_gh_missing_at_the_merge_call_is_could_not_run(self):
         self.seq({PR_VIEW: [pr("OPEN")], PR_MERGE: [{"exit": 127, "stderr": "gh: command not found"}]})

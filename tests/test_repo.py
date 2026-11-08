@@ -126,6 +126,25 @@ class WorktreeHelpers(unittest.TestCase):
         self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
         self.assertTrue(self.wt.exists())
 
+    def test_an_untracked_pr_body_alone_goes_with_the_worktree(self):
+        (self.wt / ".claude").mkdir()
+        (self.wt / ".claude" / "pr-body.md").write_text("body\n")
+        self.assertIn("removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertFalse(self.wt.exists())
+
+    def test_an_untracked_pr_body_beside_another_change_still_blocks_removal(self):
+        (self.wt / ".claude").mkdir()
+        (self.wt / ".claude" / "pr-body.md").write_text("body\n")
+        (self.wt / "u.txt").write_text("u\n")
+        self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertTrue(self.wt.exists())
+
+    def test_another_untracked_file_under_claude_still_blocks_removal(self):
+        (self.wt / ".claude").mkdir()
+        (self.wt / ".claude" / "notes.md").write_text("n\n")
+        self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertTrue(self.wt.exists())
+
     def test_harness_lock_is_lifted_for_a_remove_and_restored_when_refused(self):
         reason = "claude agent agent-abc (pid 1 start Sat Nov  7 06:14:20 2026)"
         _vcs(self.root, "worktree", "lock", "--reason", reason, str(self.wt))

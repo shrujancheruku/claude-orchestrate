@@ -119,12 +119,29 @@ def harness_lock(path, cwd):
     return None
 
 
+PR_BODY_FILE = ".claude/pr-body.md"
+
+
+def only_pr_body_untracked(path) -> bool:
+    """True when the one change in the worktree at `path` is an untracked `.claude/pr-body.md`: the file older
+    workers and briefs wrote for `gh pr create --body-file` (#404). Anything else, or a failed call, is False."""
+    st = common.run("git", "status", "--porcelain", "-z", "--untracked-files=all", cwd=path)
+    return st.code == 0 and [e for e in st.stdout.split("\0") if e] == [f"?? {PR_BODY_FILE}"]
+
+
 def remove_worktree(path, cwd):
-    """Remove the merged PR's worktree and say what happened; never raises, never forces.
+    """Remove the merged PR's worktree and say what happened; never raises, and forces only past an untracked
+    `.claude/pr-body.md` that is the tree's one change (`only_pr_body_untracked`): it goes with the tree.
 
     A harness-locked tree is unlocked first, then removed plainly, so a dirty tree is still refused;
     if that refusal comes after the unlock, the lock is put back so the tree is left as found."""
-    w = common.run("git", "worktree", "remove", path, cwd=cwd)
+    def attempt():
+        w = common.run("git", "worktree", "remove", path, cwd=cwd)
+        if w.code != 0 and "untracked" in w.stderr and only_pr_body_untracked(path):
+            w = common.run("git", "worktree", "remove", "--force", path, cwd=cwd)
+        return w
+
+    w = attempt()
     err = common.one_line(w.stderr)
     if w.code == 0:
         return f"worktree {path} removed"
@@ -136,7 +153,7 @@ def remove_worktree(path, cwd):
     u = common.run("git", "worktree", "unlock", path, cwd=cwd)
     if u.code != 0:
         return f"worktree {path} NOT removed: could not unlock: {common.one_line(u.stderr)}"
-    w = common.run("git", "worktree", "remove", path, cwd=cwd)
+    w = attempt()
     if w.code == 0:
         return f"worktree {path} unlocked (harness lock) and removed"
     refused = common.one_line(w.stderr)
