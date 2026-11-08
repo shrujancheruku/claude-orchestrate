@@ -390,7 +390,10 @@ class GateTest(unittest.TestCase):
     def test_holds_exit_1_with_no_output_is_could_not_run_not_an_overlap(self):
         from importlib.machinery import SourceFileLoader
         from unittest import mock
-        gate = SourceFileLoader("gate_under_test", str(Path(__file__).resolve().parent.parent / "scripts" / "gate")).load_module()
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("gate_under_test", str(Path(__file__).resolve().parent.parent / "scripts" / "gate"))
+        gate = module_from_spec(spec_from_loader("gate_under_test", loader))
+        loader.exec_module(gate)
         crash = gate.common.Run(1, "", "Traceback (most recent call last):\nOSError: boom")
         snap = mock.Mock(repo=None, issues=[], prs=[], merged=[])
         with mock.patch.object(gate.common, "run", return_value=crash), mock.patch.object(gate.tracker, "Snapshot"), \

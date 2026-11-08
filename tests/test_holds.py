@@ -311,7 +311,10 @@ class Holds(unittest.TestCase):
         scripts = str(Path(__file__).resolve().parent.parent / "scripts")
         sys.path.insert(0, scripts)
         self.addCleanup(sys.path.remove, scripts)
-        holds = SourceFileLoader("holds_under_test", f"{scripts}/holds").load_module()
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("holds_under_test", f"{scripts}/holds")
+        holds = module_from_spec(spec_from_loader("holds_under_test", loader))
+        loader.exec_module(holds)
         err = io.StringIO()
         with mock.patch.object(holds.claims, "claims", side_effect=PermissionError("denied\nreading it")), \
                 mock.patch.object(holds.tracker.Snapshot, "open", return_value=mock.MagicMock(prs=[])), redirect_stderr(err):
