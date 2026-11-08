@@ -4,13 +4,13 @@
 
 `hooks/guard.py` runs before every Bash call a plugin agent makes and refuses the commands that agent's role must leave to someone else, such as a scout or reviewer writing, or a worker merging. It decides from the command text, and a wrong allow lets a role do what the plugin says it can't (inferred). The role split is in the guard table in `docs/guide.md`.
 
-- **Text matching is not enough.** `gh pr "merge"`, `git $(echo push)`, `sh -c '...'`, and a heredoc body that merely mentions `git push` read differently to a regex than to the shell. Matching the raw string both misses real writes and refuses harmless searches (inferred; `guard.py:529-533` notes that a quoted script path is what a plain-word check misses, and `grep scripts/merge` must stay allowed).
+- **Text matching is not enough.** `gh pr "merge"`, `git $(echo push)`, `sh -c '...'`, and a heredoc body that merely mentions `git push` read differently to a regex than to the shell. Matching the raw string both misses real writes and refuses harmless searches (inferred; a regex on the raw text read `grep scripts/merge` or a commit message naming the script as a merge, #327).
 - **No parser is on hand.** The hook is one stdlib Python file that Claude Code starts per call (`hooks/hooks.json`, `python3 -I`). `shlex` splits words but knows nothing about `$(...)`, backticks, heredocs, line continuations or `sh -c`, and a third-party parser would add a dependency to every install (both inferred).
 - **A crash must not read as a pass.** A hook that errors lets the command run unchecked (`guard.py:968`, the comment on the `except Exception` in `main`).
 
 ## Decision
 
-- **The guard has one lexer of its own** (`parse` in `hooks/guard.py`). It splits a command into simple commands and words, with quotes, escapes, line continuations, `$(...)`, backticks, heredocs and `sh -c` resolved. Every `gh` and `git` rule decides on those words, not on the command text. The one exception is the check for `scripts/merge` (`MERGE_SCRIPT`), a regex on the raw command, because the quoted script path is what a plain-word check would miss (`guard.py:529-533`).
+- **The guard has one lexer of its own** (`parse` in `hooks/guard.py`). It splits a command into simple commands and words, with quotes, escapes, line continuations, `$(...)`, backticks, heredocs and `sh -c` resolved. Every rule decides on those words, not on the command text, the check for `scripts/merge` (`runs_merge`) included.
 - **A command it can't parse or check is refused.** A command that doesn't parse (`ParseError`) is denied with a message telling the agent to rewrite it. Any other exception while checking is caught in `main` and denied the same way. An expansion whose value the guard can't know is kept as an unknown word, not treated as harmless.
 - **Input that is not a call the guard governs returns without a verdict:** stdin that is invalid JSON or JSON that isn't an object, no plugin agent named, or no command.
 - **A role the guard doesn't know is read-only,** the same as a scout.

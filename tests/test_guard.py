@@ -121,6 +121,8 @@ CASES = [
     ("orchestrate:worker", 'printf "%s" "x | scripts/merge"', "allow"),
     ("orchestrate:worker", "python3 - <<'EOF'\nx\nEOF\nscripts/merge 12", "deny"),
     ("orchestrate:worker", "sh -c 'echo hi; scripts/merge 12'", "deny"),
+    ("orchestrate:worker", "cd scripts && sh -c './merge 1'", "deny"),
+    ("orchestrate:worker", "cd scripts && sh -c ./merge", "deny"),
     ("orchestrate:scout", "git -C /repo checkout main", "deny"),
     ("orchestrate:scout", "git worktree add ../x", "deny"),
     ("orchestrate:scout", "gh issue comment 5 --body hi", "deny"),

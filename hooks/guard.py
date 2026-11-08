@@ -1119,28 +1119,23 @@ def script_call(parsed: "Parsed", script: "re.Pattern", dynamic_ok: bool = False
 # The plugin's merge script, run as a command. Judged on the lexed command like verify and threads, so
 # words that merely name it (a heredoc body, a quoted argument, a commit message, a path given to grep)
 # are not a run of it (#327). The wrappers script_call skips (env, timeout, bash, python3 ...) still
-# count, and so do the two forms it can't see: a bare `./merge` after `cd <...>scripts &&`, and the
-# script inside `sh -c '...'`. A renamed or copied script is out of scope (a guardrail).
+# count, and so does the form it can't see: a bare `./merge` after `cd <...>scripts &&`. A renamed or copied script is out of scope (a guardrail).
 MERGE_SCRIPT = re.compile(r"(?:^|/)scripts/merge$")
+BARE_MERGE = re.compile(r"^\./merge$")
 
 
-def runs_merge(parsed: "Parsed", depth: int = 0) -> bool:
+def runs_merge(parsed: "Parsed") -> bool:
     if script_call(parsed, MERGE_SCRIPT, dynamic_ok=True) is not None:
         return True
-    cd_scripts = False
+    # parse() already lexes `sh -c '<cmd>'` into the commands after the shell's own, so the inner commands
+    # are in parsed.cmds. A `cd <..>scripts` stays in effect until the next cd, `sh -c` included (#327).
+    in_scripts = False
     for cmd in parsed.cmds:
         words = cmd.words
-        if cd_scripts and script_call(Parsed([cmd]), re.compile(r"^\./merge$")) is not None:
+        if len(words) == 2 and basename(words[0]) == "cd":
+            in_scripts = re.search(r"scripts/?$", words[1].text) is not None
+        elif in_scripts and script_call(Parsed([cmd]), BARE_MERGE) is not None:
             return True
-        cd_scripts = len(words) == 2 and basename(words[0]) == "cd" and re.search(r"scripts/?$", words[1].text) is not None
-        # `sh -c '<command>'`: the quoted text is a command line of its own.
-        for k, w in enumerate(words[:-1]):
-            if w.text == "-c" and k and basename(words[k - 1]) in ("sh", "bash", "zsh") and not words[k + 1].dynamic and depth < 3:
-                try:
-                    if runs_merge(Parsed(parse(words[k + 1].text)), depth + 1):
-                        return True
-                except ParseError:
-                    return True  # fail closed
     return False
 
 
