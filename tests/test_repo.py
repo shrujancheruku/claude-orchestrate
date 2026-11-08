@@ -170,7 +170,7 @@ class ScratchWorktrees(unittest.TestCase):
     def test_remove_scratch_removes_them_and_reports_each(self):
         self.add("pr-5", "--detach")
         self.add("pr-5-r2", "--detach")
-        out = repo.remove_scratch(5, self.root)
+        out = repo.remove_scratch(5, repo.common.run("git", "rev-parse", "HEAD", cwd=self.root).stdout.strip(), self.root)
         self.assertEqual(len(out), 2)
         self.assertTrue(all("removed" in line for line in out))
         self.assertEqual(repo.scratch_worktrees(5, self.root), [])
