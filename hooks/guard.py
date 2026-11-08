@@ -856,6 +856,17 @@ def rule_gh_merge(p: Parsed, cwd: str) -> str | None:
     return None
 
 
+def rule_pr_draft(p: Parsed, cwd: str) -> str | None:
+    """A worker opens its PR as a draft at the end of Orient (ADR 0011); a model that skips the step
+    opens it ready at Ship (#355), so the guard refuses a `gh pr create` with no `--draft`."""
+    for call in p.tool("gh"):
+        if call.is_sub("pr") and call.is_verb("create") and not any(
+                a.text == "--draft" for a in call.args if not a.dynamic):
+            return ("opens a PR that is not a draft: add `--draft` to `gh pr create`; Ship marks it ready "
+                    "with `gh pr ready <pr>`")
+    return None
+
+
 def rule_force_push(p: Parsed, cwd: str) -> str | None:
     for call in p.tool("git"):
         if call.is_sub("push") and any(
@@ -929,7 +940,7 @@ READ_ONLY = [rule_expansion, rule_bare_expansion, rule_git_writes, rule_gh_write
 RULES = {
     "scout": READ_ONLY,
     "reviewer": [rule_expansion, rule_bare_expansion, rule_reviewer_git, *READ_ONLY[3:]],
-    "worker": [rule_expansion, rule_gh_merge, rule_force_push, rule_push_default],
+    "worker": [rule_expansion, rule_gh_merge, rule_pr_draft, rule_force_push, rule_push_default],
 }
 
 NEXT_STEP = {
