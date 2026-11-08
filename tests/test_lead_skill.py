@@ -26,10 +26,26 @@ class LeadSkill(unittest.TestCase):
 
     def test_launch_resume_and_live_branches(self):
         self.check(["claude agents --json --all", "SendMessage", "pid: null",
-                    "claude --resume <sessionId> --bg", "Never resume a live row",
-                    "claude --bg --name orchestrator --permission-mode",
-                    '"/orchestrate:run --greedy"', "**Orchestrator** row", "**Models**",
+                    "scripts/launch\" --resume <sessionId> --bg", "Never resume a live row",
+                    "scripts/launch\" --bg --permission-mode", "--plugin-dir", "crossSessionInbound",
+                    "scripts/launch --no-model", "**Orchestrator** row", "**Models**",
                     "a live row wins"])
+
+    def test_the_launch_line_is_not_restated(self):
+        self.assertNotIn("claude --name orchestrator", self.text)
+        self.assertNotIn("claude --bg --name", self.text)
+        self.assertNotIn("claude --name lead", self.text)
+        self.assertIn("scripts/launch --lead", self.text)
+
+    def test_start_skill_passes_the_callers_mode_and_whitelists_arguments(self):
+        start = (SKILL.parent.parent / "start" / "SKILL.md").read_text()
+        for needle in ("<your own permission mode>", "`default`", "`--lead`", "`--permission-mode`", "Never paste the raw arguments"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, start)
+
+    def test_setup_names_the_config_row(self):
+        setup = (SKILL.parent.parent / "setup" / "SKILL.md").read_text()
+        self.assertIn("Messages from your other sessions", setup)
 
     def test_model_not_found_only_fallback(self):
         self.check(["model_not_found", 'state: "failed"', "`error` field", "exactly once",

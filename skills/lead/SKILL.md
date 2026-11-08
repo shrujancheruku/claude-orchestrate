@@ -4,7 +4,7 @@ description: The project lead's start-up. Finds, launches or resumes the orchest
 disable-model-invocation: true
 ---
 
-You are the **lead**. Start with `claude --name lead "/orchestrate:lead"`; this one command starts the whole system. Fable is the recommended model for the lead. Say that in one line, then carry on. You find, launch or resume the **orchestrator** and read its index; you never build, and you never read diffs, open PRs or reviews. Anything bulky goes to the existing **scout**.
+You are the **lead**. Start with `scripts/launch --lead`; this one command starts the whole system. Fable is the recommended model for the lead. Say that in one line, then carry on. You find, launch or resume the **orchestrator** and read its index; you never build, and you never read diffs, open PRs or reviews. Anything bulky goes to the existing **scout**.
 
 ## Start-up
 
@@ -13,12 +13,13 @@ You are the **lead**. Start with `claude --name lead "/orchestrate:lead"`; this 
 3. **Index.** Run `"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief" --repo .` and read its whole output: the config, tracker docs, glossary, ADR index, open `needs-lead` then `lead` tickets, the roadmap, and the PRs merged since the watermark with each L-tier merge's risk notes.
 4. **Find the orchestrator.** Never start a second one. Run `claude agents --json --all` and look for rows named `orchestrator`. If more than one has that name, a live row wins: while any row is live, resume nothing and launch nothing.
    - **A live `pid`:** reach it with `SendMessage` to the session named `orchestrator`. Launch nothing.
-   - **`pid: null`:** it is stopped. Run `claude --resume <sessionId> --bg [--model <model>]`, with `--model` only when the **Orchestrator** row of the config's **Models** table names one. Never resume a live row: that starts an unnamed copy.
-   - **No row:** launch it, run plainly (no wrapper, no `&`): `claude --bg --name orchestrator --permission-mode <your own permission mode> [--model <model>] "/orchestrate:run --greedy"`.
-5. **The model.** It comes from the **Orchestrator** row of the config's **Models** table, passed on launch and on resume. If the row is missing, blank or old-style (`the session's model`), launch on the account default and tell the developer which model the orchestrator got.
-6. **Failed first turn.** After a launch, check `claude agents --json`. If the orchestrator's row shows `state: "failed"` and the transcript's `error` field confirms `model_not_found`, relaunch exactly once without `--model`, and tell the developer "orchestrator is on <default>, not <X>: <error>". Any other failure, a usage limit above all, never triggers this fallback: report it and stop.
+   - **`pid: null`:** it is stopped. Run `"${CLAUDE_SKILL_DIR}/../../scripts/launch" --resume <sessionId> --bg --permission-mode <your own permission mode>`. Never resume a live row: that starts an unnamed copy.
+   - **No row:** launch it, run plainly (no wrapper, no `&`): `"${CLAUDE_SKILL_DIR}/../../scripts/launch" --bg --permission-mode <your own permission mode>`.
+   - `scripts/launch` owns the whole line, so never type it out or hand the developer a hand-built one. It adds `--plugin-dir` when the plugin runs from a checkout (a resumed session without it has no `orchestrate` agents or guard hook, so it can dispatch nothing), the model, and `crossSessionInbound` for a background session (a bypass orchestrator without it cannot hear you). If the agent types appear late after a resume, wait for them rather than swapping in a generic agent. It exits 2 with one line when a live `orchestrator` already exists: report that line and launch nothing.
+5. **The model.** `scripts/launch` reads it from the **Orchestrator** row of the config's **Models** table, on launch and on resume. If the row is missing, blank or old-style (`the session's model`), the orchestrator gets the account default: tell the developer which model it got.
+6. **Failed first turn.** After a launch, check `claude agents --json`. If the orchestrator's row shows `state: "failed"` and the transcript's `error` field confirms `model_not_found`, relaunch exactly once with `scripts/launch --no-model` (same other flags), and tell the developer "orchestrator is on <default>, not <X>: <error>". Any other failure, a usage limit above all, never triggers this fallback: report it and stop.
 
-The two-terminal start also works: the developer runs `claude --name orchestrator "/orchestrate:run --greedy"` in one terminal and the lead in another. Step 4 then finds the live row and launches nothing.
+The two-terminal start also works: the developer runs `scripts/launch` in one terminal and the lead in another. Step 4 then finds the live row and launches nothing.
 
 ## Staying current
 
