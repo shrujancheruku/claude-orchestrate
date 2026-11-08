@@ -118,6 +118,10 @@ _Avoid_: hot file, common file
 What `scripts/merge` does after a merge: updating every other open PR whose branch now conflicts with the default branch. Source: `docs/guide.md` (The guard hook), `skills/run/SKILL.md`.
 _Avoid_: refresh, rebase-all
 
+**CI green**:
+What `scripts/merge` requires of a PR head before merging: every check in the rollup is SUCCESS, SKIPPED or NEUTRAL, or (once #362 lands) the rollup is empty and the head's tree has no workflow files. A failed check is red; anything else, an empty rollup with workflows present included, is pending, and a pending or red head never merges. Source: `docs/adr/0012-ci-green-without-workflows.md`; the code is `ci_verdict` in `scripts/github.py`, which until #362 treats every empty rollup as pending.
+_Avoid_: CI passed, checks done, no CI (that is one reason for green, not the state)
+
 **Approved head**:
 The PR head commit the reviewer approved. `scripts/merge --approved-head` measures the worker's later change against it (the post-approval risk guard), ignoring merges of the default branch. Source: `scripts/merge`, `skills/run/SKILL.md`.
 _Avoid_: approved SHA, reviewed commit, last-reviewed head
