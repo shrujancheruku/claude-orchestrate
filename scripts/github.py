@@ -37,7 +37,7 @@ NO_REPO = re.compile(r"not a git repository|unable to read current working direc
 
 ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    issues(first: 100, after: $after, states: OPEN, orderBy: {field: CREATED_AT, direction: DESC}) {
+    issues(first: 100, after: $after, states: OPEN, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
@@ -746,14 +746,14 @@ def repo_info(cwd=None) -> dict:
 
 
 def open_issues(repo: dict, cwd=None) -> list:
-    """Every open issue (all pages, newest created first: a cursor over creation order holds still while issues are edited) as raw GraphQL nodes, the one home of the issues query:
+    """Every open issue (all pages, oldest created first: creation time never changes on edit, and an issue created mid-read appends past the cursor, so no page shifts; an issue seen twice is kept once) as raw GraphQL nodes, the one home of the issues query:
     number, title, url, body, creation time, parent, sub-issue summary, labels, assignees (count), blockers, edits and comments.
     `repo` is `repo_info`'s (or `gh repo view`'s) owner/name dict."""
     try:
         owner, name = repo["owner"]["login"], repo["name"]
     except (KeyError, TypeError):
         raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
-    nodes, after, seen = [], None, set()
+    nodes, after, seen, numbers = [], None, set(), set()
     while True:
         args = ["api", "graphql", "-f", f"query={ISSUES_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}"]
         if after:
@@ -766,7 +766,8 @@ def open_issues(repo: dict, cwd=None) -> list:
             raise GhError(MALFORMED, "gh returned an unexpected reply (issues)") from None
         if not isinstance(page, list):
             raise GhError(MALFORMED, "gh returned an unexpected reply (issues)")
-        nodes += page
+        nodes += [n for n in page if not (isinstance(n, dict) and n.get("number") in numbers)]
+        numbers.update(n["number"] for n in page if isinstance(n, dict) and "number" in n)
         info = issues.get("pageInfo") or {}
         after = info.get("endCursor") if isinstance(info, dict) else None
         if not (isinstance(info, dict) and info.get("hasNextPage") and after):
