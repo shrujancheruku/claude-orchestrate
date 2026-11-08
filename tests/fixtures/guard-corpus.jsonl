@@ -595,4 +595,4 @@
 {"role": "orchestrate:reviewer", "command": "diff <(git show FETCH_HEAD:scripts/gate) <(git show origin/main:scripts/gate)", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh pr diff 352 | head -200", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh pr review 354 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:worker", "command": "git push origin feat && gh pr edit 12 --repo owner/repo --body-file /tmp/pr.md && scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit 12 --body-file .claude/pr-body.md && gh pr ready 12", "expected": "silent", "source": "hand"}
