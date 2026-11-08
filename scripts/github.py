@@ -327,7 +327,8 @@ CI_PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUES
 def ci_verdict(checks) -> tuple:
     """("pass" | "pending" | "failed", [names of the checks that decide it]) from a statusCheckRollup list.
 
-    A PR with no checks at all is pending, as `watch-ci` counts it (so a repo with no CI never passes). Unlike
+    A PR with no checks at all is pending here, as `watch-ci` counts it; `scripts/merge` turns that into a pass
+    when the head has no workflow files (`has_workflows`: a repo that cannot report checks is green). Unlike
     `watch-ci`, which waits while any check is pending, a failed check outranks a pending one here, so a
     refusal names the real reason."""
     if not checks:
@@ -344,6 +345,25 @@ def ci_verdict(checks) -> tuple:
     if bad:
         return "failed", bad
     return ("pending", pending) if pending else ("pass", [])
+
+
+def has_workflows(head: str, cwd=None) -> bool:
+    """True when the tree at `head` holds a `.yml`/`.yaml` file under .github/workflows (one contents call).
+
+    A 404 (no such directory) or a listing with no workflow file is False; any other failure raises GhError."""
+    try:
+        out = call("api", f"repos/{{owner}}/{{repo}}/contents/.github/workflows?ref={head}", cwd=cwd)
+    except GhError as e:
+        if e.kind == FAILED and re.search(r"\(HTTP 404\)", e.message):
+            return False
+        raise
+    try:
+        entries = json.loads(out)
+    except ValueError:
+        raise GhError(MALFORMED, "gh returned malformed JSON") from None
+    if not isinstance(entries, list):
+        return False  # a file, not a directory, sits at the path
+    return any(isinstance(e, dict) and str(e.get("name", "")).lower().endswith((".yml", ".yaml")) for e in entries)
 
 
 def issue_claim(issue, cwd=None) -> tuple:

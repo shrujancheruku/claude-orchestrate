@@ -17,6 +17,8 @@ READY_CONFIG = ("## Review\n\n- **Risk paths** (any PR touching them is reviewed
 GREEN = [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"},
          {"context": "lint", "state": "SUCCESS"}]
 
+WF = "repos/{owner}/{repo}/contents/.github/workflows?ref="
+
 THREADS_NONE = {"stdout": json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
     "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}})}
 
@@ -62,7 +64,7 @@ class ReadinessTest(unittest.TestCase):
         return sha
 
     def merge(self, head, behind="0", update=None, approved="", flag=True, checks=GREEN, blockers=(),
-              branch="feat-br", closing=(), ticket=9, threads=None, issues=None):
+              branch="feat-br", closing=(), ticket=9, threads=None, issues=None, workflows=None):
         pr_json = {"state": "OPEN", "headRefName": branch, "headRefOid": head, "statusCheckRollup": checks,
                    "isCrossRepository": False, "closingIssuesReferences": [{"number": n} for n in closing]}
         view = {"stdout": json.dumps(pr_json)}
@@ -70,6 +72,8 @@ class ReadinessTest(unittest.TestCase):
         self.env.set_gh([
             {"args": ["pr", "view"], "seq": [view, merged]},
             {"args": ["repo", "view"], "stdout": '{"defaultBranchRef":{"name":"main"},"owner":{"login":"o"},"name":"r"}'},
+            {"args": ["api", WF + head],
+             **(workflows or {"exit": 1, "stderr": "gh: Not Found (HTTP 404)"})},
             {"args": ["api", "graphql", "-f", "query=" + github.ISSUES_QUERY],
              **(issues if issues is not None else issues_reply(ticket, blockers))},
             {"args": ["api", "graphql"], **(threads if threads is not None else THREADS_NONE)},
@@ -85,6 +89,36 @@ class ReadinessTest(unittest.TestCase):
 
     def called(self, prefix):
         return [c for c in self.env.gh_calls() if c[: len(prefix)] == prefix]
+
+    def test_empty_rollup_without_workflow_files_is_green(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, checks=[], approved=head)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("ci: none configured", p.stdout)
+        self.assertEqual(len(self.called(["api", WF + head])), 1)
+
+    def test_empty_rollup_with_a_listing_but_no_workflow_is_green(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, checks=[], approved=head, workflows={"stdout": '[{"name": "README.md"}]'})
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("ci: none configured", p.stdout)
+
+    def test_empty_rollup_with_a_workflow_file_is_pending(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, checks=[], approved=head, workflows={"stdout": '[{"name": "ci.yml"}]'})
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("ci: pending", p.stdout)
+        self.assertEqual(self.called(["pr", "merge"]), [])
+
+    def test_unreadable_workflows_exit_2(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, checks=[], approved=head, workflows={"exit": 1, "stderr": "gh: Server Error (HTTP 500)"})
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+
+    def test_non_empty_rollup_makes_no_contents_call(self):
+        head = self.push({"b.txt": "x\n"})
+        self.merge(head, approved=head)
+        self.assertEqual(self.called(["api", WF + head]), [])
 
     def test_behind_updates_the_branch_and_exits_5(self):
         head = self.push({"b.txt": "x\n"})
@@ -176,7 +210,7 @@ class ReadinessTest(unittest.TestCase):
 
     def test_no_checks_refuses_as_pending(self):
         head = self.push({"b.txt": "x\n"})
-        self.refused(self.merge(head, checks=[]), "CI pending")
+        self.refused(self.merge(head, checks=[], workflows={"stdout": "[{\"name\": \"ci.yaml\"}]"}), "ci: pending")
 
     def test_skipped_and_neutral_checks_pass(self):
         head = self.push({"b.txt": "x\n"})
