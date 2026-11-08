@@ -482,9 +482,17 @@ def fast_forward_main(cwd, default):
     r = run("git", "fetch", "-q", "origin", default, cwd=main)
     if r.code != 0:
         return "main checkout not updated (fetch failed)"
+    before = run("git", "rev-parse", "HEAD", cwd=main).stdout.strip()
+    if run("git", "merge-base", "--is-ancestor", f"origin/{default}", "HEAD", cwd=main).code == 0:
+        # HEAD already holds origin's tip: equal, or local commits on top of it.
+        if before == run("git", "rev-parse", f"origin/{default}", cwd=main).stdout.strip():
+            return "main checkout already up to date"
+        return "main checkout not updated (ahead of origin)"
     r = run("git", "merge", "--ff-only", "-q", f"origin/{default}", cwd=main)
     if r.code != 0:
-        return "main checkout not updated (not a fast-forward)"
+        # git's own reason (a diverged history, an untracked file in the way), not a guess.
+        lines = [l for l in (r.stderr.strip() or r.stdout.strip()).splitlines() if not l.startswith("hint:")]
+        return f"main checkout not updated ({common.one_line(lines[0]) if lines else 'git refused the fast-forward'})"
     r = run("git", "rev-parse", "--short", "HEAD", cwd=main)
     return f"main checkout fast-forwarded to {r.stdout.strip()}"
 

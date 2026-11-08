@@ -347,7 +347,37 @@ class MergeTest(MergeMixin, unittest.TestCase):
         p = self.merge()
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), mine)
-        self.assertIn("main checkout not updated (not a fast-forward)", p.stdout)
+        self.assertIn("main checkout not updated (fatal: Not possible to fast-forward, aborting.)", p.stdout)
+
+    def test_untracked_file_in_the_way_reports_gits_reason(self):
+        old, _ = self.behind_main()
+        (self.env.repo / "landed.txt").write_text("mine\n")
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), old)
+        self.assertEqual((self.env.repo / "landed.txt").read_text(), "mine\n")
+        self.assertRegex(p.stdout, r"main checkout not updated \(error: .*overwritten by merge")
+
+    def test_up_to_date_main_checkout_says_so(self):
+        self.seq({PR_VIEW: [pr("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        p = self.merge()
+        self.assertIn("main checkout already up to date", p.stdout)
+        self.assertNotIn("fast-forwarded", p.stdout)
+
+    def test_main_checkout_ahead_of_origin_is_untouched(self):
+        self.seq({PR_VIEW: [pr("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        mine = self.env.commit("mine.txt", "y\n", "feat: local only")
+        p = self.merge()
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), mine)
+        self.assertIn("main checkout not updated (ahead of origin)", p.stdout)
+
+    def test_merge_in_progress_is_untouched(self):
+        old, _ = self.behind_main()
+        (self.env.repo / ".git" / "MERGE_HEAD").write_text(old + "\n")
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), old)
+        self.assertIn("main checkout not updated (a merge or rebase is in progress)", p.stdout)
 
     def test_help_prints_no_verdict(self):
         p = self.env.run("merge", "--help", check=False)
