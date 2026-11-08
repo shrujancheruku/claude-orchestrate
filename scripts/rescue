@@ -100,12 +100,30 @@ def liveness(root, branch, wt):
     return None, f"lock: {'this session' if state == 'ours' else 'dead'} pid {pid}, unlocked"
 
 
+def has_local(root, name) -> bool:
+    return git(root, "rev-parse", "--verify", "-q", f"refs/heads/{name}").code == 0
+
+
+def ticket_branches(root, ticket) -> list:
+    """Every branch named `<ticket>-*`, local or on origin, as short names without duplicates."""
+    names = []
+    for prefix, strip in (("refs/heads", "refs/heads/"), ("refs/remotes/origin", "refs/remotes/origin/")):
+        r = git(root, "for-each-ref", "--format=%(refname)", f"{prefix}/{ticket}-*")
+        for ref in r.stdout.split():
+            name = ref[len(strip):]
+            if name not in names:
+                names.append(name)
+    return names
+
+
 OVERLAP_TRIES = 3
 
 
 def rate_limited(r) -> bool:
     """`holds` could not run because GitHub rate-limited it (its stderr names the limit)."""
-    return r.code == 2 and "rate limit" in (r.stderr or "").lower()
+    text = r.stderr or ""
+    # holds words its own limit as "rate limit until <time>"; gh's secondary-limit and abuse-detection text is github's.
+    return r.code == 2 and ("rate limit" in text.lower() or github._rate_limit(text) is not None)
 
 
 def overlap(root, changed, ticket) -> int:
@@ -168,6 +186,25 @@ def main(argv=None) -> int:
     if Path(path).resolve() == repo.main_checkout(root).resolve():
         return fail(f"{branch} is checked out in the main checkout {path}, not a linked worktree")
 
+    # A worktree not on a branch of the ticket must be on the harness's branch, and the ticket may already have a
+    # branch (an earlier rescue, or a worker elsewhere): reuse that one, never cut a second. All checked before
+    # anything is touched.
+    target = None
+    if repo.ticket_of_branch(branch) != ticket:
+        if not claims.is_harness_branch(branch):
+            return fail(f"{path} is on {branch or 'a detached HEAD'}, not a branch of #{ticket} or a worktree-agent-* branch")
+        git(root, "fetch", "--quiet", "origin")  # best effort: a stale remote ref only hides a branch a worker pushed
+        found = ticket_branches(root, ticket)
+        if len(found) > 1:
+            return fail(f"#{ticket} has more than one branch, cannot choose: {', '.join(found)}")
+        target = found[0] if found else None
+        if target and git(path, "merge-base", "--is-ancestor", "HEAD", target if has_local(root, target) else f"origin/{target}").code != 0:
+            return fail(f"{path} has commits that are not on {target}, so it can't be rescued onto it")
+        if target is None:
+            slug = re.sub(r"[^a-z0-9]+", "-", (args.title or "").lower()).strip("-")[:40].strip("-") or "rescue"
+            target = f"{ticket}-{slug}"
+        existing = bool(found)
+
     code, line = liveness(root, branch, wt)
     if code == 2:
         return fail(line)
@@ -175,20 +212,19 @@ def main(argv=None) -> int:
     if code == 3:
         return 3
 
-    if repo.ticket_of_branch(branch) != ticket:
-        # The worker stopped before Orient's branch step: cut the ticket branch from the worktree's HEAD.
-        slug = re.sub(r"[^a-z0-9]+", "-", (args.title or "").lower()).strip("-")[:40].strip("-") or "rescue"
-        new = f"{ticket}-{slug}"
-        if git(root, "rev-parse", "--verify", "-q", f"refs/heads/{new}").code == 0:
-            return fail(f"cannot create {new}: the branch exists")
-        sw = git(path, "switch", "-c", new)
+    created = target is not None
+    if created:
+        # The worker stopped before Orient's branch step: move the worktree's HEAD and changes onto the ticket branch.
+        if not existing:
+            sw = git(path, "switch", "-c", target)
+        elif has_local(root, target):
+            sw = git(path, "switch", target)
+        else:
+            sw = git(path, "switch", "-c", target, "--track", f"origin/{target}")
         if sw.code != 0:
-            return fail(f"cannot create {new} in {path}: {common.one_line(sw.stderr)}")
-        say(f"branch: created {new}")
-        branch = new
-        created = True
-    else:
-        created = False
+            return fail(f"cannot switch {path} to {target}: {common.one_line(sw.stderr)}")
+        say(f"branch: {'reused' if existing else 'created'} {target}")
+        branch = target
 
     base = default_base(root)
     if base is None:
