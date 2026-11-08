@@ -143,5 +143,38 @@ class WorktreeHelpers(unittest.TestCase):
         self.assertTrue(self.wt.exists())
 
 
+class ScratchWorktrees(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name).resolve()
+        self.root = self.base / "repo"
+        self.root.mkdir()
+        _vcs(self.root, "init", "-q", "-b", "main")
+        for k, v in (("user.name", "T"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            _vcs(self.root, "config", k, v)
+        (self.root / "a.txt").write_text("a\n")
+        _vcs(self.root, "add", "a.txt")
+        _vcs(self.root, "commit", "-q", "-m", "init")
+
+    def add(self, name, *flags):
+        _vcs(self.root, "worktree", "add", "-q", *flags, str(self.base / name))
+
+    def test_matches_the_names_the_ticket_lists_and_nothing_else(self):
+        for n in ("pr-300", "wt/pr-300", "pr-300b", "pr-300-r2", "pr-300-head", "pr-3001", "pr-30", "xpr-300", "pr-300bb"):
+            self.add(n, "--detach")
+        self.add("pr-300-br", "-b", "300-x")  # on a branch: never touched
+        got = sorted(Path(p).relative_to(self.base).as_posix() for p in repo.scratch_worktrees(300, self.root))
+        self.assertEqual(got, ["pr-300", "pr-300-head", "pr-300-r2", "pr-300b", "wt/pr-300"])
+
+    def test_remove_scratch_removes_them_and_reports_each(self):
+        self.add("pr-5", "--detach")
+        self.add("pr-5-r2", "--detach")
+        out = repo.remove_scratch(5, self.root)
+        self.assertEqual(len(out), 2)
+        self.assertTrue(all("removed" in line for line in out))
+        self.assertEqual(repo.scratch_worktrees(5, self.root), [])
+
+
 if __name__ == "__main__":
     unittest.main()

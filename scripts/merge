@@ -52,7 +52,7 @@ import replay
 import repo
 import runlog
 import tracker
-from repo import remove_worktree
+from repo import remove_scratch, remove_worktree
 
 # "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
 IN_PROGRESS = re.compile(r"already in progress|already merged", re.I)
@@ -340,6 +340,9 @@ def main(argv=None) -> int:
 
     if args.worktree:
         say(remove_worktree(args.worktree, cwd))
+    # The reviewer's pr-<n> scratch trees: the guard refuses it `git worktree remove`, so the merge does (ADR-0004).
+    for line in remove_scratch(pr, cwd):
+        say(f"scratch {line}")
 
     # After the worktree is gone, so the branch it held is free to delete.
     if safe:
