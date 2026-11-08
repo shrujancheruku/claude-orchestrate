@@ -80,6 +80,13 @@ class Frontier(unittest.TestCase):
         self.assertNotIn("#1 blocked-by #12 (body)", out)
         self.assertEqual(out[out.index("drift:") + 1], "none")
 
+    def test_a_colonless_blocked_by_does_not_hold_a_ticket(self):
+        self.serve(page([node(1, body="Blocked by #12"), node(12, labels=())]))
+        out = self.frontier("--all").stdout.splitlines()
+        self.assertEqual(out[0], "#1 title 1")
+        self.assertNotIn("#1 blocked-by #12 (body)", out)
+        self.assertEqual(out[out.index("drift:") + 1], "none")
+
     def test_a_self_reference_is_not_drift(self):
         self.serve(page([node(5, body="Blocked by: #5")]))
         out = self.frontier("--all").stdout.splitlines()
