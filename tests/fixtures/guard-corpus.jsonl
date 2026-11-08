@@ -585,3 +585,13 @@
 {"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create -d --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/359/reviews --input - <<'EOF'\nBODY\nEOF\ngh api --method POST repos/owner/claude-orchestrate/pulls/359/comments -f path=tests/test_holds.py -f subject_type=file -f commit_id=abc1234 -f body='[minor] x'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/359/reviews --input - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/3/comments -f path=tests/test_holds.py -f subject_type=file -f commit_id=abc1234 -f body='[minor] x'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh pr diff 352 > /private/tmp/scratch/pr352.diff", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git show FETCH_HEAD:scripts/gate > /private/tmp/scratch/gate.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "sed -i 's/x/y/' /private/tmp/scratch/rev.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cat > /private/tmp/scratch/rev.json <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "diff <(git show FETCH_HEAD:scripts/gate) <(git show origin/main:scripts/gate)", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh pr diff 352 | head -200", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh pr review 354 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
