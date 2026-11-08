@@ -358,8 +358,8 @@
 {"role": "orchestrate:worker", "command": "cd /repo/.claude/worktrees/agent-x; grep -n \"REVIEW_AIMED\" hooks/guard.py", "expected": "allow"}
 {"role": "orchestrate:worker", "command": "cd /repo/.claude/worktrees/agent-x; python3 - <<'PY'\nBODY\nPY\npython3 -m unittest discover tests 2>&1 | tail -15; /usr/bin/python3 --version; /usr/bin/python3 -m unittest discover tests 2>&1 | tail -4", "expected": "allow"}
 {"role": "orchestrate:worker", "command": "python3 - <<'PY'\nBODY\nPY", "expected": "allow"}
-{"role": "orchestrate:worker", "command": "git add hooks/guard.py tests/test_guard.py", "expected": "allow"}
-{"role": "orchestrate:worker", "command": "git commit -qm \"TEXT\"", "expected": "allow"}
+{"role": "orchestrate:worker", "command": "git add hooks/guard.py tests/test_guard.py", "expected": "approve"}
+{"role": "orchestrate:worker", "command": "git commit -qm \"TEXT\"", "expected": "approve"}
 {"role": "orchestrate:worker", "command": "git fetch -q origin", "expected": "allow"}
 {"role": "orchestrate:worker", "command": "git merge origin/main 2>&1 | tail -3", "expected": "allow"}
 {"role": "orchestrate:worker", "command": "git fetch origin 2>&1 | tail -2; git status -sb | head -3; git log --oneline -4", "expected": "allow"}
@@ -560,12 +560,14 @@
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 reopen ID --why 'x'", "expected": "deny", "source": "hand"}
-{"role": "orchestrate:worker", "command": "git commit -m \"fix: x\" -m \"(scripts/merge)\"", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git commit -m \"fix: x\" -m \"(scripts/merge)\"", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "printf \"%s\" \"x | scripts/merge\"", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr merge 12", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --draft --title 'feat: x' --body 'Closes #1'", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:worker", "command": "gh pr ready 12", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:worker", "command": "gh pr edit 12 --body-file .claude/pr-body.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr ready", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr ready 12", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file .claude/pr-body.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit 42 --body-file x", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "scripts/threads 12 reopen PRRT_x --why nope", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh pr review 12 --comment --body 'x'", "expected": "approve", "source": "hand"}
@@ -581,7 +583,7 @@
 {"role": "orchestrate:worker", "command": "bash ./evil/scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "/tmp/x/scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git -c credential.helper='!gh auth git-credential' push https://github.com/owner/repo.git feat", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create -d --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
@@ -595,4 +597,5 @@
 {"role": "orchestrate:reviewer", "command": "diff <(git show FETCH_HEAD:scripts/gate) <(git show origin/main:scripts/gate)", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh pr diff 352 | head -200", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh pr review 354 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:worker", "command": "gh pr edit 12 --body-file .claude/pr-body.md && gh pr ready 12", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file .claude/pr-body.md && gh pr ready", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file .claude/pr-body.md; gh pr ready", "expected": "silent", "source": "hand"}

@@ -915,7 +915,7 @@ class RoutineApprovalTest(unittest.TestCase):
         (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
 
     def test_the_allow_json_shape(self):
-        out = raw("orchestrate:worker", "gh pr ready 12")
+        out = raw("orchestrate:worker", "gh pr ready", self.work)
         self.assertEqual(out, {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                "permissionDecisionReason": "orchestrate guard: routine worker step"})
 
@@ -925,11 +925,36 @@ class RoutineApprovalTest(unittest.TestCase):
             "git push https://github.com/o/r.git 358-ticket",
             "git -c credential.helper='!gh auth git-credential' push https://github.com/o/r.git 358-ticket",
             "git add hooks/guard.py", "git commit -m 'feat: x'",
-            "gh pr create --draft --title 't' --body 'b'", "gh pr ready 12", "gh pr edit 12 --body-file b.md",
-            f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed abc1234", f"{SCRIPTS}/threads 12 reopen PRRT_x --why nope",
+            "gh pr create --draft --title 't' --body 'b'", "gh pr ready", "gh pr edit --body-file b.md",
+            "gh pr edit --title 't' --body-file=b.md",
+            f"{SCRIPTS}/threads resolve PRRT_x --fixed abc1234", f"{SCRIPTS}/threads reopen PRRT_x --why nope",
+            f"{SCRIPTS}/threads",
         ):
             with self.subTest(command):
                 self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+    def test_worker_pr_writes_naming_a_pr_or_a_branch_are_not_approved(self):
+        for command in (
+            "gh pr ready 12", "gh pr edit 12 --body-file b.md", "gh pr edit --body-file b.md 12",
+            "gh pr edit other-branch --body-file b.md", "gh pr edit https://github.com/o/r/pull/12 --body-file b.md",
+            "gh pr edit", "gh pr edit --add-label x", "gh pr ready --undo",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed abc1234", f"{SCRIPTS}/threads 12 reopen PRRT_x --why nope",
+            # Aimed at another repo or PR: a --repo flag, an abbreviation argparse would accept, an env prefix.
+            f"{SCRIPTS}/threads resolve PRRT_x --fixed abc1234 --repo /other",
+            f"{SCRIPTS}/threads resolve PRRT_x --fixed abc1234 --rep /other",
+            f"{SCRIPTS}/threads resolve PRRT_x --fix abc1234", f"{SCRIPTS}/threads resolve PRRT_x --fixed=abc1234",
+            f"GH_REPO=o/r {SCRIPTS}/threads resolve PRRT_x --fixed abc1234",
+            f"env GH_REPO=o/r {SCRIPTS}/threads resolve PRRT_x --fixed abc1234",
+            f"env {SCRIPTS}/threads resolve PRRT_x --fixed abc1234",
+            "gh pr edit --body-file b.md && gh pr ready", "gh pr edit --body-file b.md; gh pr ready",
+        ):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+
+    def test_worker_pr_writes_are_not_approved_outside_a_worker_worktree(self):
+        for command in ("gh pr ready", "gh pr edit --body-file b.md", f"{SCRIPTS}/threads resolve PRRT_x --fixed abc1234"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.main))
 
     def test_worker_calls_the_rules_refuse_never_get_an_allow(self):
         for command in ("git push origin main", "git push --force origin 358-ticket", "gh pr merge 12",
