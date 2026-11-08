@@ -2,6 +2,9 @@
 
     touch map = `none` | entry (SEP entry)*          SEP = `,` or `;` or `. ` outside parentheses
     entry     = path [`:` L [`-` L]] [`(` note `)`]  backticks around the path are tolerated
+    path      = no `:` or parentheses; may hold a space inside (`a b/c.py`), but not a bare `and`/`or` word
+    note      = free text; parentheses inside it must balance (`(a (b) c)` is one note)
+    `-`       = a hyphen or an en dash (`10-20`, `10–20`)
 
 `parse` is strict: an entry outside the grammar (a bare line number from `a.py:10, 20`, a note before the line, `L10`
 prefixes) raises TouchMapError rather than being half-read, so a bad map is reported where it is read and never
@@ -35,10 +38,21 @@ class Entry:
 
 
 _ENTRY = re.compile(
-    r"^`?(?P<path>[^\s`:()]+)`?"
-    r"(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?`?"
-    r"(?:\s*\((?P<note>[^()]*)\))?$"
+    r"^`?(?P<path>[^\s`:()](?:[^`:()]*[^\s`:()])?)`?"
+    r"(?::(?P<start>\d+)(?:[-–](?P<end>\d+))?)?`?"
+    r"(?:\s*\((?P<note>.*)\))?$"
 )
+# A space inside a path is allowed, but prose joining two paths ("a.py and b.py") is not one path.
+_PROSE_WORD = re.compile(r"\s(?:and|or)\s", re.I)
+
+
+def _balanced(note: str) -> bool:
+    depth = 0
+    for ch in note:
+        depth += (ch == "(") - (ch == ")")
+        if depth < 0:
+            return False
+    return depth == 0
 
 
 def _split(text: str) -> list:
@@ -65,7 +79,7 @@ def parse(text) -> list:
     entries = []
     for raw in _split(text):
         m = _ENTRY.match(raw)
-        if not m or re.fullmatch(r"[\d\-–]+", m["path"]) or (m["end"] and int(m["end"]) < int(m["start"])):
+        if not m or _PROSE_WORD.search(m["path"]) or not _balanced(m["note"] or "") or re.fullmatch(r"[\d\-–]+", m["path"]) or (m["end"] and int(m["end"]) < int(m["start"])):
             raise TouchMapError(f"bad touch-map entry: {raw!r} (want path[:L[-L]] [(note)])")
         path = m["path"][2:] if m["path"].startswith("./") else m["path"]
         note = " ".join(m["note"].split()) if m["note"] else None
