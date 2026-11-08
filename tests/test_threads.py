@@ -22,6 +22,13 @@ Q = ["api", "graphql", "-f", "query=" + github.THREADS_QUERY]
 MORE = ["api", "graphql", "-f", "query=" + github.THREAD_COMMENTS_QUERY]
 
 
+def aliased(field, n, bodies):
+    """The batched mutation text the script sends for n threads (an alias per thread)."""
+    decls = [f"$id{i}: ID!" + (f", $body{i}: String!" if bodies else "") for i in range(n)]
+    calls = [f"m{i}: " + field.replace("$id", f"$id{i}").replace("$body", f"$body{i}") for i in range(n)]
+    return "mutation(" + ", ".join(decls) + ") { " + " ".join(calls) + " }"
+
+
 def comment(author, body):
     return {"author": {"login": author}, "body": body, "url": "u"}
 
@@ -112,6 +119,33 @@ class Threads(unittest.TestCase):
         self.assertEqual(len(m), 2)
         ev = self.env.events()[-1]
         self.assertEqual((ev["kind"], ev["outcome"], ev["ref"], ev["thread"], ev["author"]), ("threads", "resolved", 12, "T1", "rev"))
+
+    def test_three_ids_make_one_reply_request_and_one_resolve_request_with_aliased_mutations(self):
+        self.gh(reply([thread("T1"), thread("T2"), thread("T3")]),
+                extra=[{"args": ["api", "graphql", "-f", "query=" + aliased(f, 3, body)], "stdout": "{}"}
+                       for f, body in ((threads_script.REPLY_FIELD, True), (threads_script.RESOLVE_FIELD, False))])
+        r = self.env.run("threads", 12, "resolve", "T1", "T2", "T3", "--left", "later", "--verbose")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr.strip(), "writes: 2")
+        m = self.mutations()
+        self.assertEqual(len(m), 2)
+        self.assertEqual(m[1][3].count("resolveReviewThread"), 3)
+        for i in range(3):
+            self.assertIn(f"m{i}: resolveReviewThread(input: {{threadId: $id{i}}})", m[1][3])
+        self.assertEqual([a for a in m[1] if a.startswith("id")], ["id0=T1", "id1=T2", "id2=T3"])
+        self.assertEqual(m[0][3].count("addPullRequestReviewThreadReply"), 3)
+        self.assertEqual(sum(a == "body2=left: later" for a in m[0]), 1)
+        self.assertEqual([e["thread"] for e in self.env.events() if e["kind"] == "threads"], ["T1", "T2", "T3"])
+        self.assertEqual(r.stdout.splitlines()[0], "resolved T1: left: later")
+
+    def test_one_unknown_id_among_several_changes_nothing(self):
+        self.gh(reply([thread("T1")]))
+        self.refused("resolve", "T1", "NOPE", "--left", "x")
+
+    def test_a_single_id_sends_the_plain_mutations(self):
+        self.gh(reply([thread("T1")]))
+        self.env.run("threads", 12, "resolve", "T1", "--left", "x")
+        self.assertEqual([m[3] for m in self.mutations()], ["query=" + threads_script.REPLY, "query=" + threads_script.RESOLVE_THREAD])
 
     def test_resolve_left_needs_no_sha_check(self):
         self.gh(reply([thread("T1")]))

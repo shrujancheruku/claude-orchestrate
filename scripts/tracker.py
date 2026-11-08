@@ -24,9 +24,9 @@ TRIAGE_LABELS = Path("docs/agents/triage-labels.md")
 DEFAULTS = {"ready": "ready-for-agent", "human": "ready-for-human", "lead": "lead"}
 # The lead label stays fixed (as in scripts/claims): its table row has no role name in column one to match.
 ROLES = {"ready-for-agent": "ready", "ready-for-human": "human"}
-# The tracker doc's fallback form: a `Blocked by: #1, #2` line (a bold or quoted lead-in allowed). The colon, or a `#`
-# right after, is required so prose like "Blocked by the outage, see #12" is not a blocker.
-BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*(?::|(?=\s*#))(.*)$", re.I)
+# The tracker doc's fallback form: a `Blocked by: #1, #2` line (a bullet, quote or bold lead-in allowed). The colon is
+# required, so prose like "Blocked by the outage, see #12" or "Blocked by #12" is not a blocker (it would hold a ticket silently).
+BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*:(.*)$", re.I)
 ISSUE_REF = re.compile(r"#(\d+)")
 
 
