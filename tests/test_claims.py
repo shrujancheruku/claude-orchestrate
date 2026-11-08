@@ -287,6 +287,37 @@ class Cli(unittest.TestCase):
         self.assertEqual(out[0], "#3 building no-branch pr none worker agent-q claude-haiku-4-5 worktree gone lock none")
         self.assertTrue(out[1].startswith("#9 stalled no-branch pr none worker none worktree gone"), out[1])
 
+    def harness_worktree(self, agent="x1"):
+        """A worktree where the harness puts it (`agent-<id>`), on its branch `worktree-agent-<id>`."""
+        path = Path(self.wt_dir.name) / f"agent-{agent}"
+        git(self.env.repo, "worktree", "add", "-b", f"worktree-agent-{agent}", str(path))
+        return path.resolve()
+
+    def record(self, ticket, agent):
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(exist_ok=True)
+        state.write_text(json.dumps({"tickets": {str(ticket): {"agent_id": agent, "model": "claude-sonnet-4-6"}}}))
+
+    def test_a_worktree_on_the_harness_branch_is_found_by_the_agent_id_with_no_branch_yet(self):
+        self.nodes = [(7, True)]
+        path = self.harness_worktree("x1")
+        (path / "a.txt").write_text("a")
+        self.record(7, "x1")
+        self.assertEqual(self.line("7"), f"#7 building none-yet pr none worker x1 claude-sonnet-4-6 worktree {path} "
+                                         f"lock none dirty 1")
+
+    def test_an_agent_id_with_the_agent_prefix_finds_it_too(self):
+        self.nodes = [(7, True)]
+        path = self.harness_worktree("x1")
+        self.record(7, "agent-x1")
+        self.assertIn(f"worktree {path} ", self.line("7"))
+
+    def test_another_workers_harness_worktree_is_not_this_tickets(self):
+        self.nodes = [(7, True)]
+        self.harness_worktree("other")
+        self.record(7, "x1")
+        self.assertIn("worktree gone", self.line("7"))
+
     def test_not_claimed(self):
         self.nodes = [(1, False)]
         self.assertEqual(self.line("1"), "#1 not claimed")
