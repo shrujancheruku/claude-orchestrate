@@ -1542,8 +1542,9 @@ def numberless_edit(args: list) -> bool:
 
 
 def scratchpad_pattern(session: str) -> "re.Pattern":
-    """The scratchpad of this session when the hook input names it (`session_id`), else any session's."""
-    return re.compile(r"/claude-[^/]+/[^/]+/%s/scratchpad(?:/.+)?" % (re.escape(session) if session else "[^/]+"))
+    """This session's scratchpad, named by the hook input's `session_id`. With no session id nothing can be
+    matched, so no scratchpad path is approved (fail closed)."""
+    return re.compile(r"/claude-[^/]+/[^/]+/%s/scratchpad(?:/.+)?" % re.escape(session)) if session else re.compile(r"(?!)")
 
 
 def body_file_ok(value: str, cwd: str, session: str = "") -> bool:
@@ -1569,7 +1570,7 @@ def body_files_ok(args: list, cwd: str, session: str = "") -> bool:
     j = 0
     while j < len(args):
         word = args[j]
-        if re.fullmatch(r"-[^-F].*", word) and "F" in word:
+        if re.fullmatch(r"-[A-Za-z]+", word) and "F" in word and not word.startswith("-F"):
             return False  # a cluster such as `-dF x`: not read, so it fails closed
         if word.startswith("-F") and len(word) > 2:
             # pflag's attached shorthand: `-F<path>` and `-F=<path>` both name the path after the F
