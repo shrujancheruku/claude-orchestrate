@@ -498,7 +498,7 @@ PR_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
     state headRefName headRefOid isCrossRepository
     closingIssuesReferences(first: 20) { nodes { number } }
     commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
-      __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } }
+      __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
   } }
 }"""
 
