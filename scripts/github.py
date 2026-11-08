@@ -445,8 +445,122 @@ def call_json(*args, shape=dict, cwd=None):
     return data
 
 
+# `gh pr view --json` field -> how the REST pull object answers it. Every `gh pr`, `gh issue` and `gh repo`
+# subcommand runs on GraphQL underneath, so the plugin asks the REST endpoint for these instead (#449): a separate
+# quota, and a `gh api` call is retried, logged and header-read like the rest.
+# GitHub's `mergeable_state` (lower case) -> the GraphQL `mergeStateStatus` the scripts branch on (`merge` on DIRTY).
+MERGE_STATE = {"clean": "CLEAN", "dirty": "DIRTY", "unstable": "UNSTABLE", "blocked": "BLOCKED", "behind": "BEHIND",
+               "draft": "DRAFT", "has_hooks": "HAS_HOOKS", "unknown": "UNKNOWN"}
+
+
+def _merge_state(pull: dict) -> str:
+    return MERGE_STATE.get(str(pull.get("mergeable_state") or "unknown").lower(), "UNKNOWN")
+
+
+def _mergeable(pull: dict) -> str:
+    """MERGEABLE | CONFLICTING | UNKNOWN: REST's `mergeable` is true, false or null (still being computed)."""
+    m = pull.get("mergeable")
+    return "UNKNOWN" if m is None else ("MERGEABLE" if m else "CONFLICTING")
+
+
+def _pr_state(pull: dict) -> str:
+    return "MERGED" if pull.get("merged_at") else ("OPEN" if pull.get("state") == "open" else "CLOSED")
+
+
+def _cross_repo(pull: dict) -> bool:
+    """True for a fork's PR (a deleted fork leaves no head repo)."""
+    head, base = (pull.get("head") or {}).get("repo"), (pull.get("base") or {}).get("repo")
+    if not isinstance(head, dict):
+        return True
+    if isinstance(base, dict) and base.get("full_name"):
+        return head.get("full_name") != base.get("full_name")
+    return bool(head.get("fork"))
+
+
+PR_FIELDS = {
+    "title": lambda p: p.get("title"),
+    "body": lambda p: p.get("body") or "",
+    "state": _pr_state,
+    "mergeable": _mergeable,
+    "mergeStateStatus": _merge_state,
+    "mergedAt": lambda p: p.get("merged_at"),
+    "baseRefName": lambda p: (p.get("base") or {}).get("ref"),
+    "headRefName": lambda p: (p.get("head") or {}).get("ref"),
+    "headRefOid": lambda p: (p.get("head") or {}).get("sha"),
+    "isCrossRepository": _cross_repo,
+}
+# These two have no REST form (the closing issues and the check rollup are GraphQL-only): one explicit query.
+GRAPHQL_PR_FIELDS = {"closingIssuesReferences", "statusCheckRollup"}
+PR_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    state headRefName headRefOid isCrossRepository
+    closingIssuesReferences(first: 20) { nodes { number } }
+    commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+      __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } }
+  } }
+}"""
+
+
+def _pr_number(pr) -> str:
+    return str(pr).lstrip("#")
+
+
 def pr_view(pr, fields: str, cwd=None) -> dict:
-    return call_json("pr", "view", str(pr), "--json", fields, cwd=cwd)
+    """The `gh pr view --json <fields>` dict of a PR, in gh's names and values, from one REST call (`pulls/{n}`);
+    a field set that holds closingIssuesReferences or statusCheckRollup comes from one GraphQL query instead."""
+    wanted = [f for f in fields.split(",") if f]
+    if GRAPHQL_PR_FIELDS & set(wanted):
+        return _pr_view_graphql(pr, wanted, cwd)
+    unknown = [f for f in wanted if f not in PR_FIELDS]
+    if unknown:
+        raise ValueError(f"pr_view: no REST form for {', '.join(unknown)}")
+    pull = call_json("api", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}", cwd=cwd)
+    return {f: PR_FIELDS[f](pull) for f in wanted}
+
+
+def _pr_view_graphql(pr, wanted, cwd=None) -> dict:
+    data = call_json("api", "graphql", "-f", f"query={PR_QUERY}", "-F", "owner={owner}", "-F", "name={repo}",
+                     "-F", f"number={_pr_number(pr)}", cwd=cwd)
+    try:
+        node = data["data"]["repository"]["pullRequest"]
+        if not isinstance(node, dict):
+            raise TypeError
+        commits = (node.get("commits") or {}).get("nodes") or []
+        rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup") or {}) if commits else {}
+        full = dict(node,
+                    closingIssuesReferences=[n for n in (node.get("closingIssuesReferences") or {}).get("nodes") or []
+                                             if isinstance(n, dict)],
+                    statusCheckRollup=[n for n in (rollup.get("contexts") or {}).get("nodes") or []
+                                       if isinstance(n, dict) and n.get("__typename")])
+        unknown = [f for f in wanted if f not in full]
+        if unknown:
+            raise ValueError(f"pr_view: no GraphQL form for {', '.join(unknown)}")
+        return {f: full[f] for f in wanted}
+    except (KeyError, TypeError, IndexError):
+        raise GhError(MALFORMED, "gh returned an unexpected reply (pull request)") from None
+
+
+def _pages(path: str, cwd=None, max_pages: int = 10) -> list:
+    """Every row of a REST list (`per_page=100` in `path`), page by page: each page is one logged, header-read call."""
+    rows = []
+    for page in range(1, max_pages + 1):
+        got = call_json("api", f"{path}{'&' if '?' in path else '?'}page={page}", shape=list, cwd=cwd)
+        rows += got
+        if len(got) < 100:
+            break
+    return rows
+
+
+def pr_diff(pr, cwd=None) -> str:
+    """The unified diff of a PR (`pulls/{n}` with the diff media type)."""
+    return call("api", "-H", "Accept: application/vnd.github.diff", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}",
+                cwd=cwd)
+
+
+def current_pr_number(cwd=None) -> str:
+    """The number of the open PR whose head is the checked-out branch ("" when there is none)."""
+    rows = call_json("api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open", shape=list, cwd=cwd)
+    return str(rows[0].get("number", "")) if rows and isinstance(rows[0], dict) else ""
 
 
 def behind_by(base: str, head: str, cwd=None) -> int:
@@ -457,21 +571,22 @@ def behind_by(base: str, head: str, cwd=None) -> int:
 
 
 def default_branch(cwd=None) -> str:
-    name = call_json("repo", "view", "--json", "defaultBranchRef", cwd=cwd).get("defaultBranchRef")
-    if not isinstance(name, dict) or not isinstance(name.get("name"), str):
+    name = call_json("api", "repos/{owner}/{repo}", cwd=cwd).get("default_branch")
+    if not isinstance(name, str) or not name:
         raise GhError(MALFORMED, "gh returned no default branch")
-    return name["name"]
+    return name
 
 
 def merge_pr(pr, method: str, head_oid: str = "", cwd=None) -> None:
-    """Run the merge command. --match-head-commit makes a push after review a refusal, not a merge."""
-    guard = ["--match-head-commit", head_oid] if head_oid else []
-    call("pr", "merge", str(pr), f"--{method}", *guard, cwd=cwd)
+    """Merge the PR (`PUT pulls/{n}/merge`). `sha` makes a push after review a refusal (409), not a merge."""
+    guard = ["-f", f"sha={head_oid}"] if head_oid else []
+    call("api", "-X", "PUT", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/merge", "-f", f"merge_method={method}",
+         *guard, cwd=cwd)
 
 
 def update_branch(pr, cwd=None) -> None:
-    """Merge the base into the PR's branch on the host (`gh pr update-branch`)."""
-    call("pr", "update-branch", str(pr), cwd=cwd)
+    """Merge the base into the PR's branch on the host (`PUT pulls/{n}/update-branch`)."""
+    call("api", "-X", "PUT", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/update-branch", cwd=cwd)
 
 
 def delete_branch(branch: str, cwd=None) -> str:
@@ -496,7 +611,8 @@ def delete_branch(branch: str, cwd=None) -> str:
 
 
 def issue_state(issue, cwd=None) -> str:
-    return str(call_json("issue", "view", str(issue), "--json", "state", cwd=cwd).get("state"))
+    """OPEN or CLOSED (REST says `open` / `closed`)."""
+    return str(call_json("api", f"repos/{{owner}}/{{repo}}/issues/{_pr_number(issue)}", cwd=cwd).get("state")).upper()
 
 
 # Check results that block a merge: failed ones, and ones still going (a missing result counts as going).
@@ -548,42 +664,56 @@ def has_workflows(head: str, cwd=None) -> bool:
 
 def issue_claim(issue, cwd=None) -> tuple:
     """(state, claimed) of an issue: claimed when it has an assignee (the claim, as the tracker doc says)."""
-    data = call_json("issue", "view", str(issue), "--json", "state,assignees", cwd=cwd)
-    return str(data.get("state")), bool(data.get("assignees"))
+    data = call_json("api", f"repos/{{owner}}/{{repo}}/issues/{_pr_number(issue)}", cwd=cwd)
+    return str(data.get("state")).upper(), bool(data.get("assignees"))
 
 
 def close_issue(issue, cwd=None) -> None:
-    call("issue", "close", str(issue), cwd=cwd)
+    call("api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/{_pr_number(issue)}", "-f", "state=closed",
+         "-f", "state_reason=completed", cwd=cwd)
+
+
+def _pull(p: dict) -> dict:
+    """A REST pull row in the names `gh pr list --json` used: what the callers read."""
+    return {"number": p.get("number"), "headRefName": (p.get("head") or {}).get("ref"),
+            "headRefOid": (p.get("head") or {}).get("sha"), "baseRefName": (p.get("base") or {}).get("ref"),
+            "isDraft": bool(p.get("draft")), "isCrossRepository": _cross_repo(p), "mergedAt": p.get("merged_at")}
 
 
 def open_prs(base: str, cwd=None) -> list:
-    return call_json("pr", "list", "--state", "open", "--base", base, "--limit", "200", "--json",
-                     "number,headRefName,isCrossRepository,isDraft", shape=list, cwd=cwd)
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls?state=open&base={urllib.parse.quote(base, safe='')}&per_page=100",
+                  cwd, max_pages=2)
+    return [_pull(p) for p in rows if isinstance(p, dict)]
 
 
 def open_prs_with_heads(cwd=None) -> list:
     """Every open PR (any base) with its number, branch and head commit: what a worker's report is checked against."""
-    return call_json("pr", "list", "--state", "open", "--limit", "200", "--json",
-                     "number,headRefName,headRefOid,isDraft,baseRefName", shape=list, cwd=cwd)
+    return [_pull(p) for p in _pages("repos/{owner}/{repo}/pulls?state=open&per_page=100", cwd, max_pages=2)
+            if isinstance(p, dict)]
 
 
-def merged_prs(base: str, cwd=None) -> list:
-    # The newest 200 only: an older merged PR is still caught by its closed issue (`Closes #n`).
-    return call_json("pr", "list", "--state", "merged", "--base", base, "--limit", "200", "--json",
-                     "number,headRefName", shape=list, cwd=cwd)
+def merged_prs(base, cwd=None, limit: int = 200) -> list:
+    """The newest merged PRs (on `base`, or any base when it is None) by last update, at most `limit` closed ones
+    read: an older merged PR is still caught by its closed issue (`Closes #n`)."""
+    where = f"&base={urllib.parse.quote(base, safe='')}" if base else ""
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls?state=closed{where}&sort=updated&direction=desc&per_page=100",
+                  cwd, max_pages=max(1, -(-limit // 100)))
+    return [_pull(p) for p in rows if isinstance(p, dict) and p.get("merged_at")]
 
 
 def pr_files(pr, cwd=None) -> list:
     """The paths a PR's diff changes."""
-    files = pr_view(pr, "files", cwd=cwd).get("files")
-    if not isinstance(files, list) or not all(isinstance(f, dict) and isinstance(f.get("path"), str) for f in files):
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/files?per_page=100", cwd, max_pages=30)
+    if not all(isinstance(f, dict) and isinstance(f.get("filename"), str) for f in rows):
         raise GhError(MALFORMED, "gh returned no file list for the PR")
-    return [f["path"] for f in files]
+    return [f["filename"] for f in rows]
 
 
 def repo_info(cwd=None) -> dict:
-    """The repository's `owner`, `name` and `defaultBranchRef`, from one `gh repo view`."""
-    return call_json("repo", "view", "--json", "owner,name,defaultBranchRef", cwd=cwd)
+    """The repository's `owner`, `name` and `defaultBranchRef`, from one `GET repos/{owner}/{repo}`."""
+    data = call_json("api", "repos/{owner}/{repo}", cwd=cwd)
+    return {"owner": {"login": (data.get("owner") or {}).get("login")}, "name": data.get("name"),
+            "defaultBranchRef": {"name": data.get("default_branch")}}
 
 
 def open_issues(repo: dict, cwd=None) -> list:
@@ -679,6 +809,13 @@ def review_threads(pr, cwd=None) -> list:
                     "path": n.get("path") or "", "line": n.get("line") or n.get("originalLine"),
                     "comments": [_comment(c) for c in comments if isinstance(c, dict)]})
     return out
+
+
+def pr_commits(pr, cwd=None) -> list:
+    """[{"oid", "committedDate"}] for the commits on a PR's branch (what `gh pr view --json commits` listed), paged."""
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/commits?per_page=100", cwd, max_pages=10)
+    return [{"oid": c.get("sha"), "committedDate": ((c.get("commit") or {}).get("committer") or {}).get("date")}
+            for c in rows if isinstance(c, dict)]
 
 
 def pr_commit_shas(pr, cwd=None) -> list:

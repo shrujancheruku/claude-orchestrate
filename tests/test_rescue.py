@@ -11,8 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import ScriptEnv, gh_pr_list, git
-from test_holds import dead_pid, gh_repo_view, live_reason
+from harness import ScriptEnv, gh_pr_list, gh_repo_view, git, rest_pull
+from test_holds import dead_pid, live_reason
 
 BRANCH = "42-the-ticket"
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "rescue"
@@ -209,8 +209,8 @@ class Rescue(unittest.TestCase):
             gh_repo_view("main"),
             gh_pr_list([{"number": 9, "headRefName": "b9", "isCrossRepository": False}], "--state", "open"),
             graphql(),
-            {"args": ["pr", "view", "9", "--json", "files"], "stdout": json.dumps({"files": [{"path": "shared.txt"}]})},
-            {"args": ["pr", "view", "9", "--json", "headRefName"], "stdout": json.dumps({"headRefName": "b9"})},
+            {"args": ["api", "~repos/{owner}/{repo}/pulls/9/files"], "stdout": json.dumps([{"filename": "shared.txt"}])},
+            {"args": ["api", "repos/{owner}/{repo}/pulls/9"], "stdout": json.dumps(rest_pull(headRefName="b9"))},
             gh_pr_list([], "--state", "merged"),
         ])
         r = self.rescue()

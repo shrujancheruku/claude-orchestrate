@@ -30,13 +30,14 @@ class CiTimes(unittest.TestCase):
     def serve(self, prs):
         """prs: {number: (merged at minute, [(sha, push minute, [check runs])])}."""
         listing = [{"number": n, "mergedAt": iso(m)} for n, (m, _) in prs.items()]
-        responses = [{"args": ["pr", "list"], "stdout": json.dumps(listing)}]
+        responses = [{"args": ["api", "~repos/{owner}/{repo}/pulls?state=closed"], "stdout": json.dumps(
+            [{"number": r["number"], "merged_at": r["mergedAt"], "state": "closed"} for r in listing])}]
         for n, (m, heads) in prs.items():
-            commits = [{"oid": sha, "committedDate": iso(push)} for sha, push, _ in heads]
-            responses.append({"args": ["pr", "view", str(n), "--json", "commits"],
-                              "stdout": json.dumps({"commits": commits})})
-            responses.append({"args": ["pr", "view", str(n), "--json", "mergedAt"],
-                              "stdout": json.dumps({"mergedAt": iso(m)})})
+            commits = [{"sha": sha, "commit": {"committer": {"date": iso(push)}}} for sha, push, _ in heads]
+            responses.append({"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{n}/commits"],
+                              "stdout": json.dumps(commits)})
+            responses.append({"args": ["api", f"repos/{{owner}}/{{repo}}/pulls/{n}"],
+                              "stdout": json.dumps({"merged_at": iso(m), "state": "closed"})})
             for sha, _, runs in heads:
                 responses.append({"args": ["api", f"repos/{{owner}}/{{repo}}/commits/{sha}/check-runs?per_page=100"],
                                   "stdout": json.dumps({"check_runs": runs})})
@@ -105,7 +106,7 @@ class CiTimes(unittest.TestCase):
         prs = {n: (n, [(f"s{n}", n, [check("test", 0, 1, push=n)])]) for n in range(1, 13)}
         self.serve(prs)
         self.assertEqual(self.times()[0], "heads: 10 green over 10 PRs (0 never green)")
-        viewed = {c[2] for c in self.env.gh_calls() if c[:2] == ["pr", "view"]}
+        viewed = {c[1].split("/")[3] for c in self.env.gh_calls() if c[0] == "api" and c[1].endswith("/commits?per_page=100&page=1")}
         self.assertEqual(viewed, {str(n) for n in range(3, 13)})
 
     def test_since_a_time_takes_every_pr_merged_from_then(self):
@@ -140,7 +141,7 @@ class CiTimes(unittest.TestCase):
         r = self.env.run("ci-times", "--since", "yesterday-ish", check=False)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertNotIn("Traceback", r.stderr)
-        self.env.set_gh([{"args": ["pr", "list"], "stderr": "HTTP 502\n", "exit": 1}])
+        self.env.set_gh([{"args": ["api", "~repos/{owner}/{repo}/pulls"], "stderr": "HTTP 502\n", "exit": 1}])
         r = self.env.run("ci-times", check=False)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertNotIn("Traceback", r.stderr)

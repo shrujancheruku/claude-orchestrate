@@ -62,8 +62,7 @@ def head_times(pushed, runs):
 
 
 def merged_prs(since_arg, root):
-    prs = github.call_json("pr", "list", "--state", "merged", "--limit", str(LIST_LIMIT),
-                           "--json", "number,mergedAt", shape=list, cwd=root)
+    prs = github.merged_prs(None, cwd=root, limit=LIST_LIMIT)
     prs = [p for p in prs if parse_ts(p.get("mergedAt"))]
     prs.sort(key=lambda p: parse_ts(p["mergedAt"]), reverse=True)
     if since_arg is None:
@@ -84,7 +83,7 @@ def measure(prs, root):
     """(push-to-green list, per-check {name: [(queued, running)]}, heads never green) over the PRs."""
     greens, per_check, never = [], {}, 0
     for pr in prs:
-        commits = github.pr_view(pr["number"], "commits", cwd=root).get("commits") or []
+        commits = github.pr_commits(pr["number"], cwd=root)
         for c in commits:
             pushed = parse_ts(c.get("committedDate"))
             data = github.call_json("api", f"repos/{{owner}}/{{repo}}/commits/{c['oid']}/check-runs?per_page=100",
