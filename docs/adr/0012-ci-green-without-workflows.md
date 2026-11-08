@@ -2,7 +2,7 @@
 
 ## Context
 
-`scripts/merge --approved-head` merges only when CI is green on the PR head (ADR-0004; `.claude/orchestration.md` **Orchestrator merges**). `ci_verdict` reads GitHub's status-check rollup: SUCCESS, SKIPPED and NEUTRAL pass, FAILURE and friends fail, and anything else, including an empty rollup, is pending. The L-tier review of #322 pointed out the consequence: a repo with no CI at all has an empty rollup forever, so the orchestrator can never merge there, and a run on such a repo waits on every PR.
+`scripts/merge --approved-head` merges only when CI is green on the PR head (`.claude/orchestration.md` **Orchestrator merges**). `ci_verdict` reads GitHub's status-check rollup: SUCCESS, SKIPPED and NEUTRAL pass, FAILURE and friends fail, and anything else, including an empty rollup, is pending. The L-tier review of #322 pointed out the consequence: a repo with no CI at all has an empty rollup forever, so the orchestrator can never merge there, and a run on such a repo waits on every PR.
 
 An empty rollup is ambiguous. Right after a push it means "the checks have not started"; in a repo without workflows it means "there is nothing to wait for". Treating every empty rollup as green would merge PRs whose checks had not yet been scheduled, which is the failure the rule exists to prevent.
 
