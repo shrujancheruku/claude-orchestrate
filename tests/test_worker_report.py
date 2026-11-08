@@ -157,6 +157,37 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual(self.verdict("status: stopped\nstop-reason: ambiguous\n"), "duplicate valid stopped ambiguous")
         self.assertEqual(self.verdict("status: stopped\nstop-reason: human-only\n"), "valid stopped human-only")
 
+    def test_transient_carries_the_retry_fields(self):
+        text = "status: stopped\nstop-reason: transient\nfailed-command: gh pr ready 12\nretry-after: 300\n"
+        self.assertEqual(self.verdict(text), "valid stopped transient")
+        e = [e for e in self.env.events() if e["kind"] == "worker-report"][-1]
+        self.assertEqual((e["stop_reason"], e["failed_command"], e["retry_after"]), ("transient", "gh pr ready 12", "300"))
+
+    def test_a_mislabelled_rate_limit_or_wait_is_reclassified_transient(self):
+        out = self.verdict("status: stopped\nstop-reason: permission-denied\ndenied-command: ! gh pr ready 12\n"
+                           "stopped-because: GraphQL: API rate limit exceeded\n")
+        self.assertEqual(out, "valid stopped transient")
+        e = [e for e in self.env.events() if e["kind"] == "worker-report"][-1]
+        self.assertEqual(e["failed_command"], "! gh pr ready 12")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: human-only\nstopped-because: waiting until 14:05 UTC\n"),
+                         "valid stopped transient")
+        # A plain permission denial and a plain human-only stop are unchanged.
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: permission-denied\ndenied-command: gh pr create\n"),
+                         "valid stopped permission-denied")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: human-only\nstopped-because: merge the release PR\n"),
+                         "valid stopped human-only")
+
+    def test_transient_is_retried_twice_then_exhausted(self):
+        text = "status: stopped\nstop-reason: transient\nfailed-command: gh pr ready 12\n"
+        self.assertEqual(self.verdict(text), "valid stopped transient")
+        self.assertEqual(self.verdict(text), "valid stopped transient")
+        self.assertEqual(self.verdict(text), "valid stopped transient exhausted")
+        # A different command starts a new count; another verdict in between resets it.
+        other = "status: stopped\nstop-reason: transient\nfailed-command: gh pr create\n"
+        self.assertEqual(self.verdict(other), "valid stopped transient")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: ambiguous\n"), "valid stopped ambiguous")
+        self.assertEqual(self.verdict(other), "valid stopped transient")
+
     def test_exit_2_without_gh(self):
         r = self.report("status: pr-opened\n", check=False, no_gh=True)
         self.assertEqual(r.returncode, 2)
