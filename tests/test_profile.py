@@ -313,6 +313,31 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual((t10["outcome"], t10["end"], t10["merge_unverified"]), ("merged", at(33), False))
         self.assertEqual(p["metrics"]["merges_unverified"], 0)
 
+    def test_a_merge_logged_in_the_wake_of_the_pass_record_is_counted_and_not_partial(self):
+        # The transcript's last line is at minute 41. scripts/merge logs at 50, the pass record lands a second
+        # later, and the transcript's last line is a second after that. The old window ended at the transcript's
+        # last line before the record's wake, and printed "no tickets merged" with a partial warning.
+        records = [json.loads(l) for l in self.fx.main.read_text().splitlines()]
+        records.append({"type": "user", "timestamp": at(50 + 2 / 60)})
+        write_jsonl(self.fx.main, records)
+        self.fx.events([{"ts": at(50), "kind": "merge", "ref": 50, "outcome": "merged"}])
+        self.fx.passes([{"ts": at(50 + 1 / 60), "slots": 2, "free": 1}])
+        p = self.fx.run()
+        self.assertEqual(p["metrics"]["tickets_merged"], 1)
+        self.assertEqual(p["metrics"]["merges_unverified"], 0)
+        self.assertEqual([w for w in p["warnings"] if "partial" in w], [])
+        self.assertNotIn("no tickets merged", prof.summary(p, Path("x.json")))
+
+    def test_the_window_ends_at_the_last_pass_record_when_it_follows_the_transcript(self):
+        # The record and the merge event are written after the transcript's last line (minute 41).
+        self.fx.passes([{"ts": at(43), "slots": 2, "free": 1}])
+        self.fx.events([{"ts": at(43), "kind": "merge", "ref": 50, "outcome": "merged"}])
+        p = self.fx.run()
+        self.assertEqual(p["metrics"]["tickets_merged"], 1)
+        t10 = next(t for t in p["tickets"] if t["ticket"] == 10)
+        self.assertEqual(t10["end"], at(43))
+        self.assertEqual([w for w in p["warnings"] if "partial" in w], [])
+
     def test_without_events_both_merge_commands_count_but_are_unverified(self):
         for cmd in ("gh pr merge 50 --squash", '"${CLAUDE_PLUGIN_ROOT}/scripts/merge" 50 --method squash', "~/p/scripts/merge 50 --worktree w"):
             records = [json.loads(l) for l in self.fx.main.read_text().splitlines()]
