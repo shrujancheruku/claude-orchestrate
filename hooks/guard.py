@@ -902,7 +902,7 @@ def rule_pr_draft(p: Parsed, cwd: str) -> str | None:
         if any(DRAFT_UNAVAILABLE.search(t) for t in pr_create_bodies(p, call, cwd)):
             continue
         return ("opens a PR that is not a draft: add `--draft` to `gh pr create`; Ship marks it ready "
-                "with `gh pr ready <pr>`. Only if `gh pr create --draft` itself failed twice, open it ready "
+                "with `gh pr ready`. Only if `gh pr create --draft` itself failed twice, open it ready "
                 "with a body line `Draft unavailable: <reason>` (a `--body-file <path>` must already exist when this "
                 "runs: write it in an earlier call, or pass `--body-file -` with a heredoc, or a literal `--body`)")
     return None
@@ -1219,6 +1219,15 @@ def threads_form(args: list) -> str | None:
     return None
 
 
+def numberless_threads_form(args: list) -> str | None:
+    """The worker's current-branch form of a threads call, with no PR number: "list", "resolve" or "reopen",
+    or None (a number first, or anything else)."""
+    words = [w.text for w in args]
+    if words in ([], ["--all"]):
+        return "list"
+    return words[0] if words[0] in ("resolve", "reopen") else None
+
+
 def threads_refusal(role: str, parsed: "Parsed") -> str | None:
     """Why a scout's or reviewer's call of scripts/threads is refused, or None. Not a threads call, or a
     worker's (every form), is None. Like the review post: an optional leading `cd <path> &&`, nothing else
@@ -1417,17 +1426,34 @@ def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
     return (remote == "origin" or is_origin_url(remote, cwd)) and ref in (branch, f"{branch}:{branch}")
 
 
+# The `gh pr edit` flags a worker's own-PR edit may carry, each taking one value.
+PR_EDIT_VALUE_FLAGS = ("--body-file", "-F", "--body", "-b", "--title", "-t")
+
+
+def numberless_edit(args: list) -> bool:
+    """True when every word of a `gh pr edit` is one of PR_EDIT_VALUE_FLAGS and its value. Any other word,
+    a number, a branch or a URL, could name a PR that is not the checked-out branch's, so it fails closed."""
+    j = 0
+    while j < len(args):
+        name, eq, _ = args[j].partition("=")
+        if name not in PR_EDIT_VALUE_FLAGS or (not eq and j + 1 >= len(args)):
+            return False
+        j += 1 if eq else 2
+    return bool(args)
+
+
 def routine_pr(call: Call) -> bool:
-    """A worker's draft PR, or its PR made ready or edited. The number is plain digits; whose PR it is the
-    guard can't see, so that is not judged."""
+    """A worker's draft PR, or its own PR made ready or edited. Ready and edit are approved only in the
+    current-branch form, with no PR number (#379): `gh` resolves the PR from the checked-out branch, and the
+    guard can't tell which PR a number names, so a call naming one is left to the permission layer."""
     if not call.is_sub("pr") or any(a.dynamic for a in call.args):
         return False
     args = [a.text for a in call.args]
     if call.is_verb("create"):
         return "--draft" in args
     if call.is_verb("ready"):
-        return len(args) == 1 and args[0].isdigit()
-    return call.is_verb("edit") and bool(args) and args[0].isdigit()
+        return args == []
+    return call.is_verb("edit") and numberless_edit(args)
 
 
 def config_path(cwd: str) -> Path | None:
@@ -1454,7 +1480,8 @@ def approval(role: str | None, command: str, cwd: str) -> bool:
     if role == "worker":
         found = script_call(parsed, THREADS_SCRIPT)
         if found is not None:
-            return threads_form(found[1]) in ("resolve", "reopen") and own_script(found[0], found[1], cwd, "threads")
+            # Only the current-branch form (no PR number) is approved: the script resolves the PR from the branch.
+            return numberless_threads_form(found[1]) is not None and own_script(found[0], found[1], cwd, "threads")
         return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0]))
     if role is None and config_path(cwd):
         for pattern, name in ((MERGE_SCRIPT, "merge"), (THREADS_SCRIPT, "threads"), (BOARD_SCRIPT, "board")):

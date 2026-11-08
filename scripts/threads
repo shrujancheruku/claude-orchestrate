@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""threads <pr> [--all] | resolve <thread>... (--fixed <sha> | --left <why>) | reopen <thread>... --why <why> [--verbose] [--repo DIR]
+"""threads [<pr>] [--all] | resolve <thread>... (--fixed <sha> | --left <why>) | reopen <thread>... --why <why> [--verbose] [--repo DIR]
 
 The one place a review thread is read, closed or reopened (ADR-0006; the rule "a review thread is closed with a reply by
 whoever acts on it" lives here, not in the prompts).
@@ -12,6 +12,10 @@ whoever acts on it" lives here, not in the prompts).
                                                      on the PR's branch at the remote
     threads <pr> resolve <thread>... --left <why>    replies `left: <why>`, then resolves
     threads <pr> reopen <thread>... --why <why>      replies `reopened: <why>`, then unresolves
+
+Leave <pr> out and the PR is the one of the checked-out branch (one `gh pr view --json number`): `threads`,
+`threads resolve <thread>... --fixed <sha>`. That is the worker's form, so the guard can allow it without knowing which
+PR it names; the orchestrator, the reviewer and the lead give the number.
 
 Several thread ids go in one call: every id is checked first (one bad id changes nothing), then the replies go in one
 GraphQL request (one aliased reply mutation per thread) and the resolves or unresolves in a second (one aliased
@@ -101,9 +105,8 @@ def on_branch(sha, shas) -> bool:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("pr", help="the PR number")
-    ap.add_argument("action", nargs="?", choices=("resolve", "reopen"))
-    ap.add_argument("thread", nargs="*", help="the thread ids (resolve and reopen)")
+    ap.add_argument("words", nargs="*", metavar="[pr] [resolve|reopen] [thread]...",
+                    help="the PR number (left out: the PR of the checked-out branch), then resolve or reopen and the thread ids")
     ap.add_argument("--all", action="store_true", help="list resolved threads too, with their closing reply")
     ap.add_argument("--fixed", metavar="SHA", help="resolve: the pushed commit that fixed it")
     ap.add_argument("--left", metavar="WHY", help="resolve: why a minor was left")
@@ -111,9 +114,12 @@ def main(argv=None) -> int:
     ap.add_argument("--verbose", action="store_true", help="print `writes: <n>` (mutation requests sent) on stderr")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
-    pr, ref = common.pr_ref(args.pr)
-    if not pr.isdigit():
-        ap.error("pr must be a number")
+    words = list(args.words)
+    pr = words.pop(0).lstrip("#") if words and words[0].lstrip("#").isdigit() else None
+    args.action = words.pop(0) if words and words[0] in ("resolve", "reopen") else None
+    args.thread = words if args.action else []
+    if words and not args.action:
+        ap.error("the first word must be a PR number, `resolve` or `reopen`")
     if args.action:
         if not args.thread:
             ap.error(f"{args.action} needs a thread id")
@@ -131,6 +137,12 @@ def main(argv=None) -> int:
     cwd = args.repo
     sent = 0
     try:
+        if pr is None:
+            # The current-branch form (a worker's): gh resolves the PR from the checked-out branch.
+            pr = github.call("pr", "view", "--json", "number", "--jq", ".number", cwd=cwd).strip()
+            if not pr.isdigit():
+                common.die("threads: could not read the current branch's PR number from gh")
+        pr, ref = common.pr_ref(pr)
         threads = github.review_threads(pr, cwd=cwd)
         if not args.action:
             for line in listing(threads, args.all):

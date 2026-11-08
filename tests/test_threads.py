@@ -120,6 +120,24 @@ class Threads(unittest.TestCase):
         ev = self.env.events()[-1]
         self.assertEqual((ev["kind"], ev["outcome"], ev["ref"], ev["thread"], ev["author"]), ("threads", "resolved", 12, "T1", "rev"))
 
+    def test_no_pr_argument_resolves_the_thread_on_the_current_branchs_pr(self):
+        self.gh(reply([thread("T1")]), extra=[{"args": ["pr", "view", "--json", "number"], "stdout": "12\n"}])
+        r = self.env.run("threads", "resolve", "T1", "--fixed", SHA[:10])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(["pr", "view", "--json", "number", "--jq", ".number"], self.env.gh_calls())
+        self.assertEqual(len(self.mutations()), 2)
+        self.assertEqual(self.env.events()[-1]["ref"], 12)
+
+    def test_no_pr_argument_lists_the_current_branchs_threads(self):
+        self.gh(reply([thread("T1")]), extra=[{"args": ["pr", "view", "--json", "number"], "stdout": "12\n"}])
+        r = self.env.run("threads")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("T1 rev a.py:3"))
+
+    def test_a_word_that_is_neither_a_pr_nor_an_action_is_a_usage_error(self):
+        r = self.env.run("threads", "nonsense", check=False)
+        self.assertEqual(r.returncode, 2)
+
     def test_three_ids_make_one_reply_request_and_one_resolve_request_with_aliased_mutations(self):
         self.gh(reply([thread("T1"), thread("T2"), thread("T3")]),
                 extra=[{"args": ["api", "graphql", "-f", "query=" + aliased(f, 3, body)], "stdout": "{}"}
