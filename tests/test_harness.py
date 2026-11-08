@@ -124,5 +124,21 @@ class HarnessSmoke(unittest.TestCase):
         self.assertEqual(len(kinds), 2)
 
 
+class ScriptEnvCopyRace(unittest.TestCase):
+    def test_copies_keep_git_background_maintenance_off(self):
+        # Auto maintenance holds objects/maintenance.lock while it runs, and a copy racing it fails (#415).
+        env = ScriptEnv()
+        self.addCleanup(env.close)
+        for d in (env.repo, env.origin):
+            self.assertEqual(git(d, "config", "maintenance.auto"), "false")
+            self.assertEqual(git(d, "config", "gc.auto"), "0")
+
+    def test_no_transient_lock_files_in_a_copy(self):
+        env = ScriptEnv()
+        self.addCleanup(env.close)
+        locks = [p.name for root in (env.repo / ".git", env.origin) for p in root.rglob("*.lock")]
+        self.assertEqual(locks, [])
+
+
 if __name__ == "__main__":
     unittest.main()
