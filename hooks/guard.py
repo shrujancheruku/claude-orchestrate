@@ -903,7 +903,8 @@ def rule_pr_draft(p: Parsed, cwd: str) -> str | None:
             continue
         return ("opens a PR that is not a draft: add `--draft` to `gh pr create`; Ship marks it ready "
                 "with `gh pr ready <pr>`. Only if `gh pr create --draft` itself failed twice, open it ready "
-                "with a body line `Draft unavailable: <reason>`")
+                "with a body line `Draft unavailable: <reason>` (a `--body-file <path>` must already exist when this "
+                "runs: write it in an earlier call, or pass `--body-file -` with a heredoc, or a literal `--body`)")
     return None
 
 

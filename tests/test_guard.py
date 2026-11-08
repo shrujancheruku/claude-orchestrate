@@ -288,6 +288,10 @@ CASES = [
     # The fallback when the draft itself failed: a `Draft unavailable:` body line (ADR 0011).
     ("orchestrate:worker", "gh pr create --title x --body 'Draft unavailable: plan has no drafts\nCloses #1'", "allow"),
     ("orchestrate:worker", "gh pr create --title x --body-file - <<'EOF'\nDraft unavailable: network\nCloses #1\nEOF", "allow"),
+    ("orchestrate:worker", "gh pr create --title x -b 'Draft unavailable: no drafts'", "allow"),
+    ("orchestrate:worker", "gh pr create --title x --body='Draft unavailable: no drafts'", "allow"),
+    ("orchestrate:worker", "gh pr create --title x -b 'Closes #1'", "deny"),
+    ("orchestrate:worker", "gh pr create --title x --body='Closes #1'", "deny"),
     ("orchestrate:worker", "gh pr create --title x --body 'Draft unavailable:'", "deny"),
     ("orchestrate:worker", "gh pr create --title x --body 'see Draft unavailable: no'", "deny"),
     ("orchestrate:worker", "make lint test > /tmp/out.txt", "allow"),
@@ -852,6 +856,45 @@ def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None):
 def approved(agent_type, command, cwd=None):
     out = raw(agent_type, command, cwd)
     return bool(out) and out["permissionDecision"] == "allow"
+
+
+class PrCreateBodyFileTest(unittest.TestCase):
+    """A worker's non-draft `gh pr create` is allowed only with a `Draft unavailable:` body line; a
+    `--body-file <path>` is read from disk when the guard runs (relative paths against its cwd)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve() / "cwd"
+        self.cwd.mkdir()
+        self.outside = Path(tmp.name).resolve() / "outside"
+        self.outside.mkdir()
+        (self.outside / "marked.md").write_text("Draft unavailable: plan has no drafts\nCloses #1\n")
+        (self.outside / "plain.md").write_text("Closes #1\n")
+        (self.cwd / "rel.md").write_text("Draft unavailable: network\nCloses #1\n")
+
+    def denied(self, command):
+        out = raw("orchestrate:worker", command, self.cwd)
+        return bool(out) and out["permissionDecision"] == "deny"
+
+    def test_marked_file_by_any_flag_spelling_is_not_denied(self):
+        path = self.outside / "marked.md"
+        for flag in (f"--body-file {path}", f"-F {path}", f"--body-file={path}"):
+            with self.subTest(flag):
+                self.assertFalse(self.denied(f"gh pr create --title x {flag}"))
+
+    def test_unmarked_or_missing_file_is_denied(self):
+        for path in (self.outside / "plain.md", self.outside / "missing.md"):
+            with self.subTest(path.name):
+                self.assertTrue(self.denied(f"gh pr create --title x --body-file {path}"))
+
+    def test_relative_path_resolves_against_the_guards_cwd(self):
+        self.assertFalse(self.denied("gh pr create --title x --body-file rel.md"))
+        self.assertTrue(self.denied("gh pr create --title x --body-file nope.md"))
+
+    def test_refusal_says_the_body_file_must_already_exist(self):
+        reason = raw("orchestrate:worker", "gh pr create --title x --body-file nope.md", self.cwd)["permissionDecisionReason"]
+        self.assertIn("already exist", reason)
 
 
 class RoutineApprovalTest(unittest.TestCase):
