@@ -24,6 +24,10 @@ FAKE_GH = '''#!/usr/bin/env python3
 import json, os, sys
 state = os.environ["FAKE_GH_STATE"]
 args = sys.argv[1:]
+# github.py adds --include to every `gh api` call to read the response headers; a canned reply has none, and a
+# test names the call without it.
+if args[:2] == ["api", "--include"]:
+    args = args[:1] + args[2:]
 with open(state + ".calls", "a") as f:
     f.write(json.dumps(args) + "\\n")
 if "-" in args:  # a body or payload on stdin (`--body-file -`, `--input -`): keep it, tests assert on it
