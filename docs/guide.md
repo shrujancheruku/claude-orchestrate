@@ -133,7 +133,7 @@ A lead session can sit above the orchestrator to answer its questions and triage
 - **Without a lead.** Every part falls back to you, and dispatch, review and merge run as before. A stop becomes `needs-info`, answered on the ticket. An ADR conflict holds its PR before merge and becomes a question in the pass report. Discovered work appears as PR URLs in the pass report, and L-tier risk notes go into the end-of-run summary. Each pass report says `Lead: none`.
 
 ```
-scripts/lead-route --lead live|none --cap <n> [--repo .] [--state FILE] [--now ISO]
+scripts/lead-route --lead live|none --cap <n> [--repo .] [--state FILE] [--snapshot FILE] [--now ISO]
 scripts/lead-brief [--repo .] [--now ISO] [--checkpoint <pr>]
 ```
 
