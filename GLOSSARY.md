@@ -11,7 +11,7 @@ The repo's `.claude/orchestration.md`: the single source for the backlog, slots,
 _Avoid_: settings, setup file
 
 **Out of the box**:
-A plugin feature works on install from the plugin's own files and the repo's `.claude/`; where it needs user config the plugin cannot ship, it degrades with one message naming the setting, and setup writes only the repo's own files (`.claude/orchestration.md`, `.worktreeinclude`, the board line, and `.claude/settings.local.json` on an explicit yes), never `~/.claude`. Source: `docs/adr/0013-plugin-features-work-out-of-the-box.md`.
+A plugin feature works on install from the plugin's own files and the repo's `.claude/`; where it needs user config the plugin cannot ship, it degrades with one message naming the setting, and setup writes only the repo's own files (`.claude/orchestration.md`, `.worktreeinclude`, the board line, and on an explicit yes `.claude/settings.local.json` plus its `.gitignore` line), never `~/.claude`. Source: `docs/adr/0013-plugin-features-work-out-of-the-box.md`.
 _Avoid_: zero-config, manual step, install instructions
 
 **Ticket**:
