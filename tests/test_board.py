@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ REPO = {"owner": {"login": "acme"}, "name": "r", "defaultBranchRef": {"name": "m
 # A board made before Backlog existed: the old five options, with colors the upgrade must keep.
 OLD_OPTIONS = [{"id": "old" + str(i), "name": n, "color": "BLUE", "description": f"d{i}"}
                for i, n in enumerate(OPTIONS[1:])]
-OLD_FIELD = {"id": "F1", "name": "Stage", "options": [{"id": o["id"], "name": o["name"]} for o in OLD_OPTIONS]}
+OLD_FIELD = {"id": "F1", "name": "Stage", "options": OLD_OPTIONS}
 
 
 def ago(**kw):
@@ -68,51 +69,89 @@ class Board(unittest.TestCase):
         (self.env.repo / ".claude").mkdir(exist_ok=True)
         (self.env.repo / ".claude" / "orchestration.md").write_text("# Orchestration config\n\n## Backlog\n\n" + line)
 
-    def gh(self, tickets=(), prs=(), cards=(), fields=(FIELD,), extra=(), new_ids=("NEW",), graphql=()):
-        """Canned gh. The graphql replies come in call order: the tracker's issues first, then `graphql` (a field
-        upgrade's two calls, then one empty reply for every card position written)."""
+    ISSUES_Q = "~query=query($owner: String!, $name: String!"
+    PROJECT_Q = "~query=query($owner: String!, $number: Int!"
+    LOOKUP_Q = "~query=query {"
+    MUTATION_Q = "~query=mutation {"
+
+    def project_reply(self, cards, fields, owner="User"):
+        nodes = []
+        for c in cards:
+            content = c["content"]
+            node_content = {"__typename": content["type"], "title": content.get("title")}
+            if content["type"] == "Issue":
+                node_content.update(number=content["number"], repository={"nameWithOwner": content["repository"]})
+            nodes.append({"id": c["id"], "content": node_content, "stage": {"name": c["stage"]} if c.get("stage") else None})
+        project = {"id": "P1", "field": fields[0] if fields else None,
+                   "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}
+        return out({"data": {"repositoryOwner": {"__typename": owner, "projectV2": project}}})
+
+    def gh(self, tickets=(), prs=(), cards=(), fields=(FIELD,), extra=(), new_ids=("NEW",), graphql=(), owner="User",
+           project=None):
+        """Canned gh. Each GraphQL call is told by its query: the tracker's issues, the one project read, the
+        content ids of new cards, and the mutations. `graphql` are the replies to a field create or upgrade, the
+        first mutation; the next is the adds' reply (the item ids in `new_ids`), then an empty one for the rest."""
         issues = out({"data": {"repository": {"issues": {"nodes": list(tickets)}}}})
+        created = [] if fields else [out({"data": {"createProjectV2Field": {"projectV2Field": FIELD}}})]
+        adds = out({"data": {f"m{k}": {"item": {"id": i}} for k, i in enumerate(new_ids)}})
+        lookup = out({"data": {"repository": {f"i{n}": {"id": f"C{n}"} for n in range(1, 200)}}})
         self.env.set_gh([
             *extra,
             gh_repo_rest(REPO),
-            {"args": ["api", "graphql"], "seq": [issues, *graphql, out({"data": {}})]},
-            {"args": ["project", "view"], **out({"id": "P1"})},
-            {"args": ["project", "field-list"], **out({"fields": list(fields)})},
-            {"args": ["project", "field-create"], **out(FIELD)},
+            {"args": ["api", "graphql", "-f", self.ISSUES_Q], **issues},
+            {"args": ["api", "graphql", "-f", self.PROJECT_Q], **(project or self.project_reply(cards, fields, owner))},
+            {"args": ["api", "graphql", "-f", self.LOOKUP_Q], **lookup},
+            {"args": ["api", "graphql", "-f", self.MUTATION_Q], "seq": [*created, *graphql, adds, out({"data": {}})]},
             gh_pr_list([p for p in prs if p.get("state") == "OPEN"], "--state", "open"),
             gh_pr_list([p for p in prs if p.get("state") == "MERGED"], "--state", "merged"),
-            {"args": ["project", "item-list"], **out({"items": list(cards)})},
-            {"args": ["project", "item-add"], "seq": [out({"id": i}) for i in new_ids]},
-            {"args": ["project", "item-edit"]},
-            {"args": ["project", "item-archive"]},
-            {"args": ["project", "item-delete"]},
         ])
 
-    def graphql_writes(self):
-        """The mutation queries sent through `gh api graphql`, in order."""
+    def queries(self):
+        """Every GraphQL query text sent through `gh api graphql`, in order."""
+        return [a[len("query="):] for c in self.env.gh_calls() if c[:2] == ["api", "graphql"]
+                for a in c if a.startswith("query=")]
+
+    def mutations(self):
+        """The mutation requests sent, in order."""
+        return [q for q in self.queries() if q.startswith("mutation")]
+
+    def fragments(self, name=None):
+        """The aliased fields of the card-write mutations (`m0: ...`), in order; those called `name` when given."""
         found = []
-        for c in self.env.gh_calls():
-            q = next((a[len("query="):] for a in c if a.startswith("query=mutation")), None)
-            if c[:2] == ["api", "graphql"] and q:
-                found.append(q)
-        return found
+        for q in self.mutations():
+            if re.match(r"mutation \{ m\d+: ", q):
+                body = q[len("mutation { "):-len(" }")]
+                found += [f.strip() for f in re.split(r"(?:^|\s)m\d+: ", body) if f.strip()]
+        return [f for f in found if name is None or f.startswith(name + "(")]
+
+    def field_writes(self):
+        """The field create and upgrade mutations (one field call each, not aliased)."""
+        return [q for q in self.mutations() if not re.match(r"mutation \{ m\d+: ", q)]
+
+    def graphql_writes(self):
+        """The position moves, as their mutation fields."""
+        return self.fragments("updateProjectV2ItemPosition")
 
     def deletes(self):
-        return [c[c.index("--id") + 1] for c in self.env.gh_calls() if c[:2] == ["project", "item-delete"]]
+        return [re.search(r'itemId: "([^"]+)"', f).group(1) for f in self.fragments("deleteProjectV2Item")]
 
-    def edits(self):
-        """{item id: stage name} for each item-edit call."""
-        names = {v: k for k, v in OPT.items()}
+    def archives(self):
+        return [re.search(r'itemId: "([^"]+)"', f).group(1) for f in self.fragments("archiveProjectV2Item")]
+
+    def adds(self):
+        """The issue numbers of the cards added (the content ids are C<number> in the fake)."""
+        return [int(re.search(r'contentId: "C(\d+)"', f).group(1)) for f in self.fragments("addProjectV2ItemById")]
+
+    def edits(self, names=None):
+        """{item id: stage name} for each stage write."""
+        names = names or {v: k for k, v in OPT.items()}
         found = {}
-        for c in self.env.gh_calls():
-            if c[:2] == ["project", "item-edit"]:
-                found[c[c.index("--id") + 1]] = names[c[c.index("--single-select-option-id") + 1]]
+        for f in self.fragments("updateProjectV2ItemFieldValue"):
+            found[re.search(r'itemId: "([^"]+)"', f).group(1)] = names[re.search(r'singleSelectOptionId: "([^"]+)"', f).group(1)]
         return found
 
     def writes(self):
-        calls = [c for c in self.env.gh_calls() if c[:2] in (["project", "item-edit"], ["project", "item-add"],
-                                                             ["project", "item-archive"], ["project", "item-delete"])]
-        return calls + self.graphql_writes()
+        return self.fragments() + self.field_writes()
 
     def test_no_board_line_is_silent_and_calls_nothing(self):
         self.config("- **Slots:** 2\n")
@@ -161,8 +200,7 @@ class Board(unittest.TestCase):
         self.config()
         self.gh(tickets=[ticket(1, claimed=True), ticket(6, ["ready-for-human"])])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
-        adds = [c for c in self.env.gh_calls() if c[:2] == ["project", "item-add"]]
-        self.assertEqual([c[c.index("--url") + 1] for c in adds], ["https://github.com/acme/r/issues/1"])
+        self.assertEqual(self.adds(), [1])
         self.assertEqual(self.edits(), {"NEW": "Building"})
 
     def test_an_elsewhere_claim_and_a_stalled_claim_both_stage_as_building(self):
@@ -192,15 +230,16 @@ class Board(unittest.TestCase):
                 cards=[card(8, "In review"), card(9, "Done")])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
         self.assertEqual(self.edits(), {"I8": "Done"})
-        archived = [c for c in self.env.gh_calls() if c[:2] == ["project", "item-archive"]]
-        self.assertEqual([c[c.index("--id") + 1] for c in archived], ["I9"])
+        self.assertEqual(self.archives(), ["I9"])
 
     def test_the_stage_field_is_created_when_missing(self):
         self.config()
         self.gh(fields=[])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
-        create = next(c for c in self.env.gh_calls() if c[:2] == ["project", "field-create"])
-        self.assertEqual(create[create.index("--single-select-options") + 1], ",".join(OPTIONS))
+        create = self.field_writes()
+        self.assertEqual(len(create), 1)
+        self.assertIn("createProjectV2Field", create[0])
+        self.assertEqual(re.findall(r'name: "([^"]+)", color: GRAY', create[0]), OPTIONS)
 
     def synced(self, cards, *flags):
         self.config()
@@ -244,8 +283,7 @@ class Board(unittest.TestCase):
                        card(8, "In review")])
         r = self.env.run("board", check=False)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
-        adds = [c[c.index("--url") + 1] for c in self.env.gh_calls() if c[:2] == ["project", "item-add"]]
-        self.assertEqual(adds, ["https://github.com/acme/r/issues/11", "https://github.com/acme/r/issues/20"])
+        self.assertEqual(self.adds(), [11, 20])
         self.assertEqual(self.edits(), {"N11": "Backlog", "N20": "Backlog", "I8": "Done"})
         # Items sit I12 I10 I15 N11 N20; wanted I10 N11 I12 I15 N20: I10 goes first, N11 after it, nothing else.
         moves = self.graphql_writes()
@@ -268,11 +306,10 @@ class Board(unittest.TestCase):
     def test_parents_wayfinder_and_lead_tickets_are_not_in_backlog(self):
         self.config()
         self.gh(tickets=[ticket(30, ["ready-for-agent", "wayfinder:task"]), ticket(31, ["ready-for-agent", "lead"]),
-                         ticket(32, ["ready-for-agent"])])
+                         ticket(32, ["ready-for-agent"])], new_ids=["N31", "N32"])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
-        adds = [c[c.index("--url") + 1] for c in self.env.gh_calls() if c[:2] == ["project", "item-add"]]
         # 31 is the lead's: it gets a card as a lead ticket (Building), never as Backlog.
-        self.assertEqual(adds, ["https://github.com/acme/r/issues/31", "https://github.com/acme/r/issues/32"])
+        self.assertEqual(self.adds(), [31, 32])
 
     def test_a_backlog_card_that_stops_qualifying_is_deleted_and_a_claimed_one_moves(self):
         self.config()
@@ -304,14 +341,13 @@ class Board(unittest.TestCase):
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         self.assertEqual(self.deletes(), [])
         self.assertEqual(self.edits(), {"NEW": "Building"})
-        self.assertFalse([c for c in self.env.gh_calls() if c[:2] == ["project", "item-archive"]])
+        self.assertEqual(self.archives(), [])
 
     def test_a_card_whose_ticket_closed_without_a_pr_is_archived_but_an_open_ticket_keeps_its_card(self):
         self.config()
         self.gh(tickets=[ticket(31)], cards=[card(30, "Building"), card(31, "Building"), card(32, "Done")])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
-        archived = [c[c.index("--id") + 1] for c in self.env.gh_calls() if c[:2] == ["project", "item-archive"]]
-        self.assertEqual(archived, ["I30"])
+        self.assertEqual(self.archives(), ["I30"])
 
     def test_an_open_lead_pr_beyond_the_first_hundred_is_still_a_card_in_review(self):
         self.config()
@@ -339,13 +375,13 @@ class Board(unittest.TestCase):
         self.assertIn("boom", r.stderr)
         # The worker's card still syncs; the lead ticket gets none.
         self.assertEqual(self.edits(), {"I1": "Building"})
-        self.assertFalse([c for c in self.env.gh_calls() if c[:2] == ["project", "item-add"]])
+        self.assertEqual(self.adds(), [])
 
     def test_dry_run_prints_each_planned_write_and_each_card_left_alone_and_writes_nothing(self):
         self.config()
         self.gh(tickets=[ticket(1, claimed=True), ticket(10, ["ready-for-agent"])], fields=[OLD_FIELD],
                 cards=[card(1, "Done"), card(7, "Backlog", repository="acme/other")],
-                graphql=[out({"data": {"node": {"options": OLD_OPTIONS}}})])
+                )
         r = self.env.run("board", "--dry-run", check=False)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         lines = r.stdout.splitlines()
@@ -358,14 +394,13 @@ class Board(unittest.TestCase):
 
     def test_an_old_board_gets_backlog_in_one_field_write_keeping_ids_and_colors(self):
         self.config()
-        node = out({"data": {"node": {"options": OLD_OPTIONS}}})
         new = [{"id": "oB", "name": "Backlog"}] + [{"id": o["id"], "name": o["name"]} for o in OLD_OPTIONS]
         mutated = out({"data": {"updateProjectV2Field": {"projectV2Field": {"options": new}}}})
-        self.gh(tickets=[ticket(1, claimed=True)], fields=[OLD_FIELD], cards=[card(1, "Done")], graphql=[node, mutated])
+        self.gh(tickets=[ticket(1, claimed=True)], fields=[OLD_FIELD], cards=[card(1, "Done")], graphql=[mutated])
         r = self.env.run("board", check=False)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
-        writes = self.graphql_writes()
-        self.assertEqual(len(writes), 1)
+        writes = self.field_writes()
+        self.assertEqual(len(writes), 1)  # the options are read with the project: no second read for them
         q = writes[0]
         self.assertIn("updateProjectV2Field", q)
         self.assertLess(q.index('name: "Backlog"'), q.index('id: "old0"'))
@@ -373,18 +408,17 @@ class Board(unittest.TestCase):
             self.assertIn(f'id: "{o["id"]}", name: "{o["name"]}", color: BLUE, description: "{o["description"]}"', q)
         self.assertIn("color: GRAY", q)
         # The upgraded field serves the same sync: the claimed ticket moves to Building by its kept option id.
-        edit = next(c for c in self.env.gh_calls() if c[:2] == ["project", "item-edit"])
-        self.assertEqual(edit[edit.index("--single-select-option-id") + 1], "old0")
+        self.assertEqual(self.edits({"old0": "Building"}), {"I1": "Building"})
 
     def test_a_board_that_already_matches_gets_no_field_write(self):
         self.config()
         self.gh(tickets=[ticket(1, claimed=True)], cards=[card(1, "Building")])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
-        self.assertEqual(self.graphql_writes(), [])
+        self.assertEqual(self.field_writes(), [])
 
     def test_a_failure_is_one_line_and_exit_1(self):
         self.config()
-        self.gh(extra=[{"args": ["project", "view"], "exit": 1,
+        self.gh(extra=[{"args": ["api", "graphql", "-f", self.PROJECT_Q], "exit": 1,
                         "stderr": "error: your authentication token is missing the 'project' scope\nmore\n"}])
         r = self.env.run("board", check=False)
         self.assertEqual(r.returncode, 1)
@@ -397,6 +431,98 @@ class Board(unittest.TestCase):
         self.config("- **Board:** https://example.com/nope\n")
         r = self.env.run("board", check=False)
         self.assertEqual((r.returncode, len(r.stderr.strip().splitlines())), (1, 1))
+
+    def test_a_sync_with_no_change_is_one_board_read_and_no_mutation(self):
+        r = self.synced([card(1, "In review"), card(3, "Needs lead")])
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        reads = [q for q in self.queries() if "repositoryOwner" in q]
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(self.mutations(), [])
+
+    def test_three_changed_rows_are_one_mutation_with_three_aliases(self):
+        self.config()
+        self.gh(tickets=[ticket(n, claimed=True) for n in (1, 2, 3)], cards=[card(n, "Done") for n in (1, 2, 3)])
+        r = self.env.run("board", "--verbose", check=False)
+        self.assertEqual((r.returncode, r.stderr.strip()), (0, "writes: 3"))
+        mutations = self.mutations()
+        self.assertEqual(len(mutations), 1)
+        self.assertEqual(re.findall(r"\bm(\d+): ", mutations[0]), ["0", "1", "2"])
+        self.assertEqual(self.edits(), {"I1": "Building", "I2": "Building", "I3": "Building"})
+
+    def test_a_mutation_holds_at_most_twenty_rows(self):
+        self.config()
+        numbers = range(1, 46)
+        self.gh(tickets=[ticket(n, claimed=True) for n in numbers], cards=[card(n, "Done") for n in numbers])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual([len(re.findall(r"\bm\d+: ", q)) for q in self.mutations()], [20, 20, 5])
+        self.assertEqual(len(self.edits()), 45)
+
+    def test_new_cards_cost_a_content_read_an_add_mutation_and_one_mutation_for_the_rest(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)], cards=[card(3, "Done")],
+                new_ids=["N1", "N2"])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual(len([q for q in self.queries() if q.startswith("query {")]), 1)
+        self.assertEqual(len(self.mutations()), 2)
+        self.assertEqual(self.adds(), [1, 2])
+        self.assertEqual(self.edits(), {"N1": "Building", "N2": "Building"})
+
+    def test_every_query_sent_has_balanced_braces_and_parentheses(self):
+        self.config()
+        self.gh(tickets=self.BACKLOG_TICKETS, prs=self.MERGED, new_ids=["N11", "N20"], fields=[OLD_FIELD],
+                cards=[card(12, "Backlog"), card(10, "Backlog"), card(15, "Backlog"), card(1, "Done"), card(8, "In review")],
+                graphql=[out({"data": {"updateProjectV2Field": {"projectV2Field": {"options": [
+                    {"id": "oB", "name": "Backlog"}] + [{"id": o["id"], "name": o["name"]} for o in OLD_OPTIONS]}}}})])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        queries = self.queries()
+        self.assertGreaterEqual(len(queries), 5)
+        for q in queries:
+            with self.subTest(q[:60]):
+                self.assertEqual((q.count("{"), q.count("(")), (q.count("}"), q.count(")")))
+
+    def test_the_project_query_reads_the_field_the_board_writes(self):
+        import github
+        source = (ROOT / "scripts" / "board").read_text()
+        self.assertIn('FIELD = "Stage"', source)
+        self.assertIn('field(name: "Stage")', github.PROJECT_QUERY)
+        self.assertIn('fieldValueByName(name: "Stage")', github.PROJECT_QUERY)
+
+    def test_a_rate_limited_owner_lookup_is_reported_as_the_rate_limit(self):
+        self.config()
+        reset = int(time.time()) + 3600
+        self.gh(extra=[{"args": ["api", "graphql", "-f", self.PROJECT_Q], "exit": 1,
+                        "stderr": f"gh: API rate limit exceeded (HTTP 403)\nx-ratelimit-remaining: 0\n"
+                                  f"x-ratelimit-reset: {reset}\n"}])
+        r = self.env.run("board", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("rate limit", r.stderr)
+        self.assertNotIn("unknown owner type", r.stderr)
+
+    def test_an_empty_owner_reply_is_a_lookup_failure_with_exit_2(self):
+        self.config()
+        self.gh(project=out({}))
+        r = self.env.run("board", check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stderr.strip(), "board: owner lookup failed: gh returned no owner")
+
+    def test_an_owner_reply_with_a_gh_error_carries_its_message(self):
+        self.config()
+        self.gh(project=out({"data": {"repositoryOwner": None}, "errors": [{"message": "Could not resolve to an owner"}]}))
+        r = self.env.run("board", check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stderr.strip(), "board: owner lookup failed: Could not resolve to an owner")
+
+    def test_a_bot_owner_is_an_unknown_owner_type(self):
+        self.config()
+        self.gh(owner="Bot")
+        r = self.env.run("board", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stderr.strip(), "board: unknown owner type: Bot")
+
+    def test_an_organization_owner_syncs(self):
+        self.config()
+        self.gh(owner="Organization", tickets=[ticket(1, claimed=True)], cards=[card(1, "Building")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
 
 
 class Prompts(unittest.TestCase):
