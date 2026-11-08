@@ -19,7 +19,7 @@ The costs ADR-0001 lists still hold: tokens, usage limits that pause every worke
 
 ## Consequences
 
-- The scout maps up to two more takeable tickets than the free slots, so scout cost scales with the cap, not the backlog.
+- The takeable tickets come from `scripts/frontier` (since #310), not the scout, which maps only the touch maps of the tickets a pass dispatches, so scout cost scales with the cap, not the backlog. (Amended 2026-11-08; before, the scout mapped up to two more takeable tickets than the free slots.)
 - Touch maps are estimates: more tickets at once means more missed overlaps and more rebases after merge. The merge sweep and hand-backs absorb these.
 - Greedy is in-session state with no file behind it; the report line is what survives a compaction.
 - Profiles measure a greedy pass's occupancy against its cap, so idle reasons show why it ran below it (#170).
