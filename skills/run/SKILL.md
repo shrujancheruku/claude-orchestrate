@@ -30,7 +30,7 @@ Every pass rebuilds its picture from the tracker and the git host, so a pass can
 - **Elsewhere**: no ready PR (a draft doesn't count), no worker record, and its worktree is locked by another live session (ADR 0009). Don't resume, rescue or redispatch it; it still counts against the slot cap. The pass table shows it as Elsewhere, waiting on that session, with its worktree and, when the lock reason didn't parse, that reason, so the user can unlock a stale lock. Every pass checks again, with no time limit; once the lock is dead or gone, the ticket is stalled.
 - **in review**: its PR is open and not a draft.
 - **done**: its PR merged, or the ticket is closed.
-- **with the lead**: a claimed `lead` ticket, the lead's own work. No PR yet: not stalled, and no slot. Its PR open: in review, as [Lead PRs](#lead-prs) says.
+- **with the lead**: a `lead` ticket, the lead's own work. No PR yet: not stalled, and no slot. Its PR open: in review, as [Lead PRs](#lead-prs) says.
 
 **paused** (its worker ended on an API or usage-limit error; see [Running out of usage](#running-out-of-usage)), **waiting** (blocked on the user: a gate, a question, a third review round) and **waiting on lead (not delivered)** (a lead PR whose failure run could not deliver to the lead; shown until the lead answers or `RESEND` sends it again) are your own, layered on these from your context; `claims` never reports them.
 
@@ -125,7 +125,7 @@ A worker's `stopped` report while its PR is open pauses the loop on that ticket,
 
 ## Lead PRs
 
-A PR that closes a claimed `lead` ticket (a `LEAD-PR` verdict) has no worker. It runs the same loop as a worker's PR (gate, CI, review, merge), with these differences:
+A PR that closes a `lead` ticket (a `LEAD-PR` verdict) has no worker. It runs the same loop as a worker's PR (gate, CI, review, merge), with these differences:
 
 - **Failures go to the lead.** Every rule above that sends a failure to the worker sends it to the lead instead, with what a worker would get: the failing CI step, the gate's output, the review URL (or the full findings when none was posted), or the conflict list from a hand-back. SendMessage the session named `lead`, and say which PR. With `Lead: none`, the failure goes to the developer in the pass report.
 - **Undelivered failures.** A SendMessage the harness holds or refuses is not delivered. Then comment on the ticket: the line `> *Waiting on lead (not delivered).*`, a line `head <the full head commit>`, and the failure's gist. The ticket shows as **waiting on lead (not delivered)** in the pass table. `RESEND` (see the lead-route verdicts) sends it again, once per head commit; a push is a new head, and its failures are new.

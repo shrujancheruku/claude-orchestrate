@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""board [--repo PATH] : sync the opt-in GitHub Projects board from tracker and PR state.
+"""board [--repo PATH] [--dry-run] : sync the opt-in GitHub Projects board from tracker and PR state.
 
 Reads the config's `- **Board:** <project URL>` line; with none it does nothing (exit 0, silent). Otherwise it
 rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a second run changes nothing. The columns
@@ -21,6 +21,10 @@ The column is the custom single-select field `Stage`, created on first sync: Git
 are not editable through `gh`. A field that lacks an option, or has them out of order, is upgraded in place through
 `updateProjectV2Field`, keeping every existing option's id and color. Needs lead stays empty without a lead. The lead
 never reads or writes the board. One tracker Snapshot serves the whole sync (and `lead-route`): no per-ticket calls.
+Only cards whose content is an issue of this repository (repository plus number) are the board's: draft, hand-placed
+and other repositories' cards are left alone. A card whose ticket closed without a merged PR is archived. If
+`lead-route` fails, the lead's cards are skipped with one stderr line and the rest syncs. `--dry-run` prints each
+write it would make (and each card left alone) and makes none.
 Exit codes: 0 synced or no board; 1 any failure, one line on stderr (`run` carries on: the board never fails a pass).
 Stdlib only, Python 3.9+.
 """
@@ -132,7 +136,21 @@ def literal_options(options) -> str:
     return "[" + ", ".join(parts) + "]"
 
 
-def upgrade_field(field, repo):
+class Writes:
+    """Every write the sync makes goes through here, so `--dry-run` can print the plan instead of making the writes.
+    The reads stay real. `planned` is what the write would have returned, for the steps after it."""
+
+    def __init__(self, dry=False):
+        self.dry = dry
+
+    def do(self, what, run, planned=None):
+        if self.dry:
+            print(f"would {what}")
+            return planned
+        return run()
+
+
+def upgrade_field(field, repo, writes):
     """Add the missing options to an existing Stage field and put them in STAGES order, in one updateProjectV2Field
     call that keeps every existing option's id and color. No write when the field already matches. Returns the field's
     {option name: id}."""
@@ -150,80 +168,116 @@ def upgrade_field(field, repo):
     query = ("mutation { updateProjectV2Field(input: {fieldId: " + json.dumps(field["id"]) + ", singleSelectOptions: "
              + literal_options(wanted) + "}) { projectV2Field { ... on ProjectV2SingleSelectField "
              "{ options { id name } } } } }")
-    reply = github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo)
+    reply = writes.do(f"update field {FIELD} options to {', '.join(o['name'] for o in wanted)} (ids kept)",
+                      lambda: github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo))
+    if reply is None:  # a dry run: the new option has no id yet
+        return {o["name"]: o.get("id") or f"new:{o['name']}" for o in wanted}
     return {o["name"]: o["id"] for o in reply["data"]["updateProjectV2Field"]["projectV2Field"]["options"]}
 
 
-def move_after(project_id, item_id, after_id, repo):
+def move_after(project_id, item_id, after_id, repo, writes):
     """Put a card right after another (the first card when after_id is None): the Board layout orders cards inside a
     column by this position, and `gh project item-edit` cannot change it."""
     after = f", afterId: {json.dumps(after_id)}" if after_id else ""
     query = ("mutation { updateProjectV2ItemPosition(input: {projectId: " + json.dumps(project_id)
              + ", itemId: " + json.dumps(item_id) + after + "}) { clientMutationId } }")
-    github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo)
+    writes.do(f"move card {item_id} " + (f"after {after_id}" if after_id else "to the top"),
+              lambda: github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo))
 
 
-def order_backlog(want_ids, current_ids, project_id, repo):
+def order_backlog(want_ids, current_ids, project_id, repo, writes):
     """Move the Backlog cards into want_ids order, writing only where a card's predecessor differs. current_ids is
     their present order; a card is only moved when it is not already where the order puts it."""
     cur = list(current_ids)
     for i, item in enumerate(want_ids):
         if cur[i] == item:
             continue
-        move_after(project_id, item, want_ids[i - 1] if i else None, repo)
+        move_after(project_id, item, want_ids[i - 1] if i else None, repo, writes)
         cur.remove(item)
         cur.insert(i, item)
 
 
-def sync(owner, number, repo):
+def repository_of(content) -> str:
+    """The `owner/name` a project item's content belongs to (gh prints a string; the API's shape is a dict)."""
+    repository = (content or {}).get("repository")
+    return repository.get("nameWithOwner") if isinstance(repository, dict) else repository
+
+
+def sync(owner, number, repo, writes=None):
+    writes = writes or Writes()
     own = ["--owner", owner]
     root = Path(repo).resolve()
-    # One tracker read serves the whole sync: the issues (Backlog, claims, labels), the PRs (claims, the archive, the
-    # lead's tickets) and, through a file, lead-route. No call per ticket.
+    # One tracker read serves the whole sync: the issues (Backlog, claims, labels), the open and merged PRs (claims,
+    # the lead's tickets) and, through a file, lead-route. Only the merge times of the archive come from another call.
     try:
         labels = tracker.label_strings(root)
     except ValueError as e:
         raise github.GhError(github.FAILED, str(e)) from None
     snap = tracker.Snapshot(root)
-    issues = snap.issues
-    prs = github.call_json("pr", "list", "--state", "all", "--limit", "100", "--json",
-                           "number,headRefName,headRefOid,baseRefName,state,mergedAt,isDraft", shape=list, cwd=repo)
-    open_prs = [p for p in prs if p.get("state") == "OPEN"]
-    merged_prs = [p for p in prs if p.get("state") == "MERGED"]
+    issues, open_prs, merged_prs = snap.issues, snap.prs, snap.merged
+    slug = f"{snap.repo['owner']['login']}/{snap.repo['name']}"
     try:
         found = claims.claims(root, root / STATE, issues, open_prs, merged_prs)
     except ValueError as e:  # claims could not run (an unreadable state file, a failed git call)
         raise github.GhError(github.FAILED, str(e)) from None
-    with tempfile.TemporaryDirectory() as tmp:
-        shared = Path(tmp) / "snapshot.json"
-        tracker.Snapshot(root, repo=snap.repo, issues=issues, prs=open_prs, merged=merged_prs, abandoned=[]).write(shared)
-        lead = lead_stages(lead_lines(shared, root), {p.get("number"): bool(p.get("isDraft")) for p in open_prs})
+    lead = {}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "snapshot.json"
+            tracker.Snapshot(root, repo=snap.repo, issues=issues, prs=open_prs, merged=merged_prs,
+                             abandoned=[]).write(shared)
+            lead = lead_stages(lead_lines(shared, root), {p.get("number"): bool(p.get("isDraft")) for p in open_prs})
+    except github.GhError as e:
+        # Plugin features degrade: the worker and Backlog cards still sync, only the lead's cards are skipped.
+        print(f"board: lead cards skipped: lead-route failed: {common.one_line(e.message)}", file=sys.stderr)
     in_backlog = tracker.backlog(issues, labels)
+    merged_at = github.call_json("pr", "list", "--state", "merged", "--limit", "100", "--json",
+                                 "number,headRefName,mergedAt", shape=list, cwd=repo)
 
     proj = github.call_json("project", "view", str(number), *own, "--format", "json", cwd=repo)
     fields = github.call_json("project", "field-list", str(number), *own, "--format", "json", cwd=repo)
     field = next((f for f in fields.get("fields", []) if f.get("name") == FIELD), None)
     if field is None:
-        field = github.call_json("project", "field-create", str(number), *own, "--name", FIELD, "--data-type",
-                                 "SINGLE_SELECT", "--single-select-options", ",".join(STAGES), "--format", "json",
-                                 cwd=repo)
+        field = writes.do(f"create field {FIELD} with options {', '.join(STAGES)}", lambda: github.call_json(
+            "project", "field-create", str(number), *own, "--name", FIELD, "--data-type", "SINGLE_SELECT",
+            "--single-select-options", ",".join(STAGES), "--format", "json", cwd=repo),
+            {"id": "new:field", "options": [{"id": f"new:{s}", "name": s} for s in STAGES]})
     # A board made before a column existed is upgraded in place, never refused.
-    options = upgrade_field(field, repo)
+    options = upgrade_field(field, repo, writes)
     merged = {}
-    for p in prs:
+    for p in merged_at:
         t, at = ticket_of_branch(p.get("headRefName")), parse_ts(p.get("mergedAt"))
-        if t and at and p.get("state") == "MERGED":
+        if t and at:
             merged[t] = max(merged.get(t, at), at)
     items = github.call_json("project", "item-list", str(number), *own, "--limit", "1000", "--format", "json",
                              cwd=repo).get("items", [])
-    cards = {(i.get("content") or {}).get("number"): i for i in items if (i.get("content") or {}).get("type") == "Issue"}
+    # The board's own cards are this repository's issues, keyed by number within it. A draft card, a hand-placed card
+    # or another repository's issue (whose number may collide with ours) is never moved, archived or deleted.
+    cards, left = {}, []
+    for i in items:
+        c = i.get("content") or {}
+        if c.get("type") == "Issue" and repository_of(c) == slug and isinstance(c.get("number"), int):
+            cards[c["number"]] = i
+        else:
+            left.append(i)
+    if writes.dry:
+        for i in left:
+            c = i.get("content") or {}
+            print(f"left alone: {c.get('type') or 'card'} {repository_of(c) or ''}#{c.get('number', '')} "
+                  f"{c.get('title') or i.get('title') or i.get('id')}".replace("  ", " "))
 
     def set_stage(card_id, stage):
-        github.call("project", "item-edit", "--id", card_id, "--project-id", proj["id"], "--field-id", field["id"],
-                    "--single-select-option-id", options[stage], cwd=repo)
+        writes.do(f"move card {card_id} to {stage}", lambda: github.call(
+            "project", "item-edit", "--id", card_id, "--project-id", proj["id"], "--field-id", field["id"],
+            "--single-select-option-id", options[stage], cwd=repo))
 
-    def delete(card_id):
-        github.call("project", "item-delete", str(number), *own, "--id", card_id, cwd=repo)
+    def delete(card_id, t):
+        writes.do(f"delete card {card_id} (#{t})", lambda: github.call(
+            "project", "item-delete", str(number), *own, "--id", card_id, cwd=repo))
+
+    def archive(card_id, t):
+        writes.do(f"archive card {card_id} (#{t})", lambda: github.call(
+            "project", "item-archive", str(number), *own, "--id", card_id, cwd=repo))
 
     want = desired(issues, found, permission_denied(repo, found), {i["number"] for i in in_backlog}, lead)
     ids = {}  # ticket -> card id, for the Backlog ordering below
@@ -232,13 +286,14 @@ def sync(owner, number, repo):
         if card is None:
             if not addable:
                 continue
-            added = github.call_json("project", "item-add", str(number), *own, "--url", issue["url"],
-                                     "--format", "json", cwd=repo)
+            added = writes.do(f"add a card for #{t}", lambda: github.call_json(
+                "project", "item-add", str(number), *own, "--url", issue["url"], "--format", "json", cwd=repo),
+                {"id": f"new:{t}"})
             card = {"id": added["id"]}
             cards[t] = card
         elif not addable and card.get(FIELD.lower()) == BACKLOG:
             # It no longer qualifies (relabelled) and nobody claimed it: it leaves the board.
-            delete(card["id"])
+            delete(card["id"], t)
             del cards[t]
             continue
         ids[t] = card["id"]
@@ -250,26 +305,35 @@ def sync(owner, number, repo):
         if card is None or t in want:
             continue
         if now - at > ARCHIVE_AFTER:
-            github.call("project", "item-archive", str(number), *own, "--id", card["id"], cwd=repo)
+            archive(card["id"], t)
         elif card.get(FIELD.lower()) != DONE:
             set_stage(card["id"], DONE)
         cards.pop(t)
+    open_numbers = {i["number"] for i in issues}
     for t, card in sorted(cards.items()):
-        # A Backlog card whose ticket is no longer open (closed without a merged PR) leaves the board.
-        if t not in want and card.get(FIELD.lower()) == BACKLOG:
-            delete(card["id"])
+        stage = card.get(FIELD.lower())
+        if t in want:
+            continue
+        if stage == BACKLOG:
+            # It no longer qualifies (closed without a merged PR, or relabelled out of the tracker's sight): it leaves.
+            delete(card["id"], t)
+        elif t not in open_numbers and stage in (BUILDING, REVIEW, NEEDS_LEAD, WAITING):
+            # A card's life ends with its ticket: the ticket closed without a merged PR (a lead ticket, say).
+            archive(card["id"], t)
 
     order = [t for t in (i["number"] for i in in_backlog) if want.get(t, (None,))[0] == BACKLOG]
     wanted_ids = [ids[t] for t in order]
     # The cards' present order is the project's item order; a card added just now is last.
     current = [c["id"] for c in items if c["id"] in wanted_ids]
     current += [i for i in wanted_ids if i not in current]
-    order_backlog(wanted_ids, current, proj["id"], repo)
+    order_backlog(wanted_ids, current, proj["id"], repo, writes)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", default=".", help="repo root: the config is read and gh runs there")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="read everything, print each write the sync would make (and each card left alone), make none")
     args = ap.parse_args(argv)
     url = config.Config.load(args.repo).board
     if not url:
@@ -279,7 +343,7 @@ def main(argv=None) -> int:
         print(f"board: cannot read the Board URL: {url}", file=sys.stderr)
         return 1
     try:
-        sync(m.group(1), int(m.group(2)), args.repo)
+        sync(m.group(1), int(m.group(2)), args.repo, Writes(args.dry_run))
     except github.GhError as e:
         print(f"board: {common.one_line(e.message)}", file=sys.stderr)
         return 1

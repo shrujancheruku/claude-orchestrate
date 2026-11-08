@@ -6,6 +6,7 @@ Also the prompt side: setup offers the board and writes the `Board:` line, and `
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -40,8 +41,8 @@ def ticket(n, labels=(), claimed=False, blocked_by=()):
             "blockedBy": {"nodes": [{"number": b, "state": "OPEN"} for b in blocked_by]}}
 
 
-def card(n, stage=None, item="I"):
-    c = {"id": f"{item}{n}", "content": {"type": "Issue", "number": n}}
+def card(n, stage=None, item="I", repository="acme/r", type="Issue"):
+    c = {"id": f"{item}{n}", "content": {"type": type, "number": n, "repository": repository, "title": f"t{n}"}}
     if stage:
         c["stage"] = stage
     return c
@@ -78,7 +79,8 @@ class Board(unittest.TestCase):
             {"args": ["project", "view"], **out({"id": "P1"})},
             {"args": ["project", "field-list"], **out({"fields": list(fields)})},
             {"args": ["project", "field-create"], **out(FIELD)},
-            {"args": ["pr", "list"], **out(list(prs))},
+            {"args": ["pr", "list", "--state", "open"], **out([p for p in prs if p.get("state") == "OPEN"])},
+            {"args": ["pr", "list", "--state", "merged"], **out([p for p in prs if p.get("state") == "MERGED"])},
             {"args": ["project", "item-list"], **out({"items": list(cards)})},
             {"args": ["project", "item-add"], "seq": [out({"id": i}) for i in new_ids]},
             {"args": ["project", "item-edit"]},
@@ -261,6 +263,68 @@ class Board(unittest.TestCase):
         r = self.env.run("board", check=False)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         self.assertEqual(self.edits(), {"N30": "Building", "N31": "In review", "N32": "Building"})
+
+    def test_cards_that_are_not_this_repos_issues_are_left_alone(self):
+        self.config()
+        # 7 is unlabelled here, but its Backlog card is another repository's #7; 8 is a draft card; 5's card in the
+        # other repository must not be moved: this repository's #5 gets a card of its own.
+        self.gh(tickets=[ticket(5, claimed=True)],
+                cards=[card(7, "Backlog", repository="acme/other"), card(8, "Backlog", type="DraftIssue"),
+                       card(9, "Building", repository="acme/other"), card(5, "Done", repository="acme/other")])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(self.edits(), {"NEW": "Building"})
+        self.assertFalse([c for c in self.env.gh_calls() if c[:2] == ["project", "item-archive"]])
+
+    def test_a_card_whose_ticket_closed_without_a_pr_is_archived_but_an_open_ticket_keeps_its_card(self):
+        self.config()
+        self.gh(tickets=[ticket(31)], cards=[card(30, "Building"), card(31, "Building"), card(32, "Done")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        archived = [c[c.index("--id") + 1] for c in self.env.gh_calls() if c[:2] == ["project", "item-archive"]]
+        self.assertEqual(archived, ["I30"])
+
+    def test_an_open_lead_pr_beyond_the_first_hundred_is_still_a_card_in_review(self):
+        self.config()
+        others = [{"number": 1000 + n, "headRefName": f"{500 + n}-x", "state": "OPEN", "isDraft": False}
+                  for n in range(149)]
+        lead_pr = {"number": 2000, "headRefName": "31-x", "state": "OPEN", "isDraft": False}
+        self.gh(tickets=[ticket(31, ["lead"])], prs=others + [lead_pr], new_ids=["N31"])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(self.edits(), {"N31": "In review"})
+        listed = next(c for c in self.env.gh_calls() if c[:4] == ["pr", "list", "--state", "open"])
+        self.assertNotIn("100", listed)
+
+    def test_a_failed_lead_route_skips_lead_cards_with_one_stderr_line_and_exits_0(self):
+        self.config()
+        scripts = Path(self.env._tmp.name) / "scripts-copy"
+        shutil.copytree(ROOT / "scripts", scripts)
+        (scripts / "lead-route").write_text("import sys\nprint('lead-route: cannot run: boom', file=sys.stderr)\nsys.exit(2)\n")
+        self.gh(tickets=[ticket(30, ["lead"]), ticket(1, claimed=True)], cards=[card(1)])
+        r = self.env.run(scripts / "board", check=False)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+        self.assertIn("lead cards skipped", r.stderr)
+        self.assertIn("boom", r.stderr)
+        # The worker's card still syncs; the lead ticket gets none.
+        self.assertEqual(self.edits(), {"I1": "Building"})
+        self.assertFalse([c for c in self.env.gh_calls() if c[:2] == ["project", "item-add"]])
+
+    def test_dry_run_prints_each_planned_write_and_each_card_left_alone_and_writes_nothing(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True), ticket(10, ["ready-for-agent"])], fields=[OLD_FIELD],
+                cards=[card(1, "Done"), card(7, "Backlog", repository="acme/other")],
+                graphql=[out({"data": {"node": {"options": OLD_OPTIONS}}})])
+        r = self.env.run("board", "--dry-run", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        lines = r.stdout.splitlines()
+        self.assertTrue(any(l.startswith("would update field Stage options to Backlog, Building") for l in lines), lines)
+        self.assertIn("would add a card for #10", lines)
+        self.assertIn("would move card I1 to Building", lines)
+        self.assertTrue(any(l.startswith("left alone: Issue acme/other#7") for l in lines), lines)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.graphql_writes(), [])
 
     def test_an_old_board_gets_backlog_in_one_field_write_keeping_ids_and_colors(self):
         self.config()
