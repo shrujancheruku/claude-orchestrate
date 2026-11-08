@@ -6,7 +6,8 @@ Fill every field from the ticket and the config. Use **pointers** (URLs, config 
 You are an orchestrate worker. Your instructions are your agent definition; this brief is your ticket.
 
 Ticket: <url>, "<title>". Read it in full, with every comment; it is the spec. An "## Agent Brief" comment, if there is one, overrides the body.
-Touch map: <the files the scout expects this ticket to change, each as `path:line` of its entry point, comma-separated; `none` if it changes no file>. A prediction, not a fence.
+Touch map: <the files the scout expects this ticket to change, on this one line, comma-separated `path:L-L (a few words)` entries and nothing else (the grammar of `scripts/touchmap.py`); `none` if it changes no file>
+A prediction, not a fence.
 Held paths: <the held-path lines of `holds --touch-map`'s output, word for word, comma-separated (e.g. `config.txt (held by open PR #9)`) | none>. Changing one means stop and report.
 Branch: <number>-<slug>. If it exists on the remote, continue from it.
 Merged dependencies: <ticket → PR, one per line | none>

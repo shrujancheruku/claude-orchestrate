@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import re
 import sys
 from pathlib import Path
 
@@ -28,31 +27,41 @@ import claims
 import common
 import config
 import github
-import session
+import touchmap
 import tracker
 from repo import STATE, ticket_of_branch, worktree_changes
 
-NOTE_SUFFIX = re.compile(r"\s*\([^()]*\)$")
-LINE_SUFFIX = re.compile(r":\d+(?:[-–,]\d+)*$")
+def plain(entry) -> str:
+    """A touch-map entry (an Entry, or text holding one) as a file path; unparseable text stands for itself."""
+    if isinstance(entry, touchmap.Entry):
+        return entry.path
+    try:
+        found = touchmap.parse(entry)
+    except touchmap.TouchMapError:
+        return str(entry).strip()
+    return found[0].path if found else ""
 
 
-def plain(entry: str) -> str:
-    """A touch-map entry as a file path: no trailing `(note)`, no `:line` or line range, no leading `./`."""
-    path = LINE_SUFFIX.sub("", NOTE_SUFFIX.sub("", entry.strip().strip("`")))
-    return path[2:] if path.startswith("./") else path
+def state_paths(value) -> list:
+    """The paths of a state file's `touch_map`: the canonical string `rebuild-state` writes (or an older list of entries)."""
+    if isinstance(value, list):
+        value = ", ".join(e for e in value if isinstance(e, str))
+    try:
+        return [e.path for e in touchmap.parse(value)] if isinstance(value, str) else []
+    except touchmap.TouchMapError:
+        return []  # rebuild-state stores only a map that parsed; anything else is a hand edit, held as nothing
 
 
 def candidate_paths(args: list, literal: bool = False) -> tuple:
-    """(paths, ignored) for the `--touch-map` arguments. Each is split into entries (commas and semicolons outside
-    parentheses, as `session.touch_map` does), so one quoted string and separate arguments give the same paths; with
-    `literal`, each argument is one path, unsplit. `none` is an empty touch map, not an ignored argument. An argument
-    that yields no path (empty, only notes) is reported on stderr as `ignored: <arg>` and counted."""
+    """(paths, ignored) for the `--touch-map` arguments. Each is parsed by `touchmap.parse`, so one quoted string and
+    separate arguments give the same paths; with `literal`, each argument is one path, unparsed. `none` is an empty
+    touch map, not an ignored argument; an empty argument is reported on stderr as `ignored: <arg>` and counted.
+    An entry off the grammar raises touchmap.TouchMapError."""
     paths, ignored = [], 0
     for arg in args:
-        entries = [arg] if literal else session.split_entries(arg)
-        if not literal and any(e.lower() == "none" for e in entries) and len(entries) == 1:
+        if not literal and arg.strip().lower() in ("none", "none."):
             continue
-        found = [p for p in (plain(e) for e in entries) if p]
+        found = [arg] if literal else [e.path for e in touchmap.parse(arg)]
         if not found:
             print(f"ignored: {arg}", file=sys.stderr)
             ignored += 1
@@ -74,8 +83,7 @@ def claimed_paths(found: dict, own, base: str) -> tuple:
             if c.worker is None:
                 paths = worktree_changes(c.worktree, base) if c.worktree else []
             else:
-                entries = c.worker.get("touch_map")
-                paths = [plain(e) for e in entries if isinstance(e, str) and plain(e)] if isinstance(entries, list) else []
+                paths = state_paths(c.worker.get("touch_map"))
             if paths:
                 tickets[n] = paths
         elif c.state == "elsewhere" or (c.state == "with-lead" and c.lock and c.lock[0] in ("ours", "foreign-live") and c.worktree):
@@ -150,7 +158,11 @@ def main(argv=None) -> int:
         ap.error("--touch-map needs --ticket")
     candidates = None
     if args.touch_map is not None:
-        candidates, ignored = candidate_paths(args.touch_map, args.literal)
+        try:
+            candidates, ignored = candidate_paths(args.touch_map, args.literal)
+        except touchmap.TouchMapError as e:
+            print(f"holds: {e}", file=sys.stderr)
+            return 2
         if not candidates and ignored:
             print("holds: --touch-map yields no path", file=sys.stderr)
             return 2

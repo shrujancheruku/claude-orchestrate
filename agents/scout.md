@@ -28,5 +28,5 @@ You inspect; the plugin's guard refuses commands that write. Use read tools, `gi
 Conclusions first, not an evidence dump. Each job has a fixed shape; use it exactly. When something isn't there, write `not found:` and where you looked.
 
 - **Reconcile:** one line per in-review ticket the caller names, `#<n> <PR> <check states>` (CI and PR state as the Jobs above say). The caller reads the claim state from `scripts/claims`, so don't report it.
-- **Touch map:** one line per file: `path:line` of its entry point (where the change starts) and a few words on the change. At most ~15 lines in all; if more files are likely, list the first 15 by likelihood and say how many more.
+- **Touch map:** one line per file, in the grammar of `scripts/touchmap.py`: `path:L-L (a few words)`, the line or range where the change starts, a note of a few words in parentheses; no prose between entries, none inside the path or line part (`a.py:10, 20` and `a.py (new):12` are errors). At most ~15 lines in all; if more files are likely, list the first 15 by likelihood and say how many more.
 - **Other jobs:** the answer first, then evidence, one line each: `path:line` or `$ command` → the key output. Under 40 lines.
