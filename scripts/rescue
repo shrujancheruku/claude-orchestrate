@@ -94,7 +94,7 @@ def overlap(root, changed, ticket) -> int:
     if not changed:
         say("overlap: none")
         return 0
-    cmd = [str(HOLDS), "--touch-map", *changed, "--repo", str(root)]
+    cmd = [str(HOLDS), "--literal", "--touch-map", *changed, "--repo", str(root)]
     if ticket is not None:
         cmd += ["--ticket", str(ticket)]
     r = common.run(*cmd, cwd=root)

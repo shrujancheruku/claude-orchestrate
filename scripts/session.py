@@ -249,9 +249,8 @@ def branch_of(prompt) -> str | None:
     return value.split()[0] if value else None
 
 
-def touch_map(prompt) -> list:
-    """The entries of a brief's `Touch map:` line as written, split on commas or semicolons outside parentheses; [] when there is none or it says `none`."""
-    value = brief_field(prompt, "Touch map")
+def split_entries(value) -> list:
+    """The entries of a touch-map string as written, split on commas or semicolons outside parentheses; blanks and bare numbers (`a.py:10,20`) dropped, `none` kept."""
     # Split only at separators outside parentheses: a note like `(main, new checks)` stays in its entry.
     entries, depth, current = [], 0, ""
     for ch in value or "":
@@ -262,5 +261,10 @@ def touch_map(prompt) -> list:
         depth = max(0, depth + (ch == "(") - (ch == ")"))
         current += ch
     entries.append(current)
-    entries = [entry.strip() for entry in entries]
-    return [entry for entry in entries if entry and entry.lower() != "none"]
+    # A bare number is the tail of a line list (`a.py:10,20`), not a path.
+    return [entry.strip() for entry in entries if entry.strip() and not entry.strip().isdigit()]
+
+
+def touch_map(prompt) -> list:
+    """The entries of a brief's `Touch map:` line as written, split on commas or semicolons outside parentheses; [] when there is none or it says `none`."""
+    return [entry for entry in split_entries(brief_field(prompt, "Touch map")) if entry.lower() != "none"]
