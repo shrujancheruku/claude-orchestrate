@@ -28,7 +28,11 @@ def points(query: str, limit: int = 100) -> float:
         if m.group(0) == "}":
             stack.pop()
             continue
-        size = SIZE.search(m.group(2) or "")
+        args = m.group(2) or ""
+        size = SIZE.search(args)
+        # Any other size variable would be priced as no connection at all: fail loudly instead.
+        if re.search(r"\b(?:first|last):\s*(?!\d|\$limit\b)\S", args):
+            raise ValueError(f"cannot price a connection size in ({args})")
         if size:  # a connection: one request per parent node, and its own nodes multiply what is inside it
             requests += stack[-1]
             n = limit if size.group(1) == "$limit" else int(size.group(1))
@@ -57,6 +61,10 @@ class QueryCost(unittest.TestCase):
 
     def test_the_merged_prs_query_costs_at_most_five_points(self):
         self.assertLessEqual(points(lead_brief.MERGED_QUERY, lead_brief.MERGED_LIMIT), MAX_POINTS)
+
+    def test_an_unpriceable_connection_size_fails_loudly(self):
+        with self.assertRaises(ValueError):
+            points("query($n: Int!) { a(first: $n) { nodes { id } } }")
 
     def test_the_issues_query_asks_for_edit_times_without_a_connection(self):
         self.assertNotIn("userContentEdits", github.ISSUES_QUERY)

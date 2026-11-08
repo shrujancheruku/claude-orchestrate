@@ -447,7 +447,7 @@ def _log_attempt(args, cwd, attempt, ms, outcome, status, headers, stdout="") ->
     _log(event, cwd, args)
 
 
-def call(*args, cwd=None) -> str:
+def call(*args, cwd=None, idempotent: bool = False) -> str:
     """Run `gh <args>` and return stdout; raise GhError (missing, failed or ratelimited).
 
     Before the first try it waits out a reset another process recorded in STATE_FILE (or raises `ratelimited`
@@ -458,6 +458,11 @@ def call(*args, cwd=None) -> str:
 
     `gh api` runs with --include (paginated calls excepted): the headers are split off before the body is returned,
     and each attempt, with its status and rate-limit headers, is logged (see the call log above).
+
+    A 5xx (HTTP 500-504) is retried on a short ladder only for a read or a write the caller marks `idempotent`
+    (repeating it leaves the same state): a 5xx can come after GitHub applied a write, and repeating a creating
+    POST, a merge or a delete-style batch could then act twice. An unmarked write fails at once on a 5xx and the
+    caller decides (merge re-reads the state first). A rate limit is retried for every call: nothing ran.
     """
     global waited
     waited = 0.0  # the budget is for this call alone: watch-ci and merge --interval loop for hours in one process
@@ -485,7 +490,10 @@ def call(*args, cwd=None) -> str:
         text = f"{p.stderr}\n{p.stdout}"
         limit = _rate_limit(text)
         if limit is None:
-            server = status in (500, 501, 502, 503, 504) or bool(SERVER_ERROR.search(text))
+            # The status line is the truth; the text is searched only when gh showed none, so a 4xx whose body
+            # echoes "HTTP 502" is not retried.
+            server = status in (500, 501, 502, 503, 504) if status is not None else bool(SERVER_ERROR.search(text))
+            server = server and (idempotent or not describe(args)["write"])
             _log_attempt(args, cwd, attempt, ms, "failed", status, headers)
             if not server:
                 raise GhError(FAILED, common.one_line(p.stderr or stdout))
@@ -519,10 +527,10 @@ def call(*args, cwd=None) -> str:
         _wait_until(clock() + pause, cwd)
 
 
-def call_json(*args, shape=dict, cwd=None):
+def call_json(*args, shape=dict, cwd=None, idempotent: bool = False):
     """`call`, parsed as JSON of type `shape`; anything else is malformed."""
     try:
-        data = json.loads(call(*args, cwd=cwd))
+        data = json.loads(call(*args, cwd=cwd, idempotent=idempotent))
     except ValueError:
         raise GhError(MALFORMED, "gh returned malformed JSON") from None
     if not isinstance(data, shape):
@@ -689,7 +697,8 @@ def delete_branch(branch: str, cwd=None) -> str:
         if e.kind == FAILED and GONE.search(e.message):
             return "already gone"
     try:
-        call("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd)
+        # Idempotent: a repeat after a delete that landed reads as GONE below.
+        call("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd, idempotent=True)
     except GhError as e:
         if e.kind == FAILED and GONE.search(e.message):
             return "already gone"
@@ -757,7 +766,7 @@ def issue_claim(issue, cwd=None) -> tuple:
 
 def close_issue(issue, cwd=None) -> None:
     call("api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/{_pr_number(issue)}", "-f", "state=closed",
-         "-f", "state_reason=completed", cwd=cwd)
+         "-f", "state_reason=completed", cwd=cwd, idempotent=True)  # closing a closed issue changes nothing
 
 
 def _pull(p: dict) -> dict:

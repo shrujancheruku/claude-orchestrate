@@ -284,20 +284,48 @@ class RetryTest(unittest.TestCase):
         fake, sleeps, out, _ = self.run_call(OK)
         self.assertEqual((out, sleeps), ("done\n", []))
 
-    def test_a_write_is_retried_only_on_a_rate_limit_or_a_5xx(self):
-        for text in ("gh: Validation Failed (HTTP 422)", "gh: Forbidden (HTTP 403)"):
+    def test_an_unmarked_write_is_retried_only_on_a_rate_limit(self):
+        for text in ("gh: Validation Failed (HTTP 422)", "gh: Forbidden (HTTP 403)", "gh: Server Error (HTTP 502)"):
             fake, sleeps = FakeGh(fail(text)), []
             with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append):
                 with self.assertRaises(github.GhError):
                     github.call("api", "--method", "POST", "x", cwd=self.dir.name)
             self.assertEqual((fake.calls, sleeps), (1, []), text)
 
-    def test_a_write_hitting_a_502_is_retried(self):
+    def test_a_write_marked_idempotent_is_retried_on_a_502(self):
         fake, sleeps = FakeGh(fail("gh: Server Error (HTTP 502)"), OK), []
         with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append), \
                 unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
-            out = github.call("api", "--method", "POST", "x", cwd=self.dir.name)
+            out = github.call("api", "--method", "POST", "x", cwd=self.dir.name, idempotent=True)
         self.assertEqual((out, fake.calls), ("done\n", 2))
+
+    def test_a_graphql_mutation_is_a_write_and_a_query_is_a_read(self):
+        for query, calls in (("mutation { x }", 1), ("query { x }", 2)):
+            fake, sleeps = FakeGh(fail("gh: Server Error (HTTP 502)"), OK), []
+            with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append), \
+                    unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+                try:
+                    github.call("api", "graphql", "-f", f"query={query}", cwd=self.dir.name)
+                except github.GhError:
+                    pass
+            self.assertEqual(fake.calls, calls, query)
+
+    def test_a_4xx_whose_body_echoes_a_5xx_is_not_retried(self):
+        echo = common.Run(1, "HTTP/2.0 422 X\n\n{}", "gh: Validation Failed (HTTP 422): upstream said HTTP 502")
+        fake, sleeps, _, err = self.run_call(echo, OK)
+        self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
+
+    def test_close_issue_and_delete_branch_are_marked_idempotent(self):
+        seen = []
+
+        def fake_call(*args, cwd=None, idempotent=False):
+            seen.append(idempotent)
+            return ""
+        with unittest.mock.patch.object(github, "call", fake_call):
+            github.close_issue(5)
+            github.delete_branch("b")
+        self.assertEqual(seen[0], True)
+        self.assertIn(True, seen[1:])  # the DELETE
 
     def test_missing_gh_is_not_retried(self):
         fake, _, _, err = self.run_call(common.Run(common.NOT_FOUND, "", "gh: no such file"))

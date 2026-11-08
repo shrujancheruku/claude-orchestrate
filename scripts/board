@@ -149,8 +149,8 @@ class OwnerLookupError(github.GhError):
     """The project owner could not be read (an empty or error reply): not an unknown owner type."""
 
 
-def graphql(query, repo):
-    return github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo)
+def graphql(query, repo, idempotent=False):
+    return github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo, idempotent=idempotent)
 
 
 class Writes:
@@ -165,7 +165,7 @@ class Writes:
         self.size = size
         self.count = 0  # the writes made, or in a dry run the writes planned
         self.adds = []  # [(ticket, number)] of the cards to add
-        self.queue = []  # [callable(resolve) -> mutation fragment]
+        self.queue = []  # [(callable(resolve) -> mutation fragment, idempotent)]
 
     def do(self, what, run, planned=None):
         """A write made at once (the field's create and upgrade: the reply's option ids are needed next)."""
@@ -175,13 +175,15 @@ class Writes:
             return planned
         return run()
 
-    def put(self, what, fragment):
-        """Queue one card write. fragment: callable(resolve) -> the mutation field, resolve mapping a `new:` id."""
+    def put(self, what, fragment, idempotent=False):
+        """Queue one card write. fragment: callable(resolve) -> the mutation field, resolve mapping a `new:` id.
+        idempotent: repeating it leaves the same board (a plain overwrite); a request is retried on a 5xx only when
+        every write in it is, never one holding a delete or an archive."""
         self.count += 1
         if self.dry:
             print(f"would {what}")
         else:
-            self.queue.append(fragment)
+            self.queue.append((fragment, idempotent))
 
     def add(self, what, ticket):
         self.count += 1
@@ -191,11 +193,11 @@ class Writes:
             self.adds.append(ticket)
 
     @staticmethod
-    def send(fields, label, repo):
+    def send(fields, label, repo, idempotent=False):
         """One aliased mutation. A failure names the rows it held and says the later requests were not sent; the next
         sync re-reads the board and writes what is still missing."""
         try:
-            return graphql("mutation { " + " ".join(fields) + " }", repo)
+            return graphql("mutation { " + " ".join(fields) + " }", repo, idempotent)
         except github.GhError as e:
             raise github.GhError(e.kind, f"{label} failed, later requests not sent: {e.message}") from None
 
@@ -226,8 +228,10 @@ class Writes:
         def resolve(item_id):
             return new[int(item_id[4:])] if item_id.startswith("new:") else item_id
         for start in range(0, len(self.queue), self.size):
-            fields = [f"m{k}: {f(resolve)}" for k, f in enumerate(self.queue[start:start + self.size])]
-            self.send(fields, f"writes {start + 1}-{start + len(fields)} of {len(self.queue)}", repo)
+            chunk = self.queue[start:start + self.size]
+            fields = [f"m{k}: {f(resolve)}" for k, (f, _) in enumerate(chunk)]
+            self.send(fields, f"writes {start + 1}-{start + len(fields)} of {len(self.queue)}", repo,
+                      all(safe for _, safe in chunk))
         self.adds, self.queue = [], []
 
 
@@ -270,7 +274,7 @@ def move_after(project_id, item_id, after_id, writes):
         after = f", afterId: {json.dumps(resolve(after_id))}" if after_id else ""
         return ("updateProjectV2ItemPosition(input: {projectId: " + json.dumps(project_id) + ", itemId: "
                 + json.dumps(resolve(item_id)) + after + "}) { clientMutationId }")
-    writes.put(f"move card {item_id} " + (f"after {after_id}" if after_id else "to the top"), fragment)
+    writes.put(f"move card {item_id} " + (f"after {after_id}" if after_id else "to the top"), fragment, idempotent=True)
 
 
 def order_backlog(want_ids, current_ids, project_id, writes):
@@ -392,7 +396,7 @@ def sync(owner, number, repo, writes=None):
         writes.put(f"move card {card_id} to {stage}", lambda r: (
             "updateProjectV2ItemFieldValue(input: {projectId: " + json.dumps(project_id) + ", itemId: "
             + json.dumps(r(card_id)) + ", fieldId: " + json.dumps(field["id"]) + ", value: {singleSelectOptionId: "
-            + json.dumps(options[stage]) + "}}) { clientMutationId }"))
+            + json.dumps(options[stage]) + "}}) { clientMutationId }"), idempotent=True)
 
     def delete(card_id, t):
         writes.put(f"delete card {card_id} (#{t})", lambda r: (
