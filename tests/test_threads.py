@@ -134,6 +134,18 @@ class Threads(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(r.stdout.startswith("T1 rev a.py:3"))
 
+    def test_no_pr_argument_on_a_branch_with_no_pr_is_could_not_run_with_no_fallback(self):
+        self.env.set_gh([gh_repo_view(), {"args": ["pr", "view"], "stderr": "no pull requests found", "exit": 1}])
+        r = self.env.run("threads", "resolve", "T1", "--fixed", SHA[:10], check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no pull requests found", r.stderr)
+        self.assertEqual(self.mutations(), [])
+        self.assertFalse(any(c[:3] == ["api", "graphql", "-f"] for c in self.env.gh_calls()))
+
+    def test_flags_are_not_abbreviated(self):
+        r = self.env.run("threads", "12", "resolve", "T1", "--fix", SHA[:10], check=False)
+        self.assertEqual(r.returncode, 2)
+
     def test_a_word_that_is_neither_a_pr_nor_an_action_is_a_usage_error(self):
         r = self.env.run("threads", "nonsense", check=False)
         self.assertEqual(r.returncode, 2)

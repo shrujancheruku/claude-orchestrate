@@ -104,7 +104,8 @@ def on_branch(sha, shas) -> bool:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    # No abbreviations: the guard approves a worker's call by the flags' full names, so `--rep` must not mean `--repo`.
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("words", nargs="*", metavar="[pr] [resolve|reopen] [thread]...",
                     help="the PR number (left out: the PR of the checked-out branch), then resolve or reopen and the thread ids")
     ap.add_argument("--all", action="store_true", help="list resolved threads too, with their closing reply")

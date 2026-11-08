@@ -1219,11 +1219,21 @@ def threads_form(args: list) -> str | None:
     return None
 
 
-def numberless_threads_form(args: list) -> str | None:
+# The only flags a worker's number-less threads call may carry, spelled in full: `--repo DIR` (and an
+# abbreviation of it, which argparse would accept) aims the call at another repository.
+THREADS_WORKER_FLAGS = ("--all", "--fixed", "--left", "--why", "--verbose")
+
+
+def numberless_threads_form(cmd: Command, args: list) -> str | None:
     """The worker's current-branch form of a threads call, with no PR number: "list", "resolve" or "reopen",
-    or None (a number first, or anything else)."""
+    or None. The script is the first word (no env prefix such as `GH_REPO=` and no wrapper), and every
+    flag is exactly one of THREADS_WORKER_FLAGS."""
     words = [w.text for w in args]
-    if words in ([], ["--all"]):
+    if len(cmd.words) - len(args) != 1 or not words:
+        return "list" if len(cmd.words) == 1 and not words else None
+    if any(w.startswith("-") and w not in THREADS_WORKER_FLAGS for w in words):
+        return None
+    if words == ["--all"]:
         return "list"
     return words[0] if words[0] in ("resolve", "reopen") else None
 
@@ -1478,10 +1488,12 @@ def approval(role: str | None, command: str, cwd: str) -> bool:
     plain_gh = (len(parsed.calls) == 1 and cmd.words[0].text == "gh"
                 and not any(REPO_FLAG.fullmatch(w.text) for w in cmd.words))
     if role == "worker":
+        if worker_worktree(cwd) is None:
+            return False
         found = script_call(parsed, THREADS_SCRIPT)
         if found is not None:
             # Only the current-branch form (no PR number) is approved: the script resolves the PR from the branch.
-            return numberless_threads_form(found[1]) is not None and own_script(found[0], found[1], cwd, "threads")
+            return numberless_threads_form(found[0], found[1]) is not None and own_script(found[0], found[1], cwd, "threads")
         return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0]))
     if role is None and config_path(cwd):
         for pattern, name in ((MERGE_SCRIPT, "merge"), (THREADS_SCRIPT, "threads"), (BOARD_SCRIPT, "board")):
