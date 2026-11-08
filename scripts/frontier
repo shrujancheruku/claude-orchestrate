@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""frontier [--parent <n> | --ticket <n>] [--all] [--repo DIR] : which tickets are takeable now?
+"""frontier [--parent <n> | --ticket <n>] [--all] [--fix-drift] [--snapshot FILE] [--repo DIR] : which tickets are takeable now?
 
 Default: one line per takeable ticket, `#<n> <title>`, ascending, nothing else (an empty frontier prints nothing).
 --all appends four sections, each `<name>:` then one line per item, or `none`:
@@ -8,8 +8,11 @@ Default: one line per takeable ticket, `#<n> <title>`, ascending, nothing else (
     parents-closed:  `#<n> <title>`, open parents whose sub-issues are all closed
     drift:           `#<n> body says blocked by #<m>, tracker does not`
 --parent <n> limits every section to that parent's sub-issues, --ticket <n> to one ticket (its line, or its reason).
-The rules are in scripts/tracker.py. Reads the open issues (every page of one `gh api graphql` query) and the label
-strings from docs/agents/triage-labels.md (the defaults when it is missing). Exit codes: 0 ran; 2 could not run
+--fix-drift adds the native `blocked_by` edge for every `drift:` line in scope (the tracker doc's Blocking command), prints
+`added #<n> blocked by #<m>` for each, and then prints as usual with those lines gone from `drift:`; the orchestrator never runs it.
+The rules are in scripts/tracker.py. Reads the open issues through a Snapshot (every page of one `gh api graphql` query;
+--snapshot FILE reads the file `snapshot` wrote instead of fetching) and the label strings from
+docs/agents/triage-labels.md (the defaults when it is missing). Exit codes: 0 ran; 2 could not run
 (no `gh`, a failed `gh` call, a malformed reply), one line on stderr and no partial output. Stdlib only, Python 3.9+.
 """
 
@@ -71,6 +74,18 @@ def render(issues, scope, labels, show_all) -> list:
     return out
 
 
+def fix_drift(issues, scope, root) -> list:
+    """Add the native edge for each drift in `scope`, record it in the issue dict, and return the lines to print."""
+    in_scope = {i["number"] for i in scope}
+    added = []
+    for issue, n in tracker.drift(issues):
+        if issue["number"] in in_scope:
+            github.add_blocked_by(issue["number"], n, cwd=root)
+            issue["blockers"] = sorted(issue["blockers"] + [n])
+            added.append(f"added #{issue['number']} blocked by #{n}")
+    return added
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     which = ap.add_mutually_exclusive_group()
@@ -78,6 +93,9 @@ def main(argv=None) -> int:
     which.add_argument("--ticket", type=int, help="only this ticket")
     ap.add_argument("--all", action="store_true",
                     help="add the not-takeable, ready-for-human, parents-closed and drift sections")
+    ap.add_argument("--fix-drift", action="store_true",
+                    help="add the native blocked_by edge for each drift line (prints each edge added)")
+    ap.add_argument("--snapshot", help="read the tracker from this file (scripts/snapshot) instead of fetching")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
     root = Path(args.repo).resolve()
@@ -85,12 +103,16 @@ def main(argv=None) -> int:
         common.die(f"frontier: cannot run: {args.repo} is not in a git repository")
     labels = label_strings(root)
     try:
-        issues = tracker.from_nodes(github.open_issues(github.repo_info(root), cwd=root))
+        issues = tracker.Snapshot.open(args.snapshot, root).issues
     except github.GhError as e:
         common.die(f"frontier: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError, AttributeError) as e:
         common.die(f"frontier: cannot run: malformed reply from gh ({e!r})")
-    scope = tracker.scoped(issues, args.parent, args.ticket)
+    try:
+        scope = tracker.scoped(issues, args.parent, args.ticket)
+        added = fix_drift(issues, scope, root) if args.fix_drift else []
+    except github.GhError as e:
+        common.die(f"frontier: cannot run: gh failed: {e.message}")
     lines = render(issues, scope, labels, args.all)
     if args.ticket is not None and not scope:
         lines.insert(0, f"#{args.ticket} not open")
@@ -98,7 +120,7 @@ def main(argv=None) -> int:
         # A named ticket always answers: its line, or the reason it is not takeable.
         reason = tracker.why_not(scope[0], labels, issues) if labels["ready"] in scope[0]["labels"] else None
         lines = [f"#{args.ticket} {reason or 'not ' + labels['ready']}"]
-    for line in lines:
+    for line in added + lines:
         print(line)
     runlog.append_event(root, "frontier", "ran", takeable=len(tracker.takeable(issues, labels)))
     return 0

@@ -50,6 +50,15 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
 }"""
 
 
+# Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
+ABANDON_QUERY = """query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 30, states: CLOSED, labels: ["wontfix"], orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes { number assignees(first: 1) { totalCount } }
+    }
+  }
+}"""
+
 THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
@@ -166,14 +175,6 @@ def issue_state(issue, cwd=None) -> str:
     return str(call_json("issue", "view", str(issue), "--json", "state", cwd=cwd).get("state"))
 
 
-def open_blockers(issue, cwd=None) -> int:
-    """How many open issues block `issue` (the tracker's own dependency summary)."""
-    out = call("api", f"repos/{{owner}}/{{repo}}/issues/{issue}", "--jq", ".issue_dependencies_summary.blocked_by", cwd=cwd)
-    if not out.strip().isdigit():
-        raise GhError(MALFORMED, f"blocked_by is not a number: {common.one_line(out) or 'empty reply'}")
-    return int(out.strip())
-
-
 # Check results that block a merge: failed ones, and ones still going (a missing result counts as going).
 CI_BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
 CI_PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
@@ -212,14 +213,14 @@ def close_issue(issue, cwd=None) -> None:
 
 
 def open_prs(base: str, cwd=None) -> list:
-    return call_json("pr", "list", "--state", "open", "--base", base, "--json",
+    return call_json("pr", "list", "--state", "open", "--base", base, "--limit", "200", "--json",
                      "number,headRefName,isCrossRepository,isDraft", shape=list, cwd=cwd)
 
 
 def open_prs_with_heads(cwd=None) -> list:
     """Every open PR (any base) with its number, branch and head commit: what a worker's report is checked against."""
     return call_json("pr", "list", "--state", "open", "--limit", "200", "--json",
-                     "number,headRefName,headRefOid,isDraft", shape=list, cwd=cwd)
+                     "number,headRefName,headRefOid,isDraft,baseRefName", shape=list, cwd=cwd)
 
 
 def merged_prs(base: str, cwd=None) -> list:
@@ -341,3 +342,26 @@ def pr_commit_shas(pr, cwd=None) -> list:
     out = call("api", "--paginate", f"repos/{{owner}}/{{repo}}/pulls/{str(pr).lstrip('#')}/commits",
                "--jq", ".[].sha", cwd=cwd)
     return out.split()
+
+
+def abandoned_tickets(repo: dict, cwd=None) -> list:
+    """Numbers of closed `wontfix` tickets that are still assigned (the newest 30 closed ones)."""
+    try:
+        owner, name = repo["owner"]["login"], repo["name"]
+    except (KeyError, TypeError):
+        raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
+    data = call_json("api", "graphql", "-f", f"query={ABANDON_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}", cwd=cwd)
+    try:
+        nodes = data["data"]["repository"]["issues"]["nodes"]
+        return sorted(int(n["number"]) for n in nodes if ((n.get("assignees") or {}).get("totalCount") or 0) > 0)
+    except (KeyError, TypeError, ValueError):
+        raise GhError(MALFORMED, "gh returned an unexpected reply (closed issues)") from None
+
+
+def add_blocked_by(child, blocker, cwd=None) -> None:
+    """Add the native `blocked_by` edge: issue `child` is blocked by issue `blocker` (the tracker doc's Blocking command)."""
+    out = call("api", f"repos/{{owner}}/{{repo}}/issues/{blocker}", "--jq", ".id", cwd=cwd).strip()
+    if not out.isdigit():
+        raise GhError(MALFORMED, f"issue id is not a number: {common.one_line(out) or 'empty reply'}")
+    call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{child}/dependencies/blocked_by",
+         "-F", f"issue_id={out}", cwd=cwd)

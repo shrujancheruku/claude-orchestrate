@@ -6,7 +6,7 @@ line), then one line per check, with the last ~40 lines of a failure's output, i
 the PR's title against Conventional Commits; its mergeability with its base (conflicts only: a branch that is
 merely behind passes, and `merge` updates it, exit 5); no overlap with held paths (`holds --pr`, run as a
 subprocess from --cwd: its exit 1 fails the check, its exit 2 is gate exit 2); dependencies merged (the PR's
-ticket has no open blocker and the PR is based on the default branch; no ticket passes); no secrets added
+ticket has no open blocker, native or on its body's `Blocked by:` line, read from the tracker Snapshot and the PR is based on the default branch; no ticket passes); no secrets added
 (env, key and credential paths, private-key and token lines in the diff); a changed lockfile has a changed
 manifest; and each command the config's `Repo-specific checks` entry carries (a `run: \`cmd\``-marked span).
 CI is never checked: that is `watch-ci`'s. Appends one `gate` event (ref = the PR number, head = the PR's head
@@ -34,6 +34,7 @@ import config
 import github
 import repo
 import runlog
+import tracker
 
 HOLDS = Path(__file__).resolve().parent / "holds"
 # Paths (by file name) that hold secrets, and added lines that are secrets.
@@ -103,9 +104,10 @@ def dependencies_check(view):
     if ticket is None:
         return check(f"{name} (no ticket)", True)
     problems = []
-    blockers = github.open_blockers(ticket)
+    blockers = tracker.Snapshot().blockers(ticket)
     if blockers:
-        problems.append(f"#{ticket} has {blockers} open blocker(s)")
+        problems.append(f"#{ticket} has {len(blockers)} open blocker(s): "
+                        + " ".join(f"#{n} (body)" if from_body else f"#{n}" for n, from_body in blockers))
     default = github.default_branch()
     if view.get("baseRefName") != default:
         problems.append(f"based on {view.get('baseRefName')}, not {default}: a dependency is not merged")

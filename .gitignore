@@ -3,3 +3,4 @@ __pycache__/
 .claude/orchestrate-state.json
 .claude/orchestrate-profiles/
 .claude/orchestrate-lead.json
+.claude/orchestrate-snapshot.json
