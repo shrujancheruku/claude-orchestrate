@@ -6,8 +6,8 @@ first decides readiness and merges nothing unless the PR is ready: CI not green 
 pending, failed, cancelled or missing, or no checks at all while the head has workflow files; no checks and no workflow files is green, `ci: none configured`) or an open blocker on the PR's ticket (the
 branch's `<number>-` prefix, else the PR's closing reference), or an unresolved review thread (outdated or not, any author; the count line, then one
 `  <author> <url>` line each), is a refusal (exit 1, the clause named); a PR behind the default branch is
-updated with `gh pr update-branch` (exit 5); the worker's own change since the approved head, not counting
-what merges of the default branch brought in, that touches a config risk path or exceeds the S thresholds
+updated with `gh pr update-branch` (exit 5); the PR's own change since the approved head (what it adds to the
+default branch at each head, compared, so merges of the default branch count for nothing) that touches a config risk path or exceeds the S thresholds
 needs re-review (exit 6). Without the flag it merges as before.
 
 `gh pr merge`'s exit is unreliable (a 502 can hide a merge that landed; a retry can answer "merge
@@ -26,7 +26,7 @@ merge main into the branch (a plain push); rebase rebases it and pushes with --f
 A conflict the script can't resolve (a file that isn't shared, or overlapping words) aborts that
 branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
 After the sweep, each --also-approved PR=SHA (a PR the reviewer approved at that head, still waiting to merge)
-that is open, still at that head and behind the default branch is brought up to date with `gh pr update-branch`
+that is open, at that head (or with only merges of the default branch since) and behind the default branch is brought up to date with `gh pr update-branch`
 too, so their CI runs at the same time instead of one merge after another: one `PR #<n> updated (behind by <k>);
 wait for CI` line each. A PR that is behind and DIRTY is not updated: its line says to hand it back. An
 unapproved PR, or one pushed to since its approval, is left alone. None of this changes the exit code.
@@ -36,10 +36,17 @@ again; 6 the change since --approved-head needs re-review (nothing merged); 1 th
 2 the script could not run (`gh` is missing or cannot read the PR, or with --approved-head readiness could not be decided, e.g. a failed compare call or review-threads read: run it again; the error goes to stderr); 3 still not MERGED at the timeout (run it
 again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
+Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word: `merged` |
+`wait-ci <pr> <head>` | `re-review <pr>` | `send-back <pr>` (the lines above it are what the PR's owner gets) |
+`ask-user <why>` | `retry` | `could-not-run`. Before it, one `also: <verdict> <pr> ...` line per other PR the run
+touched (--also-approved, the sweep): `wait-ci <pr> <head>`, `send-back <pr>` or `left <pr> <why>`. The exit codes
+are unchanged: 0 and 4 end `merged`, 5 `wait-ci`, 6 `re-review`, 3 `retry`, 2 `could-not-run`, and 1 (a refusal)
+`wait-ci`, `send-back` or `ask-user` by its clause.
 Stdlib only, Python 3.9+.
 """
 
 import argparse
+import difflib
 from pathlib import Path
 import re
 import sys
@@ -102,38 +109,89 @@ def say(msg):
     print(msg, flush=True)
 
 
-def own_changes(cwd, approved, head, default):
-    """(files, lines) the worker changed from `approved` to `head`, or None when git can't say.
+# The run's verdict, printed by main() as the `also:` lines and then the one `next:` line.
+VERDICT = {"next": None, "also": []}
 
-    Counts only the worker's non-merge commits that the default branch lacks, so a merge of the default
-    branch (the sweep's, or update-branch) adds nothing; --cherry-pick drops commits a rebase re-made
-    with the same patch. The sum is per commit, so a line added and removed again still counts: the
-    guard errs towards re-review.
+
+def verdict(text):
+    VERDICT["next"] = text
+
+
+def also(text):
+    VERDICT["also"].append(text)
+
+
+def why_of(text):
+    """One line for an `ask-user <why>` verdict."""
+    return common.one_line(text) or "see the output above"
+
+
+def own_changes(cwd, approved, head, default):
+    """(files, lines) the PR changed from `approved` to `head`, or None when git can't say.
+
+    Compares what the PR adds to the default branch at each head (see pr_patch), so a merge of the
+    default branch (the sweep's, or update-branch) contributes nothing, even in a file the PR also
+    changes far from the PR's hunks; a rebase that kept the same change counts nothing either. Every
+    file whose patch differs between the two heads counts as a file (so it meets the risk-path check),
+    even when only its mode changed or it is an empty file added or removed; its lines are the patch
+    +/- lines that differ (context fixes where each sits, so a moved line counts), at least one. (set(), 0) means the PR's
+    own change is the same at both heads. An unknown SHA or a failed git call gives None, which callers
+    treat as needing re-review.
     """
     run("git", "fetch", "--quiet", "origin", cwd=cwd)
-    revs = run("git", "rev-list", "--no-merges", "--right-only", "--cherry-pick", f"{approved}...{head}",
-               "--not", f"origin/{default}", cwd=cwd)
-    if revs.returncode != 0:
-        return None
-    shas = revs.stdout.split()
-    if not shas:
-        return set(), 0
-    stat = run("git", "show", "--no-renames", "--numstat", "--format=", *shas, cwd=cwd)
-    if stat.returncode != 0:
+    old, new = pr_patch(cwd, approved, default), pr_patch(cwd, head, default)
+    if old is None or new is None:
         return None
     files, lines = set(), 0
-    for row in stat.stdout.splitlines():
-        parts = row.split("\t", 2)
-        if len(parts) == 3:
-            files.add(parts[2])
-            lines += sum(int(n) for n in parts[:2] if n.isdigit())
+    for path in set(old) | set(new):
+        a, b = old.get(path, ()), new.get(path, ())
+        if a == b:
+            continue
+        files.add(path)
+        # Changed lines only (not context, mode or file-name rows); a file that differs counts at least one,
+        # so a moved block (same +/- rows, other context) is one line with its file counted.
+        n = sum(1 for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+                if tag != "equal" for row in a[i1:i2] + b[j1:j2]
+                if row[:1] in ("+", "-") and not row.startswith(("+++ ", "--- ")))
+        lines += max(n, 1)
     return files, lines
+
+
+def pr_patch(cwd, sha, default):
+    """{file: tuple of patch lines} the PR adds on top of `origin/<default>` at `sha`, or None.
+
+    The diff from the merge base of `sha` and the default branch to `sha`, so what the default branch
+    brought in is not in it. Each file's tuple is its patch with the context lines, the mode lines and
+    a bare `@@` for each hunk header: the line numbers (which shift when the default branch edits the
+    file elsewhere) and blob hashes are dropped, the position of every change is kept by its context.
+    """
+    base = run("git", "merge-base", f"origin/{default}", sha, cwd=cwd)
+    if base.returncode != 0 or not base.stdout.strip():
+        return None
+    diff = run("git", "diff", "--no-renames", "--no-color", "--no-ext-diff", "-U3", "--src-prefix=a/", "--dst-prefix=b/", base.stdout.strip(), sha, cwd=cwd)
+    if diff.returncode != 0:
+        return None
+    files, cur, index = {}, None, ""
+    for row in diff.stdout.splitlines():
+        if row.startswith("diff --git "):
+            cur = files.setdefault(row.rpartition(" b/")[2], [])
+        elif cur is None:
+            continue
+        elif row.startswith("index "):
+            index = row  # a blob hash: kept only for a binary file, whose change shows nowhere else
+        elif row.startswith("Binary files"):
+            cur += [index, row]
+        elif row.startswith("@@"):
+            cur.append("@@")
+        else:
+            cur.append(row)
+    return {path: tuple(rows) for path, rows in files.items()}
 
 
 def merge_rule(cwd, pr, v, head):
     """Exit code 1 (or 2: could not read) when CI is not green on the head or the PR's ticket has an open blocker, else None."""
     rollup = v.get("statusCheckRollup")
-    verdict, names = github.ci_verdict(rollup)
+    ci, names = github.ci_verdict(rollup)
     if not rollup:
         # An empty rollup is green only when the head has no workflow files (ADR-0012): a repo that cannot
         # report checks passes, one that can but has not reported yet stays pending. One contents call, only here.
@@ -146,9 +204,11 @@ def merge_rule(cwd, pr, v, head):
             say(f"PR #{pr}: ci: none configured (no workflow files on {head[:12]})")
         else:
             say(f"PR #{pr} is not ready: ci: pending on {head[:12]}: workflows exist but no checks reported yet")
+            verdict(f"wait-ci {pr} {head}")
             return 1
-    elif verdict != "pass":
-        say(f"PR #{pr} is not ready: CI {verdict} on {head[:12]}: {', '.join(names) or 'no checks'}")
+    elif ci != "pass":
+        say(f"PR #{pr} is not ready: CI {ci} on {head[:12]}: {', '.join(names) or 'no checks'}")
+        verdict(f"wait-ci {pr} {head}" if ci == "pending" else f"send-back {pr}")
         return 1
     ticket = repo.ticket_of_branch(v.get("headRefName"))
     if ticket is None:
@@ -164,6 +224,7 @@ def merge_rule(cwd, pr, v, head):
     if blockers:
         say(f"PR #{pr} is not ready: ticket #{ticket} has {len(blockers)} open blocker(s): "
             + " ".join(f"#{n} (body)" if from_body else f"#{n}" for n, from_body in blockers))
+        verdict(f"ask-user ticket #{ticket} has {len(blockers)} open blocker(s)")
         return 1
     return None
 
@@ -183,7 +244,19 @@ def threads_rule(cwd, pr):
     for t in unresolved:
         first = t["comments"][0] if t["comments"] else {}
         say(f"  {first.get('author') or 'ghost'} {first.get('url') or '?'}")
+    verdict(f"send-back {pr}")
     return 1
+
+
+def new_head(cwd, pr, old):
+    """The PR's head after a branch update (what the CI to wait for runs on). `?` when gh can't say or the head
+    is still `old`: the host may apply the update after `gh pr update-branch` returns, and the old head's green
+    CI must not be waited on (the run skill says `?` means `watch-ci <pr>`, whatever head it reports)."""
+    try:
+        head = github.pr_view(pr, "headRefOid", cwd).get("headRefOid")
+    except github.GhError:
+        return "?"
+    return head if head and head != old else "?"
 
 
 def readiness(cwd, pr, v, approved):
@@ -209,12 +282,17 @@ def readiness(cwd, pr, v, approved):
             github.update_branch(pr, cwd)
         except github.GhError as e:
             say(f"PR #{pr} is behind {default} by {behind} and update-branch failed: {e.message}")
+            # A fork's branch can't be updated by the host or pushed to by the worker: sending it back would loop.
+            verdict(f"ask-user PR #{pr} is a fork; its branch can't be updated" if v.get("isCrossRepository")
+                    else f"send-back {pr}")
             return 1
         say(f"PR #{pr} was behind {default} by {behind}; branch updated; wait for CI, then run merge again")
+        verdict(f"wait-ci {pr} {new_head(cwd, pr, head)}")
         return 5
     changes = own_changes(cwd, approved, head, default)
     if changes is None:
         say(f"PR #{pr} needs re-review: the approved head {approved[:12]} or the head is unknown to git")
+        verdict(f"re-review {pr}")
         return 6
     files, lines = changes
     cfg = config.Config.load(cwd)
@@ -225,12 +303,30 @@ def readiness(cwd, pr, v, approved):
         why = f"touches risk path(s) {', '.join(risky)}" if risky else \
             f"changed {lines} line(s) in {len(files)} file(s), over the S thresholds"
         say(f"PR #{pr} needs re-review: its change since the approved head {approved[:12]} {why}")
+        verdict(f"re-review {pr}")
         return 6
     say(f"PR #{pr} is up to date, and its change since the approved head is within the S thresholds")
     return None
 
 
 def main(argv=None) -> int:
+    """Run the merge, then print the `also:` lines and the one `next:` line (see the module docstring)."""
+    VERDICT["next"], VERDICT["also"] = None, []
+    try:
+        code = run_merge(argv)
+    except SystemExit as e:  # common.die (2) or an argparse usage error (2); --help (0) prints no verdict
+        if e.code in (0, None):
+            raise
+        code = e.code if isinstance(e.code, int) else 2
+    for line in VERDICT["also"]:
+        say(f"also: {line}")
+    # A path that set no verdict falls back on its exit code: 3 timed out, 0 merged, anything else could not run.
+    fallback = {0: "merged", 3: "retry"}.get(code, "could-not-run")
+    say(f"next: {VERDICT['next'] or fallback}")
+    return code
+
+
+def run_merge(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("pr", help="PR number")
     ap.add_argument("--method", default="squash", choices=["squash", "merge", "rebase"])
@@ -293,9 +389,11 @@ def main(argv=None) -> int:
         if state == "CLOSED":
             say(f"PR #{pr} closed without merging")
             runlog.append_event(cwd, "merge", "closed", ref=ref, branch=branch)
+            verdict(f"ask-user PR #{pr} closed without merging")
             return 1
         if refused:
             say(f"merge refused for PR #{pr}: {refused}")
+            verdict(f"ask-user {why_of(f'merge refused for PR #{pr}: {refused}')}")
             return 1
         if time.monotonic() >= deadline:
             say(f"PR #{pr} not MERGED after {args.timeout:g}s (state {state}); run merge again later")
@@ -352,6 +450,7 @@ def main(argv=None) -> int:
                         tickets=[int(t) for t in tickets if t.isdigit()])
     handed = sweep(cwd, pr, branch, default, args.method)
     update_approved(cwd, pr, default, args.also_approved)
+    verdict("merged")
     return 4 if handed else 0
 
 
@@ -367,24 +466,34 @@ def update_approved(cwd, merged_pr, default, specs):
         n = n.lstrip("#")
         if not n.isdigit() or not sha:
             say(f"also-approved {spec!r} skipped: expected PR=SHA")
+            also(f"left {n or '?'} expected PR=SHA")
             continue
         if n == str(merged_pr) or default is None:
             continue  # the PR just landed, or the default branch is unknown: nothing to update
         try:
             v = github.pr_view(n, "state,headRefName,headRefOid,isCrossRepository,mergeStateStatus", cwd)
-            if v.get("state") != "OPEN" or v.get("isCrossRepository") or v.get("headRefOid") != sha:
-                say(f"PR #{n} left alone: not open, a fork, or its head is no longer the approved one (pushed to, or updated by the sweep)")
+            if v.get("state") != "OPEN" or v.get("isCrossRepository"):
+                say(f"PR #{n} left alone: not open or a fork")
+                also(f"left {n} not open or a fork")
+                continue
+            if v.get("headRefOid") != sha and own_changes(cwd, sha, v.get("headRefOid") or "", default) != (set(), 0):
+                # The re-review rule: merges of the default branch (update-branch) are not a push.
+                say(f"PR #{n} left alone: its head is no longer the approved one (pushed to since the approval)")
+                also(f"left {n} pushed to since the approval")
                 continue
             behind = github.behind_by(default, v.get("headRefName") or sha, cwd)
             if not behind:
                 continue
             if v.get("mergeStateStatus") == "DIRTY":
                 say(f"PR #{n} is behind {default} by {behind} and DIRTY; not updated: hand it back to its worker")
+                also(f"send-back {n}")
                 continue
             github.update_branch(n, cwd)
             say(f"PR #{n} updated (behind by {behind}); wait for CI")
+            also(f"wait-ci {n} {new_head(cwd, n, v.get('headRefOid'))}")
         except github.GhError as e:
             say(f"PR #{n} not updated: {e.message}")
+            also(f"left {n} not updated: {why_of(e.message)}")
 
 
 def sweep(cwd, merged_pr, merged_branch, default, method):
@@ -423,6 +532,7 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
             say(f"sweep: PR #{n} {b} updated" + (" (force-with-lease)" if method == "rebase" else ""))
         elif result.status == "handed-back":
             handed = True
+            also(f"send-back {n}")
             say(f"sweep: PR #{n} {b} NOT updated")
             for line in result.handback_lines(f"PR #{n} {b}"):
                 say(line)

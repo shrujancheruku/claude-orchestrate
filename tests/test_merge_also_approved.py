@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, git  # noqa: E402
 
 GREEN = [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"}]
 
@@ -50,6 +50,10 @@ class AlsoApprovedTest(unittest.TestCase):
         self.assertEqual(self.updated(), [["pr", "update-branch", "8"], ["pr", "update-branch", "9"]])
         self.assertIn("PR #8 updated (behind by 3); wait for CI", p.stdout)
         self.assertIn("PR #9 updated (behind by 1); wait for CI", p.stdout)
+        lines = p.stdout.splitlines()
+        self.assertRegex(lines[-3], r"^also: wait-ci 8 \S+$")
+        self.assertRegex(lines[-2], r"^also: wait-ci 9 \S+$")
+        self.assertEqual(lines[-1], "next: merged")
 
     def test_a_pr_not_named_approved_is_left_alone(self):
         p = self.merge([self.other(8, "b" * 40), self.behind(8, 3)])
@@ -66,22 +70,59 @@ class AlsoApprovedTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertEqual(self.updated(), [])
         self.assertIn("PR #8 is behind main by 2 and DIRTY; not updated: hand it back", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-2:], ["also: send-back 8", "next: merged"])
 
     def test_a_pr_pushed_to_since_its_approval_is_left_alone(self):
         p = self.merge([self.other(8, "d" * 40), self.behind(8, 2)], "8=" + "b" * 40)
         self.assertEqual(self.updated(), [])
         self.assertIn("PR #8 left alone", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 pushed to since the approval", "next: merged"])
 
     def test_a_failed_update_does_not_fail_the_merge(self):
         p = self.merge([self.other(8, "b" * 40), self.behind(8, 2)], "8=" + "b" * 40,
                        update={"exit": 1, "stderr": "boom"})
         self.assertEqual(p.returncode, 0)
         self.assertIn("PR #8 not updated", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 not updated: boom", "next: merged"])
 
     def test_a_malformed_spec_is_skipped(self):
         p = self.merge([], "nonsense")
         self.assertEqual(p.returncode, 0)
         self.assertIn("skipped: expected PR=SHA", p.stdout)
+
+    def branch(self, name="br-8"):
+        """An approved head on `name`, pushed; returns its sha. The repo is left on main."""
+        repo = self.env.repo
+        git(repo, "checkout", "-q", "-b", name)
+        sha = self.env.commit("pr.txt", "one\n", "feat: pr")
+        git(repo, "push", "-q", "origin", name)
+        git(repo, "checkout", "-q", "main")
+        return sha
+
+    def test_a_pr_updated_from_main_still_matches_its_spec(self):
+        approved = self.branch()
+        repo = self.env.repo
+        self.env.commit("other.txt", "x\n" * 50, "feat: main moves")
+        git(repo, "push", "-q", "origin", "main")
+        git(repo, "checkout", "-q", "br-8")
+        git(repo, "merge", "-q", "--no-ff", "-m", "Merge branch main", "main")
+        head = git(repo, "rev-parse", "HEAD")
+        git(repo, "push", "-q", "origin", "br-8")
+        git(repo, "checkout", "-q", "main")
+        p = self.merge([self.other(8, head), self.behind(8, 1)], "8=" + approved)
+        self.assertEqual(self.updated(), [["pr", "update-branch", "8"]], p.stdout)
+
+    def test_a_pr_with_its_own_push_after_the_approval_is_left_alone(self):
+        approved = self.branch()
+        repo = self.env.repo
+        git(repo, "checkout", "-q", "br-8")
+        head = self.env.commit("pr2.txt", "two\n", "fix: more")
+        git(repo, "push", "-q", "origin", "br-8")
+        git(repo, "checkout", "-q", "main")
+        p = self.merge([self.other(8, head), self.behind(8, 1)], "8=" + approved)
+        self.assertEqual(self.updated(), [])
+        self.assertIn("PR #8 left alone", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
 
 
 if __name__ == "__main__":

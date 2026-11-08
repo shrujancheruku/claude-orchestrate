@@ -46,6 +46,7 @@ class SweepTest(SweepMixin, unittest.TestCase):
         p = self.sweep()
         self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
         self.assertIn("HANDBACK PR #8 pr-a: CHANGELOG.md", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-2:], ["also: send-back 8", "next: merged"])
         git(self.env.repo, "fetch", "origin")
         self.assertEqual(git(self.env.repo, "rev-parse", "origin/pr-a"), before)
         self.assertEqual(self.pushes(), [])

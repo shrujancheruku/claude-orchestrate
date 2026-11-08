@@ -224,5 +224,46 @@ class GlossaryTerms(unittest.TestCase):
         self.assertNotIn("Pre-merge check", (ROOT / "docs/guide.md").read_text())
 
 
+class VerdictLines(unittest.TestCase):
+    """`gate` and `merge` end with one `next:` verdict line; the run skill names every word and no exit code (#347)."""
+
+    GATE = ("review <head>", "send-back <pr>", "rerun-after-ci", "could-not-run")
+    MERGE = ("merged", "wait-ci <pr> <head>", "re-review <pr>", "send-back <pr>", "ask-user <why>", "retry",
+             "could-not-run")
+    ALSO = ("wait-ci <pr> <head>", "send-back <pr>", "left <pr> <why>")
+
+    def skill(self):
+        return (ROOT / "skills/run/SKILL.md").read_text()
+
+    def step(self, text, start, end):
+        i = text.index(start)
+        return text[i:text.index(end, i)]
+
+    def test_the_skill_names_every_verdict_word(self):
+        text = self.skill()
+        gate = self.step(text, "1. **Gate and CI:**", "\n2. ")
+        merge = self.step(text, "6. **Approved**", "7. **After the merge:**")
+        for word in self.GATE:
+            self.assertIn(f"`{word}`", gate)
+        for word in self.MERGE + self.ALSO:
+            self.assertIn(f"`{word}`", merge)
+        self.assertIn("`also: <verdict> <pr> ...`", merge)
+
+    def test_the_merge_step_names_no_exit_code(self):
+        merge = self.step(self.skill(), "6. **Approved**", "7. **After the merge:**")
+        self.assertNotRegex(merge, r"(?i)\bexits? \d")
+
+    def test_the_guide_lists_the_vocabulary(self):
+        guide = (ROOT / "docs/guide.md").read_text()
+        for word in set(self.GATE + self.MERGE + self.ALSO):
+            self.assertIn(f"`{word}`", guide)
+
+    def test_the_scripts_document_the_same_words(self):
+        for name, words in (("gate", self.GATE), ("merge", self.MERGE)):
+            doc = (ROOT / "scripts" / name).read_text().split('"""')[1]
+            for word in words:
+                self.assertIn(word, doc)
+
+
 if __name__ == "__main__":
     unittest.main()

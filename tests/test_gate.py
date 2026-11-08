@@ -57,6 +57,37 @@ class GateTest(unittest.TestCase):
         self.assertEqual((e["kind"], e["ref"]), ("gate", 7))
         return e
 
+    def next_lines(self, r):
+        return [l for l in r.stdout.splitlines() if l.startswith("next:")]
+
+    def test_a_failed_check_ends_send_back(self):
+        self.prime(title="Add the thing")
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (1, ["next: send-back 7"]))
+        self.assertEqual(r.stdout.splitlines()[-1], "next: send-back 7")
+
+    def test_unknown_mergeability_ends_rerun_after_ci(self):
+        self.prime(mergeable="UNKNOWN")
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: rerun-after-ci"]))
+
+    def test_every_could_not_run_path_ends_could_not_run(self):
+        self.prime()
+        paths = {"missing cwd": ("--cwd", str(self.env.repo / "gone")), "bad timeout": ("--timeout", "0")}
+        for name, flags in paths.items():
+            with self.subTest(name):
+                r = self.gate(*flags)
+                self.assertEqual((r.returncode, self.next_lines(r)), (2, ["next: could-not-run"]))
+        self.env.set_gh([{"args": ["pr", "view"], "stderr": "boom", "exit": 1}])
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (2, ["next: could-not-run"]))
+        self.assertNotIn("next:", r.stderr)
+
+    def test_help_prints_no_verdict(self):
+        r = self.env.run("gate", "--help", check=False)
+        self.assertEqual((r.returncode, "next:" in r.stdout.split("\n\n", 1)[0]), (0, False))
+        self.assertFalse(r.stdout.rstrip().splitlines()[-1].startswith("next:"))
+
     def test_one_gate_run_reads_the_issues_once(self):
         # #367: the gate hands its snapshot to `holds --snapshot`, so the issues are fetched by the gate alone.
         self.prime(blockers=0, ticket_body="x")
@@ -72,6 +103,7 @@ class GateTest(unittest.TestCase):
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         lines = r.stdout.splitlines()
+        self.assertEqual(lines.pop(), f"next: review {HEAD}")
         self.assertEqual(lines[0], f"PR #7 head {HEAD}")
         self.assertEqual(len(lines), 8)  # head, title, mergeable, overlap, dependencies, secrets, lockfiles, run:
         self.assertTrue(all(l.startswith("pass") for l in lines[1:]), lines)
@@ -143,7 +175,7 @@ class GateTest(unittest.TestCase):
                     "user's config scripts (degrade instead).")
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len(r.stdout.splitlines()), 7)  # the built-in checks only
+        self.assertEqual(len(r.stdout.splitlines()), 8)  # the built-in checks only, then next:
         self.assertNotIn("README.md", r.stdout)
 
     def test_missing_cwd_exits_2_before_any_check(self):
@@ -163,7 +195,7 @@ class GateTest(unittest.TestCase):
         r = self.gate("--cwd", str(other))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("pwd", r.stdout)
-        self.assertEqual(len(r.stdout.splitlines()), 8)
+        self.assertEqual(len(r.stdout.splitlines()), 9)
 
     def test_several_markers_in_one_item_all_run(self):
         self.prime()
@@ -263,7 +295,7 @@ class GateTest(unittest.TestCase):
         self.prime()
         r = self.gate()
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(len(r.stdout.splitlines()), 7)
+        self.assertEqual(len(r.stdout.splitlines()), 8)
 
     def test_missing_gh_is_could_not_run(self):
         r = self.env.run("gate", "7", "--retry-delay", "0", check=False, no_gh=True)
