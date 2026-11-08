@@ -32,7 +32,7 @@ def iso(minutes):
 
 
 def comment(minutes, body, edits=()):
-    return {"body": body, "createdAt": iso(minutes), "userContentEdits": {"nodes": [{"editedAt": iso(e)} for e in edits]}}
+    return {"body": body, "createdAt": iso(minutes), "lastEditedAt": iso(max(edits)) if edits else None}
 
 
 def issue(number, labels=(), claimed=False, comments=(), body_edits=(), blocked_by=()):
@@ -40,7 +40,7 @@ def issue(number, labels=(), claimed=False, comments=(), body_edits=(), blocked_
             "blockedBy": {"nodes": [{"number": b, "state": st} for b, st in blocked_by]},
             "labels": {"nodes": [{"name": name} for name in labels]},
             "assignees": {"totalCount": 1 if claimed else 0},
-            "userContentEdits": {"nodes": [{"editedAt": iso(e)} for e in body_edits]},
+            "lastEditedAt": iso(max(body_edits)) if body_edits else None,
             "comments": {"nodes": list(comments)}}
 
 

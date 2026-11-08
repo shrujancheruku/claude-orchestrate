@@ -365,6 +365,29 @@ class CallLogTest(unittest.TestCase):
         self.assertTrue(e["script"])
         self.assertNotIn('"id"', self.log.read_text())  # no body
 
+    def test_a_graphql_call_logs_the_rate_limit_cost_the_query_asked_for(self):
+        body = '{"data": {"rateLimit": {"cost": 3}}}'
+        ok = common.Run(0, reply(200, body, x_ratelimit_used=10, x_ratelimit_resource="graphql"), "")
+        self.run_call([ok], "api", "graphql", "-f", "query=query { rateLimit { cost } }")
+        [e] = self.events()
+        self.assertEqual(e["cost"], 3)
+
+    def test_a_graphql_call_without_cost_logs_the_used_delta(self):
+        github._last_used.clear()
+        self.addCleanup(github._last_used.clear)
+        calls = [common.Run(0, reply(200, '{"data": {}}', x_ratelimit_used=u, x_ratelimit_resource="graphql"), "")
+                 for u in (100, 104)]
+        for c in calls:
+            self.run_call([c], "api", "graphql", "-f", "query=query { viewer { login } }")
+        first, second = self.events()
+        self.assertNotIn("cost", first)  # nothing to subtract from yet
+        self.assertEqual(second["cost"], 4)
+
+    def test_a_rest_call_logs_no_cost(self):
+        self.run_call([common.Run(0, reply(200, "{}", x_ratelimit_used=10, x_ratelimit_resource="core"), "")], "api", "x")
+        [e] = self.events()
+        self.assertNotIn("cost", e)
+
     def test_a_retried_call_writes_one_event_per_attempt_and_a_wait(self):
         limited = common.Run(1, reply(403, "{}", retry_after=2, x_ratelimit_remaining=0),
                              "gh: You have exceeded a secondary rate limit. (HTTP 403)")

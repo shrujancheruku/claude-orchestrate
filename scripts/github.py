@@ -35,6 +35,10 @@ GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exis
 NO_REPO = re.compile(r"not a git repository|unable to read current working directory|"
                      r"cannot determine current working directory|getcwd", re.I)
 
+# GitHub bills a GraphQL call as (1 + the nodes each connection is asked under) / 100 points: a connection inside a
+# 100-node page costs 100 requests, one inside those 100 more costs 10,000. So the comments' edit history
+# (`userContentEdits`, 100 x 100 nodes) made this query ~105 points (#498). The scripts read only whether something
+# was edited after a time, which `lastEditedAt` answers with no connection: 1 + 4 x 100 requests, ~5 points.
 ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
     issues(first: 100, after: $after, states: OPEN, orderBy: {field: CREATED_AT, direction: ASC}) {
@@ -50,8 +54,8 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         labels(first: 30) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
-        userContentEdits(first: 20) { nodes { editedAt } }
-        comments(last: 100) { nodes { body createdAt userContentEdits(first: 20) { nodes { editedAt } } } }
+        lastEditedAt
+        comments(last: 100) { nodes { body createdAt lastEditedAt } }
       }
     }
   }
@@ -409,8 +413,32 @@ def _log(event: dict, cwd=None, args=None) -> None:
         pass
 
 
-def _log_attempt(args, cwd, attempt, ms, outcome, status, headers) -> None:
+_last_used: dict = {}  # x-ratelimit-resource -> the `used` this process last saw, for the per-call delta
+
+
+def _graphql_cost(stdout, headers):
+    """Points one GraphQL call cost: `rateLimit.cost` when the query asked for it, else how far the bucket's
+    `used` counter rose since this process's previous call (None for the first call, or without headers)."""
+    try:
+        cost = json.loads(stdout)["data"]["rateLimit"]["cost"]
+        if isinstance(cost, int):
+            return cost
+    except (ValueError, KeyError, TypeError):
+        pass
+    used = _int(headers or {}, "x-ratelimit-used")
+    resource = (headers or {}).get("x-ratelimit-resource")
+    if used is None or resource is None:
+        return None
+    before, _last_used[resource] = _last_used.get(resource), used
+    return used - before if before is not None and used >= before else None
+
+
+def _log_attempt(args, cwd, attempt, ms, outcome, status, headers, stdout="") -> None:
     event = {"attempt": attempt, "outcome": outcome, "ms": ms, "status": status}
+    if outcome == "ok" and args and args[0] == "api" and "graphql" in args:
+        cost = _graphql_cost(stdout, headers)
+        if cost is not None:
+            event["cost"] = cost
     if headers is None:
         event["headers"] = "unavailable"  # a subcommand, or a paginated api call: gh shows none
     else:
@@ -452,7 +480,7 @@ def call(*args, cwd=None) -> str:
         if p.returncode == common.NOT_FOUND:
             raise GhError(MISSING, common.one_line(p.stderr))
         if p.returncode == 0:
-            _log_attempt(args, cwd, attempt, ms, "ok", status, headers)
+            _log_attempt(args, cwd, attempt, ms, "ok", status, headers, stdout)
             return stdout
         text = f"{p.stderr}\n{p.stdout}"
         limit = _rate_limit(text)
