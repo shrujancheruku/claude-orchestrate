@@ -303,16 +303,21 @@ class Holds(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
 
     def test_an_error_nothing_maps_is_exit_2_with_one_line_not_a_traceback(self):
-        # An unreadable config is an OSError/UnicodeDecodeError outside the mapped set: exit 2, never Python's exit 1 (#424).
-        self.gh()
-        d = self.env.repo / ".claude"
-        d.mkdir(exist_ok=True)
-        (d / "orchestration.md").write_bytes(b"\xff\xfe\x00bad")
-        r = self.holds("--touch-map", "a.py", "--ticket", "7")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertNotIn("Traceback", r.stderr)
-        self.assertRegex(r.stderr.strip(), r"^holds: could not run: \w+: ")
-        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+        # An OSError from claims.claims is outside the mapped set: exit 2, never Python's exit 1 (#424).
+        import io
+        from contextlib import redirect_stderr
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        scripts = str(Path(__file__).resolve().parent.parent / "scripts")
+        sys.path.insert(0, scripts)
+        self.addCleanup(sys.path.remove, scripts)
+        holds = SourceFileLoader("holds_under_test", f"{scripts}/holds").load_module()
+        err = io.StringIO()
+        with mock.patch.object(holds.claims, "claims", side_effect=PermissionError("denied\nreading it")), \
+                mock.patch.object(holds.tracker.Snapshot, "open", return_value=mock.MagicMock(prs=[])), redirect_stderr(err):
+            code = holds.main(["--touch-map", "a.py", "--ticket", "7", "--repo", str(self.env.repo)])
+        self.assertEqual(code, 2)
+        self.assertEqual(err.getvalue().strip(), "holds: could not run: PermissionError: denied reading it")
 
     def test_gh_unavailable_could_not_run(self):
         r = self.env.run("holds", "--touch-map", "a.py", "--ticket", "7", check=False, no_gh=True)
