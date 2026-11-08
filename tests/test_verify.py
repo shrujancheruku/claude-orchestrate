@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, git  # noqa: E402
 
 
 class VerifyTest(unittest.TestCase):
@@ -151,6 +151,31 @@ class VerifyConfigTest(unittest.TestCase):
         r = self.verify("--config", "true")
         self.assertEqual(r.returncode, 2)
         self.assertFalse((self.env.repo / "ran.txt").exists())
+
+    def test_branch_refused_from_a_main_checkout(self):
+        r = self.verify("--branch", "feat", "true")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("main checkout", r.stderr)
+
+    def test_branch_refused_on_the_wrong_branch_and_passes_on_the_right_one(self):
+        wt = self.env.repo.parent / "wt"
+        git(self.env.repo, "worktree", "add", "-b", "feat", str(wt))
+        r = self.env.run("verify", "--branch", "other", "true", cwd=wt, check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not other", r.stderr)
+        r = self.env.run("verify", "--branch", "feat", "true", cwd=wt, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_branch_checks_cwd_flag_not_process_cwd(self):
+        wt = self.env.repo.parent / "wt"
+        git(self.env.repo, "worktree", "add", "-b", "feat", str(wt))
+        r = self.verify("--branch", "feat", "--cwd", str(wt), "true")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_help_prints_usage_instead_of_running_it(self):
+        r = self.verify("--help")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("--branch", r.stdout)
 
 
 if __name__ == "__main__":
