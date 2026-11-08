@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""snapshot [--repo DIR] [--out FILE] : read the tracker once and write it to a file.
+
+Reads the open issues (blockers, labels, assignee, body, parent, sub-issue summary, comments), the open and merged PRs,
+and the closed `wontfix` tickets still assigned, through one tracker.Snapshot, and writes them to FILE (default:
+<repo>/.claude/orchestrate-snapshot.json, gitignored). `claims`, `frontier`, `holds` and `lead-route` take
+`--snapshot FILE` and read it instead of fetching, so a reconcile pass reads the tracker once. Prints the path, one line.
+Exit codes: 0 written; 2 could not run (no `gh`, a failed `gh` call, a malformed reply, not a repository), one line on
+stderr. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import common
+import github
+import tracker
+
+SNAPSHOT = ".claude/orchestrate-snapshot.json"
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    ap.add_argument("--out", default=None, help=f"the file to write (default: <repo>/{SNAPSHOT})")
+    args = ap.parse_args(argv)
+    root = Path(args.repo).resolve()
+    if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
+        common.die(f"snapshot: cannot run: {args.repo} is not in a git repository")
+    out = Path(args.out) if args.out else root / SNAPSHOT
+    try:
+        tracker.Snapshot(root).write(out)
+    except github.GhError as e:
+        common.die(f"snapshot: cannot run: gh failed: {e.message}")
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        common.die(f"snapshot: cannot run: malformed reply from gh ({e!r})")
+    except OSError as e:
+        common.die(f"snapshot: cannot run: cannot write {out}: {e.strerror or e}")
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

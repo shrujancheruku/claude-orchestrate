@@ -8,7 +8,7 @@ lock:  `live <pid>`; `live ?` (the line then ends ` (lock: <reason>)`: the reaso
        unlock the worktree if it is stale); `dead <pid>` (unlock it, then rescue it); `none` (no lock or no worktree).
 changes (only with a worktree and no PR): `clean`, `dirty <k>`, `unpushed <k>` or `dirty <k> unpushed <j>`.
 `claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line.
-Reads the open issues (one `gh api graphql`), the open and merged PRs, the state file (a missing one means no workers) and
+Reads the tracker as one Snapshot (scripts/tracker.py; `--snapshot FILE` reads a file `snapshot` wrote instead of fetching), the state file (a missing one means no workers) and
 `git worktree list`. Exit codes: 0 printed; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository, an
 unreadable state file), one line on stderr. Stdlib only, Python 3.9+.
 """
@@ -20,6 +20,7 @@ from pathlib import Path
 import claims
 import common
 import github
+import tracker
 from repo import STATE
 
 
@@ -42,23 +43,15 @@ def main(argv=None) -> int:
     ap.add_argument("ticket", nargs="?", type=int, help="print only this ticket")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     ap.add_argument("--state", default=None, help="state file (default: <repo>/.claude/orchestrate-state.json)")
+    ap.add_argument("--snapshot", default=None, help="read the tracker from this file (scripts/snapshot) instead of fetching")
     args = ap.parse_args(argv)
     root = Path(args.repo).resolve()
     if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
         common.die(f"claims: cannot run: {args.repo} is not in a git repository")
     state_file = Path(args.state) if args.state else root / STATE
     try:
-        info = github.repo_info(root)
-        base = (info.get("defaultBranchRef") or {}).get("name")
-        if not isinstance(base, str):
-            raise github.GhError(github.MALFORMED, "gh returned no default branch")
-        nodes = github.open_issues(info, cwd=root)
-        issues = [{"number": int(n["number"]),
-                   "claimed": ((n.get("assignees") or {}).get("totalCount") or 0) > 0,
-                   "labels": {x["name"] for x in (n.get("labels") or {}).get("nodes") or []}} for n in nodes]
-        prs = github.open_prs_with_heads(cwd=root)
-        merged = github.merged_prs(base, cwd=root)
-        found = claims.claims(root, state_file, issues, prs, merged)
+        snap = tracker.Snapshot.open(args.snapshot, root)
+        found = claims.claims(root, state_file, snap.issues, snap.prs, snap.merged)
     except github.GhError as e:
         common.die(f"claims: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError) as e:
