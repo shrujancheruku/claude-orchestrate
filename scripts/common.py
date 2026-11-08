@@ -214,7 +214,7 @@ def process_start(pid):
 
 
 def worktrees(root) -> list:
-    """[{"path", "branch" (short name or None), "locked" (reason, "" for none given, None when unlocked)}] from
+    """[{"path", "branch" (short name or None), "detached" (bool), "locked" (reason, "" for none given, None when unlocked)}] from
     `git worktree list --porcelain`; [] when git can't list them."""
     r = run("git", "worktree", "list", "--porcelain", cwd=root)
     if r.code != 0:
@@ -226,7 +226,9 @@ def worktrees(root) -> list:
                 found.append(cur)
             cur = None
         elif line.startswith("worktree "):
-            cur = {"path": line[len("worktree "):], "branch": None, "locked": None}
+            cur = {"path": line[len("worktree "):], "branch": None, "detached": False, "locked": None}
+        elif cur is not None and line == "detached":
+            cur["detached"] = True
         elif cur is not None and line.startswith("branch "):
             ref = line[len("branch "):]
             cur["branch"] = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
