@@ -237,5 +237,50 @@ class WatchCi(unittest.TestCase):
         self.assertEqual((out.splitlines(), p.returncode), (["PR #6 pass CLEAN 6666666"], 0), err)
 
 
+RUN_URL = "https://github.com/o/r/actions/runs/900/job/901"
+
+
+def running(url=RUN_URL):
+    v = view(None)
+    v["statusCheckRollup"] = [{"status": "IN_PROGRESS", "conclusion": "", "detailsUrl": url}]
+    return v
+
+
+def jobs_reply(steps, status="in_progress"):
+    job = {"id": 901, "name": "validate", "status": status, "steps": [{"status": s} for s in steps]}
+    return {"args": ["api"], "stdout": json.dumps({"jobs": [job]})}
+
+
+class StuckJob(unittest.TestCase):
+    def setUp(self):
+        self.env = ScriptEnv()
+        self.addCleanup(self.env.close)
+
+    def stuck_watch(self, jobs, after, ticks=3):
+        rows = [dict(running(), number=5)] * ticks + [dict(view("SUCCESS", head="5555555aaa"), number=5)]
+        self.env.set_gh([{"args": ["pr", "list"], "seq": [{"stdout": json.dumps([r])} for r in rows]}, jobs])
+        return self.env.run("watch-ci", "--interval", "0", "--stuck-after", str(after), "5")
+
+    def test_a_job_with_all_steps_done_still_in_progress_is_reported_once(self):
+        r = self.stuck_watch(jobs_reply(["completed", "completed"]), 0)
+        self.assertEqual(r.stdout.splitlines(), [
+            "PR #5: job validate stuck in_progress with all steps done; rerun with gh run rerun 900 --job 901",
+            "PR #5 pass CLEAN 5555555"])
+        self.assertIn(["api", "repos/{owner}/{repo}/actions/runs/900/jobs"],
+                      self.env.gh_calls())
+
+    def test_nothing_is_reported_before_the_wait_is_over(self):
+        r = self.stuck_watch(jobs_reply(["completed"]), 3600)
+        self.assertEqual(r.stdout.splitlines(), ["PR #5 pass CLEAN 5555555"])
+
+    def test_a_job_with_a_step_still_running_is_not_stuck(self):
+        r = self.stuck_watch(jobs_reply(["completed", "in_progress"]), 0)
+        self.assertEqual(r.stdout.splitlines(), ["PR #5 pass CLEAN 5555555"])
+
+    def test_a_failed_jobs_read_does_not_end_the_watch(self):
+        r = self.stuck_watch({"args": ["api"], "stderr": "HTTP 502: bad gateway\n", "exit": 1}, 0)
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #5 pass CLEAN 5555555"], 0), r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,11 @@ Run it as a Monitor command so the orchestrator never sleeps or polls. Each line
 Each settle also appends one `ci` event (ref = the PR number). A PR with no checks yet counts as
 pending (checks may not be registered right after a push); the Monitor's timeout bounds the wait. A PR
 that is merged or closed settles at once.
+A run that stays `in_progress` is also read once per tick (`GET actions/runs/<id>/jobs`, only while a watched
+PR has a check in progress): a job whose steps are all `completed` yet whose status has stayed `in_progress` for
+5 minutes (`--stuck-after` overrides) prints once
+    PR #<n>: job <name> stuck in_progress with all steps done; rerun with gh run rerun <run id> --job <job id>
+and the watch carries on. Nothing is rerun; the orchestrator decides. A failed jobs read is skipped for that tick.
 Each tick is one `gh pr list` request for every PR still watched, so the read load does not grow with the
 number of PRs. The default interval is 30 seconds with one or two PRs and 60 with three or more
 (`--interval` overrides it).
@@ -23,6 +28,7 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
+import re
 import sys
 import time
 
@@ -35,6 +41,8 @@ MAX_FAILURES = 5  # consecutive failed `gh` ticks before every watched PR ends i
 MAX_MISSES = 3  # consecutive replies without a PR before it ends in an error line
 FEW, FEW_INTERVAL, MANY_INTERVAL = 2, 30.0, 60.0  # up to FEW PRs poll every FEW_INTERVAL seconds, more every MANY_INTERVAL
 EXIT_ERROR = 3
+STUCK_AFTER = 300.0  # seconds a job with every step completed may stay in_progress before it is reported as stuck
+RUN_URL = re.compile(r"/actions/runs/(\d+)/")  # a check's detailsUrl names its workflow run
 FIELDS = "number,statusCheckRollup,mergeStateStatus,headRefOid,state,isDraft"
 BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
 PENDING_STATES = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
@@ -85,11 +93,53 @@ def view_prs(root):
     return {str(r["number"]): r for r in rows if isinstance(r, dict) and "number" in r}, None
 
 
+def in_progress_runs(view: dict):
+    """Ids of the workflow runs behind the PR's checks that are still in progress."""
+    runs = []
+    for c in view.get("statusCheckRollup") or []:
+        m = RUN_URL.search(c.get("detailsUrl") or "")
+        if m and c.get("status") == "IN_PROGRESS" and m.group(1) not in runs:
+            runs.append(m.group(1))
+    return runs
+
+
+def finished_in_progress(job: dict) -> bool:
+    """A job still `in_progress` although all of its steps have completed (GitHub Actions sometimes hangs here)."""
+    steps = job.get("steps") or []
+    return job.get("status") == "in_progress" and bool(steps) and all(s.get("status") == "completed" for s in steps)
+
+
+def check_stuck(root, pr, run_id, first_seen, reported, stuck_after):
+    """Print one line per job of the run that has been finished-but-in_progress for stuck_after seconds.
+    first_seen {job id: monotonic time first seen so}; reported: job ids already printed. Best-effort: a failed
+    read is skipped, the next tick tries again."""
+    try:
+        data = github.call_json("api", f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs", cwd=root)
+    except github.GhError as e:
+        print(f"watch-ci: could not read jobs of run {run_id}: {e.message}", file=sys.stderr, flush=True)
+        return
+    now = time.monotonic()
+    for job in data.get("jobs") or []:
+        if not isinstance(job, dict):
+            continue
+        key = (run_id, job.get("id"))
+        if not finished_in_progress(job):
+            first_seen.pop(key, None)
+            continue
+        since = first_seen.setdefault(key, now)
+        if now - since >= stuck_after and key not in reported:
+            reported.add(key)
+            print(f"PR #{pr}: job {job.get('name')} stuck in_progress with all steps done; "
+                  f"rerun with gh run rerun {run_id} --job {job.get('id')}", flush=True)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("prs", nargs="+", help="PR numbers")
     ap.add_argument("--interval", type=float, default=None,
                     help="seconds between checks (default 30 with one or two PRs, 60 with three or more)")
+    ap.add_argument("--stuck-after", type=float, default=STUCK_AFTER,
+                    help="seconds a job with every step done may stay in_progress before it is reported (default 300)")
     args = ap.parse_args(argv)
     pending = [common.pr_ref(p)[0] for p in args.prs]
     code, _, _ = common.run("git", "rev-parse", "--show-toplevel")
@@ -101,6 +151,7 @@ def main(argv=None) -> int:
     misses = {pr: 0 for pr in pending}
     failures = 0
     errored = False
+    first_seen, reported = {}, set()
 
     def give_up(pr, reason):
         nonlocal errored
@@ -131,6 +182,9 @@ def main(argv=None) -> int:
                 misses[pr] = 0
                 result = judge(view)
                 if result is None:
+                    if not view.get("isDraft"):
+                        for run_id in in_progress_runs(view):
+                            check_stuck(root, pr, run_id, first_seen, reported, args.stuck_after)
                     continue
                 pending.remove(pr)
                 merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
