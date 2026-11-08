@@ -237,7 +237,7 @@ class Prompts(unittest.TestCase):
     def test_worker_resolves_threads_after_the_push_and_names_human_only(self):
         s = self.text("agents/worker.md")
         para = s[s.index('For "address review"'):]
-        self.assertIn("threads <pr>", para)
+        self.assertIn("threads resolve <id>", para)
         self.assertIn("--fixed <the pushed sha>", para)
         self.assertIn("stop-reason: human-only", para)
         self.assertNotIn("reviews/<id>/comments", s)
