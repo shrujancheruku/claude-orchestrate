@@ -25,6 +25,7 @@ import argparse
 import fnmatch
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -94,7 +95,7 @@ def lockfiles_without_manifest(changed):
     return out
 
 
-def dependencies_check(view):
+def dependencies_check(view, snap):
     """Pass when the PR's ticket has no open blocker and the PR is based on the default branch."""
     name = "dependencies merged"
     ticket = repo.ticket_of_branch(view.get("headRefName"))
@@ -104,7 +105,7 @@ def dependencies_check(view):
     if ticket is None:
         return check(f"{name} (no ticket)", True)
     problems = []
-    blockers = tracker.Snapshot().blockers(ticket)
+    blockers = snap.blockers(ticket)
     if blockers:
         problems.append(f"#{ticket} has {len(blockers)} open blocker(s): "
                         + " ".join(f"#{n} (body)" if from_body else f"#{n}" for n, from_body in blockers))
@@ -114,11 +115,25 @@ def dependencies_check(view):
     return check(name, not problems, "\n".join(problems))
 
 
-def overlap_check(pr, cwd):
+def overlap_check(pr, cwd, snap):
     """The `holds --pr` verdict as a check, or an error string when holds could not run (its exit 2)."""
     # --repo is the main checkout: the state file holding the building tickets' touch maps lives only there,
     # and from a worker's worktree holds would read none.
-    p = common.run(sys.executable, str(HOLDS), "--pr", str(pr), "--repo", repo.main_checkout(cwd), cwd=cwd)
+    # holds gets the gate's own snapshot (#367), so one gate run reads the tracker once. It reads the repo, issues,
+    # PRs and merged PRs; `abandoned` is not its business, so the file carries an empty one rather than a fetch.
+    try:
+        full = tracker.Snapshot(cwd, repo=snap.repo, issues=snap.issues, prs=snap.prs, merged=snap.merged, abandoned=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "snapshot.json"
+            full.write(path)
+            p = common.run(sys.executable, str(HOLDS), "--pr", str(pr), "--repo", repo.main_checkout(cwd),
+                           "--snapshot", str(path), cwd=cwd)
+    except github.GhError as e:
+        return f"holds could not run: gh failed: {e.message}"
+    except (KeyError, TypeError, ValueError) as e:  # a malformed issues reply: could not run, not a failed check
+        return f"gh returned a malformed issues reply ({e!r})"
+    except OSError as e:
+        return f"holds could not run: cannot write the snapshot: {e.strerror or e}"
     if p.code == 0:
         return check("no overlap with held paths", True)
     if p.code == 1:
@@ -159,12 +174,13 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
     # Being behind is not a failure: `merge --approved-head` updates the branch (exit 5) and CI reruns (#230).
     label = f"mergeable with {base} (behind_by {behind if behind is not None else '?'})"
     results.append(check(label, not problems, "\n".join(problems)))
-    overlap = overlap_check(pr, cwd)
+    snap = tracker.Snapshot(cwd)
+    overlap = overlap_check(pr, cwd, snap)
     if isinstance(overlap, str):
         return None, overlap
     results.append(overlap)
     try:
-        results.append(dependencies_check(view))
+        results.append(dependencies_check(view, snap))
         diff = github.call("pr", "diff", str(pr), cwd=cwd)
     except github.GhError as e:
         return None, e.message if e.kind == github.MALFORMED else f"gh failed: {e.message}"
