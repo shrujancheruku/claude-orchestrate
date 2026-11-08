@@ -43,19 +43,19 @@ def plain(entry: str) -> str:
 
 def claimed_paths(found: dict, own, base: str) -> tuple:
     """({ticket: [paths]} for the Building claims, {ticket: [paths]} for the Elsewhere claims), the ticket `own` left out.
-    A Building claim holds its touch map (the state-file entries, through `plain`); an Elsewhere claim holds its
-    worktree's changes, the ones a live worker has made so far (ADR 0009). An open PR is a different claim state,
+    A Building claim holds its touch map (the state-file entries, through `plain`); an Elsewhere claim, or a Building one with no record (this
+    session's own worker, `worker unknown`), holds its worktree's changes, the ones a live worker has made so far (ADR 0009). An open PR is a different claim state,
     so a ticket with a PR is held only through the PR's diff."""
     tickets, others = {}, {}
     for n, c in sorted(found.items()):
         if n == own:
             continue
-        if c.state == "building":
+        if c.state == "building" and c.worker is not None:
             entries = (c.worker or {}).get("touch_map")
             paths = [plain(e) for e in entries if isinstance(e, str) and plain(e)] if isinstance(entries, list) else []
             if paths:
                 tickets[n] = paths
-        elif c.state == "elsewhere" or (c.state == "with-lead" and c.lock and c.lock[0] == "live" and c.worktree):
+        elif c.state in ("elsewhere", "building") or (c.state == "with-lead" and c.lock and c.lock[0] in ("ours", "foreign-live") and c.worktree):
             # A `lead` ticket with a live worker's worktree still holds its uncommitted changes, as it did before the
             # claims module: the claims state says with-lead, but a live lock means someone is still writing there.
             paths = worktree_changes(c.worktree, base)

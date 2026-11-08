@@ -10,8 +10,9 @@ The state, decided in this order:
               progress marker, not a review request: it counts as no PR here (ADR 0011), so the ticket is
               building (or stalled, or elsewhere) and `Claim.pr` still names the draft to link it
   done        the ticket's branch has a merged PR, or the ticket is in the state file but not among the open issues
-  building    a worker record from this session in the state file
-  elsewhere   no record, and the worktree on its branch is locked by a live session (ADR 0009)
+  building    a worker record from this session in the state file, or no record but the worktree's lock is this
+              session's own live worker (`worker unknown`: a dispatch the state file couldn't join)
+  elsewhere   no record, and the worktree on its branch is locked by another live session (ADR 0009)
   stalled     otherwise: no PR, no record, no live lock (dead lock, no lock, no worktree, no branch)
 `paused` and `waiting` are not here: they are the orchestrator's own overlay.
 """
@@ -34,7 +35,7 @@ class Claim:
     state: str
     branch: str | None = None      # the `<ticket>-` branch some worktree has checked out, else the PR's head branch
     worktree: str | None = None    # path of the worktree on that branch
-    lock: tuple | None = None      # ("live", pid) | ("live", None, reason) | ("dead", pid) | None
+    lock: tuple | None = None      # (state, pid) | ("foreign-live", None, reason) | None; state: ours | foreign-live | dead
     pr: int | None = None          # the open PR's number: the ready one, else the draft
     worker: dict | None = None     # the state-file record: agent id, model, last report, touch map
     changes: tuple | None = None   # (dirty paths, unpushed commits) for a claim with a worktree and no PR
@@ -78,9 +79,9 @@ def worktree_state(path, branch) -> tuple:
 def _lock(wt) -> tuple | None:
     if wt is None or wt["locked"] is None:
         return None
-    state, pid = common.lock_state(wt["locked"])
-    if state == "live" and pid is None:
-        return ("live", None, wt["locked"] or "no reason given")
+    state, pid = common.worker_liveness(wt["locked"])
+    if state == "foreign-live" and pid is None:
+        return (state, None, wt["locked"] or "no reason given")
     return (state, pid)
 
 
@@ -130,7 +131,9 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.state = "done"
         elif record is not None:
             claim.state = "building"
-        elif claim.lock and claim.lock[0] == "live":
+        elif claim.lock and claim.lock[0] == "ours":
+            claim.state = "building"  # this session's own worker with no record: nothing may rescue over it
+        elif claim.lock and claim.lock[0] == "foreign-live":
             claim.state = "elsewhere"
         else:
             claim.state = "stalled"
