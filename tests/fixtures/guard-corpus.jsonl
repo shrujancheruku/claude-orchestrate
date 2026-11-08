@@ -563,3 +563,21 @@
 {"role": "orchestrate:worker", "command": "git commit -m \"fix: x\" -m \"(scripts/merge)\"", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "printf \"%s\" \"x | scripts/merge\"", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr merge 12", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title 'feat: x' --body 'Closes #1'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr ready 12", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit 12 --body-file .claude/pr-body.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "scripts/threads 12 reopen PRRT_x --why nope", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh pr review 12 --comment --body 'x'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/r/pulls/12/comments -f path=a.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr merge 12 --squash", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "scripts/merge 12 --approved-head abc1234", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh pr ready 12", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh pr review 12 --approve", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "gh pr edit 12 --body x", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --repo owner/repo --title x --body y", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh -R owner/repo pr edit 5 --title x", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr ready 5 --repo=owner/repo", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "bash ./evil/scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "/tmp/x/scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git -c credential.helper='!gh auth git-credential' push https://github.com/owner/repo.git feat", "expected": "silent", "source": "hand"}

@@ -1,11 +1,13 @@
 """PreToolUse guard for the orchestrate plugin's agents.
 
-Claude Code runs this before every Bash call while the plugin is enabled. It
-acts only when the call comes from one of this plugin's agents (the hook input
-names it in `agent_type`) and refuses the commands that agent's role must
-leave to someone else. The one write it lets a read-only role make is a
-reviewer's comment review on a PR, and only when the repo's config turns
-posting on.
+Claude Code runs this before every Bash call, and before a file edit, while the
+plugin is enabled. It acts only when the call comes from one of this plugin's
+agents (the hook input names it in `agent_type`) and refuses the commands that
+agent's role must leave to someone else. The one write it lets a read-only role
+make is a reviewer's comment review on a PR, and only when the repo's config
+turns posting on. For a call its rules accept that is one of the role's routine
+writes it also answers `allow`, so auto mode's classifier isn't asked (#358);
+the user's own deny and ask rules still win.
 
 It reads a command the way the shell tokenises it. One lexer splits the
 command into simple commands and words, with quotes, escapes, line
@@ -19,6 +21,7 @@ and computed strings can still get past it.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -1239,6 +1242,182 @@ def verdict(role: str, command: str, cwd: str, background: bool = False, timeout
     return None
 
 
+# --- Routine steps the guard approves outright (#358). ---
+#
+# Auto mode's classifier refused a worker's plain steps: editing in its own worktree, pushing its ticket
+# branch, editing its own PR, resolving its own threads. A PreToolUse `allow` skips that layer (the user's own
+# deny and ask rules still bind it). The guard says `allow` only for a call its rules already accepted AND that
+# is one of the role's routine writes, in a shape it reads whole: one simple command of plain words, no chain.
+# Everything else stays silent, so the permission layer applies as before.
+
+EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
+TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+REMOTE_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+?(?:\.git)?")
+CREDENTIAL_OPTION = "credential.helper=!gh auth git-credential"
+BOARD_SCRIPT = re.compile(r"(?:^|/)scripts/board$")
+PLUGIN_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+REPO_FLAG = re.compile(r"-R.*|--repo(?:=.*)?")
+SETTINGS_FILE = re.compile(r"settings[^/]*\.json")
+
+
+def worker_worktree(cwd: str) -> Path | None:
+    """The worker's own worktree: the `.claude/worktrees/agent-*` directory that holds cwd, or None."""
+    if not cwd:
+        return None
+    try:
+        start = Path(cwd).resolve()
+    except OSError:
+        return None
+    for directory in (start, *start.parents):
+        if (directory.name.startswith("agent-") and directory.parent.name == "worktrees"
+                and directory.parent.parent.name == ".claude"):
+            return directory
+    return None
+
+
+def worktree_branch(worktree: Path) -> str | None:
+    """The branch checked out in a linked worktree, read from its HEAD file (no git subprocess)."""
+    try:
+        gitdir = (worktree / (worktree / ".git").read_text().split("gitdir:", 1)[1].strip().splitlines()[0]).resolve()
+        head = (gitdir / "HEAD").read_text().strip()
+    except (OSError, IndexError, UnicodeDecodeError):
+        return None
+    prefix = "ref: refs/heads/"
+    return head[len(prefix):] if head.startswith(prefix) and len(head) > len(prefix) else None
+
+
+def edit_decision(tool_name: str, tool_input: object, cwd: str) -> tuple | None:
+    """("allow" | "deny", reason) for a worker's Edit, Write, MultiEdit or NotebookEdit, or None for silence.
+    A worker's file edits belong inside its own worktree (#320); a path in a temp directory is scratch."""
+    worktree = worker_worktree(cwd)
+    key = EDIT_TOOLS.get(tool_name)
+    path = tool_input.get(key) if key and isinstance(tool_input, dict) else None
+    if worktree is None or not isinstance(path, str) or not path:
+        return None  # not in an agent worktree, or no path to judge: the permission layer decides
+    target = Path(os.path.realpath(path if os.path.isabs(path) else os.path.join(cwd, path)))
+    if target == worktree or worktree in target.parents:
+        # Writes that change the worker's own permissions or git internals keep their prompt.
+        parts = target.relative_to(worktree).parts if target != worktree else ()
+        if parts[:1] == (".git",) or (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
+            return None
+        return "allow", "routine worker step"
+    in_temp = any(str(target) == t or str(target).startswith(t + "/") for t in TEMP_ROOTS)
+    in_repo = any(root == target or root in target.parents for root in repo_roots(cwd))
+    if in_temp and not in_repo:
+        return None  # scratch space outside every checkout
+    return "deny", (f"the worker role can't edit {path}: it is outside your worktree ({worktree}). "
+                    "Make every change inside your own worktree.")
+
+
+def one_plain_command(parsed: "Parsed") -> Command | None:
+    """The only command of the line when it is a single top-level simple command of plain words."""
+    if len(parsed.cmds) != 1:
+        return None
+    cmd = parsed.cmds[0]
+    return cmd if cmd.depth == 0 and only_plain_words(cmd) and not cmd.heredocs and cmd.words else None
+
+
+def github_slug(url: str) -> str | None:
+    m = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?", url)
+    return m.group(1).lower() if m else None
+
+
+def is_origin_url(url: str, cwd: str) -> bool:
+    """The HTTPS push form (for the credential helper) is approved only for the repo `origin` names."""
+    slug = github_slug(url)
+    if slug is None or not REMOTE_URL.fullmatch(url):
+        return False
+    for git_dir in common_git_dirs(cwd):
+        try:
+            text = (git_dir / "config").read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        m = re.search(r'\[remote "origin"\][^\[]*?^\s*url\s*=\s*(\S+)', text, re.MULTILINE)
+        if m:
+            return github_slug(m.group(1)) == slug
+    return False
+
+
+def own_script(cmd: Command, args: list, cwd: str, name: str) -> bool:
+    """The script word of a threads, merge or board call is this plugin's own scripts/<name>, not a
+    same-named file elsewhere (a worker can write one in its worktree)."""
+    word = cmd.words[len(cmd.words) - len(args) - 1].text
+    return Path(os.path.realpath(os.path.join(cwd or ".", word))) == PLUGIN_SCRIPTS / name
+
+
+def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
+    """A worker's `git add`, `git commit` or push of its own ticket branch, from inside its worktree."""
+    worktree = worker_worktree(cwd)
+    if worktree is None or basename(cmd.words[0]) != "git" or len(parsed.calls) != 1:
+        return False
+    call = parsed.calls[0]
+    if call.is_sub("add", "commit"):
+        return not call.options
+    if not call.is_sub("push"):
+        return False
+    if [(n, v.text if v else None) for n, v in call.options] not in ([], [("-c", CREDENTIAL_OPTION)]):
+        return False
+    args = [a.text for a in call.args if a.text not in ("-u", "--set-upstream")]
+    branch = worktree_branch(worktree)
+    if branch is None or branch in default_branches(cwd) or len(args) != 2:
+        return False
+    remote, ref = args
+    return (remote == "origin" or is_origin_url(remote, cwd)) and ref in (branch, f"{branch}:{branch}")
+
+
+def routine_pr(call: Call) -> bool:
+    """A worker's draft PR, or its PR made ready or edited. The number is plain digits; whose PR it is the
+    guard can't see, so that is not judged."""
+    if not call.is_sub("pr") or any(a.dynamic for a in call.args):
+        return False
+    args = [a.text for a in call.args]
+    if call.is_verb("create"):
+        return "--draft" in args
+    if call.is_verb("ready"):
+        return len(args) == 1 and args[0].isdigit()
+    return call.is_verb("edit") and bool(args) and args[0].isdigit()
+
+
+def config_path(cwd: str) -> Path | None:
+    """The nearest `.claude/orchestration.md` up from cwd."""
+    start = Path(cwd or ".").resolve()
+    for directory in (start, *start.parents):
+        if (directory / CONFIG).is_file():
+            return directory / CONFIG
+    return None
+
+
+def approval(role: str | None, command: str, cwd: str) -> bool:
+    """True when this command, already accepted by the rules, is one of its role's routine writes. `role`
+    None is the orchestrator's own session (no `agent_type`), in a repo that carries this plugin's config."""
+    parsed = Parsed(parse(command))
+    if role == "reviewer":
+        return review_post(parsed) == "" and posting_enabled(cwd)
+    cmd = one_plain_command(parsed)
+    if cmd is None:
+        return False
+    # `-R`/`--repo` aims a gh call at a repo the agent was not given: leave it to the permission layer.
+    plain_gh = (len(parsed.calls) == 1 and cmd.words[0].text == "gh"
+                and not any(REPO_FLAG.fullmatch(w.text) for w in cmd.words))
+    if role == "worker":
+        found = script_call(parsed, THREADS_SCRIPT)
+        if found is not None:
+            return threads_form(found[1]) in ("resolve", "reopen") and own_script(found[0], found[1], cwd, "threads")
+        return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0]))
+    if role is None and config_path(cwd):
+        for pattern, name in ((MERGE_SCRIPT, "merge"), (THREADS_SCRIPT, "threads"), (BOARD_SCRIPT, "board")):
+            found = script_call(parsed, pattern)
+            if found is not None:
+                return own_script(found[0], found[1], cwd, name)
+        return plain_gh and parsed.calls[0].is_sub("issue") and parsed.calls[0].is_verb("edit", "comment", "create", "close")
+    return False
+
+
+def allow(reason: str) -> None:
+    json.dump({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                      "permissionDecisionReason": f"orchestrate guard: {reason}"}}, sys.stdout)
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -1249,19 +1428,39 @@ def main() -> None:
     agent_type = data.get("agent_type")
     tool_input = data.get("tool_input")
     role = role_of(agent_type if isinstance(agent_type, str) else "")
+    cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else ""
+    if data.get("tool_name") in EDIT_TOOLS:
+        decision = edit_decision(data["tool_name"], tool_input, cwd) if role == "worker" else None
+        if decision:
+            (deny if decision[0] == "deny" else allow)(decision[1])
+        return
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if role is None or command is None or command == "":
+    orchestrator = role is None and not agent_type  # the main session: only ever approved, never refused
+    if (role is None and not orchestrator) or command is None or command == "":
+        return
+    if orchestrator:
+        try:
+            if isinstance(command, str) and approval(None, command, cwd):
+                allow("routine orchestrator step")
+        except Exception:
+            pass  # silence: the permission layer decides
         return
     try:
         if not isinstance(command, str):
             raise TypeError("command is not a string")
-        reason = verdict(role, command, data.get("cwd") or "", tool_input.get("run_in_background") is True,
+        reason = verdict(role, command, cwd, tool_input.get("run_in_background") is True,
                          tool_input.get("timeout"))
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
                   f"Rewrite it more simply. {NEXT_STEP[rules_role(role)]}")
     if reason:
         deny(reason)
+        return
+    try:
+        if approval(role, command, cwd):
+            allow(f"routine {role} step")
+    except Exception:
+        pass  # silence: the permission layer decides
 
 
 if __name__ == "__main__":
