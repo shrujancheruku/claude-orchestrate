@@ -108,13 +108,21 @@ class Decide(unittest.TestCase):
     def wt(self, n, locked=None):
         return {"path": f"/wt/{n}", "branch": f"{n}-x", "locked": locked}
 
-    def test_live_lock_without_a_record_is_elsewhere(self):
+    def test_own_live_lock_without_a_record_is_building_worker_unknown(self):
+        # The test process is an ancestor of itself, as the session is of the worker it dispatched.
         c = self.decide([issue(7)], worktrees=[self.wt(7, own_start_reason())])[7]
-        self.assertEqual((c.state, c.lock, c.worktree), ("elsewhere", ("live", os.getpid()), "/wt/7"))
+        self.assertEqual((c.state, c.lock, c.worktree, c.worker), ("building", ("ours", os.getpid()), "/wt/7", None))
 
-    def test_unparseable_lock_is_live_with_its_reason(self):
+    def test_foreign_live_lock_without_a_record_is_elsewhere(self):
+        other = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        c = self.decide([issue(7)], worktrees=[self.wt(7, own_start_reason(other.pid))])[7]
+        self.assertEqual((c.state, c.lock), ("elsewhere", ("foreign-live", other.pid)))
+
+    def test_unparseable_lock_is_foreign_live_with_its_reason(self):
         c = self.decide([issue(7)], worktrees=[self.wt(7, "held by hand")])[7]
-        self.assertEqual((c.state, c.lock), ("elsewhere", ("live", None, "held by hand")))
+        self.assertEqual((c.state, c.lock), ("elsewhere", ("foreign-live", None, "held by hand")))
 
     def test_dead_lock_is_stalled(self):
         reason = own_start_reason().replace(f"pid {os.getpid()}", f"pid {dead_pid()}")
@@ -154,41 +162,25 @@ class Decide(unittest.TestCase):
 
 
 class Liveness(unittest.TestCase):
-    """common.worker_liveness (ADR 0009's home), on a real repo with real `git worktree lock`."""
+    """common.worker_liveness, the one reader of a lock (ADR 0009): lock text and pid state -> the four states."""
 
-    def setUp(self):
-        self.env = ScriptEnv()
-        self.addCleanup(self.env.close)
-        self.wt_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.wt_dir.cleanup)
-
-    def worktree(self, reason=None):
-        path = Path(self.wt_dir.name) / "1-widget"
-        git(self.env.repo, "worktree", "add", "-b", "1-widget", str(path))
-        if reason is not None:
-            git(self.env.repo, "worktree", "lock", "--reason", reason, str(path))
-        return path.resolve()
-
-    def liveness(self, branch="1-widget"):
-        return common.worker_liveness(self.env.repo, branch)
-
-    def test_live_for_a_running_pid_with_the_recorded_start_time(self):
-        path = self.worktree(own_start_reason())
-        state, pid, wt, _ = self.liveness()
-        self.assertEqual((state, pid, Path(wt).resolve()), ("live", os.getpid(), path))
-
-    def test_dead_for_a_reused_pid_number(self):
-        self.worktree(own_start_reason(shift=-3600))
-        self.assertEqual(self.liveness()[0], "dead")
-
-    def test_live_when_the_reason_does_not_parse(self):
-        self.worktree("held by hand")
-        self.assertEqual(self.liveness()[:2], ("live", None))
-
-    def test_none_without_a_lock_or_a_worktree(self):
-        self.worktree()
-        self.assertEqual(self.liveness()[0], "none")
-        self.assertEqual(self.liveness("9-nothing"), ("none", None, None, None))
+    def test_table(self):
+        foreign = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(foreign.wait)
+        self.addCleanup(foreign.kill)
+        gone = dead_pid()
+        rows = [
+            (None, ("none", None)),
+            (own_start_reason(), ("ours", os.getpid())),
+            (own_start_reason(foreign.pid), ("foreign-live", foreign.pid)),
+            (own_start_reason(shift=-3600), ("dead", os.getpid())),  # the pid number reused by another process
+            (f"claude agent agent-abc (pid {gone} start Sat Nov  7 06:14:20 2026)", ("dead", gone)),
+            ("held by hand", ("foreign-live", None)),
+            ("", ("foreign-live", None)),
+        ]
+        for reason, want in rows:
+            with self.subTest(reason=reason):
+                self.assertEqual(common.worker_liveness(reason), want)
 
 
 class Cli(unittest.TestCase):
@@ -229,11 +221,20 @@ class Cli(unittest.TestCase):
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         return r.stdout.strip()
 
-    def test_live_lock_with_own_pid_is_elsewhere_and_clean(self):
+    def test_own_live_lock_is_building_worker_unknown_and_clean(self):
         self.nodes = [(1, True)]
         path = self.worktree(reason=own_start_reason())
+        self.assertEqual(self.line("1"), f"#1 building 1-widget pr none worker unknown worktree {path} "
+                                         f"lock ours {os.getpid()} clean")
+
+    def test_foreign_live_lock_is_elsewhere(self):
+        self.nodes = [(1, True)]
+        other = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        path = self.worktree(reason=own_start_reason(other.pid))
         self.assertEqual(self.line("1"), f"#1 elsewhere 1-widget pr none worker none worktree {path} "
-                                         f"lock live {os.getpid()} clean")
+                                         f"lock foreign-live {other.pid} clean")
 
     def test_dead_lock(self):
         self.nodes = [(1, True)]
@@ -246,7 +247,7 @@ class Cli(unittest.TestCase):
         self.nodes = [(1, True)]
         path = self.worktree(reason="held by hand")
         self.assertEqual(self.line("1"), f"#1 elsewhere 1-widget pr none worker none worktree {path} "
-                                         f"lock live ? clean (lock: held by hand)")
+                                         f"lock foreign-live ? clean (lock: held by hand)")
 
     def test_dirty_and_unpushed_counts(self):
         self.nodes = [(1, True), (2, True), (3, True)]

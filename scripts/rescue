@@ -78,16 +78,16 @@ def liveness(root, branch, wt):
     reason = wt["locked"]
     if reason is None:
         return None, "lock: none"
-    state, pid = common.lock_state(reason)
-    if state == "live" and pid is None:
+    state, pid = common.worker_liveness(reason)
+    if state == "foreign-live" and pid is None:
         return 3, f"live ? {wt['path']} (lock: {common.one_line(reason) or 'no reason given'})"
-    if state == "live" and pid not in common.ancestor_pids():
+    if state == "foreign-live":
         return 3, f"live {pid} {wt['path']}"
     u = git(root, "worktree", "unlock", wt["path"])
     if u.code != 0:
         return 2, f"could not unlock {wt['path']}: {common.one_line(u.stderr)}"
     LIFTED.append((root, wt["path"], reason))
-    return None, f"lock: {'this session' if state == 'live' else 'dead'} pid {pid}, unlocked"
+    return None, f"lock: {'this session' if state == 'ours' else 'dead'} pid {pid}, unlocked"
 
 
 def overlap(root, changed, ticket) -> int:

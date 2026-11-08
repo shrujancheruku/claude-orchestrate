@@ -246,26 +246,19 @@ def ancestor_pids() -> set:
     return found
 
 
-def lock_state(reason):
-    """('live' | 'dead', pid or None) for a lock reason. One that doesn't parse is live: a second worker costs more
-    than a ticket left waiting, and the pass shows the reason so the user can unlock a stale one."""
+def worker_liveness(reason):
+    """(state, pid or None) for a worktree's lock reason (None: unlocked); the one reader of a lock (ADR 0009).
+    `ours`: a live lock naming this process or an ancestor (this session's own worker). `foreign-live`: a live lock
+    of another session. `dead`: the pid isn't running, or the number was reused. `none`: no lock. A reason that
+    doesn't parse is foreign-live: a second worker costs more than a ticket left waiting, and the pass shows the
+    reason so the user can unlock a stale one."""
+    if reason is None:
+        return "none", None
     parsed = parse_lock_reason(reason)
     if parsed is None:
-        return "live", None
+        return "foreign-live", None
     pid, start = parsed
     actual = process_start(pid)
-    if actual is not None and abs((actual - start).total_seconds()) <= START_TOLERANCE:
-        return "live", pid
-    return "dead", pid  # not running, or the number was reused by another process
-
-
-def worker_liveness(root, branch):
-    """(state, pid, worktree, reason): state is live | dead | none for the worktree checked out on `branch`, found
-    by `git worktree list`, never from the state file. pid is None when the lock reason doesn't parse."""
-    for wt in worktrees(root):
-        if wt["branch"] == branch:
-            if wt["locked"] is None:
-                return "none", None, wt["path"], None
-            state, pid = lock_state(wt["locked"])
-            return state, pid, wt["path"], wt["locked"]
-    return "none", None, None, None
+    if actual is None or abs((actual - start).total_seconds()) > START_TOLERANCE:
+        return "dead", pid
+    return ("ours" if pid in ancestor_pids() else "foreign-live"), pid
