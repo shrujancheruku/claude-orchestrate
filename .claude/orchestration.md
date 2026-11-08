@@ -4,8 +4,9 @@
 
 ## Backlog
 
-- **Tracker docs:** `docs/agents/issue-tracker.md` (operations, blocking, claiming) and `docs/agents/triage-labels.md` (label strings), from `/setup-matt-pocock-skills`. Takeable tickets are open, `ready-for-agent`, unassigned and unblocked, with no open sub-issues and no `wayfinder:` label, taken in ascending issue number. Claim = assign to the user.
+- **Tracker docs:** `docs/agents/issue-tracker.md` (operations, blocking, claiming) and `docs/agents/triage-labels.md` (label strings), from `/setup-matt-pocock-skills`. Takeable tickets are what `scripts/frontier` lists, in ascending issue number. Claim = assign to the user.
 - **Domain docs:** `docs/agents/domain.md` (the glossary and ADRs workers and reviewers follow).
+- **Board:** https://github.com/users/shrujancheruku/projects/1
 
 ## Slots
 
@@ -31,6 +32,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 - **Shared files:**
   - `README.md`: edit only the section for the feature the PR changes.
   - `docs/guide.md`: edit only the section for the feature the PR changes.
+  - `skills/run/SKILL.md`: edit only the section for the step the PR changes.
 - **Generated:** none
 - **Orchestrator-owned edits:** none
 
@@ -42,7 +44,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 - **Commits:** Conventional Commits (`type(scope): description`, `!` or a `BREAKING CHANGE:` footer for breaking changes). No attribution lines or trailers.
 - **PR title:** Conventional Commits, same as commits (checked by `scripts/gate`). **Body:** `Closes #<n>`; no attribution lines.
 - **Method:** squash, deleting the branch in the merge command (the repo doesn't delete merged branches on its own)
-- **Orchestrator merges:** yes. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date, review threads resolved, reviewer approved. `main` has no branch protection, so this rule is the only gate: never merge with CI pending or red.
+- **Orchestrator merges:** yes. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date, review threads resolved, reviewer approved. `main`'s ruleset requires a PR (squash or rebase) but no status checks, so this rule is the only CI gate: never merge with CI pending or red.
 
 ## Gates
 
@@ -65,7 +67,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 
 | Role | Model | Effort |
 |---|---|---|
-| Orchestrator | the session's model | |
+| Orchestrator | opus (used when the lead launches it; a hand-started session keeps its own) | |
 | Worker | sonnet; haiku for S tickets (at most 3 files, the **Tiers** file limit) | medium |
 | Scout | haiku | low |
 | Reviewer | S haiku · M sonnet · L sonnet (high effort) | medium |
@@ -73,7 +75,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 ## Review
 
 - **Instruction files:** `CLAUDE.md`, `docs/agents/*.md`, `docs/adr/`
-- **Risk paths** (any PR touching them is reviewed as L): `.claude-plugin/**`, `hooks/**`, `.github/workflows/**`, `release-please-config.json`, `.release-please-manifest.json`, `version.txt`, `CHANGELOG.md`, `scripts/merge`, `scripts/gate`, `scripts/sandbox-git`
+- **Risk paths** (any PR touching them is reviewed as L): `.claude-plugin/**`, `hooks/**`, `.github/workflows/**`, `release-please-config.json`, `.release-please-manifest.json`, `version.txt`, `CHANGELOG.md`, `scripts/merge`, `scripts/gate`, `scripts/sandbox-git`, `scripts/github.py`, `scripts/replay.py`, `scripts/rescue`
 - **Tiers:** S is at most 50 changed lines in at most 3 files, none on a risk path; L touches a risk path or changes more than 400 lines; M is everything else. A `size:S|M|L` label on the ticket overrides.
 - **Repo-specific checks:**
   - behaviour changes come with tests; Python 3.9 compatible
@@ -82,4 +84,5 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
   - plugin features work out of the box, with no manual edits to the user's config scripts (degrade instead)
   - a mechanical rule moved into a script ships with CLI tests, and the prompts call the script rather than restate the rule (ADR-0006)
   - a new script declares its kind in `tests/test_invocation.py` (ADR-0003)
+  - a guard behaviour change updates `tests/fixtures/guard-corpus.jsonl`
 - **Post reviews:** yes. The reviewer posts each round on the PR as a comment review.
