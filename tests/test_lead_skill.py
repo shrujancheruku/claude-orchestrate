@@ -26,10 +26,14 @@ class LeadSkill(unittest.TestCase):
 
     def test_launch_resume_and_live_branches(self):
         self.check(["claude agents --json --all", "SendMessage", "pid: null",
-                    "claude --resume <sessionId> --bg", "Never resume a live row",
-                    "claude --bg --name orchestrator --permission-mode",
-                    '"/orchestrate:run --greedy"', "**Orchestrator** row", "**Models**",
+                    "scripts/launch\" --resume <sessionId> --bg", "Never resume a live row",
+                    "scripts/launch\" --bg --permission-mode", "--plugin-dir", "crossSessionInbound",
+                    "scripts/launch --no-model", "**Orchestrator** row", "**Models**",
                     "a live row wins"])
+
+    def test_the_launch_line_is_not_restated(self):
+        self.assertNotIn("claude --name orchestrator", self.text)
+        self.assertNotIn("claude --bg --name", self.text)
 
     def test_model_not_found_only_fallback(self):
         self.check(["model_not_found", 'state: "failed"', "`error` field", "exactly once",

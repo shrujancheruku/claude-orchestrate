@@ -130,7 +130,8 @@ class LeadDocs(unittest.TestCase):
     def test_guide_covers_both_starts_and_the_fallbacks(self):
         section = lead_section()
         self.assertIn('claude --name lead "/orchestrate:lead"', section)
-        self.assertIn('claude --name orchestrator "/orchestrate:run --greedy"', section)
+        self.assertIn("**Two terminals.** Start the orchestrator yourself in one terminal with `scripts/launch`", section)
+        self.assertNotIn("claude --name orchestrator", section)
         # Without a lead, each part falls back: stops to needs-info, discovered work and risk notes to the summary.
         # Assert on text only the new paragraph has: "discovered" and "risk notes" predate this PR.
         self.assertIn("**Without a lead.**", section)
