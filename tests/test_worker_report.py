@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, gh_pulls  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 HEAD = "7e38ea0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -21,8 +21,7 @@ NOTICE = "<task-id>a1</task-id>\n<status>completed</status>\n<summary>Agent comp
 
 
 def prs(*items, draft=()):
-    return [{"args": ["pr", "list"], "stdout": json.dumps(
-        [{"number": n, "headRefName": b, "headRefOid": h, "isDraft": n in draft} for n, b, h in items])}]
+    return [gh_pulls([{"number": n, "headRefName": b, "headRefOid": h, "isDraft": n in draft} for n, b, h in items], "open")]
 
 
 class WorkerReport(unittest.TestCase):
@@ -39,10 +38,36 @@ class WorkerReport(unittest.TestCase):
             path = empty
         else:
             path = f"{self.env.bin}{os.pathsep}{os.environ['PATH']}"
-        env = dict(os.environ, PATH=path, FAKE_GH_STATE=str(self.env.gh_state))
+        env = dict(os.environ, PATH=path, FAKE_GH_STATE=str(self.env.gh_state), ORCHESTRATE_GH_5XX_TRIES="1")
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "worker-report"), ticket, "--branch", BRANCH, "--repo", "."],
             cwd=self.env.repo, env=env, input=text, capture_output=True, text=True, check=check)
+
+    def reviewer(self, text):
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "494", "--reviewer"],
+                           cwd=self.env.repo, input=text, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_reviewer_report_with_a_suite_line_is_valid(self):
+        for suite in ("pass", "fail 2", "not run (S tier)", "`pass`"):
+            with self.subTest(suite=suite):
+                self.assertEqual(self.reviewer(f"verdict: approve\nround: 1\nsuite: {suite}\nblocking: 0\n"), "valid")
+
+    def test_reviewer_report_without_a_suite_line_is_incomplete(self):
+        self.assertEqual(self.reviewer("verdict: approve\nround: 1\nblocking: 0\n"), "incomplete suite-missing")
+
+    def test_reviewer_report_with_not_run_and_no_reason_is_incomplete(self):
+        for suite in ("not run", "not run ()"):
+            with self.subTest(suite=suite):
+                self.assertEqual(self.reviewer(f"suite: {suite}\n"), "incomplete suite-not-run-without-reason")
+
+    def test_reviewer_report_with_another_suite_value_is_incomplete(self):
+        self.assertEqual(self.reviewer("suite: probably fine\n"), "incomplete suite-unrecognised")
+
+    def test_reviewer_mode_needs_no_branch_and_writes_no_event(self):
+        self.reviewer("suite: pass\n")
+        self.assertEqual(self.env.events(), [])
 
     def verdict(self, text, **kw):
         r = self.report(text, **kw)
@@ -71,8 +96,7 @@ class WorkerReport(unittest.TestCase):
         cmd = 'gh pr create --title "feat: x" --body-file /tmp/b.md --base main --head 260-x'
         self.assertEqual(self.verdict(f"status: stopped\nstop-reason: permission-denied\ndenied-command: {cmd}\n"),
                          "valid stopped permission-denied")
-        events = [json.loads(l) for l in (self.env.repo / ".claude/orchestrate-profiles/events.jsonl").read_text().splitlines()]
-        self.assertEqual(events[-1]["denied_command"], cmd)
+        self.assertEqual(self.env.events()[-1]["denied_command"], cmd)
 
     def test_a_second_permission_denied_with_another_command_is_not_a_duplicate(self):
         a = "status: stopped\nstop-reason: permission-denied\ndenied-command: gh pr create --head x\n"
@@ -127,6 +151,23 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual((ev[1]["status"], ev[1]["stop_reason"]), ("stopped", "ambiguous"))
         self.assertNotIn("status", ev[2])
 
+    def refused_of(self, text, ticket="260"):
+        self.verdict(text, ticket=ticket)
+        return [e for e in self.env.events() if e["kind"] == "worker-report"][-1].get("refused", "absent")
+
+    def test_refused_lines_ride_in_the_event(self):
+        a = "Bash — git push origin x — denied by the guard"
+        b = "Edit — /a/b.py — permission denied"
+        self.assertEqual(self.refused_of(f"status: pr-opened\nrefused: {a}\nrefused: {b}\n"), [a, b])
+
+    def test_refused_none_is_an_empty_list_and_no_line_leaves_the_field_out(self):
+        self.assertEqual(self.refused_of("status: pr-opened\nrefused: none\n"), [])
+        self.assertEqual(self.refused_of("status: stopped\nstop-reason: ambiguous\n", ticket="261"), "absent")
+        self.assertEqual(self.verdict("status: pr-opened\n", ticket="262"), "valid pr-opened 12 " + HEAD)
+
+    def test_refused_lines_do_not_change_the_verdict(self):
+        self.assertEqual(self.verdict("status: pr-opened\nrefused: Bash — x — y\n"), "valid pr-opened 12 " + HEAD)
+
     def test_a_repeat_is_a_duplicate_and_a_new_head_is_valid(self):
         text = "status: pr-opened\n"
         self.assertEqual(self.verdict(text), f"valid pr-opened 12 {HEAD}")
@@ -134,13 +175,59 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual(self.verdict(text), f"duplicate valid pr-opened 12 {HEAD}")
         self.env.set_gh(prs((12, BRANCH, HEAD2)))
         self.assertEqual(self.verdict(text), f"valid pr-opened 12 {HEAD2}")
-        self.assertEqual([e["outcome"] for e in self.env.events()],
+        self.assertEqual([e["outcome"] for e in self.env.events() if e["kind"] == "worker-report"],
                          ["valid", "duplicate", "duplicate", "valid"])
 
     def test_a_repeated_stop_is_a_duplicate_only_with_the_same_reason(self):
         self.assertEqual(self.verdict("status: stopped\nstop-reason: ambiguous\n"), "valid stopped ambiguous")
         self.assertEqual(self.verdict("status: stopped\nstop-reason: ambiguous\n"), "duplicate valid stopped ambiguous")
         self.assertEqual(self.verdict("status: stopped\nstop-reason: human-only\n"), "valid stopped human-only")
+
+    def test_transient_carries_the_retry_fields(self):
+        text = "status: stopped\nstop-reason: transient\nfailed-command: gh pr ready 12\nretry-after: 300\n"
+        self.assertEqual(self.verdict(text), "valid stopped transient")
+        e = [e for e in self.env.events() if e["kind"] == "worker-report"][-1]
+        self.assertEqual((e["stop_reason"], e["failed_command"], e["retry_after"]), ("transient", "gh pr ready 12", "300"))
+
+    def test_a_mislabelled_rate_limit_or_wait_is_reclassified_transient(self):
+        out = self.verdict("status: stopped\nstop-reason: permission-denied\ndenied-command: ! gh pr ready 12\n"
+                           "stopped-because: GraphQL: API rate limit exceeded\n")
+        self.assertEqual(out, "valid stopped transient")
+        e = [e for e in self.env.events() if e["kind"] == "worker-report"][-1]
+        self.assertEqual(e["failed_command"], "! gh pr ready 12")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: human-only\nstopped-because: waiting until 14:05 UTC\n"),
+                         "valid stopped transient")
+        # A plain permission denial and a plain human-only stop are unchanged.
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: permission-denied\ndenied-command: gh pr create\n"),
+                         "valid stopped permission-denied")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: human-only\nstopped-because: merge the release PR\n"),
+                         "valid stopped human-only")
+
+    def test_transient_is_retried_twice_then_exhausted(self):
+        text = "status: stopped\nstop-reason: transient\nfailed-command: gh pr ready 12\n"
+        self.assertEqual(self.verdict(text), "valid stopped transient")
+        self.assertEqual(self.verdict(text), "valid stopped transient")
+        self.assertEqual(self.verdict(text), "valid stopped transient exhausted")
+        events = [e for e in self.env.events() if e["kind"] == "worker-report"]
+        self.assertEqual([e.get("exhausted") for e in events], [None, None, True])
+        # A different command starts a new count; another verdict in between resets it.
+        other = "status: stopped\nstop-reason: transient\nfailed-command: gh pr create\n"
+        self.assertEqual(self.verdict(other), "valid stopped transient")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: ambiguous\n"), "valid stopped ambiguous")
+        self.assertEqual(self.verdict(other), "valid stopped transient")
+
+    def test_the_bound_ignores_interim_and_a_bang_prefix(self):
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: transient\nfailed-command: gh pr ready 12\n"),
+                         "valid stopped transient")
+        self.assertEqual(self.verdict("working on it"), "interim")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: transient\nfailed-command: ! gh  pr ready 12\n"),
+                         "valid stopped transient")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: transient\nfailed-command: gh pr ready 12\n"),
+                         "valid stopped transient exhausted")
+
+    def test_waiting_on_a_person_is_not_a_wait_until_a_time(self):
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: human-only\nstopped-because: waiting until you confirm\n"),
+                         "valid stopped human-only")
 
     def test_exit_2_without_gh(self):
         r = self.report("status: pr-opened\n", check=False, no_gh=True)
@@ -149,10 +236,10 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual(r.stdout, "")
 
     def test_exit_2_on_a_failed_pr_lookup(self):
-        self.env.set_gh([{"args": ["pr", "list"], "stderr": "HTTP 502", "exit": 1}])
+        self.env.set_gh([{"args": ["api", "~repos/{owner}/{repo}/pulls"], "stderr": "HTTP 502", "exit": 1}])
         r = self.report("status: pr-opened\n", check=False)
         self.assertEqual((r.returncode, len(r.stderr.strip().splitlines())), (2, 1))
-        self.assertEqual(self.env.events(), [])
+        self.assertEqual([e for e in self.env.events() if e["kind"] == "worker-report"], [])
 
     def test_exit_2_on_an_unwritable_run_log(self):
         log = self.env.repo / ".claude" / "orchestrate-profiles"

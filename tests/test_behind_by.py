@@ -13,7 +13,7 @@ class BehindBy(unittest.TestCase):
     def test_run_leaves_the_behind_check_to_merge(self):
         s = read("skills/run/SKILL.md")
         step = next(l for l in s.splitlines() if l.startswith("6. **Approved**"))
-        for needle in ("--approved-head", "Exit 5", "Exit 6", "wait for CI", "a main-only update needs no re-review"):
+        for needle in ("--approved-head", "`wait-ci <pr> <head>`", "`re-review <pr>`", "a main-only update needs no re-review"):
             self.assertIn(needle, step)
         self.assertNotIn("read `behind_by`", s)
         self.assertNotIn("Post-approval risk guard:", s)

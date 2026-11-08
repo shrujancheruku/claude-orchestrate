@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """worker-report <ticket> --branch <branch> [--repo DIR] : classify a worker's completion (ADR 0006)
+worker-report <pr> --reviewer                                : classify a reviewer's completion (#416)
 
 Reads the worker's whole completion text (the harness notice plus the report) on stdin, prints one verdict
 line and appends a `worker-report` event to the run log. The orchestrator applies the line word for word:
     valid pr-opened <pr> <head>      `status: pr-opened` and an open non-draft PR exists; <pr> and <head> are the host's
     valid stopped <stop-reason>      `status: stopped` with a `stop-reason:` on the list below
+    valid stopped transient exhausted  the third `transient` in a row on the same failed command (TRANSIENT_RETRIES retries done)
     interim                          no `status:` line, but text (a placeholder, a progress note)
     not-a-stop                       `status: stopped` with no `stop-reason:` line, or an unlisted one, or a
                                      `permission-denied` with no `denied-command:` line
@@ -14,9 +16,16 @@ line and appends a `worker-report` event to the run log. The orchestrator applie
     missing-report none              a bare completion notice, and no open PR on --branch
     limit [<reset time>]             no report, and the text names a usage limit
     error <gist>                     no report, and the text names another API error
+With `--reviewer` the text is a reviewer's short report and no PR is looked up, no `--branch` is needed and no event is
+written. It prints `valid` when the report has a `suite:` line that is `pass`, `fail <n>` or `not run (<reason>)`,
+else `incomplete <why>` (`suite-missing`, `suite-not-run-without-reason` or `suite-unrecognised`): the orchestrator
+sends an incomplete report back to the reviewer once.
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
-no-primary-source, worktree-gone, permission-denied (which also needs the exact denied command in `denied-command:`; the event
-carries it). Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
+no-primary-source, worktree-gone, transient (a host failure nobody decides: the event carries `retry_after` and
+`failed_command`; a `permission-denied` or `human-only` report whose text names a rate limit or a wait-until time is
+reclassified `transient`), permission-denied (which also needs the exact denied command in `denied-command:`; the event
+carries it). A report's `refused:` lines (one per tool call the harness or guard refused) ride in the event as
+`refused: [...]` (`refused: none` is `[]`, no line leaves the field out); the verdict never depends on them. Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
 run log): one line on stderr, run it again on the next wake. Stdlib only, Python 3.9+.
 """
 
@@ -32,10 +41,18 @@ import runlog
 import session
 
 STOP_REASONS = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
-                "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied", "worktree-gone")
+                "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied", "worktree-gone", "transient")
+# The orchestrator retries a `transient` stop without the developer, at most this many times per failed command.
+TRANSIENT_RETRIES = 2
+RATE_LIMIT = re.compile(r"(?:api|secondary|github) rate[ -]limit|rate[ -]limit (?:exceeded|was hit|reset)", re.I)
+# The phrase must be followed by a clock time or a date, so "waiting until you confirm" stays a human's.
+WAIT_UNTIL = re.compile(r"\b(?:wait(?:ing)?|retry|try again|resets?)\s+(?:until|after|at)\s+(?:\d|`?\d{4}-\d\d)", re.I)
+RETRY_AFTER = re.compile(r"^[ \t>*-]*retry-after:[ \t]*`*(.*?)`*[ \t]*$", re.I | re.M)
+FAILED_COMMAND = re.compile(r"^[ \t>*-]*failed-command:[ \t]*`*([^\s`].*?)`*[ \t]*$", re.I | re.M)
 STATUS = re.compile(r"^[ \t>*-]*status:[ \t]*(pr-opened|stopped)\b", re.I | re.M)
 STOP_REASON = re.compile(r"^[ \t>*-]*stop-reason:[ \t]*`?([\w-]+)", re.I | re.M)
 DENIED_COMMAND = re.compile(r"^[ \t>*-]*denied-command:[ \t]*`*([^\s`].*?)`*[ \t]*$", re.I | re.M)
+REFUSED = re.compile(r"^[ \t>*-]*refused:[ \t]*`*(.*?)`*[ \t]*$", re.I | re.M)
 REPORT_PR = re.compile(r"^[ \t>*-]*pr:[ \t]*\S*?/pull/(\d+)", re.I | re.M)
 # The harness's own wrapper elements say nothing about the worker's work: a completion with only these is bare.
 NOTICE = re.compile(r"<(task-id|tool-use-id|output-file|worktreePath|worktreeBranch|status|summary|usage)>.*?</\1>", re.S)
@@ -61,8 +78,25 @@ def find_pr(prs: list, report_pr: str | None, branch: str):
     return None
 
 
+def refused_calls(text: str):
+    """The report's `refused:` lines as a list of strings; [] for `refused: none`; None when the report has no such line
+    (an older worker prompt), so the event can tell "none refused" from "not reported"."""
+    found = [m.group(1).strip() for m in REFUSED.finditer(text)]
+    if not found:
+        return None
+    return [l for l in found if l and l.lower().rstrip(".") != "none"]
+
+
 def classify(text: str, branch: str, lookup) -> tuple:
     """(verdict words, event fields). `lookup()` fetches the open PRs and is called only when a PR matters."""
+    words, fields = _classify(text, branch, lookup)
+    refused = refused_calls(text) if STATUS.search(text) else None
+    if refused is not None:
+        fields = dict(fields, refused=refused)
+    return words, fields
+
+
+def _classify(text: str, branch: str, lookup) -> tuple:
     m = STATUS.search(text)
     if not m:
         if session.LIMIT_TEXT.search(text):
@@ -81,6 +115,14 @@ def classify(text: str, branch: str, lookup) -> tuple:
     if status == "stopped":
         r = STOP_REASON.search(text)
         reason = r.group(1).lower() if r else None
+        # A rate limit, or a wait for a stated time, is a host failure no human decides, whatever the worker called it.
+        mislabelled = reason in ("permission-denied", "human-only") and (RATE_LIMIT.search(text) or WAIT_UNTIL.search(text))
+        if reason == "transient" or mislabelled:
+            reason = "transient"
+            ra, fc = RETRY_AFTER.search(text), FAILED_COMMAND.search(text) or DENIED_COMMAND.search(text)
+            return ("valid", "stopped", reason), {"status": status, "stop_reason": reason,
+                                                  "retry_after": ra.group(1).strip() if ra else "",
+                                                  "failed_command": fc.group(1).strip() if fc else ""}
         if reason == "permission-denied":
             # Nothing can resume a denial without the command: the user runs it with `!`, or allows it.
             d = DENIED_COMMAND.search(text)
@@ -98,14 +140,37 @@ def classify(text: str, branch: str, lookup) -> tuple:
     return ("valid", "pr-opened", str(pr["number"]), pr["headRefOid"]), {"status": status, "head": pr["headRefOid"], "pr": pr["number"]}
 
 
+SUITE = re.compile(r"^[ \t>*-]*suite:[ \t]*`*(.*?)`*[ \t]*$", re.I | re.M)
+SUITE_OK = re.compile(r"pass|fail\s+\d+|not run\s*\(\s*\S[^)]*\)", re.I)
+
+
+def classify_reviewer(text: str) -> tuple:
+    """`("valid",)` or `("incomplete", why)` for a reviewer's report. The last `suite:` line counts."""
+    found = SUITE.findall(text)
+    if not found:
+        return ("incomplete", "suite-missing")
+    value = found[-1].strip()
+    if SUITE_OK.fullmatch(value):
+        return ("valid",)
+    if re.fullmatch(r"not run\s*(\(\s*\))?", value, re.I):
+        return ("incomplete", "suite-not-run-without-reason")
+    return ("incomplete", "suite-unrecognised")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("ticket", help="the ticket number")
-    ap.add_argument("--branch", required=True, help="the ticket's branch")
+    ap.add_argument("--branch", help="the ticket's branch (required unless --reviewer)")
+    ap.add_argument("--reviewer", action="store_true", help="classify a reviewer's report by its `suite:` line")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
     _, ticket = common.pr_ref(args.ticket)
     text = sys.stdin.read()
+    if args.reviewer:
+        print(" ".join(classify_reviewer(text)))
+        return 0
+    if not args.branch:
+        common.die("worker-report: --branch is required (unless --reviewer)")
 
     def lookup():
         try:
@@ -114,7 +179,11 @@ def main(argv=None) -> int:
             common.die(f"worker-report: cannot look up PRs: {e.message}")
 
     words, fields = classify(text, args.branch, lookup)
-    if words[0] == "valid" and runlog_dup(args.repo, ticket, words, fields):
+    if words[:3] == ("valid", "stopped", "transient"):
+        if transient_run(args.repo, ticket, fields["failed_command"]) >= TRANSIENT_RETRIES:
+            words = (*words, "exhausted")
+            fields["exhausted"] = True
+    elif words[0] == "valid" and runlog_dup(args.repo, ticket, words, fields):
         words = ("duplicate", *words)
     try:
         runlog.append_event(args.repo, runlog.WORKER_REPORT, words[0], ref=ticket, **fields)
@@ -122,6 +191,24 @@ def main(argv=None) -> int:
         common.die(f"worker-report: cannot write the run log: {e.strerror or e}")
     print(" ".join(words))
     return 0
+
+
+def norm_command(c) -> str:
+    """A failed command compared without a leading `! ` and with its whitespace collapsed."""
+    return re.sub(r"\s+", " ", re.sub(r"^\s*!\s*", "", c or "")).strip()
+
+
+def transient_run(repo, ticket, command) -> int:
+    """How many `transient` stops in a row, newest first and ending at the latest verdict for this ticket, were on
+    this failed command: the retries already spent (a duplicate or an interim does not count; any other verdict ends the run)."""
+    n = 0
+    for e in reversed(list(common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG)))):
+        if e.get("kind") != runlog.WORKER_REPORT or str(e.get("ref")) != str(ticket) or e.get("outcome") in ("duplicate", "interim"):
+            continue
+        if e.get("stop_reason") != "transient" or norm_command(e.get("failed_command")) != norm_command(command):
+            break
+        n += 1
+    return n
 
 
 def runlog_dup(repo, ticket, words, fields) -> bool:

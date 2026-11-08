@@ -7,7 +7,17 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import SCRIPTS, ScriptEnv, git # noqa: E402
+from harness import SCRIPTS, ScriptEnv, gh_pr_view, git # noqa: E402
+
+# One gh call through scripts/github.py (which logs a `gh_call` row), then one event of its own.
+GH_CALL_CLI = '''
+import sys
+sys.path.insert(0, %r)
+import github, runlog
+
+github.pr_view(7, "state")
+runlog.append_event(".", "merge", "merged", ref="#7", session="s1")
+''' % str(SCRIPTS)
 
 TRIVIAL_CLI = '''
 import subprocess, sys
@@ -91,6 +101,43 @@ class HarnessSmoke(unittest.TestCase):
         self.assertEqual(res.returncode, 2)
         self.assertEqual(len(res.stderr.strip().splitlines()), 1, res.stderr)
         self.assertEqual(e.events(), [])
+
+    def test_gh_calls_are_not_logged_by_default_so_event_counts_hold(self):
+        self.env.set_gh([gh_pr_view(7, {"state": "OPEN"})])
+        self.env.run(self.cli("ghcall.py", GH_CALL_CLI))
+        self.assertEqual([e["kind"] for e in self.env.events(profiling=True)], ["merge"])
+
+    def test_gh_log_opt_in_logs_gh_calls_and_the_reader_hides_them_unless_asked(self):
+        env = ScriptEnv(gh_log=True)
+        self.addCleanup(env.close)
+        env.set_gh([gh_pr_view(7, {"state": "OPEN"})])
+        d = env.repo.parent / "scripts"
+        d.mkdir(exist_ok=True)
+        for name in ("common.py", "runlog.py", "repo.py"):
+            shutil.copy(SCRIPTS / name, d / name)
+        cli = d / "ghcall.py"
+        cli.write_text(GH_CALL_CLI)
+        env.run(cli)
+        self.assertEqual([e["kind"] for e in env.events()], ["merge"])
+        kinds = [e["kind"] for e in env.events(profiling=True)]
+        self.assertIn("gh_call", kinds)
+        self.assertEqual(len(kinds), 2)
+
+
+class ScriptEnvCopyRace(unittest.TestCase):
+    def test_copies_keep_git_background_maintenance_off(self):
+        # Auto maintenance holds objects/maintenance.lock while it runs, and a copy racing it fails (#415).
+        env = ScriptEnv()
+        self.addCleanup(env.close)
+        for d in (env.repo, env.origin):
+            self.assertEqual(git(d, "config", "maintenance.auto"), "false")
+            self.assertEqual(git(d, "config", "gc.auto"), "0")
+
+    def test_no_transient_lock_files_in_a_copy(self):
+        env = ScriptEnv()
+        self.addCleanup(env.close)
+        locks = [p.name for root in (env.repo / ".git", env.origin) for p in root.rglob("*.lock")]
+        self.assertEqual(locks, [])
 
 
 if __name__ == "__main__":

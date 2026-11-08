@@ -117,7 +117,8 @@ class LeadDocs(unittest.TestCase):
 
     def test_readme_starts_the_lead_in_one_command_and_links_the_guide(self):
         readme = (ROOT / "README.md").read_text()
-        self.assertIn('claude --name lead "/orchestrate:lead"', readme)
+        self.assertIn("scripts/launch --lead", readme)
+        self.assertNotIn("claude --name lead", readme)
         self.assertIn("docs/guide.md#lead-mode", readme)
 
     def test_every_readme_link_into_the_guide_resolves(self):
@@ -129,8 +130,10 @@ class LeadDocs(unittest.TestCase):
 
     def test_guide_covers_both_starts_and_the_fallbacks(self):
         section = lead_section()
-        self.assertIn('claude --name lead "/orchestrate:lead"', section)
-        self.assertIn('claude --name orchestrator "/orchestrate:run --greedy"', section)
+        self.assertIn("scripts/launch --lead", section)
+        self.assertNotIn("claude --name lead", section)
+        self.assertIn("**Two terminals.** Start the orchestrator yourself in one terminal with `scripts/launch`", section)
+        self.assertNotIn("claude --name orchestrator", section)
         # Without a lead, each part falls back: stops to needs-info, discovered work and risk notes to the summary.
         # Assert on text only the new paragraph has: "discovered" and "risk notes" predate this PR.
         self.assertIn("**Without a lead.**", section)
@@ -224,5 +227,81 @@ class GlossaryTerms(unittest.TestCase):
         self.assertNotIn("Pre-merge check", (ROOT / "docs/guide.md").read_text())
 
 
+class VerdictLines(unittest.TestCase):
+    """`gate` and `merge` end with one `next:` verdict line; the run skill names every word and no exit code (#347)."""
+
+    GATE = ("review <head>", "send-back <pr>", "rerun-after-ci", "could-not-run")
+    MERGE = ("merged", "wait-ci <pr> <head>", "re-review <pr>", "send-back <pr>", "ask-user <why>", "retry",
+             "could-not-run")
+    ALSO = ("wait-ci <pr> <head>", "send-back <pr>", "left <pr> <why>")
+
+    def skill(self):
+        return (ROOT / "skills/run/SKILL.md").read_text()
+
+    def step(self, text, start, end):
+        i = text.index(start)
+        return text[i:text.index(end, i)]
+
+    def test_the_skill_names_every_verdict_word(self):
+        text = self.skill()
+        gate = self.step(text, "1. **Gate and CI:**", "\n2. ")
+        merge = self.step(text, "6. **Approved**", "7. **After the merge:**")
+        for word in self.GATE:
+            self.assertIn(f"`{word}`", gate)
+        for word in self.MERGE + self.ALSO:
+            self.assertIn(f"`{word}`", merge)
+        self.assertIn("`also: <verdict> <pr> ...`", merge)
+
+    def test_the_merge_step_names_no_exit_code(self):
+        merge = self.step(self.skill(), "6. **Approved**", "7. **After the merge:**")
+        self.assertNotRegex(merge, r"(?i)\bexits? \d")
+
+    def test_the_guide_lists_the_vocabulary(self):
+        guide = (ROOT / "docs/guide.md").read_text()
+        for word in set(self.GATE + self.MERGE + self.ALSO):
+            self.assertIn(f"`{word}`", guide)
+
+    def test_the_scripts_document_the_same_words(self):
+        for name, words in (("gate", self.GATE), ("merge", self.MERGE)):
+            doc = (ROOT / "scripts" / name).read_text().split('"""')[1]
+            for word in words:
+                self.assertIn(word, doc)
+
+
+class ReviewerChecksOutByHash(unittest.TestCase):
+    """#416: the reviewer reads the PR head by hash and runs the suite in the foreground, the way verify does."""
+
+    REVIEWER = (ROOT / "agents" / "reviewer.md").read_text()
+    RUN = (ROOT / "skills" / "run" / "SKILL.md").read_text()
+
+    def test_head_is_fetched_by_hash_never_by_the_pull_ref(self):
+        self.assertIn("headRefOid", self.REVIEWER)
+        self.assertIn("git fetch origin <hash>", self.REVIEWER)
+        self.assertNotIn("git fetch origin pull/", self.REVIEWER)
+        self.assertIn("read `headRefOid` again just before you post", self.REVIEWER)
+
+    def test_suite_runs_in_the_pr_tree_through_verify_in_the_foreground(self):
+        self.assertIn("scripts/verify --config --cwd <scratch>/pr-<n>", self.REVIEWER)
+        self.assertIn("never `run_in_background`", self.REVIEWER)
+        self.assertIn("600000", self.REVIEWER)
+
+    def test_reports_carry_head_and_suite(self):
+        self.assertEqual(self.REVIEWER.count("suite: pass | fail <n> | not run (<reason>)"), 2)
+        self.assertIn("head: <hash reviewed>", self.REVIEWER)
+
+    def test_run_skill_reruns_a_stale_head_and_owns_the_reviewer_worktree(self):
+        self.assertIn("is stale: run it again", self.RUN)
+        self.assertIn("detached `pr-<n>` worktree under its scratchpad", self.RUN)
+        self.assertIn("until that lands, remove the `pr-<n>` trees", self.RUN)
+
+    def test_run_skill_classifies_every_reviewer_report_with_the_script(self):
+        self.assertIn('scripts/worker-report" <pr> --reviewer', self.RUN)
+
+    def test_run_skill_sends_back_a_report_without_a_suite_reason(self):
+        self.assertIn("(no `suite:` line, or `not run` with no reason) is sent back to the same reviewer once", self.RUN)
+        self.assertIn("incomplete <why>", self.RUN)
+
+
 if __name__ == "__main__":
     unittest.main()
+

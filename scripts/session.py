@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 import common
+import touchmap
 from repo import iso, parse_ts
 
 PLUGIN = common.PLUGIN
@@ -233,14 +234,14 @@ def subagents(main: Transcript) -> list:
     return out
 
 
-def brief_field(prompt, label: str) -> str | None:
-    """The text after `<label>:` on its line of a dispatch prompt (a brief), up to the sentence's end; None when absent.
+def brief_field(prompt, label: str, whole: bool = False) -> str | None:
+    """The text after `<label>:` on its line of a dispatch prompt (a brief), up to the sentence's end (the whole line with `whole`); None when absent.
 
     The label may be in bold (`**Touch map:**`) or after a list marker. The first match wins."""
     m = re.search(rf"^\W*{re.escape(label)}:\**[ \t]*(.*)$", str(prompt or ""), re.M)
     if not m:
         return None
-    return m.group(1).split(". ")[0].rstrip(". ")
+    return m.group(1).strip() if whole else m.group(1).split(". ")[0].rstrip(". ")
 
 
 def branch_of(prompt) -> str | None:
@@ -249,22 +250,14 @@ def branch_of(prompt) -> str | None:
     return value.split()[0] if value else None
 
 
-def split_entries(value) -> list:
-    """The entries of a touch-map string as written, split on commas or semicolons outside parentheses; blanks and bare numbers (`a.py:10,20`) dropped, `none` kept."""
-    # Split only at separators outside parentheses: a note like `(main, new checks)` stays in its entry.
-    entries, depth, current = [], 0, ""
-    for ch in value or "":
-        if ch in ",;" and depth == 0:
-            entries.append(current)
-            current = ""
-            continue
-        depth = max(0, depth + (ch == "(") - (ch == ")"))
-        current += ch
-    entries.append(current)
-    # A bare number is the tail of a line list (`a.py:10,20`), not a path.
-    return [entry.strip() for entry in entries if entry.strip() and not entry.strip().isdigit()]
+def touch_map_text(prompt) -> str:
+    """The raw text of a brief's `Touch map:` line, the template's trailing "A prediction, not a fence." sentence cut; "" when absent."""
+    line = brief_field(prompt, "Touch map", whole=True)
+    return re.sub(r"\.?\s*A prediction, not a fence\.?\s*$", "", line or "")
 
 
 def touch_map(prompt) -> list:
-    """The entries of a brief's `Touch map:` line as written, split on commas or semicolons outside parentheses; [] when there is none or it says `none`."""
-    return [entry for entry in split_entries(brief_field(prompt, "Touch map")) if entry.lower() != "none"]
+    """The entries of a brief's `Touch map:` line (touchmap.Entry); [] when there is none or it says `none`.
+
+    The line is one touch map in canonical form (see touchmap.py). Raises touchmap.TouchMapError when the line is off the grammar."""
+    return touchmap.parse(touch_map_text(prompt))

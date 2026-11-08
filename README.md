@@ -22,13 +22,14 @@ You need `git` 2.38+, `gh` (signed in) and `python3` 3.9+.
 /orchestrate:setup                     # once per repo: scouts the codebase, asks you a few questions
 /orchestrate:run                       # works the backlog until nothing is left to take
 /orchestrate:run --greedy --profile    # as many tickets at once as don't collide, with a cost profile
-claude --name lead "/orchestrate:lead" # optional: a lead session that starts and supervises the orchestrator
+/orchestrate:start --greedy=4          # starts the orchestrator in the background from any session (a terminal: scripts/launch)
+scripts/launch --lead                  # optional: a lead session that starts and supervises the orchestrator
 ```
 
 1. **Write tickets.** orchestrate works the GitHub issues labelled `ready-for-agent`. It pairs with [Matt Pocock's skills](https://github.com/mattpocock/skills): `to-spec` and `to-tickets` write the backlog, `triage` labels it, and `/setup-matt-pocock-skills` writes the tracker and domain docs orchestrate reads.
 2. **Run `/orchestrate:setup`.** It scouts the repo and asks you, in one round, about slots, gates, who merges, models and review tiers. It writes `.claude/orchestration.md`, the config every agent reads.
 3. **Run `/orchestrate:run`.** It works until the backlog is empty or everything left needs you. `status` reports without acting, `<issue>` narrows to one ticket or one parent's sub-issues, `--greedy` runs every ticket that doesn't collide with another, and `--profile` records what the session cost.
-4. **Add a lead (optional).** `claude --name lead "/orchestrate:lead"` starts the whole system in one command and puts a planner above the orchestrator to answer its questions, triage what it discovers and write decisions down ([lead mode](docs/guide.md#lead-mode) in the guide covers the two-terminal start and each fallback).
+4. **Add a lead (optional).** `scripts/launch --lead` starts the whole system in one command and puts a planner above the orchestrator to answer its questions, triage what it discovers and write decisions down ([lead mode](docs/guide.md#lead-mode) in the guide covers the two-terminal start and each fallback).
 
 ## How it works
 
@@ -134,7 +135,7 @@ Each finding names a `path:line` and either a concrete failure or the rule it br
 Defined by `agents/scout.md`. It runs on Haiku at low effort with a turn cap, is read-only by the guard, and does not load the repo's `CLAUDE.md`. It answers the questions the orchestrator would otherwise dig for itself, each in a fixed shape so the orchestrator reads conclusions rather than evidence:
 
 - **Reconcile:** the check states of the in-review tickets. The takeable tickets, the `ready-for-human` ones and the parents whose sub-issues have all closed come from `scripts/frontier`. Each claimed ticket's state, worktree and unpushed work come from `scripts/claims`, not the scout.
-- **Touch map:** the files a ticket will most likely change, each as `path:line` of its entry point. A prediction, not a fence.
+- **Touch map:** the files a ticket will most likely change, one line of `path:L-L (a few words)` entries, the grammar of `scripts/touchmap.py`. A prediction, not a fence.
 - **CI and PRs:** each check's state by name, the failing step of a failed run, how far a branch is behind its base, and unresolved review comments.
 - **Environment:** build and test commands, tool versions, anything that would collide across parallel worktrees.
 
@@ -144,7 +145,7 @@ It reports what is true, with the command or `path:line` that shows it, and leav
 
 *The thoughtful planner, one level above. Answers the orchestrator's stops and keeps the record.*
 
-Defined by `skills/lead/SKILL.md`. Fable is recommended for it. Started with `claude --name lead "/orchestrate:lead"`, it checks its own name, reads the config and tracker docs, runs `scripts/lead-brief` for its index (glossary, ADR list, open `needs-lead` and `lead` tickets, the roadmap, and the PRs merged since its watermark with each large merge's risk notes), then finds the orchestrator. A live `orchestrator` session is reached by message. A stopped one is resumed. None is launched, in the background, on the config's model.
+Defined by `skills/lead/SKILL.md`. Fable is recommended for it. Started with `scripts/launch --lead`, it checks its own name, reads the config and tracker docs, runs `scripts/lead-brief` for its index (glossary, ADR list, open `needs-lead` and `lead` tickets, the roadmap, and the PRs merged since its watermark with each large merge's risk notes), then finds the orchestrator. A live `orchestrator` session is reached by message. A stopped one is resumed. None is launched, in the background, on the config's model.
 
 Its moves are the part you talk to. **Settling a stop:** answer on the ticket, edit the spec if the answer changes it, remove `needs-lead`, nudge the orchestrator; or split the ticket, or close it `wontfix`. **Settling an ADR conflict:** decide, then release the held PR or file a follow-up. **Discovered work:** dedupe against the backlog and turn what is real into tickets, as `needs-triage` drafts when you are away and as `ready-for-agent` only after triage with you. **Risk notes:** each gets one outcome, taken in, sent to a scout to check, or filed as a ticket. **Decision PRs:** each settled decision lands as one PR with the ADR and its glossary terms, behind a ticket the lead filed and claimed with the `lead` label; the orchestrator runs it through the same gate, review and merge as any other PR. It also measures CI wait every ten merges and drafts a CI-speed ticket when the p90 is over the limit.
 
@@ -243,7 +244,7 @@ sequenceDiagram
 5. **Changes requested.** The worker is told "address review `<url>`" and reads the findings from the PR itself. After three rounds the ticket waits for you. An approve with minors tells the worker to take or leave them, with CI alone gating the merge and no re-review. A push after approval needs no decision from the orchestrator: the merge script decides.
 6. **Merge.** If a merge gate applies or the config says the orchestrator doesn't merge, the ticket waits for you. Otherwise, for a large PR whose review wasn't posted, the risk notes go on the PR as one comment first. Then `scripts/merge <pr> --method <squash|merge|rebase> --approved-head <sha> --worktree <dir>`:
    - It decides readiness first. A PR behind the default branch is updated with `gh pr update-branch` and the script exits 5; the loop goes back to step 1 for CI on the new head, with no re-review for a main-only update. A worker change since the approved head that touches a risk path or exceeds the S thresholds exits 6 and goes back to the same reviewer as the next round. After a merge lands, the script also updates every other approved PR that is behind (the orchestrator passes `--also-approved <pr>=<sha>` for each), so their CI runs together and one Monitor watches them all.
-   - It merges with `--match-head-commit`, so a push after the review is a refusal rather than merged unreviewed code. It treats `gh pr merge`'s exit as unreliable and re-checks the PR until GitHub reports it MERGED.
+   - It merges with the approved head as `sha`, so a push after the review is a refusal (409) rather than merged unreviewed code. It treats the merge call's exit as unreliable and re-checks the PR until GitHub reports it MERGED.
    - Only then it deletes the remote branch (never the default branch or a fork's), closes the ticket if the host didn't, unlocks and removes the worker's worktree with a plain `git worktree remove` (never forced), and appends a `merge` event.
    - Then it **sweeps**: every other open PR whose branch now conflicts with the default branch is updated by the script itself. Under squash or merge it merges main into the branch and pushes plainly; under rebase it rebases and pushes with `--force-with-lease`. A conflict in a config **shared file** is resolved by replaying the PR's lines onto main, with a word-level three-way merge for a line both sides changed. A conflict in a **generated** file takes main's side and reruns the generate command against the PR's sources. Anything else is handed back: the branch is left untouched and the script prints `HANDBACK PR #n <branch>: <path> (<why>)` and exits 4. The orchestrator resumes that PR's worker with those lines as its conflict list, the one case in which a worker merges the default branch, always by merge and never by force.
 7. **After the merge.** The slot is free. Any edits the config says only the orchestrator makes are batched into one `chore:` PR at the end of a pass with nothing in flight, and that PR runs the same gate, review and merge.

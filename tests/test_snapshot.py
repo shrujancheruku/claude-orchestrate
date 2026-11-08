@@ -4,10 +4,11 @@ one blocker rule, and `frontier --fix-drift`."""
 import json
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest  # noqa: E402
 import github  # noqa: E402
 import tracker  # noqa: E402
 
@@ -36,11 +37,11 @@ class SnapshotTest(unittest.TestCase):
 
     def serve(self, nodes, prs=()):
         self.env.set_gh([
-            {"args": ["repo", "view"], "stdout": json.dumps(REPO)},
+            gh_repo_rest(REPO),
             issues_reply(nodes),
             {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": []}}}})},
-            {"args": ["pr", "list", "--state", "open"], "stdout": json.dumps(list(prs))},
-            {"args": ["pr", "list", "--state", "merged"], "stdout": "[]"},
+            gh_pr_list(list(prs), "--state", "open"),
+            gh_pr_list([], "--state", "merged"),
         ])
 
     def issue_reads(self):
@@ -65,6 +66,40 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(snap.blockers(1), [(2, False)])
         self.assertEqual(snap.default_branch, "main")
 
+    def files_reply(self, n, paths):
+        return {"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{n}/files"], "stdout": json.dumps([{"filename": p} for p in paths])}
+
+    def files_reads(self):
+        return [c for c in self.env.gh_calls() if len(c) > 1 and "/files" in c[1]]
+
+    def test_the_open_prs_file_lists_are_cached_once_and_holds_reads_them(self):
+        rp = "release-please--branches--main--components--orchestrate"
+        prs = [{"number": 5, "headRefName": "3-a", "headRefOid": "aaa"}, {"number": 6, "headRefName": "4-b", "headRefOid": "bbb"},
+               {"number": 7, "headRefName": rp, "headRefOid": "ccc"}]
+        self.env.set_gh([gh_repo_rest(REPO), issues_reply([node(1)]),
+                         {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": []}}}})},
+                         gh_pr_list(prs, "--state", "open"),
+                         gh_pr_list([], "--state", "merged"),
+                         self.files_reply(5, ["scripts/a"]), self.files_reply(6, ["scripts/b"])])
+        r = self.env.run("snapshot", "--repo", ".", check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.files_reads()), 2, "one read per PR, none for release-please's")
+        self.assertEqual(json.loads((self.env.repo / FILE).read_text())["pr_files"],
+                         {"5": {"sha": "aaa", "files": ["scripts/a"]}, "6": {"sha": "bbb", "files": ["scripts/b"]}})
+        before = len(self.env.gh_calls())
+        for ticket in (11, 12, 13, 14, 15):  # five candidates in one pass
+            r = self.env.run("holds", "--touch-map", "scripts/a", "--ticket", str(ticket), "--snapshot", FILE, check=False)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(len(self.env.gh_calls()), before, "holds fetched instead of reading the cache")
+
+    def test_a_pushed_pr_refreshes_its_one_entry(self):
+        snap = tracker.Snapshot(None, pr_files={"5": {"sha": "old", "files": ["old"]}, "6": {"sha": "x", "files": ["keep"]}})
+        with unittest.mock.patch.object(github, "pr_files", return_value=["new"]) as fetch:
+            self.assertEqual(snap.pr_files({"number": 6, "headRefOid": "x"}), ["keep"])
+            self.assertEqual(snap.pr_files({"number": 5, "headRefOid": "new"}), ["new"])
+            self.assertEqual(snap.pr_files({"number": 5, "headRefOid": "new"}), ["new"])  # now cached
+        self.assertEqual(fetch.call_count, 1)
+
     def test_a_missing_snapshot_file_could_not_run(self):
         r = self.env.run("frontier", "--snapshot", "nope.json", check=False)
         self.assertEqual(r.returncode, 2)
@@ -79,7 +114,7 @@ class SnapshotTest(unittest.TestCase):
 
     def test_fix_drift_posts_one_edge_and_the_next_run_has_no_drift(self):
         self.env.set_gh([
-            {"args": ["repo", "view"], "stdout": json.dumps(REPO)},
+            gh_repo_rest(REPO),
             issues_reply([node(1), node(5, body="Blocked by: #1")]),
             {"args": ["api", "repos/{owner}/{repo}/issues/1", "--jq", ".id"], "stdout": "4242\n"},
             {"args": ["api", "--method", "POST"], "stdout": "{}"},
@@ -92,7 +127,7 @@ class SnapshotTest(unittest.TestCase):
                                   "-F", "issue_id=4242"]])
         # The next run reads the edge from the tracker: no drift, nothing more to add.
         fixed = node(5, body="Blocked by: #1", blockers=[(1, "OPEN")])
-        self.env.set_gh([{"args": ["repo", "view"], "stdout": json.dumps(REPO)}, issues_reply([node(1), fixed])])
+        self.env.set_gh([gh_repo_rest(REPO), issues_reply([node(1), fixed])])
         again = self.env.run("frontier", "--all", "--fix-drift").stdout.splitlines()
         self.assertEqual(again[-2:], ["drift:", "none"])
         self.assertFalse([l for l in again if l.startswith("added")])

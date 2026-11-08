@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
-"""rescue <branch> [--title T] [--repo DIR] : save a stalled or stopped ticket's worktree, then retire it.
+"""rescue <ticket | branch> [--title T] [--pr N] [--repo DIR] : save a stalled or stopped ticket's worktree, then retire it.
 
 The one place the rescue recipe lives (commit the work, push, unlock a dead lock, remove the worktree plainly, never
-force). It finds the worktree checked out on <branch> with `git worktree list`, never from the state file, and never
-calls `gh`: its only tracker contact is `holds`, run as a subprocess. Each step prints one line, in this order:
+force). Given a branch it finds the worktree checked out on it with `git worktree list`. Given a ticket number it
+finds the ticket's worktree the way `claims` does (claims.find_worktree: the worker's state-file record, then the
+ticket branch), so a worker stopped before it made the ticket branch, whose worktree sits on the harness's
+`worktree-agent-*` branch, is still found. It never calls `gh`: its only tracker contact is `holds`, run as a
+subprocess. Each step prints one line, in this order:
 
 1. liveness: a lock naming one of this process's ancestors is this session's own, a dead lock is stale; both are
    unlocked. Another process's live pid, or a reason that does not parse, stops here (exit 3), nothing touched.
+   If the worktree is not on a branch of the ticket, a branch line follows: `branch: created <n>-<slug>` (`--title`
+   gives the slug) cut from the worktree's HEAD, with the changes committed on it as `chore(wip): rescue #<n>`; the
+   `worktree-agent-*` branch is left to the harness.
 2. changed paths: every path the worktree changed against the default branch (committed, staged, unstaged, untracked).
 3. commit: `chore(wip): <T>` (or `chore(wip): #<n> work in progress` without --title) when the tree is dirty.
 4. push: `git push -u origin <branch>` when commits are unpushed or the branch has no remote ref..
 5. remove: the worktree, plainly (the local branch is kept).
-6. overlap: `holds` on the changed paths against everything else that is held: `overlap: none`, its `overlap:` lines,
-   or `overlap: could not check (...)`.
+6. scratch: with `--pr <n>`, the PR's reviewer scratch worktrees (`pr-<n>`, detached) with HEAD in the rescued branch are removed plainly
+   (`scratch worktree <path> removed`); a dirty one, a live foreign lock or a HEAD outside the branch is kept with one
+   `scratch worktree <path> NOT removed: <why>` line, the same checks `merge` makes. Without `--pr` none is touched.
+7. overlap: `holds` on the changed paths against everything else that is held: `overlap: none`, its `overlap:` lines,
+   or `overlap: could not check (...)`. A rate-limited check is retried within the shared backoff; if it still can't
+   run, `overlap: unchecked (rate limited; re-run holds before dispatching into these files)` and exit 0.
 
-No worktree on the branch: `nothing to rescue: no worktree on <branch>`, exit 0 (the remote branch is the whole state).
+No worktree on the branch (or for the ticket): `nothing to rescue: no worktree on <branch | #n>`, exit 0 (the remote branch is the whole state).
 Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something held or that could not be checked
 (dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, nothing removed, a lock step 1 lifted put back);
 3 a live lock that is not this session's (`live <pid | ?> <worktree>`). Stdlib only, Python 3.9+.
@@ -23,10 +33,13 @@ Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
+import claims
 import common
+import github
 import repo
 
 HOLDS = Path(__file__).resolve().parent / "holds"
@@ -90,6 +103,32 @@ def liveness(root, branch, wt):
     return None, f"lock: {'this session' if state == 'ours' else 'dead'} pid {pid}, unlocked"
 
 
+def has_local(root, name) -> bool:
+    return git(root, "rev-parse", "--verify", "-q", f"refs/heads/{name}").code == 0
+
+
+def ticket_branches(root, ticket) -> list:
+    """Every branch named `<ticket>-*`, local or on origin, as short names without duplicates."""
+    names = []
+    for prefix, strip in (("refs/heads", "refs/heads/"), ("refs/remotes/origin", "refs/remotes/origin/")):
+        r = git(root, "for-each-ref", "--format=%(refname)", f"{prefix}/{ticket}-*")
+        for ref in r.stdout.split():
+            name = ref[len(strip):]
+            if name not in names:
+                names.append(name)
+    return names
+
+
+OVERLAP_TRIES = 3
+
+
+def rate_limited(r) -> bool:
+    """`holds` could not run because GitHub rate-limited it (its stderr names the limit)."""
+    text = r.stderr or ""
+    # holds words its own limit as "rate limit until <time>"; gh's secondary-limit and abuse-detection text is github's.
+    return r.code == 2 and ("rate limit" in text.lower() or github._rate_limit(text) is not None)
+
+
 def overlap(root, changed, ticket) -> int:
     if not changed:
         say("overlap: none")
@@ -97,7 +136,18 @@ def overlap(root, changed, ticket) -> int:
     cmd = [str(HOLDS), "--literal", "--touch-map", *changed, "--repo", str(root)]
     if ticket is not None:
         cmd += ["--ticket", str(ticket)]
-    r = common.run(*cmd, cwd=root)
+    for attempt in range(OVERLAP_TRIES):
+        r = common.run(*cmd, cwd=root)
+        if not rate_limited(r) or attempt == OVERLAP_TRIES - 1:
+            break
+        try:  # holds recorded the reset it hit; wait it out, or give up when that would pass the wait budget
+            github._wait_for_shared_reset(root)
+        except github.GhError:
+            break
+    if rate_limited(r):
+        # The rescue itself is done; only the lookup was limited. Not a failure: the orchestrator checks holds later.
+        say("overlap: unchecked (rate limited; re-run holds before dispatching into these files)")
+        return 0
     if r.code == 0:
         say("overlap: none")
         return 0
@@ -112,22 +162,56 @@ def overlap(root, changed, ticket) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("branch", help="the ticket's branch, `<number>-<slug>`")
+    ap.add_argument("branch", metavar="ticket|branch", help="the ticket number, or its branch `<number>-<slug>`")
     ap.add_argument("--title", help="the ticket title, for the wip commit message")
+    ap.add_argument("--pr", type=int, help="the ticket's open PR: its reviewer scratch worktrees are removed too")
     ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
     args = ap.parse_args(argv)
     root, branch = Path(args.repo), args.branch
-    ticket = repo.ticket_of_branch(branch)
+    by_number = branch.isdigit()
+    ticket = int(branch) if by_number else repo.ticket_of_branch(branch)
     if ticket is None:
         return fail(f"{branch} is not named <number>-<slug>, so there is no ticket to check the overlap for")
 
-    wt = next((w for w in common.worktrees(root) if w["branch"] == branch), None)
+    if by_number:
+        try:
+            record = claims.read_state(root / repo.STATE).get(str(ticket))
+        except ValueError as e:
+            return fail(str(e))
+        wts = [w for w in common.worktrees(root) if Path(w["path"]).is_dir()]
+        wt = claims.find_worktree(ticket, wts, record)
+    else:
+        wt = next((w for w in common.worktrees(root) if w["branch"] == branch), None)
     if wt is None:
-        say(f"nothing to rescue: no worktree on {branch}")
+        say(f"nothing to rescue: no worktree on {branch if not by_number else '#' + branch}")
         return 0
+    branch = wt["branch"] if not by_number else wt["branch"] or ""
     path = wt["path"]
     if Path(path).resolve() == repo.main_checkout(root).resolve():
         return fail(f"{branch} is checked out in the main checkout {path}, not a linked worktree")
+
+    # A worktree not on a branch of the ticket must be on the harness's branch, and the ticket may already have a
+    # branch (an earlier rescue, or a worker elsewhere): reuse that one, never cut a second. All checked before
+    # anything is touched.
+    target = None
+    if repo.ticket_of_branch(branch) != ticket:
+        if not claims.is_harness_branch(branch):
+            return fail(f"{path} is on {branch or 'a detached HEAD'}, not a branch of #{ticket} or a worktree-agent-* branch")
+        git(root, "fetch", "--quiet", "origin")  # best effort: a stale remote ref only hides a branch a worker pushed
+        found = ticket_branches(root, ticket)
+        if len(found) > 1:
+            return fail(f"#{ticket} has more than one branch, cannot choose: {', '.join(found)}")
+        target = found[0] if found else None
+        other = next((w["path"] for w in common.worktrees(root) if target and w["branch"] == target
+                      and Path(w["path"]).resolve() != Path(path).resolve()), None)
+        if other:
+            return fail(f"{target} is checked out in another worktree {other}, so {path} can't switch to it")
+        if target and git(path, "merge-base", "--is-ancestor", "HEAD", target if has_local(root, target) else f"origin/{target}").code != 0:
+            return fail(f"{path} has commits that are not on {target}, so it can't be rescued onto it")
+        if target is None:
+            slug = re.sub(r"[^a-z0-9]+", "-", (args.title or "").lower()).strip("-")[:40].strip("-") or "rescue"
+            target = f"{ticket}-{slug}"
+        existing = bool(found)
 
     code, line = liveness(root, branch, wt)
     if code == 2:
@@ -135,6 +219,20 @@ def main(argv=None) -> int:
     say(line)
     if code == 3:
         return 3
+
+    created = target is not None
+    if created:
+        # The worker stopped before Orient's branch step: move the worktree's HEAD and changes onto the ticket branch.
+        if not existing:
+            sw = git(path, "switch", "-c", target)
+        elif has_local(root, target):
+            sw = git(path, "switch", target)
+        else:
+            sw = git(path, "switch", "-c", target, "--track", f"origin/{target}")
+        if sw.code != 0:
+            return fail(f"cannot switch {path} to {target}: {common.one_line(sw.stderr)}")
+        say(f"branch: {'reused' if existing else 'created'} {target}")
+        branch = target
 
     base = default_base(root)
     if base is None:
@@ -150,7 +248,7 @@ def main(argv=None) -> int:
         return fail(f"git status failed in {path}: {common.one_line(status.stderr)}")
     if status.stdout.strip():
         add = git(path, "add", "-A")
-        msg = f"chore(wip): {args.title}" if args.title else f"chore(wip): #{ticket} work in progress" if ticket is not None \
+        msg = f"chore(wip): rescue #{ticket}" if created else f"chore(wip): {args.title}" if args.title else f"chore(wip): #{ticket} work in progress" if ticket is not None \
             else "chore(wip): work in progress"
         c = git(path, "commit", "--no-verify", "-m", msg) if add.code == 0 else add
         if c.code != 0:
@@ -172,11 +270,15 @@ def main(argv=None) -> int:
     else:
         say("pushed 0 commits: up to date")
 
+    tip = git(path, "rev-parse", "HEAD").stdout.strip()
     removed = repo.remove_worktree(path, root)
     if "NOT removed" in removed:
         say(removed)
         return fail(removed)
     say(f"removed {path}")
+    if args.pr is not None:
+        for line in repo.remove_scratch(args.pr, tip, root):
+            say(f"scratch {line}")
 
     return overlap(root, changed, ticket)
 

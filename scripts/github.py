@@ -35,9 +35,13 @@ GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exis
 NO_REPO = re.compile(r"not a git repository|unable to read current working directory|"
                      r"cannot determine current working directory|getcwd", re.I)
 
+# GitHub bills a GraphQL call as (1 + the nodes each connection is asked under) / 100 points: a connection inside a
+# 100-node page costs 100 requests, one inside those 100 more costs 10,000. So the comments' edit history
+# (`userContentEdits`, 100 x 100 nodes) made this query ~105 points (#498). The scripts read only whether something
+# was edited after a time, which `lastEditedAt` answers with no connection: 1 + 4 x 100 requests, ~5 points.
 ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    issues(first: 100, after: $after, states: OPEN, orderBy: {field: CREATED_AT, direction: DESC}) {
+    issues(first: 100, after: $after, states: OPEN, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
@@ -50,13 +54,40 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         labels(first: 30) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
-        userContentEdits(first: 20) { nodes { editedAt } }
-        comments(last: 100) { nodes { body createdAt userContentEdits(first: 20) { nodes { editedAt } } } }
+        lastEditedAt
+        comments(last: 100) { nodes { body createdAt lastEditedAt } }
       }
     }
   }
 }"""
 
+
+# The Projects board in one read (#447): the owner (a user or an organization), the project's id, its `Stage` field
+# with every option, and the items a page at a time (first page carries the field; `after` pages the items). The
+# field is named in the query, so it must match board.FIELD (a test holds them together).
+PROJECT_QUERY = """query($owner: String!, $number: Int!, $after: String) {
+  repositoryOwner(login: $owner) {
+    __typename
+    ... on ProjectV2Owner {
+      projectV2(number: $number) {
+        id
+        field(name: "Stage") { ... on ProjectV2SingleSelectField { id options { id name color description } } }
+        items(first: 100, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            content {
+              __typename
+              ... on Issue { number title repository { nameWithOwner } }
+              ... on DraftIssue { title }
+            }
+            stage: fieldValueByName(name: "Stage") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+          }
+        }
+      }
+    }
+  }
+}"""
 
 # Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
 ABANDON_QUERY = """query($owner: String!, $name: String!) {
@@ -114,6 +145,22 @@ RATE_LIMITED = re.compile(r"secondary rate limit|abuse detection|API rate limit 
 RETRY_AFTER = re.compile(r"retry-after:?\s*(\d+)", re.I)
 QUOTA_EMPTY = re.compile(r"x-ratelimit-remaining:?\s*0\b", re.I)
 QUOTA_RESET = re.compile(r"x-ratelimit-reset:?\s*(\d+)", re.I)
+# A GitHub 5xx (500-504) is transient: retried like a secondary limit, on a short ladder (seconds) since no
+# reset is involved. A 4xx other than a rate limit is never retried.
+SERVER_ERROR = re.compile(r"\bHTTP 50[0-4]\b")
+SERVER_ERROR_PAUSES = (2, 4, 8, 16)
+
+
+def server_error_tries() -> int:
+    """ORCHESTRATE_GH_5XX_TRIES when it is a positive integer, else TRIES; the test harness sets 1 so a fake gh's
+    5xx fails at once instead of sleeping through the ladder."""
+    try:
+        value = int(os.environ.get("ORCHESTRATE_GH_5XX_TRIES", ""))
+    except ValueError:
+        return TRIES
+    return min(value, TRIES) if value > 0 else TRIES
+
+
 TRIES = 5
 # A reset further off than this is the hourly quota running out: waiting it out here would stall the script.
 PRIMARY_RESET_AFTER = 120
@@ -127,11 +174,11 @@ clock = time.time
 # Where that can't be written it falls back to <git common dir>/orchestrate-ratelimit.json.
 FALLBACK_FILE = "orchestrate-ratelimit.json"
 DEFAULT_PAUSE = 60  # no retry-after or reset header: assume a minute
-# The most one process sleeps in total, across the shared-file wait and every retry. The orchestrator runs these
+# The most one `call` sleeps in total, across the shared-file wait and every retry. The orchestrator runs these
 # scripts through Bash (two-minute default timeout) and neither `merge --timeout` nor the watch-ci deadline sees a
 # sleep, so a longer wait is returned as `rate limit until <time>` (exit 2) for the caller to retry later.
 DEFAULT_WAIT_BUDGET = 75
-waited = 0.0  # seconds this process has slept so far
+waited = 0.0  # seconds the current call has slept so far; reset at the start of each call, so a long-lived loop gets a fresh budget per call
 
 
 def wait_budget() -> float:
@@ -144,7 +191,7 @@ def wait_budget() -> float:
 
 
 def _wait_until(reset: float, cwd=None, shared: bool = False) -> None:
-    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the process's wait budget.
+    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the current call's wait budget.
 
     `shared` marks a wait for a reset another process recorded, not this process's own hit; it is logged so the
     profile shows how much waiting one hit multiplied across scripts."""
@@ -366,8 +413,32 @@ def _log(event: dict, cwd=None, args=None) -> None:
         pass
 
 
-def _log_attempt(args, cwd, attempt, ms, outcome, status, headers) -> None:
+_last_used: dict = {}  # x-ratelimit-resource -> the `used` this process last saw, for the per-call delta
+
+
+def _graphql_cost(stdout, headers):
+    """Points one GraphQL call cost: `rateLimit.cost` when the query asked for it, else how far the bucket's
+    `used` counter rose since this process's previous call (None for the first call, or without headers)."""
+    try:
+        cost = json.loads(stdout)["data"]["rateLimit"]["cost"]
+        if isinstance(cost, int):
+            return cost
+    except (ValueError, KeyError, TypeError):
+        pass
+    used = _int(headers or {}, "x-ratelimit-used")
+    resource = (headers or {}).get("x-ratelimit-resource")
+    if used is None or resource is None:
+        return None
+    before, _last_used[resource] = _last_used.get(resource), used
+    return used - before if before is not None and used >= before else None
+
+
+def _log_attempt(args, cwd, attempt, ms, outcome, status, headers, stdout="") -> None:
     event = {"attempt": attempt, "outcome": outcome, "ms": ms, "status": status}
+    if outcome == "ok" and args and args[0] == "api" and "graphql" in args:
+        cost = _graphql_cost(stdout, headers)
+        if cost is not None:
+            event["cost"] = cost
     if headers is None:
         event["headers"] = "unavailable"  # a subcommand, or a paginated api call: gh shows none
     else:
@@ -376,7 +447,7 @@ def _log_attempt(args, cwd, attempt, ms, outcome, status, headers) -> None:
     _log(event, cwd, args)
 
 
-def call(*args, cwd=None) -> str:
+def call(*args, cwd=None, idempotent: bool = False) -> str:
     """Run `gh <args>` and return stdout; raise GhError (missing, failed or ratelimited).
 
     Before the first try it waits out a reset another process recorded in STATE_FILE (or raises `ratelimited`
@@ -387,7 +458,14 @@ def call(*args, cwd=None) -> str:
 
     `gh api` runs with --include (paginated calls excepted): the headers are split off before the body is returned,
     and each attempt, with its status and rate-limit headers, is logged (see the call log above).
+
+    A 5xx (HTTP 500-504) is retried on a short ladder only for a read or a write the caller marks `idempotent`
+    (repeating it leaves the same state): a 5xx can come after GitHub applied a write, and repeating a creating
+    POST, a merge or a delete-style batch could then act twice. An unmarked write fails at once on a 5xx and the
+    caller decides (merge re-reads the state first). A rate limit is retried for every call: nothing ran.
     """
+    global waited
+    waited = 0.0  # the budget is for this call alone: watch-ci and merge --interval loop for hours in one process
     _wait_for_shared_reset(cwd)
     # `gh api` prints the response headers only with --include; they carry the status and the rate-limit evidence.
     # A paginated reply holds one header block per page, so that one runs without them.
@@ -407,13 +485,28 @@ def call(*args, cwd=None) -> str:
         if p.returncode == common.NOT_FOUND:
             raise GhError(MISSING, common.one_line(p.stderr))
         if p.returncode == 0:
-            _log_attempt(args, cwd, attempt, ms, "ok", status, headers)
+            _log_attempt(args, cwd, attempt, ms, "ok", status, headers, stdout)
             return stdout
         text = f"{p.stderr}\n{p.stdout}"
         limit = _rate_limit(text)
         if limit is None:
+            # The status line is the truth; the text is searched only when gh showed none, so a 4xx whose body
+            # echoes "HTTP 502" is not retried.
+            server = status in (500, 501, 502, 503, 504) if status is not None else bool(SERVER_ERROR.search(text))
+            server = server and (idempotent or not describe(args)["write"])
             _log_attempt(args, cwd, attempt, ms, "failed", status, headers)
-            raise GhError(FAILED, common.one_line(p.stderr or stdout))
+            if not server:
+                raise GhError(FAILED, common.one_line(p.stderr or stdout))
+            message = common.one_line(_evidence(text))
+            if attempt >= server_error_tries():
+                raise GhError(FAILED, message)
+            pause = SERVER_ERROR_PAUSES[min(attempt, len(SERVER_ERROR_PAUSES)) - 1]
+            print(f"github: HTTP {status or 502}, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
+            try:
+                _wait_until(clock() + pause, cwd)
+            except GhError as e:  # over the call's wait budget: say what failed, not only when to retry
+                raise GhError(e.kind, f"{message}; {e.message}")
+            continue
         _log_attempt(args, cwd, attempt, ms, "ratelimited", status, headers)
         message = common.one_line(_evidence(text))
         if not api and not (RETRY_AFTER.search(text) or QUOTA_EMPTY.search(text) or QUOTA_RESET.search(text)):
@@ -434,10 +527,10 @@ def call(*args, cwd=None) -> str:
         _wait_until(clock() + pause, cwd)
 
 
-def call_json(*args, shape=dict, cwd=None):
+def call_json(*args, shape=dict, cwd=None, idempotent: bool = False):
     """`call`, parsed as JSON of type `shape`; anything else is malformed."""
     try:
-        data = json.loads(call(*args, cwd=cwd))
+        data = json.loads(call(*args, cwd=cwd, idempotent=idempotent))
     except ValueError:
         raise GhError(MALFORMED, "gh returned malformed JSON") from None
     if not isinstance(data, shape):
@@ -445,8 +538,124 @@ def call_json(*args, shape=dict, cwd=None):
     return data
 
 
+# `gh pr view --json` field -> how the REST pull object answers it. Every `gh pr`, `gh issue` and `gh repo`
+# subcommand runs on GraphQL underneath, so the plugin asks the REST endpoint for these instead (#449): a separate
+# quota, and a `gh api` call is retried, logged and header-read like the rest.
+# GitHub's `mergeable_state` (lower case) -> the GraphQL `mergeStateStatus` the scripts branch on (`merge` on DIRTY).
+MERGE_STATE = {"clean": "CLEAN", "dirty": "DIRTY", "unstable": "UNSTABLE", "blocked": "BLOCKED", "behind": "BEHIND",
+               "draft": "DRAFT", "has_hooks": "HAS_HOOKS", "unknown": "UNKNOWN"}
+
+
+def _merge_state(pull: dict) -> str:
+    return MERGE_STATE.get(str(pull.get("mergeable_state") or "unknown").lower(), "UNKNOWN")
+
+
+def _mergeable(pull: dict) -> str:
+    """MERGEABLE | CONFLICTING | UNKNOWN: REST's `mergeable` is true, false or null (still being computed)."""
+    m = pull.get("mergeable")
+    return "UNKNOWN" if m is None else ("MERGEABLE" if m else "CONFLICTING")
+
+
+def _pr_state(pull: dict) -> str:
+    return "MERGED" if pull.get("merged_at") else ("OPEN" if pull.get("state") == "open" else "CLOSED")
+
+
+def _cross_repo(pull: dict) -> bool:
+    """True for a fork's PR (a deleted fork leaves no head repo)."""
+    head, base = (pull.get("head") or {}).get("repo"), (pull.get("base") or {}).get("repo")
+    if not isinstance(head, dict):
+        return True
+    if isinstance(base, dict) and base.get("full_name"):
+        return head.get("full_name") != base.get("full_name")
+    return bool(head.get("fork"))
+
+
+PR_FIELDS = {
+    "title": lambda p: p.get("title"),
+    "body": lambda p: p.get("body") or "",
+    "state": _pr_state,
+    "mergeable": _mergeable,
+    "mergeStateStatus": _merge_state,
+    "mergedAt": lambda p: p.get("merged_at"),
+    "baseRefName": lambda p: (p.get("base") or {}).get("ref"),
+    "headRefName": lambda p: (p.get("head") or {}).get("ref"),
+    "headRefOid": lambda p: (p.get("head") or {}).get("sha"),
+    "isCrossRepository": _cross_repo,
+}
+# These two have no REST form (the closing issues and the check rollup are GraphQL-only): one explicit query.
+# It reads at most 20 closing issues and 100 check contexts and has no pageInfo, so a PR past either limit is
+# truncated, as `gh pr view --json` was (a follow-up could page them).
+GRAPHQL_PR_FIELDS = {"closingIssuesReferences", "statusCheckRollup"}
+PR_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    state headRefName headRefOid isCrossRepository
+    closingIssuesReferences(first: 20) { nodes { number } }
+    commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+      __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  } }
+}"""
+
+
+def _pr_number(pr) -> str:
+    return str(pr).lstrip("#")
+
+
 def pr_view(pr, fields: str, cwd=None) -> dict:
-    return call_json("pr", "view", str(pr), "--json", fields, cwd=cwd)
+    """The `gh pr view --json <fields>` dict of a PR, in gh's names and values, from one REST call (`pulls/{n}`);
+    a field set that holds closingIssuesReferences or statusCheckRollup comes from one GraphQL query instead."""
+    wanted = [f for f in fields.split(",") if f]
+    if GRAPHQL_PR_FIELDS & set(wanted):
+        return _pr_view_graphql(pr, wanted, cwd)
+    unknown = [f for f in wanted if f not in PR_FIELDS]
+    if unknown:
+        raise ValueError(f"pr_view: no REST form for {', '.join(unknown)}")
+    pull = call_json("api", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}", cwd=cwd)
+    return {f: PR_FIELDS[f](pull) for f in wanted}
+
+
+def _pr_view_graphql(pr, wanted, cwd=None) -> dict:
+    data = call_json("api", "graphql", "-f", f"query={PR_QUERY}", "-F", "owner={owner}", "-F", "name={repo}",
+                     "-F", f"number={_pr_number(pr)}", cwd=cwd)
+    try:
+        node = data["data"]["repository"]["pullRequest"]
+        if not isinstance(node, dict):
+            raise TypeError
+        commits = (node.get("commits") or {}).get("nodes") or []
+        rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup") or {}) if commits else {}
+        full = dict(node,
+                    closingIssuesReferences=[n for n in (node.get("closingIssuesReferences") or {}).get("nodes") or []
+                                             if isinstance(n, dict)],
+                    statusCheckRollup=[n for n in (rollup.get("contexts") or {}).get("nodes") or []
+                                       if isinstance(n, dict) and n.get("__typename")])
+        unknown = [f for f in wanted if f not in full]
+        if unknown:
+            raise ValueError(f"pr_view: no GraphQL form for {', '.join(unknown)}")
+        return {f: full[f] for f in wanted}
+    except (KeyError, TypeError, IndexError):
+        raise GhError(MALFORMED, "gh returned an unexpected reply (pull request)") from None
+
+
+def _pages(path: str, cwd=None, max_pages: int = 10) -> list:
+    """Every row of a REST list (`per_page=100` in `path`), page by page: each page is one logged, header-read call."""
+    rows = []
+    for page in range(1, max_pages + 1):
+        got = call_json("api", f"{path}{'&' if '?' in path else '?'}page={page}", shape=list, cwd=cwd)
+        rows += got
+        if len(got) < 100:
+            break
+    return rows
+
+
+def pr_diff(pr, cwd=None) -> str:
+    """The unified diff of a PR (`pulls/{n}` with the diff media type)."""
+    return call("api", "-H", "Accept: application/vnd.github.diff", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}",
+                cwd=cwd)
+
+
+def current_pr_number(cwd=None) -> str:
+    """The number of the open PR whose head is the checked-out branch ("" when there is none)."""
+    rows = call_json("api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open", shape=list, cwd=cwd)
+    return str(rows[0].get("number", "")) if rows and isinstance(rows[0], dict) else ""
 
 
 def behind_by(base: str, head: str, cwd=None) -> int:
@@ -457,21 +666,22 @@ def behind_by(base: str, head: str, cwd=None) -> int:
 
 
 def default_branch(cwd=None) -> str:
-    name = call_json("repo", "view", "--json", "defaultBranchRef", cwd=cwd).get("defaultBranchRef")
-    if not isinstance(name, dict) or not isinstance(name.get("name"), str):
+    name = call_json("api", "repos/{owner}/{repo}", cwd=cwd).get("default_branch")
+    if not isinstance(name, str) or not name:
         raise GhError(MALFORMED, "gh returned no default branch")
-    return name["name"]
+    return name
 
 
 def merge_pr(pr, method: str, head_oid: str = "", cwd=None) -> None:
-    """Run the merge command. --match-head-commit makes a push after review a refusal, not a merge."""
-    guard = ["--match-head-commit", head_oid] if head_oid else []
-    call("pr", "merge", str(pr), f"--{method}", *guard, cwd=cwd)
+    """Merge the PR (`PUT pulls/{n}/merge`). `sha` makes a push after review a refusal (409), not a merge."""
+    guard = ["-f", f"sha={head_oid}"] if head_oid else []
+    call("api", "-X", "PUT", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/merge", "-f", f"merge_method={method}",
+         *guard, cwd=cwd)
 
 
 def update_branch(pr, cwd=None) -> None:
-    """Merge the base into the PR's branch on the host (`gh pr update-branch`)."""
-    call("pr", "update-branch", str(pr), cwd=cwd)
+    """Merge the base into the PR's branch on the host (`PUT pulls/{n}/update-branch`)."""
+    call("api", "-X", "PUT", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/update-branch", cwd=cwd)
 
 
 def delete_branch(branch: str, cwd=None) -> str:
@@ -487,7 +697,8 @@ def delete_branch(branch: str, cwd=None) -> str:
         if e.kind == FAILED and GONE.search(e.message):
             return "already gone"
     try:
-        call("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd)
+        # Idempotent: a repeat after a delete that landed reads as GONE below.
+        call("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd, idempotent=True)
     except GhError as e:
         if e.kind == FAILED and GONE.search(e.message):
             return "already gone"
@@ -496,7 +707,8 @@ def delete_branch(branch: str, cwd=None) -> str:
 
 
 def issue_state(issue, cwd=None) -> str:
-    return str(call_json("issue", "view", str(issue), "--json", "state", cwd=cwd).get("state"))
+    """OPEN or CLOSED (REST says `open` / `closed`)."""
+    return str(call_json("api", f"repos/{{owner}}/{{repo}}/issues/{_pr_number(issue)}", cwd=cwd).get("state")).upper()
 
 
 # Check results that block a merge: failed ones, and ones still going (a missing result counts as going).
@@ -548,53 +760,67 @@ def has_workflows(head: str, cwd=None) -> bool:
 
 def issue_claim(issue, cwd=None) -> tuple:
     """(state, claimed) of an issue: claimed when it has an assignee (the claim, as the tracker doc says)."""
-    data = call_json("issue", "view", str(issue), "--json", "state,assignees", cwd=cwd)
-    return str(data.get("state")), bool(data.get("assignees"))
+    data = call_json("api", f"repos/{{owner}}/{{repo}}/issues/{_pr_number(issue)}", cwd=cwd)
+    return str(data.get("state")).upper(), bool(data.get("assignees"))
 
 
 def close_issue(issue, cwd=None) -> None:
-    call("issue", "close", str(issue), cwd=cwd)
+    call("api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/{_pr_number(issue)}", "-f", "state=closed",
+         "-f", "state_reason=completed", cwd=cwd, idempotent=True)  # closing a closed issue changes nothing
+
+
+def _pull(p: dict) -> dict:
+    """A REST pull row in the names `gh pr list --json` used: what the callers read."""
+    return {"number": p.get("number"), "headRefName": (p.get("head") or {}).get("ref"),
+            "headRefOid": (p.get("head") or {}).get("sha"), "baseRefName": (p.get("base") or {}).get("ref"),
+            "isDraft": bool(p.get("draft")), "isCrossRepository": _cross_repo(p), "mergedAt": p.get("merged_at")}
 
 
 def open_prs(base: str, cwd=None) -> list:
-    return call_json("pr", "list", "--state", "open", "--base", base, "--limit", "200", "--json",
-                     "number,headRefName,isCrossRepository,isDraft", shape=list, cwd=cwd)
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls?state=open&base={urllib.parse.quote(base, safe='')}&per_page=100",
+                  cwd, max_pages=2)
+    return [_pull(p) for p in rows if isinstance(p, dict)]
 
 
 def open_prs_with_heads(cwd=None) -> list:
     """Every open PR (any base) with its number, branch and head commit: what a worker's report is checked against."""
-    return call_json("pr", "list", "--state", "open", "--limit", "200", "--json",
-                     "number,headRefName,headRefOid,isDraft,baseRefName", shape=list, cwd=cwd)
+    return [_pull(p) for p in _pages("repos/{owner}/{repo}/pulls?state=open&per_page=100", cwd, max_pages=2)
+            if isinstance(p, dict)]
 
 
-def merged_prs(base: str, cwd=None) -> list:
-    # The newest 200 only: an older merged PR is still caught by its closed issue (`Closes #n`).
-    return call_json("pr", "list", "--state", "merged", "--base", base, "--limit", "200", "--json",
-                     "number,headRefName", shape=list, cwd=cwd)
+def merged_prs(base, cwd=None, limit: int = 200) -> list:
+    """The newest merged PRs (on `base`, or any base when it is None) by last update, at most `limit` closed ones
+    read: an older merged PR is still caught by its closed issue (`Closes #n`)."""
+    where = f"&base={urllib.parse.quote(base, safe='')}" if base else ""
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls?state=closed{where}&sort=updated&direction=desc&per_page=100",
+                  cwd, max_pages=max(1, -(-limit // 100)))
+    return [_pull(p) for p in rows if isinstance(p, dict) and p.get("merged_at")]
 
 
 def pr_files(pr, cwd=None) -> list:
     """The paths a PR's diff changes."""
-    files = pr_view(pr, "files", cwd=cwd).get("files")
-    if not isinstance(files, list) or not all(isinstance(f, dict) and isinstance(f.get("path"), str) for f in files):
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/files?per_page=100", cwd, max_pages=30)
+    if not all(isinstance(f, dict) and isinstance(f.get("filename"), str) for f in rows):
         raise GhError(MALFORMED, "gh returned no file list for the PR")
-    return [f["path"] for f in files]
+    return [f["filename"] for f in rows]
 
 
 def repo_info(cwd=None) -> dict:
-    """The repository's `owner`, `name` and `defaultBranchRef`, from one `gh repo view`."""
-    return call_json("repo", "view", "--json", "owner,name,defaultBranchRef", cwd=cwd)
+    """The repository's `owner`, `name` and `defaultBranchRef`, from one `GET repos/{owner}/{repo}`."""
+    data = call_json("api", "repos/{owner}/{repo}", cwd=cwd)
+    return {"owner": {"login": (data.get("owner") or {}).get("login")}, "name": data.get("name"),
+            "defaultBranchRef": {"name": data.get("default_branch")}}
 
 
 def open_issues(repo: dict, cwd=None) -> list:
-    """Every open issue (all pages, newest created first: a cursor over creation order holds still while issues are edited) as raw GraphQL nodes, the one home of the issues query:
+    """Every open issue (all pages, oldest created first: creation time never changes on edit, and an issue created mid-read appends past the cursor, so no page shifts; an issue seen twice is kept once) as raw GraphQL nodes, the one home of the issues query:
     number, title, url, body, creation time, parent, sub-issue summary, labels, assignees (count), blockers, edits and comments.
     `repo` is `repo_info`'s (or `gh repo view`'s) owner/name dict."""
     try:
         owner, name = repo["owner"]["login"], repo["name"]
     except (KeyError, TypeError):
         raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
-    nodes, after, seen = [], None, set()
+    nodes, after, seen, numbers = [], None, set(), set()
     while True:
         args = ["api", "graphql", "-f", f"query={ISSUES_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}"]
         if after:
@@ -607,7 +833,8 @@ def open_issues(repo: dict, cwd=None) -> list:
             raise GhError(MALFORMED, "gh returned an unexpected reply (issues)") from None
         if not isinstance(page, list):
             raise GhError(MALFORMED, "gh returned an unexpected reply (issues)")
-        nodes += page
+        nodes += [n for n in page if not (isinstance(n, dict) and n.get("number") in numbers)]
+        numbers.update(n["number"] for n in page if isinstance(n, dict) and "number" in n)
         info = issues.get("pageInfo") or {}
         after = info.get("endCursor") if isinstance(info, dict) else None
         if not (isinstance(info, dict) and info.get("hasNextPage") and after):
@@ -679,6 +906,13 @@ def review_threads(pr, cwd=None) -> list:
                     "path": n.get("path") or "", "line": n.get("line") or n.get("originalLine"),
                     "comments": [_comment(c) for c in comments if isinstance(c, dict)]})
     return out
+
+
+def pr_commits(pr, cwd=None) -> list:
+    """[{"oid", "committedDate"}] for the commits on a PR's branch (what `gh pr view --json commits` listed), paged."""
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/commits?per_page=100", cwd, max_pages=10)
+    return [{"oid": c.get("sha"), "committedDate": ((c.get("commit") or {}).get("committer") or {}).get("date")}
+            for c in rows if isinstance(c, dict)]
 
 
 def pr_commit_shas(pr, cwd=None) -> list:

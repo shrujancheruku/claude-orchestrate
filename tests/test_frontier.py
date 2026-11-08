@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from harness import ScriptEnv, gh_repo_view  # noqa: E402
 
 
@@ -51,6 +52,15 @@ class Frontier(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertNotIn("after=CUR1", calls[0])
         self.assertIn("after=CUR1", calls[1])
+
+    def test_an_issue_repeated_across_pages_is_returned_once(self):
+        # an issue created mid-read can shift a page: the last issue of page one reappears first on page two
+        self.serve(page([node(1), node(2)], cursor="CUR1"), page([node(2), node(3)]))
+        self.assertEqual(self.frontier().stdout, "#1 title 1\n#2 title 2\n#3 title 3\n")
+
+    def test_the_open_issues_query_pages_by_creation_oldest_first(self):
+        import github
+        self.assertIn("orderBy: {field: CREATED_AT, direction: ASC}", github.ISSUES_QUERY)
 
     def test_a_repeated_cursor_is_malformed_not_a_loop(self):
         self.serve(page([node(1)], cursor="SAME"))

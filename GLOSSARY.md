@@ -74,6 +74,14 @@ _Avoid_: WIP PR, early PR
 A claimed ticket blocked on the user: a gate, a question or a third review round. With a lead live it waits on the lead instead and carries `needs-lead`. Source: `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.
 _Avoid_: blocked, on hold
 
+**Snapshot**:
+The one read of the tracker a pass works from: the open issues with their blockers (native edges plus the body `Blocked by:` line), the open PRs with their draft state, the merged branches, and the closed `wontfix` tickets still assigned. `scripts/tracker.py` owns it and `scripts/snapshot` writes it to a file; `frontier`, `claims`, `holds`, `lead-route` and `gate` read it. Source: `scripts/tracker.py`, `scripts/snapshot`.
+_Avoid_: cache, issue list, tracker state
+
+**Scratch worktree**:
+A detached worktree a reviewer adds under its scratchpad (`pr-<n>`, `pr-<n>b`, `pr-<n>-r2`) to read or run a PR's head. `merge` removes the merged PR's scratch worktrees; nothing else does. Source: `agents/reviewer.md`, `scripts/merge`.
+_Avoid_: review worktree, temp checkout
+
 **State file**:
 `.claude/orchestrate-state.json`, gitignored: for each ticket this session dispatched a worker for, the agent ID, worktree path (null once gone), worker model, time of its last report and the brief's touch map. Rebuilt by `scripts/rebuild-state`, never written by the orchestrator, and a cache that the tracker overrules. `scripts/claims` is its one reader. Source: `scripts/rebuild-state`, `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: status file, session file
@@ -97,7 +105,7 @@ _Avoid_: hand-back (that is the sweep's `HANDBACK` line), result, completion (th
 ### Overlap
 
 **Touch map**:
-The files a ticket is expected to change, as a prediction rather than a fence. Source: `agents/scout.md`, `skills/run/brief.md`.
+The files a ticket is expected to change, as a prediction rather than a fence. Its grammar is `path[:L[-L]] [(note)]`, entries separated by `,`, `;` or a sentence-ending `. ` outside parentheses (`none` for an empty map). `scripts/touchmap.py` is its one parser and formatter, and the brief carries the canonical form. Source: `scripts/touchmap.py`, `agents/scout.md`, `skills/run/brief.md`.
 _Avoid_: file list, change set
 
 **Held path**:
@@ -119,7 +127,7 @@ What `scripts/merge` does after a merge: updating every other open PR whose bran
 _Avoid_: refresh, rebase-all
 
 **CI green**:
-What `scripts/merge` requires of a PR head before merging: every check in the rollup is SUCCESS, SKIPPED or NEUTRAL, or (once #362 lands) the rollup is empty and the head's tree has no workflow files. A failed check is red; anything else, an empty rollup with workflows present included, is pending, and a pending or red head never merges. Source: `docs/adr/0012-ci-green-without-workflows.md`; the code is `ci_verdict` in `scripts/github.py`, which until #362 treats every empty rollup as pending.
+What `scripts/merge` requires of a PR head before merging: every check in the rollup is SUCCESS, SKIPPED or NEUTRAL, or the rollup is empty and the head's tree has no workflow files. A failed check is red; anything else, an empty rollup with workflows present included, is pending, and a pending or red head never merges. Source: `docs/adr/0012-ci-green-without-workflows.md`; the code is `ci_verdict` in `scripts/github.py`, which treats every empty rollup as pending and leaves the no-workflows case to `scripts/merge`.
 _Avoid_: CI passed, checks done, no CI (that is one reason for green, not the state)
 
 **Approved head**:

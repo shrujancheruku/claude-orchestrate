@@ -119,7 +119,7 @@ class WorkerTurnRules(unittest.TestCase):
         orient = s[s.index("1. **Orient.**"):s.index("2. **Build")]
         check = orient.index("compare each acceptance criterion with `origin/<default branch>`")
         self.assertLess(orient.index("git fetch origin"), check)
-        self.assertLess(check, orient.index("If the brief's branch exists on the remote"))
+        self.assertLess(check, orient.index("your first git step is to move onto the brief's branch"))
         # The already-done stop reports status: stopped with no branch.
         self.assertIn("`status: stopped`", orient)
         self.assertIn("`branch: none`", orient)

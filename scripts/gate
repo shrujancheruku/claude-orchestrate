@@ -18,6 +18,9 @@ and nothing else failed (run the gate again; not the worker's fault); UNKNOWN wi
 that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's
 worktree, so they see the PR's code); default is the current directory. Each runs for at most --timeout
 seconds (default 1800); one that outlives it is killed and fails with "timed out after Ns".
+Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word:
+`review <head>` (exit 0) | `send-back <pr>` (exit 1; the lines above it are what the worker gets) |
+`rerun-after-ci` (exit 3) | `could-not-run` (exit 2, the reason on stderr).
 Stdlib only, Python 3.9+.
 """
 
@@ -37,6 +40,7 @@ import repo
 import runlog
 import tracker
 
+NEXT = {}  # what main() needs for the `next:` line: the PR and its head
 HOLDS = Path(__file__).resolve().parent / "holds"
 # Paths (by file name) that hold secrets, and added lines that are secrets.
 SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "id_rsa*", "id_ed25519*",
@@ -95,7 +99,7 @@ def lockfiles_without_manifest(changed):
     return out
 
 
-def dependencies_check(view, snap):
+def dependencies_check(view, snap, cwd="."):
     """Pass when the PR's ticket has no open blocker and the PR is based on the default branch."""
     name = "dependencies merged"
     ticket = repo.ticket_of_branch(view.get("headRefName"))
@@ -109,7 +113,7 @@ def dependencies_check(view, snap):
     if blockers:
         problems.append(f"#{ticket} has {len(blockers)} open blocker(s): "
                         + " ".join(f"#{n} (body)" if from_body else f"#{n}" for n, from_body in blockers))
-    default = github.default_branch()
+    default = github.default_branch(cwd)
     if view.get("baseRefName") != default:
         problems.append(f"based on {view.get('baseRefName')}, not {default}: a dependency is not merged")
     return check(name, not problems, "\n".join(problems))
@@ -123,6 +127,11 @@ def overlap_check(pr, cwd, snap):
     # PRs and merged PRs; `abandoned` is not its business, so the file carries an empty one rather than a fetch.
     try:
         full = tracker.Snapshot(cwd, repo=snap.repo, issues=snap.issues, prs=snap.prs, merged=snap.merged, abandoned=[])
+        # The open PRs' file lists come from the main checkout's snapshot file when their head SHAs match (#446); the
+        # misses are fetched once here and written back, and holds reads them from the temp file below.
+        full.use_cache(Path(repo.main_checkout(cwd)) / tracker.SNAPSHOT_FILE)
+        full.cache_pr_files()
+        full.save_cache()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "snapshot.json"
             full.write(path)
@@ -147,7 +156,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
     # GitHub computes mergeability lazily: UNKNOWN right after a push usually settles in seconds.
     for attempt in range(retries + 1):
         try:
-            view = github.pr_view(pr, "title,mergeable,baseRefName,headRefName,headRefOid,body")
+            view = github.pr_view(pr, "title,mergeable,baseRefName,headRefName,headRefOid,body", cwd)
         except github.GhError as e:
             if e.kind == github.MALFORMED:
                 return None, "gh pr view returned malformed JSON"
@@ -161,7 +170,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
     mergeable = view.get("mergeable", "UNKNOWN")
     behind = None
     try:
-        behind = github.behind_by(base, view.get("headRefName"))
+        behind = github.behind_by(base, view.get("headRefName"), cwd)
     except github.GhError:
         pass  # shown as ? and logged as null
     problems = []
@@ -180,8 +189,8 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
         return None, overlap
     results.append(overlap)
     try:
-        results.append(dependencies_check(view, snap))
-        diff = github.call("pr", "diff", str(pr), cwd=cwd)
+        results.append(dependencies_check(view, snap, cwd))
+        diff = github.pr_diff(pr, cwd)
     except github.GhError as e:
         return None, e.message if e.kind == github.MALFORMED else f"gh failed: {e.message}"
     except (KeyError, TypeError, ValueError) as e:  # a malformed issues reply: could not run, not a failed check
@@ -195,6 +204,20 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
 
 
 def main(argv=None) -> int:
+    """Run the gate, then print the one `next:` line (see the module docstring)."""
+    NEXT.clear()
+    try:
+        code = run_gate(argv)
+    except SystemExit as e:  # an argparse usage error (2); --help (0) prints no verdict
+        if e.code in (0, None):
+            raise
+        code = e.code if isinstance(e.code, int) else 2
+    pr, head = NEXT.get("pr", "?"), NEXT.get("head")
+    print("next: " + {0: f"review {head}", 1: f"send-back {pr}", 3: "rerun-after-ci"}.get(code, "could-not-run"))
+    return code
+
+
+def run_gate(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("pr", help="PR number")
     ap.add_argument("--cwd", default=".", help="directory holding the PR's code and the config")
@@ -210,12 +233,14 @@ def main(argv=None) -> int:
         print(f"gate: --cwd {args.cwd} does not exist", file=sys.stderr)
         return 2
     pr, ref = common.pr_ref(args.pr)
+    NEXT["pr"] = pr
 
     results, extra = pr_checks(pr, args.base, delay=args.retry_delay, cwd=args.cwd)
     if results is None:
         print(f"gate: {extra}", file=sys.stderr)
         return 2
     behind, unknown, head = extra
+    NEXT["head"] = head
     cfg = config.Config.load(args.cwd)
     malformed = cfg.problems_of(config.RUN)  # only a bad `run:` fails the gate; other problems are not its business
     results += checks.run_stages([list(cfg.check_commands)], args.cwd, args.timeout)

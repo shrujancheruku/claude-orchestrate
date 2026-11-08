@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, gh_pr_list, git  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git  # noqa: E402
 from test_claims import own_start_reason  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,7 +32,7 @@ def iso(minutes):
 
 
 def comment(minutes, body, edits=()):
-    return {"body": body, "createdAt": iso(minutes), "userContentEdits": {"nodes": [{"editedAt": iso(e)} for e in edits]}}
+    return {"body": body, "createdAt": iso(minutes), "lastEditedAt": iso(max(edits)) if edits else None}
 
 
 def issue(number, labels=(), claimed=False, comments=(), body_edits=(), blocked_by=()):
@@ -40,7 +40,7 @@ def issue(number, labels=(), claimed=False, comments=(), body_edits=(), blocked_
             "blockedBy": {"nodes": [{"number": b, "state": st} for b, st in blocked_by]},
             "labels": {"nodes": [{"name": name} for name in labels]},
             "assignees": {"totalCount": 1 if claimed else 0},
-            "userContentEdits": {"nodes": [{"editedAt": iso(e)} for e in body_edits]},
+            "lastEditedAt": iso(max(body_edits)) if body_edits else None,
             "comments": {"nodes": list(comments)}}
 
 
@@ -70,7 +70,7 @@ class LeadRoute(unittest.TestCase):
                 "isDraft": b in drafts} for i, b in enumerate(open_branches)]
         merged = [{"headRefName": b, "number": 200 + i} for i, b in enumerate(merged_branches)]
         repo = {"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}}
-        self.responses = [{"args": ["repo", "view"], "stdout": json.dumps(repo)},
+        self.responses = [gh_repo_rest(repo),
                           graphql,
                           gh_pr_list(prs, "--state", "open"),
                           gh_pr_list(merged, "--state", "merged")]

@@ -34,7 +34,9 @@ if "-" in args:  # a body or payload on stdin (`--body-file -`, `--input -`): ke
     with open(state + ".stdin", "a") as f:
         f.write(json.dumps({"args": args, "stdin": sys.stdin.read()}) + "\\n")
 for i, r in enumerate(json.load(open(state))["responses"]):
-    if args[: len(r["args"])] == r["args"]:
+    # A canned arg that starts with "~" matches any call arg that starts with the rest (a REST path with its query).
+    want = r["args"]
+    if len(args) >= len(want) and all(a.startswith(w[1:]) if w.startswith("~") else a == w for a, w in zip(args, want)):
         if "seq" in r:
             try:
                 counts = json.load(open(state + ".counts"))
@@ -72,8 +74,15 @@ def _template():
         atexit.register(tmp.cleanup)
         root = Path(tmp.name)
         origin, repo = root / "origin.git", root / "repo"
-        git(root, "init", "--bare", "-b", "main", str(origin))
-        git(root, "init", "-b", "main", str(repo))
+        # Git's auto maintenance (after a commit or push) detaches and holds `objects/maintenance.lock` for a
+        # moment; a copy of the template racing it fails with ENOENT (#415). Never start it: the -c flags cover
+        # the build, and the config below keeps it off in every copy, so no test's git command starts it either.
+        off = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
+        git(root, *off, "init", "--bare", "-b", "main", str(origin))
+        git(root, *off, "init", "-b", "main", str(repo))
+        for d in (origin, repo):
+            git(d, "config", "maintenance.auto", "false")
+            git(d, "config", "gc.auto", "0")
         for k, v in (("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")):
             git(repo, "config", k, v)
         git(repo, "remote", "add", "origin", str(origin))
@@ -92,26 +101,80 @@ def _template():
     return _TEMPLATE
 
 
-# Named canned `gh` replies, for ScriptEnv.set_gh.
-def gh_repo_view(owner="o", name="r"):
-    """`gh repo view --json owner,name`."""
-    return {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": owner}, "name": name})}
+# Named canned `gh` replies, for ScriptEnv.set_gh. The plugin reads GitHub through REST (`gh api`, #449): these
+# take the field names `gh pr view/list --json` used and answer in REST's.
+def rest_pull(merged=False, **v):
+    """A REST pull object from gh-style fields (state, mergeable, mergeStateStatus, headRefName, headRefOid,
+    baseRefName, isDraft, isCrossRepository, mergedAt, title, body, number)."""
+    state = v.get("state", "MERGED" if merged else "OPEN")
+    cross = v.get("isCrossRepository", False)
+    return {"number": v.get("number"), "title": v.get("title"), "body": v.get("body"),
+            "state": "open" if state == "OPEN" else "closed",
+            "merged_at": v.get("mergedAt") or ("2026-01-01T00:00:00Z" if state == "MERGED" else None),
+            "draft": bool(v.get("isDraft", False)),
+            "mergeable": {"MERGEABLE": True, "CONFLICTING": False}.get(v.get("mergeable", "UNKNOWN")),
+            "mergeable_state": str(v.get("mergeStateStatus", "UNKNOWN")).lower(),
+            "head": {"ref": v.get("headRefName"), "sha": v.get("headRefOid"),
+                     "repo": {"full_name": "x/r" if cross else "o/r", "fork": cross}},
+            "base": {"ref": v.get("baseRefName", "main"), "repo": {"full_name": "o/r"}}}
+
+
+def gh_pulls(prs, state, **kw):
+    """`GET pulls?state=<open|closed>` replying with `prs` (gh-style rows). Closed rows are merged ones."""
+    rows = [rest_pull(merged=state == "closed", **p) for p in prs]
+    return {"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls?state={state}"], "stdout": json.dumps(rows), **kw}
+
+
+def gh_pr_view(n, view, **kw):
+    """`GET pulls/<n>` replying with the REST form of the gh-style `view` fields."""
+    return {"args": ["api", f"repos/{{owner}}/{{repo}}/pulls/{n}"], "stdout": json.dumps(rest_pull(**view)), **kw}
+
+
+def pr_graphql_reply(view):
+    """The explicit GraphQL pull-request query's reply for gh-style `view` fields (closingIssuesReferences, statusCheckRollup)."""
+    node = {k: view[k] for k in ("state", "headRefName", "headRefOid", "isCrossRepository") if k in view}
+    node["closingIssuesReferences"] = {"nodes": view.get("closingIssuesReferences") or []}
+    contexts = [dict(c, __typename="CheckRun" if "status" in c else "StatusContext")
+                for c in view.get("statusCheckRollup") or []]
+    node["commits"] = {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": contexts}}}}]}
+    return json.dumps({"data": {"repository": {"pullRequest": node}}})
+
+
+PR_GRAPHQL = ["api", "graphql", "-f", "~query=query($owner: String!, $name: String!, $number: Int!)"]
+
+
+def gh_repo_view(owner="o", name="r", default="main"):
+    """`GET repos/{owner}/{repo}`: owner, name and default branch."""
+    return {"args": ["api", "repos/{owner}/{repo}"],
+            "stdout": json.dumps({"owner": {"login": owner}, "name": name, "default_branch": default})}
+
+
+def gh_repo_rest(repo):
+    """`GET repos/{owner}/{repo}` replying with the REST form of a gh-style `repo view` dict."""
+    return {"args": ["api", "repos/{owner}/{repo}"], "stdout": json.dumps(
+        {"owner": repo.get("owner"), "name": repo.get("name"),
+         "default_branch": (repo.get("defaultBranchRef") or {}).get("name", "main")})}
 
 
 def gh_default_branch(name="main"):
-    """`gh repo view --json defaultBranchRef`."""
-    return {"args": ["repo", "view"], "stdout": json.dumps({"defaultBranchRef": {"name": name}})}
+    """`GET repos/{owner}/{repo}` for the default branch."""
+    return gh_repo_view(default=name)
 
 
 def gh_pr_list(prs, *prefix):
-    """`gh pr list` (optionally only calls starting with `prefix`, e.g. "--state", "open") replying with `prs`."""
-    return {"args": ["pr", "list", *prefix], "stdout": json.dumps(prs)}
+    """The open (prefix "--state", "open") or merged pulls list replying with gh-style `prs`."""
+    return gh_pulls(prs, "open" if "open" in prefix else "closed")
 
 
 class ScriptEnv:
-    """Use as `env = ScriptEnv(); self.addCleanup(env.close)`."""
+    """Use as `env = ScriptEnv(); self.addCleanup(env.close)`.
 
-    def __init__(self):
+    Scripts run with ORCHESTRATE_GH_LOG=off, so the event log holds only what a test provokes; pass
+    `gh_log=True` for a test of the `gh_call` profiling events themselves.
+    """
+
+    def __init__(self, gh_log=False):
+        self.gh_log = gh_log
         self._tmp = tempfile.TemporaryDirectory()
         root = Path(self._tmp.name)
         self.origin = root / "origin.git"
@@ -163,9 +226,15 @@ class ScriptEnv:
         f = Path(str(self.gh_state) + ".stdin")
         return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
 
-    def events(self):
+    def events(self, profiling=False):
+        """The event log's rows; `gh_call` profiling rows are left out unless `profiling=True`."""
         log = runlog.log_path(self.repo, runlog.EVENTS_LOG)
-        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return rows if profiling else [r for r in rows if r.get("kind") != runlog.GH_CALL]
+
+    def clear_events(self):
+        """Forget the events so far (a test that runs a script in a loop, one fresh log per pass)."""
+        runlog.log_path(self.repo, runlog.EVENTS_LOG).unlink(missing_ok=True)
 
     def _tmp_empty(self):
         empty = Path(self._tmp.name) / "empty-bin"
@@ -185,7 +254,12 @@ class ScriptEnv:
             os.environ,
             PATH=search_path,
             FAKE_GH_STATE=str(self.gh_state),
+            ORCHESTRATE_GH_5XX_TRIES="1",  # a fake gh's 5xx is a plain failure here; github.call's retry is tested in test_github_retry
         )
+        if self.gh_log:
+            env.pop("ORCHESTRATE_GH_LOG", None)
+        else:
+            env["ORCHESTRATE_GH_LOG"] = "off"
         return subprocess.run(
             [sys.executable, str(path), *map(str, args)],
             cwd=cwd or self.repo, env=env, capture_output=True, text=True, check=check,

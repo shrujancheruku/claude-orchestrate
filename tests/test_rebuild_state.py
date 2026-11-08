@@ -121,15 +121,23 @@ class RebuildState(unittest.TestCase):
         _, state = self.rebuild()
         self.assertIsNone(state["tickets"]["5"]["worktree"])
 
-    def test_touch_map_is_read_from_the_brief_as_written(self):
-        brief = ("Build #5.\nTouch map: scripts/a.py:10, scripts/b.py:20 (the join, twice). A prediction, not a fence.\n"
+    def test_touch_map_is_stored_in_canonical_form(self):
+        brief = ("Build #5.\nTouch map: `scripts/a.py`:10; scripts/b.py:20 (the join, twice)\nA prediction, not a fence.\n"
                  "Branch: 5-slug. If it exists on the remote, continue from it.")
         self.main_records += [dispatch("t1", "Build #5", prompt=brief), dispatch("t2", "Build #6", prompt="no brief")]
         self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z")])
         self.agent("a2", "t2", [reply("2026-11-04T09:01:00Z")])
         _, state = self.rebuild()
-        self.assertEqual(state["tickets"]["5"]["touch_map"], ["scripts/a.py:10", "scripts/b.py:20 (the join, twice)"])
-        self.assertEqual(state["tickets"]["6"]["touch_map"], [])
+        self.assertEqual(state["tickets"]["5"]["touch_map"], "scripts/a.py:10, scripts/b.py:20 (the join, twice)")
+        self.assertEqual(state["tickets"]["6"]["touch_map"], "none")
+
+    def test_an_unparseable_touch_map_is_reported_and_kept_as_unparsed(self):
+        brief = "Build #5.\nTouch map: a.py:10, 20\nBranch: 5-slug."
+        self.main_records += [dispatch("t1", "Build #5", prompt=brief)]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z")])
+        res, state = self.rebuild()
+        self.assertEqual(state["tickets"]["5"]["touch_map"], "unparsed:a.py:10, 20")
+        self.assertIn("#5 touch map not read, held as every path: bad touch-map entry: '20'", res.stdout)
 
     def test_latest_dispatch_for_a_ticket_wins(self):
         self.main_records += [dispatch("t1", "Build #5"), dispatch("t2", "Build #5")]
