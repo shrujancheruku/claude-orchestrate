@@ -8,6 +8,8 @@ Default: one line per takeable ticket, `#<n> <title>`, ascending, nothing else (
     parents-closed:  `#<n> <title>`, open parents whose sub-issues are all closed
     drift:           `#<n> body says blocked by #<m>, tracker does not`
 --parent <n> limits every section to that parent's sub-issues, --ticket <n> to one ticket (its line, or its reason).
+--ticket <n> for a number absent from the open issues prints `#<n> not open` and exits 0.
+An unreadable docs/agents/triage-labels.md is exit 2 with one stderr line; a missing one keeps the default labels.
 --fix-drift adds the native `blocked_by` edge for every `drift:` line in scope (the tracker doc's Blocking command), prints
 `added #<n> blocked by #<m>` for each, and then prints as usual with those lines gone from `drift:`; the orchestrator never runs it.
 The rules are in scripts/tracker.py. Reads the open issues through a Snapshot (every page of one `gh api graphql` query;
