@@ -1570,7 +1570,7 @@ def body_files_ok(args: list, cwd: str, session: str = "") -> bool:
     j = 0
     while j < len(args):
         word = args[j]
-        if re.fullmatch(r"-[A-Za-z]+", word) and "F" in word and not word.startswith("-F"):
+        if re.match(r"-[A-Za-z0-9]+F", word) and not word.startswith("-F"):
             return False  # a cluster such as `-dF x`: not read, so it fails closed
         if word.startswith("-F") and len(word) > 2:
             # pflag's attached shorthand: `-F<path>` and `-F=<path>` both name the path after the F

@@ -1109,6 +1109,8 @@ class RoutineApprovalTest(unittest.TestCase):
 
     def test_attached_and_clustered_short_body_file_forms_fail_closed(self):
         for command in ("gh pr edit -F/etc/passwd", "gh pr edit -F=/etc/passwd", "gh pr edit -dF /etc/passwd",
+                        "gh pr create --draft -dF/etc/passwd --title t", "gh pr create --draft -dF=/etc/passwd --title t",
+                        "gh pr create --draft -dF../../.env --title t", "gh pr create --draft -d1F/etc/passwd --title t",
                         "gh pr create --draft --title t -F/etc/passwd", "gh pr edit -F../../.env", "gh pr edit -F=", "gh pr edit -F"):
             with self.subTest(command):
                 self.assertFalse(approved("orchestrate:worker", command, self.work))

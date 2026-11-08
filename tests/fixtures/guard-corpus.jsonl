@@ -661,3 +661,4 @@
 {"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" -F=b.md", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit -F~/x", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit -F../../.env", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft -dF/etc/passwd --title \"TEXT\"", "expected": "silent", "source": "hand"}
