@@ -11,12 +11,11 @@ resolves, whichever subdirectory or linked worktree the caller stands in.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import common
-from repo import main_checkout, parse_ts
+from repo import STATE, main_checkout, parse_ts
 
 PROFILES = Path(".claude") / "orchestrate-profiles"
 EVENTS_LOG = "events.jsonl"
@@ -46,6 +45,20 @@ def log_path(repo, name: str) -> Path:
     return main_checkout(repo) / PROFILES / name
 
 
+def current_session(repo) -> str | None:
+    """The session the state file is stamped with (rebuild-state writes it), or None when there is no
+    usable state file. Read from the main checkout, like the log, so a linked worktree's script finds it.
+
+    Not $CLAUDE_SESSION_ID: the run skill templates that variable into the commands it names only, so the
+    scripts a run starts never see it, and every event was written with session null (#341)."""
+    try:
+        state = json.loads((main_checkout(repo) / STATE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    sid = state.get("session") if isinstance(state, dict) else None
+    return sid if isinstance(sid, str) and sid else None
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -61,16 +74,21 @@ def _append(repo, name: str, record: dict) -> None:
 def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = None, **extra) -> dict:
     """Append one event to the events log.
 
-    Fields: ts (UTC ISO), session (default $CLAUDE_SESSION_ID), kind, ref (PR or ticket), outcome,
-    plus any extra keys. An unknown kind, or an outcome the kind doesn't have, raises ValueError.
+    Fields: ts (UTC ISO), session (default: the state file's, see current_session), kind, ref (PR or
+    ticket), outcome, plus any extra keys. An unknown kind, or an outcome the kind doesn't have, raises
+    ValueError. With no session from either source nothing is written: one line on stderr, exit 2.
     """
     if kind not in OUTCOMES:
         raise ValueError(f"unknown event kind {kind!r}; expected one of {EVENT_KINDS}")
     if outcome not in OUTCOMES[kind]:
         raise ValueError(f"unknown outcome {outcome!r} for {kind!r} events; expected one of {OUTCOMES[kind]}")
+    session = session or current_session(repo)
+    if not session:
+        common.die(f"runlog: no session for the {kind} event: no {STATE} stamped under {main_checkout(repo)} "
+                   "(rebuild-state writes it; pass session= to override)")
     event = {
         "ts": _now(),
-        "session": session if session is not None else os.environ.get("CLAUDE_SESSION_ID"),
+        "session": session,
         "kind": kind,
         "ref": ref,
         "outcome": outcome,

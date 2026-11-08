@@ -75,10 +75,43 @@ class RunLogTest(unittest.TestCase):
         self.assertEqual(p["slots"], 2)
         self.assertEqual(p["metrics"]["events"]["gate"]["pass"], 1)
 
-    def test_outside_a_checkout_falls_back_to_the_given_directory(self):
+    def stamp(self, where, session):
+        """Write the state file rebuild-state would, in `where`'s main checkout."""
+        (Path(where) / repo.STATE).parent.mkdir(parents=True, exist_ok=True)
+        (Path(where) / repo.STATE).write_text(json.dumps({"session": session, "tickets": {}}))
+
+    def test_outside_a_checkout_the_state_file_is_read_from_the_given_directory(self):
         with tempfile.TemporaryDirectory() as d:
-            runlog.append_event(d, "gate", "pass")
+            self.stamp(d, "sess")
+            self.assertEqual(runlog.append_event(d, "gate", "pass")["session"], "sess")
             self.assertTrue(runlog.log_path(d, runlog.EVENTS_LOG).exists())
+
+    def test_session_comes_from_the_state_file_from_a_linked_worktree(self):
+        # The session is not in the environment: the state file, in the main checkout, is the only source.
+        self.stamp(self.repo, "sess")
+        wt = self.worktree()
+        self.assertEqual(runlog.append_event(wt, "gate", "pass", ref=1)["session"], "sess")
+        self.assertEqual([e["ref"] for e in runlog.read_events(self.repo, "sess", *self.span)], [1])
+
+    def test_an_explicit_session_overrides_the_state_file(self):
+        self.stamp(self.repo, "stamped")
+        runlog.append_event(self.repo, "gate", "pass", session="given")
+        self.assertEqual(runlog.read_events(self.repo, "given", *self.span)[0]["session"], "given")
+
+    def test_no_state_file_and_no_session_exits_2_and_writes_nothing(self):
+        with self.assertRaises(SystemExit) as cm:
+            runlog.append_event(self.repo, "gate", "pass", ref=1)
+        self.assertEqual(cm.exception.code, 2)
+        self.assertFalse(runlog.log_path(self.repo, runlog.EVENTS_LOG).exists())
+
+    def test_a_state_file_without_a_session_exits_2(self):
+        for text in ("not json", json.dumps({"session": ""}), json.dumps({"session": None}), json.dumps([])):
+            (self.repo / repo.STATE).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / repo.STATE).write_text(text)
+            with self.assertRaises(SystemExit) as cm:
+                runlog.append_event(self.repo, "gate", "pass")
+            self.assertEqual(cm.exception.code, 2, text)
+        self.assertFalse(runlog.log_path(self.repo, runlog.EVENTS_LOG).exists())
 
     def test_unknown_outcome_or_kind_raises_and_writes_nothing(self):
         with self.assertRaises(ValueError):
@@ -96,8 +129,13 @@ class RunLogTest(unittest.TestCase):
         self.assertEqual(set(runlog.OUTCOMES[runlog.REPLAY]),
                          {replay.LINE_REPLAY, replay.WORD_MERGE, replay.REGENERATED, replay.HANDED_BACK})
 
-    def test_sessionless_event_counts_inside_the_span_only(self):
-        runlog.append_event(self.repo, "gate", "pass", session="")
+    def test_a_legacy_sessionless_event_counts_inside_the_span_only(self):
+        # Logs written before #341 hold events with session null: the time window still attributes them.
+        legacy = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "session": None,
+                  "kind": "gate", "ref": 1, "outcome": "pass"}
+        path = runlog.log_path(self.repo, runlog.EVENTS_LOG)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(legacy) + "\n")
         self.assertEqual(len(runlog.read_events(self.repo, "s", *self.span)), 1)
         long_ago = datetime(2000, 1, 1, tzinfo=timezone.utc)
         self.assertIsNone(runlog.read_events(self.repo, "s", long_ago, long_ago + timedelta(days=1)))

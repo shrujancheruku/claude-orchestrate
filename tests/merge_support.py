@@ -75,7 +75,7 @@ class SweepMixin(MergeMixin):
         patcher = unittest.mock.patch.dict(os.environ, {"GIT_LOG": str(self.git_log)})
         patcher.start()
         self.addCleanup(patcher.stop)
-        (self.env.repo / ".claude").mkdir()
+        (self.env.repo / ".claude").mkdir(exist_ok=True)  # the harness stamps a state file here
         (self.env.repo / ".claude" / "orchestration.md").write_text(CONFIG)
         self.env.commit("CHANGELOG.md", CHANGELOG, "chore: changelog")
         self.env.commit("src.txt", "one\ntwo\n", "chore: src")
