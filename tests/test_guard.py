@@ -1093,6 +1093,24 @@ class RoutineApprovalTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertFalse(approved("orchestrate:worker", command, self.work))
 
+    def test_attached_and_clustered_short_body_file_forms_fail_closed(self):
+        for command in ("gh pr edit -F/etc/passwd", "gh pr edit -F=/etc/passwd", "gh pr edit -dF /etc/passwd",
+                        "gh pr create --draft --title t -F/etc/passwd", "gh pr edit -F./b.md"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+
+    def test_board_accepts_exactly_repo_dot_once(self):
+        for command in (f"{SCRIPTS}/board --repo .", f"{SCRIPTS}/board --repo . --dry-run"):
+            with self.subTest(command):
+                self.assertTrue(approved(None, command, self.main))
+        for command in (f"{SCRIPTS}/board --repo ..", f"{SCRIPTS}/board --repo /x", f"{SCRIPTS}/board --repo=.",
+                        f"{SCRIPTS}/board --repo . --repo .", f"{SCRIPTS}/board --dry-run --repo ."):
+            with self.subTest(command):
+                self.assertFalse(approved(None, command, self.main))
+
+    def test_merge_pr_number_is_ascii_digits(self):
+        self.assertFalse(approved(None, f"{SCRIPTS}/merge ²", self.main))
+
     def test_worker_body_file_symlink_out_of_the_worktree_is_not_approved(self):
         (self.work / "link.md").symlink_to("/etc/passwd")
         self.assertFalse(approved("orchestrate:worker", "gh pr edit --body-file link.md", self.work))

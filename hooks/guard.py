@@ -1023,10 +1023,24 @@ def role_label(role: str) -> str:
     return f"the {role or '(unnamed)'} role, which this version of the guard doesn't know and so treats as read-only,"
 
 
+def is_number(word: str) -> bool:
+    """ASCII digits only: `str.isdigit` also accepts `\u00b2`."""
+    return word.isdigit() and word.isascii()
+
+
 def only_plain_words(cmd: Command) -> bool:
     """No redirect, no expansion, and no unquoted glob, brace or tilde word: the shell would turn that into
     other words before the script sees them (#441)."""
     return not cmd.redirects and not any(w.dynamic or w.glob for w in cmd.words)
+
+
+def cd_target_plain(cd: Command) -> bool:
+    """The leading `cd <path>` of a review post: plain words, except that `~` may start the path (`cd ~/x`), as
+    before #441. It only changes directory, like any other path the rule allows; a glob or brace still fails."""
+    if cd.redirects or any(w.dynamic for w in cd.words):
+        return False
+    target = cd.words[1]
+    return not target.glob or (target.text.startswith("~") and not re.search(r"[*?\[{$]", target.text))
 
 
 def review_shape(cmd: Command) -> str | None:
@@ -1050,7 +1064,7 @@ def review_shape(cmd: Command) -> str | None:
             if set(fields) == FILE_COMMENT_FIELDS and fields["subject_type"] == "file":
                 return "file-comment"
         return None
-    if words[1:3] != ["pr", "review"] or len(words) < 5 or not words[3].isdigit():
+    if words[1:3] != ["pr", "review"] or len(words) < 5 or not is_number(words[3]):
         return None
     args, comment, body, body_file = words[4:], 0, 0, 0
     j = 0
@@ -1101,7 +1115,7 @@ def review_post(p: Parsed) -> str | None:
         return "it isn't in the accepted shape"
     if at == 1:  # only a plain `cd <path> &&` may come first
         cd = cmds[0]
-        if ([w.text for w in cd.words[:1]] != ["cd"] or len(cd.words) != 2 or not only_plain_words(cd)
+        if ([w.text for w in cd.words[:1]] != ["cd"] or len(cd.words) != 2 or not cd_target_plain(cd)
                 or cd.heredocs or cmds[1].joiner != "&&"):
             return "it isn't in the accepted shape"
     post = cmds[at]
@@ -1216,7 +1230,7 @@ def threads_form(args: list) -> str | None:
     """Which form a threads call is, from its lexed words after the script: "list", "reopen", "resolve"
     or None for anything else."""
     words = [w.text for w in args]
-    if not words or not words[0].isdigit():
+    if not words or not is_number(words[0]):
         return None
     rest = words[1:]
     if rest in ([], ["--all"]):
@@ -1258,7 +1272,7 @@ def orchestrator_threads_form(cmd: Command, args: list) -> bool:
     THREADS_ORCHESTRATOR_FLAGS in full. Anything else (`--repo`, `reopen`, an abbreviation, a number-less
     call) is left to the permission layer, so a mistaken `resolve` can't land on another PR or repository."""
     words = [w.text for w in args]
-    if len(cmd.words) - len(args) != 1 or not words or not words[0].isdigit():
+    if len(cmd.words) - len(args) != 1 or not words or not is_number(words[0]):
         return False
     if words and words[-1] == "--verbose":
         words = words[:-1]
@@ -1459,7 +1473,7 @@ def orchestrator_merge_form(cmd: Command, args: list) -> bool:
     """True when the orchestrator's merge call is `<pr> [flags]`: the script first (no env prefix, no wrapper),
     a PR number, then only MERGE_VALUE_FLAGS, each with one value, in full (`--flag value` or `--flag=value`)."""
     words = [w.text for w in args]
-    if len(cmd.words) - len(args) != 1 or not words or not words[0].isdigit():
+    if len(cmd.words) - len(args) != 1 or not words or not is_number(words[0]):
         return False
     seen, j = set(), 1
     while j < len(words):
@@ -1479,9 +1493,12 @@ BOARD_FLAGS = ("--dry-run", "--verbose")
 
 
 def orchestrator_board_form(cmd: Command, args: list) -> bool:
-    """True when the orchestrator's board call carries only BOARD_FLAGS, each once, in full: no `--repo`, which
-    aims the sync at another repository, and no positional word (#441)."""
+    """True when the orchestrator's board call carries only BOARD_FLAGS, each once, in full, optionally after
+    exactly `--repo .` (the run skill's form): any other `--repo` aims the sync at another repository, and a
+    positional word is refused (#441)."""
     words = [w.text for w in args]
+    if words[:2] == ["--repo", "."]:  # the run skill's own sync (`scripts/board --repo .`): the current repo only
+        words = words[2:]
     return len(cmd.words) - len(args) == 1 and len(set(words)) == len(words) and all(w in BOARD_FLAGS for w in words)
 
 
@@ -1522,10 +1539,14 @@ def numberless_edit(args: list) -> bool:
 
 
 # The session scratchpad: `<tmp>/claude-<uid>/<project>/<session>/scratchpad/...` under a temp root.
-SCRATCHPAD = re.compile(r"/claude-[^/]+/[^/]+/[^/]+/scratchpad(?:/.+)?")
 
 
-def body_file_ok(value: str, cwd: str) -> bool:
+def scratchpad_pattern(session: str) -> "re.Pattern":
+    """The scratchpad of this session when the hook input names it (`session_id`), else any session's."""
+    return re.compile(r"/claude-[^/]+/[^/]+/%s/scratchpad(?:/.+)?" % (re.escape(session) if session else "[^/]+"))
+
+
+def body_file_ok(value: str, cwd: str, session: str = "") -> bool:
     """A worker's `--body-file` is `-` (stdin) or a path that, resolved against cwd with symlinks followed, sits
     inside its own worktree or the session scratchpad: any other readable file (a key, `../../.env`) would
     become a PR body (#434). The word is literal (an unquoted `~` is not a plain word), so it is not expanded."""
@@ -1537,13 +1558,18 @@ def body_file_ok(value: str, cwd: str) -> bool:
     target = Path(os.path.realpath(os.path.join(cwd, value)))
     if worktree in target.parents:
         return True
-    return any(str(target).startswith(t + "/") and SCRATCHPAD.fullmatch(str(target)[len(t):]) for t in TEMP_ROOTS)
+    pad = scratchpad_pattern(session)
+    return any(str(target).startswith(t + "/") and pad.fullmatch(str(target)[len(t):]) for t in TEMP_ROOTS)
 
 
-def body_files_ok(args: list, cwd: str) -> bool:
-    """Every `--body-file`, `--body-file=<path>` and `-F <path>` word of a `gh pr` call passes body_file_ok."""
+def body_files_ok(args: list, cwd: str, session: str = "") -> bool:
+    """Every `--body-file`, `--body-file=<path>` and `-F <path>` word of a `gh pr` call passes body_file_ok.
+    A short-option word that holds an `F` but is not exactly `-F` (`-F/etc/x`, `-F=x`, `-dF x`) is a form this
+    parser does not read, so it fails closed."""
     j = 0
     while j < len(args):
+        if re.fullmatch(r"-[^-].*", args[j]) and "F" in args[j] and args[j] != "-F":
+            return False
         name, eq, value = args[j].partition("=") if args[j].startswith("--") else (args[j], "", "")
         j += 1
         if name in ("--body-file", "-F"):
@@ -1551,19 +1577,19 @@ def body_files_ok(args: list, cwd: str) -> bool:
                 if j >= len(args):
                     return False
                 value, j = args[j], j + 1
-            if not body_file_ok(value, cwd):
+            if not body_file_ok(value, cwd, session):
                 return False
     return True
 
 
-def routine_pr(call: Call, cwd: str = "") -> bool:
+def routine_pr(call: Call, cwd: str = "", session: str = "") -> bool:
     """A worker's draft PR, or its own PR made ready or edited. Ready and edit are approved only in the
     current-branch form, with no PR number (#379): `gh` resolves the PR from the checked-out branch, and the
     guard can't tell which PR a number names, so a call naming one is left to the permission layer."""
     if not call.is_sub("pr") or any(a.dynamic for a in call.args):
         return False
     args = [a.text for a in call.args]
-    if not body_files_ok(args, cwd):
+    if not body_files_ok(args, cwd, session):
         return False
     if call.is_verb("create"):
         return "--draft" in args
@@ -1581,7 +1607,7 @@ def config_path(cwd: str) -> Path | None:
     return None
 
 
-def approval(role: str | None, command: str, cwd: str) -> bool:
+def approval(role: str | None, command: str, cwd: str, session: str = "") -> bool:
     """True when this command, already accepted by the rules, is one of its role's routine writes. `role`
     None is the orchestrator's own session (no `agent_type`), in a repo that carries this plugin's config."""
     parsed = Parsed(parse(command))
@@ -1600,7 +1626,7 @@ def approval(role: str | None, command: str, cwd: str) -> bool:
         if found is not None:
             # Only the current-branch form (no PR number) is approved: the script resolves the PR from the branch.
             return numberless_threads_form(found[0], found[1]) is not None and own_script(found[0], found[1], cwd, "threads")
-        return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0], cwd))
+        return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0], cwd, session))
     if role is None and config_path(cwd):
         for pattern, name in ((MERGE_SCRIPT, "merge"), (THREADS_SCRIPT, "threads"), (BOARD_SCRIPT, "board")):
             found = script_call(parsed, pattern)
@@ -1630,6 +1656,7 @@ def main() -> None:
     tool_input = data.get("tool_input")
     role = role_of(agent_type if isinstance(agent_type, str) else "")
     cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else ""
+    session = data.get("session_id") if isinstance(data.get("session_id"), str) else ""
     if data.get("tool_name") in EDIT_TOOLS:
         decision = edit_decision(data["tool_name"], tool_input, cwd) if role == "worker" else None
         if decision:
@@ -1658,7 +1685,7 @@ def main() -> None:
         deny(reason)
         return
     try:
-        if approval(role, command, cwd):
+        if approval(role, command, cwd, session):
             allow(f"routine {role} step")
     except Exception:
         pass  # silence: the permission layer decides
