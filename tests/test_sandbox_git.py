@@ -111,7 +111,7 @@ class SandboxGitTest(unittest.TestCase):
 
     def test_non_utf8_settings_file_is_refused_without_a_traceback(self):
         self.ssh()
-        self.settings.parent.mkdir(parents=True)
+        self.settings.parent.mkdir(exist_ok=True)  # the harness stamps a state file in .claude
         self.settings.write_bytes(b"\xff\xfe not utf-8")
         r = self.run_script()
         self.assertNotIn("Traceback", r.stderr)

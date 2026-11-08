@@ -77,6 +77,10 @@ def _template():
         git(repo, "add", "README.md")
         git(repo, "commit", "-m", "chore: init")
         git(repo, "push", "-u", "origin", "main")
+        # Every script a test runs stamps its events with the state file's session (#341), so each repo has one.
+        # Gitignored, so it never shows in the repo's status.
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "orchestrate-state.json").write_text(json.dumps({"session": "test-session", "tickets": {}}))
         for d in (origin, repo / ".git"):  # sample hooks: dozens of files copied per test, never run
             shutil.rmtree(d / "hooks", ignore_errors=True)
             (d / "hooks").mkdir()  # tests install their own hooks here

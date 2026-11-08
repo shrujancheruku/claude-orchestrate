@@ -25,7 +25,7 @@ from pathlib import Path
 
 import common
 import session
-from repo import STATE
+from repo import STATE, main_checkout
 
 
 def find_transcript(arg: str) -> Path:
@@ -80,13 +80,13 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("session", nargs="?", default=os.environ.get("CLAUDE_SESSION_ID"),
                     help="session id or transcript path (default: $CLAUDE_SESSION_ID)")
-    ap.add_argument("--repo", default=".", help="repo root; the state file is written under it")
+    ap.add_argument("--repo", default=".", help="repo root; the state file goes in its main checkout")
     args = ap.parse_args(argv)
     if not args.session:
         common.die("rebuild-state: no session id (pass one or set CLAUDE_SESSION_ID)")
     repo = Path(args.repo).resolve()
     state = rebuild(find_transcript(args.session), repo)
-    out = repo / STATE
+    out = main_checkout(repo) / STATE  # the main checkout's: runlog reads the session from there (#341)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=2) + "\n")
