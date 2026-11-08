@@ -163,7 +163,7 @@ _Avoid_: comment, conversation, finding (a finding is what the reviewer writes; 
 ### The lead
 
 **Lead**:
-The session above one orchestrator: it triages discovered work, writes ADRs and answers `needs-lead` stops, and never merges. Source: `docs/adr/0008-lead-above-orchestrator.md`.
+The session above one orchestrator: it triages discovered work, writes ADRs and answers `needs-lead` stops, and never merges. It also answers the orchestrator's asks, or bubbles them up to the developer with a recommendation. Source: `docs/adr/0008-lead-above-orchestrator.md`.
 _Avoid_: supervisor, manager, parent orchestrator
 
 **Lead mode**:
