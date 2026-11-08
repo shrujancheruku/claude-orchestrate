@@ -4,4 +4,3 @@ __pycache__/
 .claude/orchestrate-profiles/
 .claude/orchestrate-lead.json
 .claude/orchestrate-snapshot.json
-.claude/orchestrate-ratelimit.json

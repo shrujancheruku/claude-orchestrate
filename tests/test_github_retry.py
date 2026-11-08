@@ -1,6 +1,7 @@
 """Unit tests for the secondary-rate-limit retry in scripts/github.py `call`."""
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -36,7 +37,11 @@ class RetryTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        self.state = Path(self.dir.name) / ".claude" / "orchestrate-ratelimit.json"
+        self.state = Path(self.dir.name) / "orchestrate" / "github-ratelimit-github.com.json"
+        env = unittest.mock.patch.dict("os.environ", {"XDG_CACHE_HOME": self.dir.name})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("GH_HOST", None)
 
     def run_call(self, *replies, clock=1000.0):
         fake, sleeps = FakeGh(*replies), []
@@ -111,7 +116,7 @@ class RetryTest(unittest.TestCase):
         with unittest.mock.patch.object(common, "run", run), unittest.mock.patch.object(github, "sleep", nap), \
                 unittest.mock.patch.object(github, "clock", lambda: now[0]):
             github.call("api", "x", cwd=self.dir.name)
-            github.call("api", "y", cwd=self.dir.name)
+            github.call("api", "y", cwd=tempfile.gettempdir())  # another cwd, same file
         self.assertEqual(order, [("sleep", 30.0), ("gh", 1030.0), ("gh", 1030.0)])
         self.assertFalse(self.state.exists())  # past reset: removed
 
@@ -122,6 +127,20 @@ class RetryTest(unittest.TestCase):
         self.assertEqual((fake.calls, sleeps, err.kind), (0, [], github.RATELIMITED))
         self.assertIn("rate limit until 1970-01-01T01:16:40Z", err.message)
         self.assertTrue(github.could_not_run(err))
+
+    def test_unwritable_cache_falls_back_to_the_repo_common_dir(self):
+        with tempfile.TemporaryDirectory() as repo:
+            common.run("git", "init", "-q", repo)
+            blocker = Path(self.dir.name) / "blocked"
+            blocker.write_text("a file, so mkdir under it fails")
+            with unittest.mock.patch.dict("os.environ", {"XDG_CACHE_HOME": str(blocker)}), \
+                    unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+                path = github._state_path(repo)
+            self.assertEqual(path, Path(repo) / ".git" / "orchestrate-ratelimit.json")
+
+    def test_host_names_the_file(self):
+        with unittest.mock.patch.dict("os.environ", {"GH_HOST": "ghe.example"}):
+            self.assertEqual(github._state_path(None).name, "github-ratelimit-ghe.example.json")
 
     def test_garbage_state_file_is_ignored(self):
         self.state.parent.mkdir()

@@ -120,8 +120,10 @@ PRIMARY_RESET_AFTER = 120
 sleep = time.sleep
 clock = time.time
 
-# Written on a rate-limit reply so every other process waits too, not each discovering the wall alone.
-STATE_FILE = Path(".claude") / "orchestrate-ratelimit.json"
+# Written on a rate-limit reply so every other process waits too. The limit is per GitHub user, so the file is
+# machine-wide per host: $XDG_CACHE_HOME/orchestrate/github-ratelimit-<host>.json (~/.cache when unset).
+# Where that can't be written it falls back to <git common dir>/orchestrate-ratelimit.json.
+FALLBACK_FILE = "orchestrate-ratelimit.json"
 DEFAULT_PAUSE = 60  # no retry-after or reset header: assume a minute
 WAIT_BUDGET = 120   # the longest a call waits for the shared reset before exiting 2
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
@@ -132,7 +134,21 @@ def _utc(epoch: float) -> str:
 
 
 def _state_path(cwd) -> Path:
-    return Path(cwd or ".") / STATE_FILE
+    cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    host = os.environ.get("GH_HOST") or "github.com"
+    path = Path(cache) / "orchestrate" / f"github-ratelimit-{host}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if os.access(path.parent, os.W_OK):
+            return path
+    except OSError:
+        pass
+    p = common.run("git", "rev-parse", "--git-common-dir", cwd=cwd)
+    if p.returncode != 0 or not p.stdout.strip():
+        return path  # no repository either: reads find nothing and writes are dropped
+    fallback = Path(cwd or ".") / p.stdout.strip() / FALLBACK_FILE
+    print(f"github: {path.parent} is not writable; sharing the rate-limit backoff through {fallback}", file=sys.stderr)
+    return fallback
 
 
 def _shared_reset(cwd) -> float:

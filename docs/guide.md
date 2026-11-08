@@ -35,7 +35,7 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
    - Add `--greedy[=N]` to a full or parent pass to size the slot count from how many tickets can run at once, up to N (5 by default): see [Choosing a slot count](#choosing-a-slot-count).
    - Add `--profile` to any of these to profile the session as it runs: see [Profiling](#profiling).
    - The two combine: `/orchestrate:run --greedy --profile` runs greedy and profiles it, which is how to find out whether greedy paid off on your backlog.
-   - **Rate limits.** A greedy run can hit GitHub's secondary rate limit (many `gh` calls at once). Every script waits it out: `scripts/github.py` retries up to 5 times, sleeping the `retry-after` seconds or backing off from 2s to 60s. The hourly quota running out is not retried; the call fails at once with the reset time. A script's rate-limit hit is also written to `.claude/orchestrate-ratelimit.json`, so every other script waits too (up to 2 minutes, else it exits 2 with `rate limit until <time>`), and the error says the HTTP status and headers.
+   - **Rate limits.** A greedy run can hit GitHub's secondary rate limit (many `gh` calls at once). Every script waits it out: `scripts/github.py` retries up to 5 times, sleeping the `retry-after` seconds or backing off from 2s to 60s. The hourly quota running out is not retried; the call fails at once with the reset time. A script's rate-limit hit is also written to `$XDG_CACHE_HOME/orchestrate/github-ratelimit-<host>.json` (`~/.cache` when unset), shared by every agent on the machine, so every other script waits too (up to 2 minutes, else it exits 2 with `rate limit until <time>`), and the error says the HTTP status and headers.
 
 ### Concepts
 
