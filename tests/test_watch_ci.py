@@ -1,3 +1,7 @@
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -6,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from harness import SCRIPTS, ScriptEnv
 
@@ -24,13 +29,18 @@ class WatchCi(unittest.TestCase):
         self.addCleanup(self.env.close)
 
     def seq(self, steps):
-        """{"<pr>": [view, ...]}: the Nth `pr view <pr>` gets step min(N, last); "GH_ERROR" is a failed call."""
-        def reply(step):
-            if step == "GH_ERROR":
-                return {"stderr": "HTTP 502: bad gateway\n", "exit": 1}
-            return {"stdout": json.dumps(step)}
-        self.env.set_gh([{"args": ["pr", "view", pr], "seq": [reply(s) for s in pr_steps]}
-                         for pr, pr_steps in steps.items()])
+        """{"<pr>": [view, ...]}: the Nth `pr list` reply holds each PR's step min(N, last).
+        "GH_ERROR" fails the whole call; "MISSING" leaves that PR out of the reply."""
+        ticks = max(len(v) for v in steps.values())
+        replies = []
+        for n in range(ticks):
+            picked = {pr: v[min(n, len(v) - 1)] for pr, v in steps.items()}
+            if "GH_ERROR" in picked.values():
+                replies.append({"stderr": "HTTP 502: bad gateway\n", "exit": 1})
+            else:
+                rows = [dict(v, number=int(pr)) for pr, v in picked.items() if v != "MISSING"]
+                replies.append({"stdout": json.dumps(rows)})
+        self.env.set_gh([{"args": ["pr", "list"], "seq": replies}])
 
     def watch(self, *prs):
         return self.env.run("watch-ci", "--interval", "0", *prs)
@@ -94,7 +104,7 @@ class WatchCi(unittest.TestCase):
         self.seq({"6": ["GH_ERROR", "GH_ERROR", view("SUCCESS", head="6666666ccc")]})
         r = self.watch("6")
         self.assertEqual(r.stdout.splitlines(), ["PR #6 pass CLEAN 6666666"])
-        self.assertIn("gh failed for #6", r.stderr)
+        self.assertIn("gh failed: HTTP 502", r.stderr)
         self.assertEqual(len(self.env.gh_calls()), 3)
 
     def test_unwritable_event_log_still_prints_every_line(self):
@@ -115,9 +125,9 @@ class WatchCi(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
 
     def test_reply_that_is_not_a_pr_object_is_could_not_run(self):
-        for reply in ("[]", "<html>not json"):
+        for reply in ("{}","<html>not json"):
             with self.subTest(reply=reply):
-                self.env.set_gh([{"args": ["pr", "view"], "stdout": reply}])
+                self.env.set_gh([{"args": ["pr", "list"], "stdout": reply}])
                 r = self.env.run("watch-ci", "--interval", "0", "7", check=False)
                 self.assertEqual(r.returncode, 2, r.stdout)
                 self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
@@ -145,15 +155,59 @@ class WatchCi(unittest.TestCase):
         r = self.watch_any("6")
         self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #6 pass CLEAN 6666666"], 0))
 
-    def test_one_pr_erroring_does_not_stop_the_others(self):
-        self.seq({"6": ["GH_ERROR"], "7": [view(None), view(None), view("SUCCESS", head="7777777ccc")]})
+    def test_a_pr_missing_from_the_reply_is_retried_and_does_not_end_the_watch(self):
+        self.seq({"6": ["MISSING", "MISSING", view("SUCCESS", head="6666666ccc")],
+                  "7": [view(None), view(None), view(None), view("SUCCESS", head="7777777ddd")]})
         r = self.watch_any("6", "7")
-        self.assertIn("PR #6 error HTTP 502: bad gateway", r.stdout)
+        self.assertEqual(r.stdout.splitlines(), ["PR #6 pass CLEAN 6666666", "PR #7 pass CLEAN 7777777"])
+        self.assertEqual(r.returncode, 0)
+
+    def test_three_misses_end_in_an_error_and_the_others_carry_on(self):
+        self.seq({"6": ["MISSING"], "7": [view(None), view(None), view("SUCCESS", head="7777777ccc")]})
+        r = self.watch_any("6", "7")
+        self.assertIn("PR #6 error not in gh's pr list", r.stdout)
         self.assertIn("PR #7 pass CLEAN 7777777", r.stdout)
         self.assertEqual(r.returncode, 3)
 
+    def test_three_watched_prs_cost_one_gh_call_per_tick(self):
+        self.seq({"1": [view(None), view(None), view("SUCCESS", head="1111111aaa")],
+                  "2": [view(None), view("SUCCESS", head="2222222bbb")],
+                  "3": [view(None), view(None), view("SUCCESS", head="3333333ccc")]})
+        r = self.watch("1", "2", "3")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(r.stdout.splitlines()), 3)
+        calls = self.env.gh_calls()
+        self.assertEqual(len(calls), 3)  # three ticks, one request each
+        self.assertTrue(all(c[:2] == ["pr", "list"] for c in calls))
+
+    def test_default_interval_is_30_with_two_prs_and_60_with_three(self):
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(sys.path.remove, str(SCRIPTS))
+        loader = importlib.machinery.SourceFileLoader("watch_ci_under_test", str(SCRIPTS / "watch-ci"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        self.assertEqual([mod.interval_for(n) for n in (1, 2, 3, 5)], [30, 30, 60, 60])
+        self.assertEqual([mod.interval_for(n, 7) for n in (2, 3)], [7, 7])
+        self.assertEqual(mod.interval_for(3, 0), 0)
+        cases = ((["1", "2"], [], 30), (["1", "2", "3"], [], 60), (["1", "2", "3"], ["--interval", "5"], 5))
+        for prs, flags, want in cases:
+            with self.subTest(prs=prs, flags=flags):
+                self.seq({pr: [view(None), view("SUCCESS")] for pr in prs})
+                slept = []
+                env = dict(PATH=f"{self.env.bin}{os.pathsep}{os.environ['PATH']}", FAKE_GH_STATE=str(self.env.gh_state))
+                old = os.getcwd()
+                os.chdir(self.env.repo)
+                try:
+                    with mock.patch.dict(os.environ, env), mock.patch.object(mod.time, "sleep", slept.append):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(mod.main([*flags, *prs]), 0)
+                finally:
+                    os.chdir(old)
+                self.assertEqual(slept, [want])
+
     def test_no_repository_failure_ends_at_once(self):
-        self.env.set_gh([{"args": ["pr", "view"], "stderr": "fatal: not a git repository\n", "exit": 1}])
+        self.env.set_gh([{"args": ["pr", "list"], "stderr": "fatal: not a git repository\n", "exit": 1}])
         r = self.watch_any("6")
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")
