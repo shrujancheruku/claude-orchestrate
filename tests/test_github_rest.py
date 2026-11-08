@@ -252,10 +252,8 @@ class Rest(unittest.TestCase):
             self.assertFalse(github.describe(c[1:] if c[1] != "--include" else ["api", *c[2:]])["graphql"])
 
 
-# The one `gh pr|issue|repo` subcommand left in scripts/, with why. #450 switches gate to github.pr_diff and drops
-# its entry; nothing else is added without a REST form to point at.
+# The one `gh pr|issue|repo` subcommand left in scripts/, with why; nothing else is added without a REST form to point at.
 SUBCOMMAND_ALLOWED = {
-    ("gate", "pr", "diff"): "until #450 switches gate to github.pr_diff",
     ("watch-ci", "pr", "list"): "its check rollup has no single REST call (N+1)",
 }
 SUBCOMMAND = re.compile(r'(?:\bcall(?:_json)?|\bgh_json|common\.run)\(\s*(?:"gh",\s*)?(?:root,\s*)?"(pr|issue|repo)",\s*"([a-z-]+)"')

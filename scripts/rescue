@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rescue <ticket | branch> [--title T] [--repo DIR] : save a stalled or stopped ticket's worktree, then retire it.
+"""rescue <ticket | branch> [--title T] [--pr N] [--repo DIR] : save a stalled or stopped ticket's worktree, then retire it.
 
 The one place the rescue recipe lives (commit the work, push, unlock a dead lock, remove the worktree plainly, never
 force). Given a branch it finds the worktree checked out on it with `git worktree list`. Given a ticket number it
@@ -17,7 +17,10 @@ subprocess. Each step prints one line, in this order:
 3. commit: `chore(wip): <T>` (or `chore(wip): #<n> work in progress` without --title) when the tree is dirty.
 4. push: `git push -u origin <branch>` when commits are unpushed or the branch has no remote ref..
 5. remove: the worktree, plainly (the local branch is kept).
-6. overlap: `holds` on the changed paths against everything else that is held: `overlap: none`, its `overlap:` lines,
+6. scratch: with `--pr <n>`, the PR's reviewer scratch worktrees (`pr-<n>`, detached) with HEAD in the rescued branch are removed plainly
+   (`scratch worktree <path> removed`); a dirty one, a live foreign lock or a HEAD outside the branch is kept with one
+   `scratch worktree <path> NOT removed: <why>` line, the same checks `merge` makes. Without `--pr` none is touched.
+7. overlap: `holds` on the changed paths against everything else that is held: `overlap: none`, its `overlap:` lines,
    or `overlap: could not check (...)`. A rate-limited check is retried within the shared backoff; if it still can't
    run, `overlap: unchecked (rate limited; re-run holds before dispatching into these files)` and exit 0.
 
@@ -161,6 +164,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("branch", metavar="ticket|branch", help="the ticket number, or its branch `<number>-<slug>`")
     ap.add_argument("--title", help="the ticket title, for the wip commit message")
+    ap.add_argument("--pr", type=int, help="the ticket's open PR: its reviewer scratch worktrees are removed too")
     ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
     args = ap.parse_args(argv)
     root, branch = Path(args.repo), args.branch
@@ -266,11 +270,15 @@ def main(argv=None) -> int:
     else:
         say("pushed 0 commits: up to date")
 
+    tip = git(path, "rev-parse", "HEAD").stdout.strip()
     removed = repo.remove_worktree(path, root)
     if "NOT removed" in removed:
         say(removed)
         return fail(removed)
     say(f"removed {path}")
+    if args.pr is not None:
+        for line in repo.remove_scratch(args.pr, tip, root):
+            say(f"scratch {line}")
 
     return overlap(root, changed, ticket)
 

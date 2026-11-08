@@ -24,6 +24,28 @@ GRAMMAR = [
     ("a.py:1 (x, y), b.py:2 (p; q)", "a.py:1 (x, y), b.py:2 (p; q)"),
     ("src/a.py (see note). src/b.py", "src/a.py (see note), src/b.py"),
     ("a.py:1.", "a.py:1"),
+    ("a b/c.py,d.py", "a b/c.py, d.py"),
+    ("a b/c.py:3-4 (x), d.py", "a b/c.py:3-4 (x), d.py"),
+    ("`a b/c.py`", "a b/c.py"),
+    ("a.py:10\u201320", "a.py:10-20"),
+    ("a.py:1 (x (y) z), b.py", "a.py:1 (x (y) z), b.py"),
+    ("a.py (x) (y)", None),
+    ("a.py (x))", None),
+    ("a.py or b.py", None),
+    ("scripts/a.py scripts/b.py", None),
+    ("a.py b.py", None),
+    ("see scripts/x.py", None),
+    ("a.py - b.py", None),
+    ("a.py\nb.py", None),
+    ("a.py,\nb.py", "a.py, b.py"),
+    ("a.py\tb/c.py", None),
+    ("a.py, and b.py", None),
+    ("a.py, or b.py", None),
+    ("my or dir/x.py", None),
+    ("brand or/x.py", None),
+    ("a  b/c.py", None),
+    ("a.py:5 (x (y", None),
+    ("a.py:20\u201310", None),
     ("none", "none"),
     ("None.", "none"),
     ("", "none"),
@@ -74,6 +96,11 @@ class Grammar(unittest.TestCase):
         self.assertFalse(touchmap.overlaps(a, touchmap.parse("y.py")[0]))
         self.assertTrue(touchmap.overlaps(touchmap.parse("db/")[0], touchmap.parse("db/schema.sql:1")[0]))
         self.assertTrue(touchmap.overlaps(touchmap.parse("db/schema.sql")[0], touchmap.parse("db/")[0]))
+
+    def test_an_unparsed_marker_overlaps_every_path(self):
+        every = touchmap.Entry(touchmap.HOLDS_ALL)
+        self.assertTrue(touchmap.overlaps(every, touchmap.parse("x/y.py")[0]))
+        self.assertTrue(touchmap.overlaps(touchmap.parse("x/y.py")[0], every))
 
 
 if __name__ == "__main__":
