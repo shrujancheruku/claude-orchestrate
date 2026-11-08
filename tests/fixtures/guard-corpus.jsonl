@@ -583,3 +583,5 @@
 {"role": "orchestrate:worker", "command": "git -c credential.helper='!gh auth git-credential' push https://github.com/owner/repo.git feat", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create -d --title \"TEXT\" --body-file /repo/.claude/pr-body.md", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}

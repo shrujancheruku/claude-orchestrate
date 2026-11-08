@@ -856,14 +856,54 @@ def rule_gh_merge(p: Parsed, cwd: str) -> str | None:
     return None
 
 
+# The one body line that lets a worker open its PR ready: drafts are unavailable (ADR 0011).
+DRAFT_UNAVAILABLE = re.compile(r"(?m)^Draft unavailable: *\S")
+
+
+def pr_create_bodies(p: Parsed, call: "Call", cwd: str) -> list:
+    """The body text(s) a `gh pr create` carries: `--body`/`-b` values, a `--body-file` read from disk
+    (relative to cwd), or `-` for the command's heredoc. Unreadable or dynamic sources give nothing."""
+    texts, args, j = [], call.args, 0
+    while j < len(args):
+        a = args[j]
+        j += 1
+        name, eq, value = a.text.partition("=") if a.text.startswith("--") else (a.text, "", "")
+        if name not in ("--body", "-b", "--body-file", "-F"):
+            continue
+        if not eq:
+            if j >= len(args):
+                break
+            value, dynamic = args[j].text, args[j].dynamic
+            j += 1
+        else:
+            dynamic = a.dynamic
+        if name in ("--body", "-b"):
+            texts.append(value)
+        elif value == "-":
+            texts.extend(hd.body for cmd in p.cmds for hd in cmd.heredocs)
+        elif not dynamic:
+            try:
+                path = Path(value)
+                texts.append((path if path.is_absolute() else Path(cwd or ".") / path).read_text(errors="replace"))
+            except OSError:
+                pass
+    return texts
+
+
 def rule_pr_draft(p: Parsed, cwd: str) -> str | None:
     """A worker opens its PR as a draft at the end of Orient (ADR 0011); a model that skips the step
-    opens it ready at Ship (#355), so the guard refuses a `gh pr create` with no `--draft`."""
+    opens it ready at Ship (#355), so the guard refuses a `gh pr create` that is not a draft. The one
+    exception is the fallback: a body line `Draft unavailable: <reason>` (the draft itself failed)."""
     for call in p.tool("gh"):
-        if call.is_sub("pr") and call.is_verb("create") and not any(
-                a.text == "--draft" for a in call.args if not a.dynamic):
-            return ("opens a PR that is not a draft: add `--draft` to `gh pr create`; Ship marks it ready "
-                    "with `gh pr ready <pr>`")
+        if not (call.is_sub("pr") and call.is_verb("create")):
+            continue
+        if any(a.text in ("--draft", "-d", "--draft=true") for a in call.args if not a.dynamic):
+            continue
+        if any(DRAFT_UNAVAILABLE.search(t) for t in pr_create_bodies(p, call, cwd)):
+            continue
+        return ("opens a PR that is not a draft: add `--draft` to `gh pr create`; Ship marks it ready "
+                "with `gh pr ready <pr>`. Only if `gh pr create --draft` itself failed twice, open it ready "
+                "with a body line `Draft unavailable: <reason>`")
     return None
 
 

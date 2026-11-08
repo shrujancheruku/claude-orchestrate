@@ -281,6 +281,15 @@ CASES = [
     # A worker's PR is a draft first (#355); other roles are unchanged.
     ("orchestrate:worker", "gh pr create --title x --body y", "deny"),
     (None, "gh pr create --title x --body y", "allow"),
+    # gh's short and valued forms of --draft count (#355 review); --draft=false does not.
+    ("orchestrate:worker", "gh pr create -d --title x --body y", "allow"),
+    ("orchestrate:worker", "gh pr create --draft=true --title x --body y", "allow"),
+    ("orchestrate:worker", "gh pr create --draft=false --title x --body y", "deny"),
+    # The fallback when the draft itself failed: a `Draft unavailable:` body line (ADR 0011).
+    ("orchestrate:worker", "gh pr create --title x --body 'Draft unavailable: plan has no drafts\nCloses #1'", "allow"),
+    ("orchestrate:worker", "gh pr create --title x --body-file - <<'EOF'\nDraft unavailable: network\nCloses #1\nEOF", "allow"),
+    ("orchestrate:worker", "gh pr create --title x --body 'Draft unavailable:'", "deny"),
+    ("orchestrate:worker", "gh pr create --title x --body 'see Draft unavailable: no'", "deny"),
     ("orchestrate:worker", "make lint test > /tmp/out.txt", "allow"),
     ("orchestrate:worker", 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/verify" "make lint" --then "make test"', "allow"),
     ("orchestrate:worker", "python3 /plugins/orchestrate/scripts/verify --cwd . 'python3 -m unittest discover tests'", "allow"),
