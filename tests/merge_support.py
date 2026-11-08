@@ -13,19 +13,29 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, git  # noqa: E402
+from harness import PR_GRAPHQL, ScriptEnv, git, gh_pulls, pr_graphql_reply  # noqa: E402
 
 
 def pr(state, issues=(5,), branch="feat-br", cross=False):
-    return {"stdout": json.dumps({"state": state, "headRefName": branch, "headRefOid": "abc123",
-                                  "isCrossRepository": cross,
-                                  "closingIssuesReferences": [{"number": n} for n in issues]})}
+    """merge's PR read: the explicit GraphQL query (closing issues and checks have no REST form)."""
+    return {"stdout": pr_graphql_reply({"state": state, "headRefName": branch, "headRefOid": "abc123",
+                                        "isCrossRepository": cross,
+                                        "closingIssuesReferences": [{"number": n} for n in issues]})}
 
+
+# The calls a scripted gh answers, as the argument lists `gh` gets (a "~" arg matches by prefix).
+PR_VIEW = tuple(PR_GRAPHQL)
+PR_MERGE = ("api", "-X", "PUT", "repos/{owner}/{repo}/pulls/7/merge")
+UPDATE_BRANCH = ("api", "-X", "PUT", "repos/{owner}/{repo}/pulls/7/update-branch")
+ISSUE_VIEW = ("api", "~repos/{owner}/{repo}/issues/")
+ISSUE_CLOSE = ("api", "-X", "PATCH", "~repos/{owner}/{repo}/issues/")
+REPO_VIEW = ("api", "repos/{owner}/{repo}")
+OPEN_PULLS = ("api", "~repos/{owner}/{repo}/pulls?state=open")
 
 OK = {"exit": 0}
-OPEN_ISSUE = [{"stdout": '{"state":"OPEN"}'}]
-CLOSED_ISSUE = [{"stdout": '{"state":"CLOSED"}'}]
-REPO = [{"stdout": '{"defaultBranchRef":{"name":"main"}}'}]
+OPEN_ISSUE = [{"stdout": '{"state":"open"}'}]
+CLOSED_ISSUE = [{"stdout": '{"state":"closed"}'}]
+REPO = [{"stdout": '{"default_branch":"main"}'}]
 REF_GET = "api repos/{owner}/{repo}/git/ref/heads/feat-br"
 
 
@@ -33,9 +43,12 @@ class MergeMixin:
     """The merge CLI through the harness with a scripted gh, for a TestCase whose setUp made self.env."""
 
     def seq(self, steps):
-        steps = {"repo view": REPO, "api -X": [OK], **steps}
-        # {"pr view": [reply, ...]}: the Nth matching call gets reply min(N, last).
-        self.env.set_gh([{"args": key.split(), "seq": replies} for key, replies in steps.items()])
+        # {PR_VIEW: [reply, ...]}: the Nth matching call gets reply min(N, last). A string key is split on spaces.
+        steps = {**steps}
+        steps.setdefault(REPO_VIEW, REPO)
+        steps.setdefault(("api", "-X", "DELETE"), [OK])
+        self.env.set_gh([{"args": list(key) if isinstance(key, tuple) else key.split(), "seq": replies}
+                         for key, replies in steps.items()])
 
     def merge(self, *extra):
         return self.env.run("merge", "7", "--interval", "0", "--timeout", "5", *extra, check=False)
@@ -97,10 +110,10 @@ class SweepMixin(MergeMixin):
         git(self.env.repo, "push", "origin", "main")
 
     def sweep(self, method="squash", branches=("pr-a",), drafts=()):
-        listing = json.dumps([{"number": 8 + i, "headRefName": b, "isCrossRepository": False, "isDraft": b in drafts}
-                              for i, b in enumerate(branches)])
-        self.seq({"pr view": [pr("MERGED")], "issue view": CLOSED_ISSUE, REF_GET: [OK],
-                  "pr list": [{"stdout": listing}]})
+        listing = gh_pulls([{"number": 8 + i, "headRefName": b, "isDraft": b in drafts}
+                            for i, b in enumerate(branches)], "open")["stdout"]
+        self.seq({PR_VIEW: [pr("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK],
+                  OPEN_PULLS: [{"stdout": listing}]})
         return self.merge("--method", method)
 
     def remote(self, branch, path):

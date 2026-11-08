@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, gh_repo_rest  # noqa: E402
 
 # The queries are matched by their text, so the fake gh sees the call exactly as GitHub would.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -89,7 +89,7 @@ class LeadBrief(unittest.TestCase):
                        if merged_exit else
                        {"args": ["api", "graphql", "-f", "query=" + lead_brief.MERGED_QUERY], "stdout": json.dumps(mbody)})
         self.env.set_gh([
-            {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r"})},
+            gh_repo_rest({"owner": {"login": "o"}, "name": "r"}),
             merged_resp,
             issues_resp,
         ])
