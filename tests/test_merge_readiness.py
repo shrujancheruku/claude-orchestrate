@@ -169,6 +169,40 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(len(self.called(["pr", "merge"])), 1)
 
+    def update_from_main(self, main_path, text):
+        """main gains a commit, then the host merges it into feat-br (update-branch); the new head."""
+        self.env.commit(main_path, text, "feat: main moves")
+        git(self.repo, "push", "-q", "origin", "main")
+        git(self.repo, "checkout", "-q", "feat-br")
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "Merge branch main", "main")
+        head = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "push", "-q", "origin", "feat-br")
+        git(self.repo, "checkout", "-q", "main")
+        return head
+
+    def test_a_main_update_alone_is_an_empty_delta(self):
+        head = self.update_from_main("big.txt", "x\n" * 50)
+        p = self.merge(head)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_the_delta_after_a_main_update_is_the_prs_own_lines_only(self):
+        self.update_from_main("big.txt", "x\n" * 50)
+        git(self.repo, "checkout", "-q", "feat-br")
+        head = self.env.commit("c.txt", "y\n" * 11, "fix: more")
+        git(self.repo, "push", "-q", "origin", "feat-br")
+        git(self.repo, "checkout", "-q", "main")
+        p = self.merge(head)
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
+        self.assertIn("changed 11 line(s) in 1 file(s)", p.stdout)
+
+    def test_one_pr_line_after_a_main_update_is_within_the_thresholds(self):
+        self.update_from_main("big.txt", "x\n" * 50)
+        git(self.repo, "checkout", "-q", "feat-br")
+        head = self.env.commit("c.txt", "y\n", "fix: one line")
+        git(self.repo, "push", "-q", "origin", "feat-br")
+        git(self.repo, "checkout", "-q", "main")
+        self.assertEqual(self.merge(head).returncode, 0)
+
     def test_small_change_within_thresholds_merges(self):
         head = self.push({"b.txt": "x\n"})
         self.assertEqual(self.merge(head).returncode, 0)
