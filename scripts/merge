@@ -42,6 +42,10 @@ Every run ends with exactly one `next:` line, the verdict the orchestrator appli
 touched (--also-approved, the sweep): `wait-ci <pr> <head>`, `send-back <pr>` or `left <pr> <why>`. The exit codes
 are unchanged: 0 and 4 end `merged`, 5 `wait-ci`, 6 `re-review`, 3 `retry`, 2 `could-not-run`, and 1 (a refusal)
 `wait-ci`, `send-back` or `ask-user` by its clause.
+After the cleanup it also fast-forwards the main checkout (the first `git worktree list` entry) to origin/<default>, so the
+scripts the orchestrator runs and the files a lead reads are the merged code: one line, `main checkout fast-forwarded to <sha>`
+or `main checkout not updated (<reason>)`. It skips, never stashes, resets or fails the merge, when the checkout is dirty, on
+another branch, mid merge/rebase, or the update is not a fast-forward.
 Stdlib only, Python 3.9+.
 """
 
@@ -448,10 +452,41 @@ def run_merge(argv=None) -> int:
 
     runlog.append_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
                         tickets=[int(t) for t in tickets if t.isdigit()])
+    say(fast_forward_main(cwd, default))
     handed = sweep(cwd, pr, branch, default, args.method)
     update_approved(cwd, pr, default, args.also_approved)
     verdict("merged")
     return 4 if handed else 0
+
+
+def fast_forward_main(cwd, default):
+    """One line: the main checkout fast-forwarded to origin/<default>, or why it was left alone. Never raises, never discards work."""
+    if not default:
+        return "main checkout not updated (default branch unknown)"
+    trees = common.worktrees(cwd)
+    if not trees:
+        return "main checkout not updated (cannot list worktrees)"
+    main = trees[0]["path"]
+    if trees[0]["branch"] != default:
+        return f"main checkout not updated (on {trees[0]['branch'] or 'a detached HEAD'}, not {default})"
+    for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"):
+        r = run("git", "rev-parse", "--git-path", marker, cwd=main)
+        if r.code == 0 and (Path(main) / r.stdout.strip()).exists():
+            return "main checkout not updated (a merge or rebase is in progress)"
+    # Tracked changes only: git itself refuses a fast-forward that would overwrite an untracked file.
+    r = run("git", "status", "--porcelain", "--untracked-files=no", cwd=main)
+    if r.code != 0:
+        return "main checkout not updated (git status failed)"
+    if r.stdout.strip():
+        return "main checkout not updated (uncommitted changes)"
+    r = run("git", "fetch", "-q", "origin", default, cwd=main)
+    if r.code != 0:
+        return "main checkout not updated (fetch failed)"
+    r = run("git", "merge", "--ff-only", "-q", f"origin/{default}", cwd=main)
+    if r.code != 0:
+        return "main checkout not updated (not a fast-forward)"
+    r = run("git", "rev-parse", "--short", "HEAD", cwd=main)
+    return f"main checkout fast-forwarded to {r.stdout.strip()}"
 
 
 def update_approved(cwd, merged_pr, default, specs):

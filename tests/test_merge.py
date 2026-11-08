@@ -307,6 +307,48 @@ class MergeTest(MergeMixin, unittest.TestCase):
                 self.assertNotIn("Traceback", p.stderr)
                 self.assertEqual(self.called(list(PR_MERGE)), [])
 
+    def behind_main(self):
+        """The main checkout one commit behind origin/main; returns (old head, origin's head)."""
+        old = git(self.env.repo, "rev-parse", "HEAD")
+        new = self.env.commit("landed.txt", "x\n", "feat: landed")
+        git(self.env.repo, "push", "origin", "main")
+        git(self.env.repo, "reset", "-q", "--hard", old)
+        self.seq({PR_VIEW: [pr("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        return old, new
+
+    def test_clean_main_checkout_is_fast_forwarded(self):
+        old, new = self.behind_main()
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), new)
+        self.assertIn(f"main checkout fast-forwarded to {new[:7]}", p.stdout)
+
+    def test_dirty_main_checkout_is_untouched(self):
+        old, _ = self.behind_main()
+        (self.env.repo / "README.md").write_text("local edit\n")
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), old)
+        self.assertEqual((self.env.repo / "README.md").read_text(), "local edit\n")
+        self.assertIn("main checkout not updated (uncommitted changes)", p.stdout)
+
+    def test_main_checkout_on_another_branch_is_untouched(self):
+        self.behind_main()
+        git(self.env.repo, "checkout", "-q", "feat-br")
+        head = git(self.env.repo, "rev-parse", "HEAD")
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), head)
+        self.assertIn("main checkout not updated (on feat-br, not main)", p.stdout)
+
+    def test_diverged_main_checkout_is_untouched(self):
+        self.behind_main()
+        mine = self.env.commit("mine.txt", "y\n", "feat: local only")
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), mine)
+        self.assertIn("main checkout not updated (not a fast-forward)", p.stdout)
+
     def test_help_prints_no_verdict(self):
         p = self.env.run("merge", "--help", check=False)
         self.assertEqual(p.returncode, 0)
