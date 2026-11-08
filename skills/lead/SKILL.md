@@ -25,6 +25,7 @@ The two-terminal start also works: the developer runs `claude --name orchestrato
 - **Open `needs-lead` tickets** are queried at start-up and on every reconcile, so a lost nudge never hides a stop.
 - **After a compaction**, re-run `"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief" --repo .`: the same index, with merges from the watermark only.
 - **Between compactions**, a nudge that names a ticket or PR means read only that item. A merge that touched ADRs or the glossary refreshes only that ADR line or the glossary.
+- **A stale checkout feeds no decision.** `git fetch` first; when the checkout is behind `origin/<default>`, read code with `git show origin/<default>:<path>`, not from disk.
 - Read outcomes only. A search bigger than one lookup goes to the scout.
 
 ## Moves

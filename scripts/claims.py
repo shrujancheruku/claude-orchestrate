@@ -14,6 +14,9 @@ The state, decided in this order:
               session's own live worker (`worker unknown`: a dispatch the state file couldn't join)
   elsewhere   no record, and the worktree on its branch is locked by another live session (ADR 0009)
   stalled     otherwise: no PR, no record, no live lock (dead lock, no lock, no worktree, no branch)
+A ticket's worktree is found first from its worker's record (the harness path `.claude/worktrees/agent-<id>`, or the
+checkout on `worktree-agent-<id>`), then by the ticket branch. A worker that stopped before Orient's branch step has
+only the harness branch: its claim has `branch None` and `pending_branch` set, and its worktree is never "gone".
 `paused` and `waiting` are not here: they are the orchestrator's own overlay.
 """
 
@@ -40,6 +43,7 @@ class Claim:
     worker: dict | None = None     # the state-file record: agent id, model, last report, touch map
     changes: tuple | None = None   # (dirty paths, unpushed commits) for a claim with a worktree and no PR
     draft: bool = False            # `pr` is a draft: the ticket is building, not in review
+    pending_branch: bool = False   # the worktree is on a `worktree-agent-*` branch: the worker never made the ticket branch
 
 
 def read_state(path) -> dict:
@@ -56,6 +60,26 @@ def read_state(path) -> dict:
     if not isinstance(tickets, dict):
         raise ValueError(f"state file {path} has no tickets object")
     return tickets
+
+
+def find_worktree(ticket, worktrees, record=None):
+    """The worktree that is `ticket`'s: the one its worker's record names (by path, or by the agent id in the harness
+    path `.claude/worktrees/agent-<id>` or on the branch `worktree-agent-<id>`), else the one on a `<ticket>-` branch.
+    None when no listed worktree is. Pure: `worktrees` is `common.worktrees`'s list, `record` a state-file record."""
+    record = record if isinstance(record, dict) else {}
+    named = str(record.get("worktree") or "")
+    agent = str(record.get("agent_id") or "")
+    agent = agent[len("agent-"):] if agent.startswith("agent-") else agent
+    for wt in worktrees:
+        if named and wt["path"] == named:
+            return wt
+        if agent and (wt["branch"] == f"worktree-agent-{agent}" or Path(wt["path"]).name == f"agent-{agent}"):
+            return wt
+    return next((wt for wt in worktrees if ticket_of_branch(wt["branch"]) == ticket), None)
+
+
+def is_harness_branch(branch) -> bool:
+    return str(branch or "").startswith("worktree-agent-")
 
 
 def _git(path, *args) -> str:
@@ -106,22 +130,18 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
         n = ticket_of_branch((pr or {}).get("headRefName"))
         if n is not None:
             merged_branch.setdefault(n, pr["headRefName"])
-    on_branch = {}
-    for wt in wts:
-        n = ticket_of_branch(wt["branch"])
-        if n is not None:
-            on_branch.setdefault(n, wt)
     records = {int(k): v for k, v in state.items() if str(k).isdigit()}
     tickets = sorted({n for n, i in open_issues.items() if i.get("claimed")} | (set(records) - set(open_issues)))
     out = {}
     for n in tickets:
-        wt, shown = on_branch.get(n), open_pr.get(n)
+        record = records.get(n) if isinstance(records.get(n), dict) else None
+        wt, shown = find_worktree(n, wts, record), open_pr.get(n)
         draft = bool(shown and shown.get("isDraft"))
         pr = None if draft else shown  # the PR that decides the state: a draft decides nothing
-        record = records.get(n) if isinstance(records.get(n), dict) else None
-        branch = wt["branch"] if wt else (shown["headRefName"] if shown else merged_branch.get(n))
+        pending = bool(wt) and ticket_of_branch(wt["branch"]) is None and is_harness_branch(wt["branch"])
+        branch = wt["branch"] if wt and not pending else (shown["headRefName"] if shown else merged_branch.get(n))
         claim = Claim(n, "", branch, wt["path"] if wt else None, _lock(wt), shown["number"] if shown else None, record,
-                      draft=draft)
+                      draft=draft, pending_branch=pending and branch is None)
         labels = set((open_issues.get(n) or {}).get("labels") or ())
         if n in open_issues and LEAD_LABEL in labels and pr is None:
             claim.state = "with-lead"
