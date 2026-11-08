@@ -235,6 +235,36 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertTrue(wt.exists())
         self.assertTrue(self.local_branch())
 
+    def scratch(self, name, *flags):
+        wt = self.env.repo.parent / "scratch" / name
+        git(self.env.repo, "worktree", "add", *flags, str(wt))
+        return wt
+
+    def test_merge_removes_the_prs_scratch_worktrees_and_only_those(self):
+        mine = [self.scratch(n, "--detach") for n in ("pr-7", "pr-7b", "pr-7-r2")]
+        other = self.scratch("pr-71", "--detach")      # PR 71's, not 7's
+        on_branch = self.scratch("pr-7c", "-b", "other-br")   # a branch worktree is a worker's
+        self.seq({"pr view": [pr("MERGED")], "issue view": CLOSED_ISSUE, REF_GET: [OK]})
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.count("scratch worktree"), 3)
+        for wt in mine:
+            self.assertFalse(wt.exists(), wt)
+        self.assertTrue(other.exists())
+        self.assertTrue(on_branch.exists())
+        listed = git(self.env.repo, "worktree", "list", "--porcelain")
+        self.assertNotIn("/pr-7b\n", listed + "\n")
+        self.assertIn("/pr-71\n", listed + "\n")
+
+    def test_a_dirty_scratch_worktree_is_kept_and_reported(self):
+        wt = self.scratch("pr-7", "--detach")
+        (wt / "x.txt").write_text("untracked")
+        self.seq({"pr view": [pr("MERGED")], "issue view": CLOSED_ISSUE, REF_GET: [OK]})
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(wt.exists())
+
     def test_never_forces_worktree_removal(self):
         self.assertNotIn("--force", (Path(__file__).resolve().parent.parent / "scripts" / "repo.py").read_text()
                          .split("def remove_worktree")[1])

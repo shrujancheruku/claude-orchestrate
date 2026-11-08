@@ -142,3 +142,22 @@ def remove_worktree(path, cwd):
     l = common.run("git", "worktree", "lock", "--reason", reason, path, cwd=cwd)
     state = "harness lock kept" if l.code == 0 else f"harness lock NOT restored: {common.one_line(l.stderr)}"
     return f"worktree {path} NOT removed: {refused} ({state})"
+
+
+def scratch_worktrees(pr, cwd) -> list:
+    """The paths of the scratch worktrees a reviewer left for PR `pr`: detached, and named `pr-<pr>` followed by
+    nothing, one letter, or `-<suffix>` (`pr-306b`, `pr-290-r2`, `wt/pr-300`). Matched on the whole basename, so
+    `pr-<pr>1` (another PR) is not one, and a tree on a branch never is: that is a worker's. Where it lives is
+    not looked at: a reviewer's scratch dir is outside the repo."""
+    name = re.compile(rf"pr-{int(pr)}(?:[A-Za-z]|-[^/]+)?")
+    main = main_checkout(cwd).resolve()
+    return [wt["path"] for wt in common.worktrees(cwd)
+            if wt["detached"] and wt["branch"] is None and name.fullmatch(Path(wt["path"]).name)
+            and Path(wt["path"]).resolve() != main]
+
+
+def remove_scratch(pr, cwd) -> list:
+    """Remove PR `pr`'s scratch worktrees (`scratch_worktrees`) and say what happened to each, one line per tree.
+    The reviewer is refused `git worktree remove` by the guard, so the merge removes them (ADR-0004); plainly,
+    through `remove_worktree`, so a dirty tree is kept and reported. Never raises."""
+    return [remove_worktree(path, cwd) for path in scratch_worktrees(pr, cwd)]
