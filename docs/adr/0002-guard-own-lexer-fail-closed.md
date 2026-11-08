@@ -12,7 +12,7 @@
 
 - **The guard has one lexer of its own** (`parse` in `hooks/guard.py`). It splits a command into simple commands and words, with quotes, escapes, line continuations, `$(...)`, backticks, heredocs and `sh -c` resolved. Every rule decides on those words, not on the command text, the check for `scripts/merge` (`runs_merge`) included.
 - **A command it can't parse or check is refused.** A command that doesn't parse (`ParseError`) is denied with a message telling the agent to rewrite it. Any other exception while checking is caught in `main` and denied the same way. An expansion whose value the guard can't know is kept as an unknown word, not treated as harmless.
-- **Input that is not a call the guard governs returns without a verdict:** stdin that is invalid JSON or JSON that isn't an object, no plugin agent named, or no command.
+- **Input that is not a call the guard governs returns without a verdict:** stdin that is invalid JSON or JSON that isn't an object, no plugin agent named (the orchestrator's own session is never refused; since #358 it can only be given an explicit `allow` for its routine steps), or no command.
 - **A role the guard doesn't know is read-only,** the same as a scout.
 - **It is a guardrail against mistakes, not a sandbox.** Aliases, `eval`, scripts written to disk and then run, and computed strings can still get past it. The user's permission mode and sandbox apply on top.
 - **Its decisions are pinned by tests:** `tests/test_guard.py` and the regression corpus (`tests/fixtures/guard-corpus.jsonl`, run by `tests/test_guard_corpus.py`), so a change that flips a decision shows in the PR diff.

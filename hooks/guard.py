@@ -1255,6 +1255,9 @@ TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
 REMOTE_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+?(?:\.git)?")
 CREDENTIAL_OPTION = "credential.helper=!gh auth git-credential"
 BOARD_SCRIPT = re.compile(r"(?:^|/)scripts/board$")
+PLUGIN_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+REPO_FLAG = re.compile(r"-R.*|--repo(?:=.*)?")
+SETTINGS_FILE = re.compile(r"settings[^/]*\.json")
 
 
 def worker_worktree(cwd: str) -> Path | None:
@@ -1293,6 +1296,10 @@ def edit_decision(tool_name: str, tool_input: object, cwd: str) -> tuple | None:
         return None  # not in an agent worktree, or no path to judge: the permission layer decides
     target = Path(os.path.realpath(path if os.path.isabs(path) else os.path.join(cwd, path)))
     if target == worktree or worktree in target.parents:
+        # Writes that change the worker's own permissions or git internals keep their prompt.
+        parts = target.relative_to(worktree).parts if target != worktree else ()
+        if parts[:1] == (".git",) or (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
+            return None
         return "allow", "routine worker step"
     in_temp = any(str(target) == t or str(target).startswith(t + "/") for t in TEMP_ROOTS)
     in_repo = any(root == target or root in target.parents for root in repo_roots(cwd))
@@ -1308,6 +1315,34 @@ def one_plain_command(parsed: "Parsed") -> Command | None:
         return None
     cmd = parsed.cmds[0]
     return cmd if cmd.depth == 0 and only_plain_words(cmd) and not cmd.heredocs and cmd.words else None
+
+
+def github_slug(url: str) -> str | None:
+    m = re.fullmatch(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?", url)
+    return m.group(1).lower() if m else None
+
+
+def is_origin_url(url: str, cwd: str) -> bool:
+    """The HTTPS push form (for the credential helper) is approved only for the repo `origin` names."""
+    slug = github_slug(url)
+    if slug is None or not REMOTE_URL.fullmatch(url):
+        return False
+    for git_dir in common_git_dirs(cwd):
+        try:
+            text = (git_dir / "config").read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        m = re.search(r'\[remote "origin"\][^\[]*?^\s*url\s*=\s*(\S+)', text, re.MULTILINE)
+        if m:
+            return github_slug(m.group(1)) == slug
+    return False
+
+
+def own_script(cmd: Command, args: list, cwd: str, name: str) -> bool:
+    """The script word of a threads, merge or board call is this plugin's own scripts/<name>, not a
+    same-named file elsewhere (a worker can write one in its worktree)."""
+    word = cmd.words[len(cmd.words) - len(args) - 1].text
+    return Path(os.path.realpath(os.path.join(cwd or ".", word))) == PLUGIN_SCRIPTS / name
 
 
 def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
@@ -1327,7 +1362,7 @@ def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
     if branch is None or branch in default_branches(cwd) or len(args) != 2:
         return False
     remote, ref = args
-    return (remote == "origin" or bool(REMOTE_URL.fullmatch(remote))) and ref in (branch, f"{branch}:{branch}")
+    return (remote == "origin" or is_origin_url(remote, cwd)) and ref in (branch, f"{branch}:{branch}")
 
 
 def routine_pr(call: Call) -> bool:
@@ -1361,15 +1396,19 @@ def approval(role: str | None, command: str, cwd: str) -> bool:
     cmd = one_plain_command(parsed)
     if cmd is None:
         return False
-    plain_gh = len(parsed.calls) == 1 and cmd.words[0].text == "gh"
+    # `-R`/`--repo` aims a gh call at a repo the agent was not given: leave it to the permission layer.
+    plain_gh = (len(parsed.calls) == 1 and cmd.words[0].text == "gh"
+                and not any(REPO_FLAG.fullmatch(w.text) for w in cmd.words))
     if role == "worker":
         found = script_call(parsed, THREADS_SCRIPT)
         if found is not None:
-            return threads_form(found[1]) in ("resolve", "reopen")
+            return threads_form(found[1]) in ("resolve", "reopen") and own_script(found[0], found[1], cwd, "threads")
         return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0]))
     if role is None and config_path(cwd):
-        if any(script_call(parsed, pattern) is not None for pattern in (MERGE_SCRIPT, THREADS_SCRIPT, BOARD_SCRIPT)):
-            return True
+        for pattern, name in ((MERGE_SCRIPT, "merge"), (THREADS_SCRIPT, "threads"), (BOARD_SCRIPT, "board")):
+            found = script_call(parsed, pattern)
+            if found is not None:
+                return own_script(found[0], found[1], cwd, name)
         return plain_gh and parsed.calls[0].is_sub("issue") and parsed.calls[0].is_verb("edit", "comment", "create", "close")
     return False
 

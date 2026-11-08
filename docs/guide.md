@@ -68,7 +68,7 @@ Use greedy when the backlog has several independent tickets and you have plan he
 
 ## The guard hook
 
-`hooks/guard.py` runs before every Bash call and every file edit (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) and acts only on this plugin's agents (`agent_type` `orchestrate:<role>`):
+`hooks/guard.py` runs before every Bash call and every file edit (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) and refuses only for this plugin's agents (`agent_type` `orchestrate:<role>`); the orchestrator's own session (no `agent_type`) is never refused, only given the routine-step approval described below:
 
 | Role | Refused |
 |---|---|

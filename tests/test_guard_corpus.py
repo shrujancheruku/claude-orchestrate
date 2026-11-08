@@ -111,7 +111,7 @@ class GuardCorpus(unittest.TestCase):
                 self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source", "background", "timeout"})
                 self.assertTrue(row["role"].startswith("orchestrate:"), row["role"])
                 self.assertTrue(row["command"].strip())
-                self.assertIn(row["expected"], ("allow", "approve", "deny"))
+                self.assertIn(row["expected"], ("allow", "approve", "silent", "deny"))
                 if "gap" in row:
                     self.assertRegex(row["gap"], r"^#\d+$")
         keys = [(r["role"], r["command"]) for r in self.rows]
@@ -123,8 +123,9 @@ class GuardCorpus(unittest.TestCase):
             label = f"line {n} ({row['role']}): {row['command'][:100]!r}"
             with self.subTest(label):
                 # `allow` means the rules accept the call (silently or by an explicit approval); `approve` is
-                # the explicit `permissionDecision: "allow"` (#358).
-                matches = actual == row["expected"] or (row["expected"] == "allow" and actual == "approve")
+                # the explicit `permissionDecision: "allow"` (#358); `silent` is neither, so the permission layer decides.
+                matches = actual == row["expected"] or (row["expected"] == "allow" and actual == "approve") or (
+                    row["expected"] == "silent" and actual == "allow")
                 if "gap" in row:
                     self.assertFalse(
                         matches,
