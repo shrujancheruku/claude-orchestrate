@@ -2,7 +2,7 @@
 """holds (--touch-map PATH... --ticket N | --pr N) [--repo DIR] [--state FILE] : what is held, and does this overlap it.
 
 The one place the overlap rule lives. A path is held by an open PR (its diff, through `gh`), by a
-building ticket (its touch map in the state file), by an Elsewhere ticket (a live worker in another session:
+building ticket (its touch map in the state file, or its worktree's changes when this session's own worker has no record), by an Elsewhere ticket (a live worker in another session:
 the changes in its worktree, ADR 0009) or by an exclusive hold (the config). The ticket states come from the
 claims module (scripts/claims.py): one tracker Snapshot per run (`--snapshot FILE` reads one `snapshot` wrote), never a `gh` call per ticket. Paths are compared
 as files: any `:line` or line range is stripped, so a different section of one file still overlaps.
@@ -43,19 +43,23 @@ def plain(entry: str) -> str:
 
 def claimed_paths(found: dict, own, base: str) -> tuple:
     """({ticket: [paths]} for the Building claims, {ticket: [paths]} for the Elsewhere claims), the ticket `own` left out.
-    A Building claim holds its touch map (the state-file entries, through `plain`); an Elsewhere claim, or a Building one with no record (this
-    session's own worker, `worker unknown`), holds its worktree's changes, the ones a live worker has made so far (ADR 0009). An open PR is a different claim state,
-    so a ticket with a PR is held only through the PR's diff."""
+    A Building claim holds its touch map (the state-file entries, through `plain`); a Building claim with no record
+    (this session's own worker, `worker unknown`) has no touch map, so it holds its worktree's changes and is labelled
+    building. An Elsewhere claim holds its worktree's changes, the ones a live worker has made so far (ADR 0009). An
+    open PR is a different claim state, so a ticket with a PR is held only through the PR's diff."""
     tickets, others = {}, {}
     for n, c in sorted(found.items()):
         if n == own:
             continue
-        if c.state == "building" and c.worker is not None:
-            entries = (c.worker or {}).get("touch_map")
-            paths = [plain(e) for e in entries if isinstance(e, str) and plain(e)] if isinstance(entries, list) else []
+        if c.state == "building":
+            if c.worker is None:
+                paths = worktree_changes(c.worktree, base) if c.worktree else []
+            else:
+                entries = c.worker.get("touch_map")
+                paths = [plain(e) for e in entries if isinstance(e, str) and plain(e)] if isinstance(entries, list) else []
             if paths:
                 tickets[n] = paths
-        elif c.state in ("elsewhere", "building") or (c.state == "with-lead" and c.lock and c.lock[0] in ("ours", "foreign-live") and c.worktree):
+        elif c.state == "elsewhere" or (c.state == "with-lead" and c.lock and c.lock[0] in ("ours", "foreign-live") and c.worktree):
             # A `lead` ticket with a live worker's worktree still holds its uncommitted changes, as it did before the
             # claims module: the claims state says with-lead, but a live lock means someone is still writing there.
             paths = worktree_changes(c.worktree, base)

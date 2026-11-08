@@ -256,9 +256,32 @@ class Holds(unittest.TestCase):
         (path / "README.md").write_text("changed\n")
         (path / "c.txt").write_text("new\n")
 
-    def test_live_elsewhere_holds_committed_unstaged_and_untracked(self):
+    def foreign_reason(self):
+        """A lock reason naming a live process that is not an ancestor of the test: another session's worker."""
+        other = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        return live_reason(other.pid)
+
+    def test_own_unrecorded_worker_holds_its_changes_as_building(self):
         self.gh(open_tickets=[12])
         self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "README.md (held by building #12)", "a.py (held by building #12)", "c.txt (held by building #12)",
+            "overlap: a.py (held by building #12)"])
+
+    def test_lead_ticket_with_own_live_worktree_holds_its_changes(self):
+        self.gh(open_tickets=[12], lead=[12])
+        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("a.py (held by elsewhere #12)", r.stdout.splitlines())
+
+    def test_live_elsewhere_holds_committed_unstaged_and_untracked(self):
+        self.gh(open_tickets=[12])
+        self.dirty(self.worktree("12-widget", reason=self.foreign_reason()))
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertEqual(r.stdout.splitlines(), [
@@ -337,7 +360,7 @@ class Holds(unittest.TestCase):
     def test_lead_ticket_with_live_worktree_holds_its_changes(self):
         # Kept from before the claims module: a `lead` ticket is with-lead in claims, but its live worktree still holds.
         self.gh(open_tickets=[12], lead=[12])
-        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        self.dirty(self.worktree("12-widget", reason=self.foreign_reason()))
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertEqual(r.stdout.splitlines(), [

@@ -2,7 +2,8 @@
 """claims [<ticket>] [--repo DIR] [--state FILE] : what state is each claimed ticket in?
 
 One line per claimed ticket in ascending ticket order, or the one named (the rules are in scripts/claims.py):
-    #<n> <state> <branch | no-branch> pr <num | none> worker <agent-id> <model> | none worktree <path | gone> lock <lock> [<changes>]
+    #<n> <state> <branch | no-branch> pr <num | none> worker <agent-id> <model> | unknown | none worktree <path | gone> lock <lock> [<changes>]
+worker `unknown`: a building claim with no state record, this session's own live worker that the state file couldn't join.
 state: with-lead | in-review | done | building | elsewhere | stalled (`paused` and `waiting` are the orchestrator's own).
 lock:  `ours <pid>` (this session's own worker); `foreign-live <pid>`; `foreign-live ?` (the line then ends ` (lock: <reason>)`: the reason doesn't parse, which counts as live;
        unlock the worktree if it is stale); `dead <pid>` (unlock it, then rescue it); `none` (no lock or no worktree).
