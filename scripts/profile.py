@@ -804,7 +804,7 @@ def gh_block(events: list) -> dict:
         "calls": len(calls),
         "writes": sum(1 for e in calls if e.get("write")),
         "graphql": sum(1 for e in calls if e.get("graphql")),
-        "graphql_points": sum(e["cost"] for e in calls if e.get("graphql") and isinstance(e.get("cost"), int)),
+        "graphql_points": sum(e["cost"] for e in calls if e.get("graphql") and isinstance(e.get("cost"), int) and not isinstance(e["cost"], bool)),
         "by_script": dict(sorted(by_script.items(), key=lambda kv: (-kv[1], kv[0]))),
         "retries": sum(1 for e in calls if (e.get("attempt") or 1) > 1),
         "rate_limited": sum(1 for e in calls if e.get("outcome") == "ratelimited"),
@@ -830,7 +830,7 @@ def gh_metrics(events: list | None, passes: list) -> dict:
     rows = [{"pass": n, **gh_block(b)} for (n, _), b in zip(bounds, buckets) if b]
     if buckets[-1]:
         rows.append({"pass": None, **gh_block(buckets[-1])})  # outside any recorded pass
-    return {"available": True, "total": gh_block(calls), "passes": rows}
+    return {"available": True, "total": gh_block(calls), "passes": rows, "pass_records": len(bounds)}
 
 
 def gh_lines(g: dict) -> list:
@@ -848,10 +848,12 @@ def gh_lines(g: dict) -> list:
     out = [f"GitHub calls: {line(t)}" + (f" · top: {top}" if top else "")]
     # Points per pass: each row's sum of GraphQL `cost` (calls outside any record form a row of their own).
     # Shown only when the log carries costs, so a log from before #490 keeps the old summary.
-    points = [r.get("graphql_points", 0) for r in g.get("passes") or []]
-    if t.get("graphql_points") and points:
-        out.append(f"graphql points per pass: avg {sum(points) / len(points):.0f}, max {max(points)} "
-                   f"(total {t['graphql_points']} over {len(points)} pass{'es' if len(points) != 1 else ''})")
+    # N is the pass records (a pass with no calls counts, the row for calls outside any pass does not).
+    records = g.get("pass_records") or 0
+    points = [r.get("graphql_points", 0) for r in g.get("passes") or [] if r.get("pass") is not None]
+    if t.get("graphql_points") and records:
+        out.append(f"graphql points per pass: avg {sum(points) / records:.0f}, max {max(points, default=0)} "
+                   f"(total {sum(points)} over {records} pass{'es' if records != 1 else ''})")
     return out
 
 

@@ -178,7 +178,7 @@ Never suggest below 1 or above 5. Give the reason in one line, e.g. "Suggest slo
 
 With `--profile`, at the end of each pass, before the report, and at the end of every **wake** that dispatched, merged or resumed a ticket (a worker or reviewer completion, a `watch-ci` line, a rescue or a merge), whether or not it ran every step above:
 
-1. **Record the pass**, one JSON object, so the profile can say why slots sat idle. A wake that did any of that records a pass with scope `wake` and the same fields, so a long event-driven session isn't left with a few records and mostly `unknown` idle time:
+1. **Record the pass**, one JSON object, so the profile can say why slots sat idle. A wake that did any of that records a pass with scope `wake`, so a long event-driven session isn't left with a few records and mostly `unknown` idle time. A wake that dispatched, merged and resumed nothing (a relay-only wake) records nothing, and a wake that ran a full pass writes that pass's one record (scope `full`), not a second `wake` one. A `wake` record carries `scope`, `slots` (the count in force), `claimed` (ticket number → state, from the state file as the wake last read it), `free` (the free slots at the end of the wake, after any dispatch it made), `idle` (why each of those free slots is free, with the same reasons and the same sum rule), `takeable_waiting` (0 if the wake didn't look), `limit_hit`, `reset_at`, `dispatched` and `merged` (this wake's tickets only) and `suggestion` (null); `greedy` is set as for a pass:
    ```sh
    python3 -I "${CLAUDE_SKILL_DIR}/../../scripts/profile.py" record --repo . --session ${CLAUDE_SESSION_ID} '<json>'
    ```

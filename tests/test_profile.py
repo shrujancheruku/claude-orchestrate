@@ -828,17 +828,20 @@ class OrchestratorTest(unittest.TestCase):
         self.assertGreater(len(self.fx.run()["metrics"]["gh_calls"]["passes"]), 1)
 
     def test_graphql_points_are_summed_per_pass_and_printed(self):
-        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}, {"ts": at(10), "slots": 2, "free": 1}])
+        # A third pass made no calls (it counts in N); a call after the last record is not a pass; `True` is not a cost.
+        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}, {"ts": at(10), "slots": 2, "free": 1}, {"ts": at(20), "slots": 2, "free": 1}])
         events = self.gh_events()
+        events.append({"ts": at(30), "session": SESSION, "kind": "gh_call", "script": "gate", "graphql": True, "cost": 50})
+        events.append({"ts": at(31), "session": SESSION, "kind": "gh_call", "script": "gate", "graphql": True, "cost": True})
         events[0]["cost"] = 7
         events[5]["cost"] = 3
         events[1]["cost"] = 99  # a REST call: not counted
         self.fx.events(events)
         p = self.fx.run()
         g = p["metrics"]["gh_calls"]
-        self.assertEqual([r["graphql_points"] for r in g["passes"]], [7, 3])
-        self.assertEqual(g["total"]["graphql_points"], 10)
-        self.assertIn("graphql points per pass: avg 5, max 7 (total 10 over 2 passes)", prof.summary(p, Path("x.json")))
+        self.assertEqual([r["graphql_points"] for r in g["passes"]], [7, 3, 50])
+        self.assertEqual(g["total"]["graphql_points"], 60)
+        self.assertIn("graphql points per pass: avg 3, max 7 (total 10 over 3 passes)", prof.summary(p, Path("x.json")))
 
     def test_no_points_line_when_the_log_has_no_costs(self):
         self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
