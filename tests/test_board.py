@@ -202,6 +202,35 @@ class Board(unittest.TestCase):
         create = next(c for c in self.env.gh_calls() if c[:2] == ["project", "field-create"])
         self.assertEqual(create[create.index("--single-select-options") + 1], ",".join(OPTIONS))
 
+    def synced(self, cards, *flags):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True), ticket(3, ["needs-lead"], True)],
+                prs=[{"number": 11, "headRefName": "1-x", "state": "OPEN", "mergedAt": None}], cards=cards)
+        return self.env.run("board", *flags, check=False)
+
+    def test_a_board_that_matches_makes_zero_writes_and_verbose_says_so(self):
+        r = self.synced([card(1, "In review"), card(3, "Needs lead")], "--verbose")
+        self.assertEqual((r.returncode, r.stderr.strip()), (0, "writes: 0"))
+        self.assertEqual(self.writes(), [])
+
+    def test_one_moved_card_is_exactly_one_write(self):
+        r = self.synced([card(1, "Building"), card(3, "Needs lead")], "--verbose")
+        self.assertEqual(r.stderr.strip(), "writes: 1")
+        self.assertEqual(len(self.writes()), 1)
+        self.assertEqual(self.edits(), {"I1": "In review"})
+
+    def test_one_removed_card_is_exactly_one_deletion(self):
+        r = self.synced([card(1, "In review"), card(3, "Needs lead"), card(9, "Backlog")], "--verbose")
+        self.assertEqual(r.stderr.strip(), "writes: 1")
+        self.assertEqual(self.deletes(), ["I9"])
+        self.assertEqual(len(self.writes()), 1)
+
+    def test_dry_run_ends_with_the_count_of_planned_writes(self):
+        r = self.synced([card(1, "Building"), card(3, "Needs lead"), card(9, "Backlog")], "--dry-run", "--verbose")
+        self.assertEqual(r.stdout.splitlines()[-1], "2 writes planned")
+        self.assertEqual(r.stderr.strip(), "writes: 2")
+        self.assertEqual(self.writes(), [])
+
     # The Backlog fixture: 10, 11, 12 takeable; 15 and 20 held by the open blocker 21; 1 building; 8 merged.
     BACKLOG_TICKETS = [ticket(10, ["ready-for-agent"]), ticket(11, ["ready-for-agent"]), ticket(12, ["ready-for-agent"]),
                        ticket(15, ["ready-for-agent"], blocked_by=[21]), ticket(20, ["ready-for-agent"], blocked_by=[21]),

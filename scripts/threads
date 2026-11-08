@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""threads <pr> [--all] | resolve <thread> (--fixed <sha> | --left <why>) | reopen <thread> --why <why> [--repo DIR]
+"""threads <pr> [--all] | resolve <thread>... (--fixed <sha> | --left <why>) | reopen <thread>... --why <why> [--verbose] [--repo DIR]
 
 The one place a review thread is read, closed or reopened (ADR-0006; the rule "a review thread is closed with a reply by
 whoever acts on it" lives here, not in the prompts).
@@ -8,12 +8,17 @@ whoever acts on it" lives here, not in the prompts).
                               <thread id> <author> <path>:<line | file> [outdated] <first line of the first comment>
                             --all adds resolved threads (marked `resolved`), each followed by its closing reply
                             (the `fixed in` / `left:` / `reopened:` comment, indented). Nothing printed when none.
-    threads <pr> resolve <thread> --fixed <sha>   replies `fixed in <sha>`, then resolves; <sha> must be a commit on the
-                                                  PR's branch at the remote
-    threads <pr> resolve <thread> --left <why>    replies `left: <why>`, then resolves
-    threads <pr> reopen <thread> --why <why>      replies `reopened: <why>`, then unresolves
+    threads <pr> resolve <thread>... --fixed <sha>   replies `fixed in <sha>`, then resolves; <sha> must be a commit
+                                                     on the PR's branch at the remote
+    threads <pr> resolve <thread>... --left <why>    replies `left: <why>`, then resolves
+    threads <pr> reopen <thread>... --why <why>      replies `reopened: <why>`, then unresolves
 
-Each resolve and reopen appends a `threads` event to the run log (outcome resolved | reopened, plus thread and author).
+Several thread ids go in one call: every id is checked first (one bad id changes nothing), then the replies go in one
+GraphQL request (one aliased reply mutation per thread) and the resolves or unresolves in a second (one aliased
+mutation per thread), however many threads. A thread whose last comment already is the reply is not replied to again.
+`--verbose` prints `writes: <n>` on stderr: the mutation requests sent.
+Each resolve and reopen appends a `threads` event per thread to the run log (outcome resolved | reopened, plus thread
+and author).
 Exit codes: 0 done; 1 nothing changed (a thread id the PR doesn't have, a resolve of a resolved thread, a reopen of an
 open one, a --fixed sha not on the branch: one line on stderr); 2 could not run (`gh` failed, or a bad command line;
 run it again). Stdlib only, Python 3.9+.
@@ -28,10 +33,14 @@ import common
 import github
 import runlog
 
-REPLY = ("mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: "
-           "{pullRequestReviewThreadId: $id, body: $body}) { comment { id } } }")
-RESOLVE_THREAD = "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }"
-UNRESOLVE_THREAD = "mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { id } } }"
+# Each mutation is one field; a single thread wraps it in a mutation, several get an alias each (see batched).
+REPLY_FIELD = ("addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $id, body: $body}) "
+               "{ comment { id } }")
+RESOLVE_FIELD = "resolveReviewThread(input: {threadId: $id}) { thread { id } }"
+UNRESOLVE_FIELD = "unresolveReviewThread(input: {threadId: $id}) { thread { id } }"
+REPLY = "mutation($id: ID!, $body: String!) { " + REPLY_FIELD + " }"
+RESOLVE_THREAD = "mutation($id: ID!) { " + RESOLVE_FIELD + " }"
+UNRESOLVE_THREAD = "mutation($id: ID!) { " + UNRESOLVE_FIELD + " }"
 REPLIES = ("fixed in ", "left:", "reopened:")
 MIN_SHA = 7
 
@@ -68,6 +77,24 @@ def graphql(query, cwd, **variables):
     github.call(*args, cwd=cwd)
 
 
+def batched(field, ids, cwd, bodies=None) -> None:
+    """One GraphQL request applying the mutation `field` to every id: an alias (`m0`, `m1`, ...) per thread, so the
+    rate limit sees one write however many threads. bodies: the reply text per id (the reply mutation); None for
+    resolve and unresolve. One id sends the plain single-mutation text."""
+    if len(ids) == 1:
+        graphql("mutation($id: ID!" + (", $body: String!" if bodies else "") + ") { " + field + " }", cwd,
+                id=ids[0], **({"body": bodies[0]} if bodies else {}))
+        return
+    decls, calls, variables = [], [], {}
+    for i, tid in enumerate(ids):
+        decls.append(f"$id{i}: ID!" + (f", $body{i}: String!" if bodies else ""))
+        calls.append(f"m{i}: " + field.replace("$id", f"$id{i}").replace("$body", f"$body{i}"))
+        variables[f"id{i}"] = tid
+        if bodies:
+            variables[f"body{i}"] = bodies[i]
+    graphql("mutation(" + ", ".join(decls) + ") { " + " ".join(calls) + " }", cwd, **variables)
+
+
 def on_branch(sha, shas) -> bool:
     return len(sha) >= MIN_SHA and any(s.startswith(sha.lower()) for s in shas)
 
@@ -76,11 +103,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("pr", help="the PR number")
     ap.add_argument("action", nargs="?", choices=("resolve", "reopen"))
-    ap.add_argument("thread", nargs="?", help="the thread id (resolve and reopen)")
+    ap.add_argument("thread", nargs="*", help="the thread ids (resolve and reopen)")
     ap.add_argument("--all", action="store_true", help="list resolved threads too, with their closing reply")
     ap.add_argument("--fixed", metavar="SHA", help="resolve: the pushed commit that fixed it")
     ap.add_argument("--left", metavar="WHY", help="resolve: why a minor was left")
     ap.add_argument("--why", metavar="WHY", help="reopen: what is still wrong")
+    ap.add_argument("--verbose", action="store_true", help="print `writes: <n>` (mutation requests sent) on stderr")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
     pr, ref = common.pr_ref(args.pr)
@@ -101,38 +129,50 @@ def main(argv=None) -> int:
         ap.error("--fixed, --left, --why and a thread id go with resolve or reopen")
 
     cwd = args.repo
+    sent = 0
     try:
         threads = github.review_threads(pr, cwd=cwd)
         if not args.action:
             for line in listing(threads, args.all):
                 print(line)
             return 0
-        thread = next((t for t in threads if t["id"] == args.thread), None)
-        if thread is None:
-            return refuse(f"PR #{pr} has no review thread {args.thread}")
-        if args.action == "resolve" and thread["resolved"]:
-            return refuse(f"thread {args.thread} is already resolved")
-        if args.action == "reopen" and not thread["resolved"]:
-            return refuse(f"thread {args.thread} is not resolved")
+        by_id = {t["id"]: t for t in threads}
+        chosen = []
+        for tid in dict.fromkeys(args.thread):  # a repeated id is one thread
+            thread = by_id.get(tid)
+            if thread is None:
+                return refuse(f"PR #{pr} has no review thread {tid}")
+            if args.action == "resolve" and thread["resolved"]:
+                return refuse(f"thread {tid} is already resolved")
+            if args.action == "reopen" and not thread["resolved"]:
+                return refuse(f"thread {tid} is not resolved")
+            chosen.append(thread)
         if args.fixed and not on_branch(args.fixed, github.pr_commit_shas(pr, cwd=cwd)):
             return refuse(f"{args.fixed} is not a commit on PR #{pr}'s branch at the remote (push first)")
         if args.action == "resolve":
             reply = f"fixed in {args.fixed}" if args.fixed else f"left: {args.left}"
-            outcome, mutation = "resolved", RESOLVE_THREAD
+            outcome, field = "resolved", RESOLVE_FIELD
         else:
-            reply, outcome, mutation = f"reopened: {args.why}", "reopened", UNRESOLVE_THREAD
+            reply, outcome, field = f"reopened: {args.why}", "reopened", UNRESOLVE_FIELD
         # A retry after a failed mutation must not post the same reply twice.
-        if not (thread["comments"] and thread["comments"][-1]["body"].strip() == reply):
-            graphql(REPLY, cwd, id=thread["id"], body=reply)
-        graphql(mutation, cwd, id=thread["id"])
+        todo = [t for t in chosen if not (t["comments"] and t["comments"][-1]["body"].strip() == reply)]
+        if todo:
+            sent += 1
+            batched(REPLY_FIELD, [t["id"] for t in todo], cwd, [reply] * len(todo))
+        sent += 1
+        batched(field, [t["id"] for t in chosen], cwd)
     except github.GhError as e:
         common.die(f"threads: gh failed: {e.message}")
-    author = thread["comments"][0]["author"] if thread["comments"] else "ghost"
-    try:
-        runlog.append_event(cwd, runlog.THREADS, outcome, ref=ref, thread=thread["id"], author=author)
-    except OSError as e:
-        common.die(f"threads: the thread is {outcome}, but the run log is unwritable: {e.strerror or e}")
-    print(f"{outcome} {thread['id']}: {reply}")
+    finally:
+        if args.verbose and args.action:
+            print(f"writes: {sent}", file=sys.stderr)
+    for thread in chosen:
+        author = thread["comments"][0]["author"] if thread["comments"] else "ghost"
+        try:
+            runlog.append_event(cwd, runlog.THREADS, outcome, ref=ref, thread=thread["id"], author=author)
+        except OSError as e:
+            common.die(f"threads: the thread is {outcome}, but the run log is unwritable: {e.strerror or e}")
+        print(f"{outcome} {thread['id']}: {reply}")
     return 0
 
 
