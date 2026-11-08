@@ -195,10 +195,22 @@ class Board(unittest.TestCase):
 class Prompts(unittest.TestCase):
     def test_setup_offers_the_board_and_writes_the_line(self):
         text = (ROOT / "skills" / "setup" / "SKILL.md").read_text()
-        for phrase in ("! gh auth refresh -s project", "- **Board:** <project URL>", "gh project create", "gh project link",
+        for phrase in ("! gh auth refresh -h <host> -s project", "`origin`", "`github.com`",
+                       "- **Board:** <project URL>", "gh project create", "gh project link",
                        "@me", "retry or skip", "gh project list --owner @me", "skip with one line",
                        "lacks the `project` scope", "stays unlinked", "write the line"):
             self.assertIn(phrase, text)
+
+    def test_no_prompt_or_doc_gives_the_refresh_command_without_a_host(self):
+        # Without -h, gh refuses to run under `!` (no TTY): "--hostname required when not running interactively".
+        for rel in ("skills/setup/SKILL.md", "docs/guide.md", "README.md"):
+            path = ROOT / rel
+            if not path.exists():
+                continue
+            text = path.read_text()
+            self.assertNotIn("gh auth refresh -s project", text, rel)
+            if "gh auth refresh" in text:
+                self.assertIn("gh auth refresh -h <host> -s project", text, rel)
 
     def test_run_syncs_the_board_in_step_5_and_carries_on_when_it_fails(self):
         text = (ROOT / "skills" / "run" / "SKILL.md").read_text()

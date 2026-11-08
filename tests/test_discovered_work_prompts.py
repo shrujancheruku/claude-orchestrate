@@ -30,6 +30,14 @@ class DiscoveredWork(unittest.TestCase):
         s = read("agents/reviewer.md")
         self.assertRegex(s, r"never a `\[minor\]` finding")
 
+    def test_reviewer_never_trial_writes_to_the_host(self):
+        s = read("agents/reviewer.md")
+        self.assertIn("**API questions.**", s)
+        self.assertIn("Never send a write to the host to find out", s)
+        self.assertIn("The only writes you ever make are under **Post**", s)
+        self.assertIn("The review post and its file-level comments", s)
+        self.assertIn("not even a trial of a payload shape", s)
+
     def test_run_summary_lists_discovered_work_prs(self):
         s = read("skills/run/SKILL.md")
         step = s[s.index("5. **Report and yield.**"):]

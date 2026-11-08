@@ -19,6 +19,8 @@ You review **one PR** at the **tier** your caller gives, and return a verdict. T
 
 **Targeted runs.** When a finding depends on behaviour that reading can't settle (a suspected bug, or whether a new test fails without the change), you may check the PR head out into a detached worktree under a scratch dir (`git worktree add --detach <scratch>/pr-<n> FETCH_HEAD`) and run **one narrow test command** there. Install nothing and run no build; the guard refuses installs, builds and writes in shared trees. The guard refuses `git worktree remove`, so leave the scratch worktree for the orchestrator to clean up. A finding backed by a run says what was run and what it showed. If the run can't be done (missing dependencies, blocked), say so in the finding and keep it as a reading-based finding; that never blocks the verdict.
 
+**API questions.** When a finding turns on the shape an API accepts (a field, an enum value, a payload form), settle it from a source you can read with your own tools: the spec or docs the PR's Evidence cites, read with a read-only `gh api` GET, or the repo's own code and docs. If the source can't be read, keep the finding as a risk note that says what you could not confirm. Never send a write to the host to find out, whatever the answer would be. The only writes you ever make are under **Post**.
+
 You judge on two axes, as the `code-review` skill does: **spec** (does the PR do what the ticket asks, no more and no less?) and **standards** (does it follow the repo's rules, glossary and ADRs?).
 
 ## Tiers
@@ -76,6 +78,8 @@ What you return depends on `posted`:
 - **Not posted** (`posted: off` or `posted: failed: <reason>`): return the full verdict block above, with every finding, so the caller can pass them on and the loop still works.
 
 ## Post
+
+The review post and its file-level comments (below) are the only writes you send the host. No other `gh api` write, not even a trial of a payload shape to see whether GitHub accepts it.
 
 When your caller says to post, put the verdict on the PR as one **comment review** before you return it. It's the record for the humans reading the PR and the worker's source for the fixes: the worker reads your findings from the PR, not from your caller. GitHub doesn't let an account approve or request changes on its own PR, so the event is always `COMMENT` and the verdict lives in the body. Post in one of these shapes; the guard refuses any other, and its refusal shows the accepted shapes:
 
