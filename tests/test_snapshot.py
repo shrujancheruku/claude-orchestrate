@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest  # noqa: E402
 import github  # noqa: E402
 import tracker  # noqa: E402
 
@@ -36,11 +36,11 @@ class SnapshotTest(unittest.TestCase):
 
     def serve(self, nodes, prs=()):
         self.env.set_gh([
-            {"args": ["repo", "view"], "stdout": json.dumps(REPO)},
+            gh_repo_rest(REPO),
             issues_reply(nodes),
             {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": []}}}})},
-            {"args": ["pr", "list", "--state", "open"], "stdout": json.dumps(list(prs))},
-            {"args": ["pr", "list", "--state", "merged"], "stdout": "[]"},
+            gh_pr_list(list(prs), "--state", "open"),
+            gh_pr_list([], "--state", "merged"),
         ])
 
     def issue_reads(self):
@@ -79,7 +79,7 @@ class SnapshotTest(unittest.TestCase):
 
     def test_fix_drift_posts_one_edge_and_the_next_run_has_no_drift(self):
         self.env.set_gh([
-            {"args": ["repo", "view"], "stdout": json.dumps(REPO)},
+            gh_repo_rest(REPO),
             issues_reply([node(1), node(5, body="Blocked by: #1")]),
             {"args": ["api", "repos/{owner}/{repo}/issues/1", "--jq", ".id"], "stdout": "4242\n"},
             {"args": ["api", "--method", "POST"], "stdout": "{}"},
@@ -92,7 +92,7 @@ class SnapshotTest(unittest.TestCase):
                                   "-F", "issue_id=4242"]])
         # The next run reads the edge from the tracker: no drift, nothing more to add.
         fixed = node(5, body="Blocked by: #1", blockers=[(1, "OPEN")])
-        self.env.set_gh([{"args": ["repo", "view"], "stdout": json.dumps(REPO)}, issues_reply([node(1), fixed])])
+        self.env.set_gh([gh_repo_rest(REPO), issues_reply([node(1), fixed])])
         again = self.env.run("frontier", "--all", "--fix-drift").stdout.splitlines()
         self.assertEqual(again[-2:], ["drift:", "none"])
         self.assertFalse([l for l in again if l.startswith("added")])

@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from harness import ScriptEnv, git  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git  # noqa: E402
 
 import claims  # noqa: E402
 import common  # noqa: E402
@@ -198,11 +198,10 @@ class Cli(unittest.TestCase):
                  for n, claimed in self.nodes]
         graphql = {"data": {"repository": {"issues": {"nodes": nodes}}}}
         self.env.set_gh([
-            {"args": ["repo", "view"], "stdout": json.dumps(
-                {"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}})},
+            gh_repo_rest({"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}}),
             {"args": ["api", "graphql"], "stdout": json.dumps(graphql), **kw},
-            {"args": ["pr", "list", "--state", "open"], "stdout": json.dumps(self.prs)},
-            {"args": ["pr", "list", "--state", "merged"], "stdout": json.dumps(self.merged)},
+            gh_pr_list(self.prs, "--state", "open"),
+            gh_pr_list(self.merged, "--state", "merged"),
         ])
 
     def worktree(self, branch="1-widget", reason=None):

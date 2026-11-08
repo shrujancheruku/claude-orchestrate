@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, git  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git  # noqa: E402
 
 import common  # noqa: E402
 
@@ -74,13 +74,13 @@ class Board(unittest.TestCase):
         issues = out({"data": {"repository": {"issues": {"nodes": list(tickets)}}}})
         self.env.set_gh([
             *extra,
-            {"args": ["repo", "view"], **out(REPO)},
+            gh_repo_rest(REPO),
             {"args": ["api", "graphql"], "seq": [issues, *graphql, out({"data": {}})]},
             {"args": ["project", "view"], **out({"id": "P1"})},
             {"args": ["project", "field-list"], **out({"fields": list(fields)})},
             {"args": ["project", "field-create"], **out(FIELD)},
-            {"args": ["pr", "list", "--state", "open"], **out([p for p in prs if p.get("state") == "OPEN"])},
-            {"args": ["pr", "list", "--state", "merged"], **out([p for p in prs if p.get("state") == "MERGED"])},
+            gh_pr_list([p for p in prs if p.get("state") == "OPEN"], "--state", "open"),
+            gh_pr_list([p for p in prs if p.get("state") == "MERGED"], "--state", "merged"),
             {"args": ["project", "item-list"], **out({"items": list(cards)})},
             {"args": ["project", "item-add"], "seq": [out({"id": i}) for i in new_ids]},
             {"args": ["project", "item-edit"]},
@@ -322,8 +322,9 @@ class Board(unittest.TestCase):
         r = self.env.run("board", check=False)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         self.assertEqual(self.edits(), {"N31": "In review"})
-        listed = next(c for c in self.env.gh_calls() if c[:4] == ["pr", "list", "--state", "open"])
-        self.assertNotIn("100", listed)
+        # More than one page of open PRs is read, not the first hundred only.
+        pages = [c[1] for c in self.env.gh_calls() if c[0] == "api" and c[1].startswith("repos/{owner}/{repo}/pulls?state=open")]
+        self.assertTrue(any(p.endswith("page=2") for p in pages), pages)
 
     def test_a_failed_lead_route_skips_lead_cards_with_one_stderr_line_and_exits_0(self):
         self.config()
