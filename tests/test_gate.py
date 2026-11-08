@@ -362,7 +362,7 @@ class GateTest(unittest.TestCase):
         self.prime(issues=[{"number": 12, "labels": {"nodes": []}, "assignees": {"totalCount": 1}}])
         state = self.env.repo / ".claude" / "orchestrate-state.json"
         state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps({"tickets": {"12": {"touch_map": ["src/a.py:5"]}}}))
+        state.write_text(json.dumps({"session": "test-session", "tickets": {"12": {"touch_map": ["src/a.py:5"]}}}))
         wt = self.env.repo / ".claude" / "worktrees" / "w1"
         subprocess.run(["git", "worktree", "add", "-q", "-b", "w1", str(wt)], cwd=self.env.repo, check=True)
         self.assertFalse((wt / ".claude" / "orchestrate-state.json").exists())

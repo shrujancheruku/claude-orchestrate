@@ -52,7 +52,7 @@ class Fixture:
 
     def __init__(self, root: Path):
         self.repo = root / "repo"
-        (self.repo / ".claude").mkdir(parents=True)
+        (self.repo / ".claude").mkdir(parents=True, exist_ok=True)
         (self.repo / ".claude" / "orchestration.md").write_text("## Slots\n\n- **Slots:** 2.\n")
         self.main = root / "projects" / "-repo" / f"{SESSION}.jsonl"
         sub = self.main.with_suffix("") / "subagents"

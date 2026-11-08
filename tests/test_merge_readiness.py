@@ -37,7 +37,7 @@ class ReadinessTest(unittest.TestCase):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
         self.repo = self.env.repo
-        (self.repo / ".claude").mkdir()
+        (self.repo / ".claude").mkdir(exist_ok=True)
         (self.repo / ".claude" / "orchestration.md").write_text(READY_CONFIG)
         git(self.repo, "checkout", "-q", "-b", "feat-br")
         self.approved = self.env.commit("a.txt", "one\n", "feat: a")
