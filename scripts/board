@@ -24,11 +24,14 @@ never reads or writes the board. One tracker Snapshot serves the whole sync (and
 Only cards whose content is an issue of this repository (repository plus number) are the board's: draft, hand-placed
 and other repositories' cards are left alone. A card whose ticket closed without a merged PR is archived. If
 `lead-route` fails, the lead's cards are skipped with one stderr line and the rest syncs. The sync reads the project's
-fields and items once and writes only the difference from the wanted state (an add, a move, an archive or a delete per
-card that differs), so a board that already matches makes no write. `--dry-run` prints each write it would make (and each
+fields and items in one GraphQL read (a further request per 100 cards) and writes only the difference from the wanted
+state (an add, a move, an archive or a delete per card that differs), so a board that already matches makes no write.
+The writes go out as aliased mutations, at most 20 to a request; the adds go first (they need a content-id read and
+return the new card ids the rest uses), so a sync with new cards makes up to three requests more, else one per 20 writes. `--dry-run` prints each write it would make (and each
 card left alone), then `<n> writes planned`, and makes none. `--verbose` prints `writes: <n>` on stderr: the writes
 made (planned, with `--dry-run`).
-Exit codes: 0 synced or no board; 1 any failure, one line on stderr (`run` carries on: the board never fails a pass).
+Exit codes: 0 synced or no board; 1 any failure, one line on stderr; 2 the owner lookup got no owner (`board: owner lookup
+failed: <gh message>`). `run` carries on: the board never fails a pass.
 Stdlib only, Python 3.9+.
 """
 
@@ -139,34 +142,114 @@ def literal_options(options) -> str:
     return "[" + ", ".join(parts) + "]"
 
 
+BATCH_SIZE = 20  # aliased mutations in one request: GitHub's content-creation limit counts requests, not aliases
+
+
+class OwnerLookupError(github.GhError):
+    """The project owner could not be read (an empty or error reply): not an unknown owner type."""
+
+
+def graphql(query, repo):
+    return github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo)
+
+
 class Writes:
     """Every write the sync makes goes through here, so `--dry-run` can print the plan instead of making the writes.
-    The reads stay real. `planned` is what the write would have returned, for the steps after it."""
+    The reads stay real. A card write is queued as a GraphQL fragment and `flush` sends the queue in aliased mutations
+    of at most `size` each, in order (a mutation's fields run one after another, which the Backlog ordering needs).
+    A new card has no item id until its add is made, so adds go first, in their own request(s), and the rest of the
+    queue names the new cards by `new:<ticket>` and is resolved after them."""
 
-    def __init__(self, dry=False):
+    def __init__(self, dry=False, size=BATCH_SIZE):
         self.dry = dry
+        self.size = size
         self.count = 0  # the writes made, or in a dry run the writes planned
+        self.adds = []  # [(ticket, number)] of the cards to add
+        self.queue = []  # [callable(resolve) -> mutation fragment]
 
     def do(self, what, run, planned=None):
+        """A write made at once (the field's create and upgrade: the reply's option ids are needed next)."""
         self.count += 1
         if self.dry:
             print(f"would {what}")
             return planned
         return run()
 
+    def put(self, what, fragment):
+        """Queue one card write. fragment: callable(resolve) -> the mutation field, resolve mapping a `new:` id."""
+        self.count += 1
+        if self.dry:
+            print(f"would {what}")
+        else:
+            self.queue.append(fragment)
+
+    def add(self, what, ticket):
+        self.count += 1
+        if self.dry:
+            print(f"would {what}")
+        else:
+            self.adds.append(ticket)
+
+    @staticmethod
+    def send(fields, label, repo):
+        """One aliased mutation. A failure names the rows it held and says the later requests were not sent; the next
+        sync re-reads the board and writes what is still missing."""
+        try:
+            return graphql("mutation { " + " ".join(fields) + " }", repo)
+        except github.GhError as e:
+            raise github.GhError(e.kind, f"{label} failed, later requests not sent: {e.message}") from None
+
+    def flush(self, project_id, slug, repo):
+        """Send the queued writes: one content-id read and the adds first (if any card is new), then the rest."""
+        new = {}
+        if self.adds:
+            owner, name = slug.split("/", 1)
+            lookup = ("query { repository(owner: " + json.dumps(owner) + ", name: " + json.dumps(name) + ") { "
+                      + " ".join(f"i{n}: issue(number: {n}) {{ id }}" for n in self.adds) + " } }")
+            repository = ((graphql(lookup, repo).get("data") or {}).get("repository")) or {}
+            for start in range(0, len(self.adds), self.size):
+                chunk = self.adds[start:start + self.size]
+                fields = []
+                for k, n in enumerate(chunk):
+                    content = (repository.get(f"i{n}") or {}).get("id")
+                    if not content:
+                        raise github.GhError(github.MALFORMED, f"gh returned no id for issue #{n}")
+                    fields.append(f"m{k}: addProjectV2ItemById(input: {{projectId: {json.dumps(project_id)}, "
+                                  f"contentId: {json.dumps(content)}}}) {{ item {{ id }} }}")
+                data = self.send(fields, f"adds {start + 1}-{start + len(chunk)} of {len(self.adds)}", repo).get("data") or {}
+                for k, n in enumerate(chunk):
+                    item = ((data.get(f"m{k}") or {}).get("item") or {}).get("id")
+                    if not item:
+                        raise github.GhError(github.MALFORMED, f"gh returned no card for #{n}")
+                    new[n] = item
+
+        def resolve(item_id):
+            return new[int(item_id[4:])] if item_id.startswith("new:") else item_id
+        for start in range(0, len(self.queue), self.size):
+            fields = [f"m{k}: {f(resolve)}" for k, f in enumerate(self.queue[start:start + self.size])]
+            self.send(fields, f"writes {start + 1}-{start + len(fields)} of {len(self.queue)}", repo)
+        self.adds, self.queue = [], []
+
+
+def create_field(project_id, repo, writes):
+    """Create the Stage field with every column, in one createProjectV2Field call. Returns {id, options: [{id, name}]}."""
+    options = literal_options([{"name": s, "color": NEW_OPTION_COLOR, "description": ""} for s in STAGES])
+    query = ("mutation { createProjectV2Field(input: {projectId: " + json.dumps(project_id) + ", dataType: SINGLE_SELECT, "
+             "name: " + json.dumps(FIELD) + ", singleSelectOptions: " + options + "}) { projectV2Field { ... on "
+             "ProjectV2SingleSelectField { id options { id name } } } } }")
+    return writes.do(f"create field {FIELD} with options {', '.join(STAGES)}",
+                     lambda: graphql(query, repo)["data"]["createProjectV2Field"]["projectV2Field"],
+                     {"id": "new:field", "options": [{"id": f"new:{s}", "name": s} for s in STAGES]})
+
 
 def upgrade_field(field, repo, writes):
     """Add the missing options to an existing Stage field and put them in STAGES order, in one updateProjectV2Field
-    call that keeps every existing option's id and color. No write when the field already matches. Returns the field's
-    {option name: id}."""
-    current = field.get("options") or []
-    names = [o["name"] for o in current]
+    call that keeps every existing option's id and color (the read already holds them). No write when the field
+    already matches. Returns the field's {option name: id}."""
+    have = field.get("options") or []
+    names = [o["name"] for o in have]
     if [n for n in names if n in STAGES] == STAGES:
-        return {o["name"]: o["id"] for o in current}
-    node = github.call_json("api", "graphql", "-f", "query=query($id: ID!) { node(id: $id) { ... on "
-                            "ProjectV2SingleSelectField { options { id name color description } } } }",
-                            "-f", f"id={field['id']}", cwd=repo)
-    have = node["data"]["node"]["options"]
+        return {o["name"]: o["id"] for o in have}
     by_name = {o["name"]: o for o in have}
     wanted = [by_name.get(s) or {"name": s, "color": NEW_OPTION_COLOR, "description": ""} for s in STAGES]
     wanted += [o for o in have if o["name"] not in STAGES]  # an option someone added by hand stays, after ours
@@ -174,32 +257,75 @@ def upgrade_field(field, repo, writes):
              + literal_options(wanted) + "}) { projectV2Field { ... on ProjectV2SingleSelectField "
              "{ options { id name } } } } }")
     reply = writes.do(f"update field {FIELD} options to {', '.join(o['name'] for o in wanted)} (ids kept)",
-                      lambda: github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo))
+                      lambda: graphql(query, repo))
     if reply is None:  # a dry run: the new option has no id yet
         return {o["name"]: o.get("id") or f"new:{o['name']}" for o in wanted}
     return {o["name"]: o["id"] for o in reply["data"]["updateProjectV2Field"]["projectV2Field"]["options"]}
 
 
-def move_after(project_id, item_id, after_id, repo, writes):
+def move_after(project_id, item_id, after_id, writes):
     """Put a card right after another (the first card when after_id is None): the Board layout orders cards inside a
-    column by this position, and `gh project item-edit` cannot change it."""
-    after = f", afterId: {json.dumps(after_id)}" if after_id else ""
-    query = ("mutation { updateProjectV2ItemPosition(input: {projectId: " + json.dumps(project_id)
-             + ", itemId: " + json.dumps(item_id) + after + "}) { clientMutationId } }")
-    writes.do(f"move card {item_id} " + (f"after {after_id}" if after_id else "to the top"),
-              lambda: github.call_json("api", "graphql", "-f", f"query={query}", cwd=repo))
+    column by this position."""
+    def fragment(resolve):
+        after = f", afterId: {json.dumps(resolve(after_id))}" if after_id else ""
+        return ("updateProjectV2ItemPosition(input: {projectId: " + json.dumps(project_id) + ", itemId: "
+                + json.dumps(resolve(item_id)) + after + "}) { clientMutationId }")
+    writes.put(f"move card {item_id} " + (f"after {after_id}" if after_id else "to the top"), fragment)
 
 
-def order_backlog(want_ids, current_ids, project_id, repo, writes):
+def order_backlog(want_ids, current_ids, project_id, writes):
     """Move the Backlog cards into want_ids order, writing only where a card's predecessor differs. current_ids is
     their present order; a card is only moved when it is not already where the order puts it."""
     cur = list(current_ids)
     for i, item in enumerate(want_ids):
         if cur[i] == item:
             continue
-        move_after(project_id, item, want_ids[i - 1] if i else None, repo, writes)
+        move_after(project_id, item, want_ids[i - 1] if i else None, writes)
         cur.remove(item)
         cur.insert(i, item)
+
+
+def read_project(owner, number, repo):
+    """(project id, Stage field or None, [card]) from PROJECT_QUERY, every page of items. A card is {id, content:
+    {type, number, repository, title}, stage}. A reply with no owner is `owner lookup failed: <gh message>`
+    (OwnerLookupError, exit 2), never an unknown owner type: that is only a typename that is neither User nor
+    Organization. A rate limit raises from call_json as `ratelimited`."""
+    items, after, seen, field = [], None, set(), None
+    while True:
+        args = ["api", "graphql", "-f", f"query={github.PROJECT_QUERY}", "-f", f"owner={owner}", "-F", f"number={number}"]
+        if after:
+            args += ["-f", f"after={after}"]
+        reply = github.call_json(*args, cwd=repo)
+        data = reply.get("data") if isinstance(reply.get("data"), dict) else {}
+        found = data.get("repositoryOwner")
+        if not isinstance(found, dict) or not found.get("__typename"):
+            errors = reply.get("errors")
+            first = errors[0] if isinstance(errors, list) and errors else None
+            message = first.get("message") if isinstance(first, dict) else None
+            raise OwnerLookupError(github.FAILED, f"owner lookup failed: {message or 'gh returned no owner'}")
+        if found["__typename"] not in ("User", "Organization"):
+            raise github.GhError(github.FAILED, f"unknown owner type: {found['__typename']}")
+        project = found.get("projectV2")
+        if not isinstance(project, dict):
+            raise github.GhError(github.FAILED, f"project {number} not found for {owner}")
+        found_field = project.get("field")
+        if found_field is not None and not found_field.get("id"):
+            # The field query only answers for a single-select field; creating one would repeat the name.
+            raise github.GhError(github.FAILED, f"the project's {FIELD} field is not a single-select field")
+        field = field or found_field
+        page = project["items"]
+        for n in page["nodes"]:
+            c = n.get("content") or {}
+            items.append({"id": n["id"], "stage": (n.get("stage") or {}).get("name"),
+                          "content": {"type": c.get("__typename"), "number": c.get("number"), "title": c.get("title"),
+                                      "repository": (c.get("repository") or {}).get("nameWithOwner")}})
+        info = page.get("pageInfo") or {}
+        after = info.get("endCursor") if info.get("hasNextPage") else None
+        if not after:
+            return project["id"], field, items
+        if after in seen:
+            raise github.GhError(github.MALFORMED, "gh returned a repeated page cursor (board items)")
+        seen.add(after)
 
 
 def repository_of(content) -> str:
@@ -210,7 +336,6 @@ def repository_of(content) -> str:
 
 def sync(owner, number, repo, writes=None):
     writes = writes or Writes()
-    own = ["--owner", owner]
     root = Path(repo).resolve()
     # One tracker read serves the whole sync: the issues (Backlog, claims, labels), the open and merged PRs (claims,
     # the lead's tickets) and, through a file, lead-route. Only the merge times of the archive come from another call.
@@ -238,14 +363,9 @@ def sync(owner, number, repo, writes=None):
     in_backlog = tracker.backlog(issues, labels)
     merged_at = github.merged_prs(None, cwd=repo, limit=100)
 
-    proj = github.call_json("project", "view", str(number), *own, "--format", "json", cwd=repo)
-    fields = github.call_json("project", "field-list", str(number), *own, "--format", "json", cwd=repo)
-    field = next((f for f in fields.get("fields", []) if f.get("name") == FIELD), None)
+    project_id, field, items = read_project(owner, number, repo)
     if field is None:
-        field = writes.do(f"create field {FIELD} with options {', '.join(STAGES)}", lambda: github.call_json(
-            "project", "field-create", str(number), *own, "--name", FIELD, "--data-type", "SINGLE_SELECT",
-            "--single-select-options", ",".join(STAGES), "--format", "json", cwd=repo),
-            {"id": "new:field", "options": [{"id": f"new:{s}", "name": s} for s in STAGES]})
+        field = create_field(project_id, repo, writes)
     # A board made before a column existed is upgraded in place, never refused.
     options = upgrade_field(field, repo, writes)
     merged = {}
@@ -253,8 +373,6 @@ def sync(owner, number, repo, writes=None):
         t, at = ticket_of_branch(p.get("headRefName")), parse_ts(p.get("mergedAt"))
         if t and at:
             merged[t] = max(merged.get(t, at), at)
-    items = github.call_json("project", "item-list", str(number), *own, "--limit", "1000", "--format", "json",
-                             cwd=repo).get("items", [])
     # The board's own cards are this repository's issues, keyed by number within it. A draft card, a hand-placed card
     # or another repository's issue (whose number may collide with ours) is never moved, archived or deleted.
     cards, left = {}, []
@@ -271,17 +389,20 @@ def sync(owner, number, repo, writes=None):
                   f"{c.get('title') or i.get('title') or i.get('id')}".replace("  ", " "))
 
     def set_stage(card_id, stage):
-        writes.do(f"move card {card_id} to {stage}", lambda: github.call(
-            "project", "item-edit", "--id", card_id, "--project-id", proj["id"], "--field-id", field["id"],
-            "--single-select-option-id", options[stage], cwd=repo))
+        writes.put(f"move card {card_id} to {stage}", lambda r: (
+            "updateProjectV2ItemFieldValue(input: {projectId: " + json.dumps(project_id) + ", itemId: "
+            + json.dumps(r(card_id)) + ", fieldId: " + json.dumps(field["id"]) + ", value: {singleSelectOptionId: "
+            + json.dumps(options[stage]) + "}}) { clientMutationId }"))
 
     def delete(card_id, t):
-        writes.do(f"delete card {card_id} (#{t})", lambda: github.call(
-            "project", "item-delete", str(number), *own, "--id", card_id, cwd=repo))
+        writes.put(f"delete card {card_id} (#{t})", lambda r: (
+            "deleteProjectV2Item(input: {projectId: " + json.dumps(project_id) + ", itemId: " + json.dumps(r(card_id))
+            + "}) { clientMutationId }"))
 
     def archive(card_id, t):
-        writes.do(f"archive card {card_id} (#{t})", lambda: github.call(
-            "project", "item-archive", str(number), *own, "--id", card_id, cwd=repo))
+        writes.put(f"archive card {card_id} (#{t})", lambda r: (
+            "archiveProjectV2Item(input: {projectId: " + json.dumps(project_id) + ", itemId: " + json.dumps(r(card_id))
+            + "}) { clientMutationId }"))
 
     want = desired(issues, found, permission_denied(repo, found), {i["number"] for i in in_backlog}, lead)
     ids = {}  # ticket -> card id, for the Backlog ordering below
@@ -290,10 +411,8 @@ def sync(owner, number, repo, writes=None):
         if card is None:
             if not addable:
                 continue
-            added = writes.do(f"add a card for #{t}", lambda: github.call_json(
-                "project", "item-add", str(number), *own, "--url", issue["url"], "--format", "json", cwd=repo),
-                {"id": f"new:{t}"})
-            card = {"id": added["id"]}
+            writes.add(f"add a card for #{t}", t)
+            card = {"id": f"new:{t}"}  # the real item id arrives with the add; later writes name it by this
             cards[t] = card
         elif not addable and card.get(FIELD.lower()) == BACKLOG:
             # It no longer qualifies (relabelled) and nobody claimed it: it leaves the board.
@@ -330,7 +449,8 @@ def sync(owner, number, repo, writes=None):
     # The cards' present order is the project's item order; a card added just now is last.
     current = [c["id"] for c in items if c["id"] in wanted_ids]
     current += [i for i in wanted_ids if i not in current]
-    order_backlog(wanted_ids, current, proj["id"], repo, writes)
+    order_backlog(wanted_ids, current, project_id, writes)
+    writes.flush(project_id, slug, repo)
     if writes.dry:
         print(f"{writes.count} write{'' if writes.count == 1 else 's'} planned")
 
@@ -358,7 +478,7 @@ def main(argv=None) -> int:
                 print(f"writes: {writes.count}", file=sys.stderr)
     except github.GhError as e:
         print(f"board: {common.one_line(e.message)}", file=sys.stderr)
-        return 1
+        return 2 if isinstance(e, OwnerLookupError) else 1
     except (KeyError, TypeError, ValueError, AttributeError):
         print("board: gh returned an unexpected reply", file=sys.stderr)
         return 1

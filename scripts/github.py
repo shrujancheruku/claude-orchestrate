@@ -58,6 +58,33 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
 }"""
 
 
+# The Projects board in one read (#447): the owner (a user or an organization), the project's id, its `Stage` field
+# with every option, and the items a page at a time (first page carries the field; `after` pages the items). The
+# field is named in the query, so it must match board.FIELD (a test holds them together).
+PROJECT_QUERY = """query($owner: String!, $number: Int!, $after: String) {
+  repositoryOwner(login: $owner) {
+    __typename
+    ... on ProjectV2Owner {
+      projectV2(number: $number) {
+        id
+        field(name: "Stage") { ... on ProjectV2SingleSelectField { id options { id name color description } } }
+        items(first: 100, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            content {
+              __typename
+              ... on Issue { number title repository { nameWithOwner } }
+              ... on DraftIssue { title }
+            }
+            stage: fieldValueByName(name: "Stage") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+          }
+        }
+      }
+    }
+  }
+}"""
+
 # Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
 ABANDON_QUERY = """query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
