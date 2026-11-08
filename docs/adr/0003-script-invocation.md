@@ -2,7 +2,7 @@
 
 ## Context
 
-The plugin ships helper scripts under `scripts/` (`gate`, `merge`, `verify`, ...) and a hook, and skills, agents and the hook config all have to call them.
+The plugin ships helper scripts under `scripts/` (`gate`, `merge`, `verify`, `snapshot`, ...) and a hook, and skills, agents and the hook config all have to call them.
 
 - **Where the plugin lives varies.** It is installed under a versioned cache directory (the README's `profile.py` example path). `${CLAUDE_SKILL_DIR}` is set for a skill, but `${CLAUDE_PLUGIN_ROOT}` may be unset for a subagent (the README's convention before this ADR, from #100; not otherwise verified).
 - **`python3 -I` drops the script's own directory from `sys.path`.** A script run that way can't `import common` unless it puts its directory back itself (`scripts/profile.py:30-35`). Running a script by path puts its directory first and never the current directory, so a repo's own `common.py` can't shadow the plugin's (#100 and the README's convention before this ADR).
@@ -15,7 +15,7 @@ Without one rule, each script could grow its own call shape (inferred). Before `
 One rule, checked by `tests/test_invocation.py`:
 
 - **Found:** a skill calls a script as `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`. An agent never relies on `${CLAUDE_PLUGIN_ROOT}`; the brief hands it the absolute path.
-- **A CLI is an executable without an extension** (`gate`, `merge`, `verify`, ...) with a `#!/usr/bin/env python3` shebang, run by path with no interpreter and no `-I`. It may import siblings (`common`, `checks`, `replay`, `github`, `runlog`, `session`, `config`, `repo`, `claims`, `tracker`, `touchmap`).
+- **A CLI is an executable without an extension** (`gate`, `merge`, `verify`, `snapshot`, ...) with a `#!/usr/bin/env python3` shebang, run by path with no interpreter and no `-I`. It may import siblings (`common`, `checks`, `replay`, `github`, `runlog`, `session`, `config`, `repo`, `claims`, `tracker`, `touchmap`).
 - **A `.py` file is a library or a standalone script.** A library (`common.py`, `checks.py`, `replay.py`, `github.py`, `runlog.py`, `session.py`, `config.py`, `repo.py`, `claims.py`, `tracker.py`, `touchmap.py`) is only imported. A standalone script (`scripts/profile.py`, and the hook `hooks/guard.py` via `hooks/hooks.json`) is run by path under `python3 -I`. `profile.py` imports `common`, `config`, `repo`, `runlog` and `session`, so it appends its own directory to `sys.path` first: appended, never inserted, so the stdlib `profile` module is not shadowed (`scripts/profile.py:30-35`).
 - **Never work around a failed import with `PYTHONPATH`.** Fix the script's kind to match the rules above (the README's convention before this ADR; the reason is inferred).
 
