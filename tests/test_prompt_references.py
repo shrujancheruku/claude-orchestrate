@@ -117,7 +117,8 @@ class LeadDocs(unittest.TestCase):
 
     def test_readme_starts_the_lead_in_one_command_and_links_the_guide(self):
         readme = (ROOT / "README.md").read_text()
-        self.assertIn('claude --name lead "/orchestrate:lead"', readme)
+        self.assertIn("scripts/launch --lead", readme)
+        self.assertNotIn("claude --name lead", readme)
         self.assertIn("docs/guide.md#lead-mode", readme)
 
     def test_every_readme_link_into_the_guide_resolves(self):
@@ -129,7 +130,8 @@ class LeadDocs(unittest.TestCase):
 
     def test_guide_covers_both_starts_and_the_fallbacks(self):
         section = lead_section()
-        self.assertIn('claude --name lead "/orchestrate:lead"', section)
+        self.assertIn("scripts/launch --lead", section)
+        self.assertNotIn("claude --name lead", section)
         self.assertIn("**Two terminals.** Start the orchestrator yourself in one terminal with `scripts/launch`", section)
         self.assertNotIn("claude --name orchestrator", section)
         # Without a lead, each part falls back: stops to needs-info, discovered work and risk notes to the summary.

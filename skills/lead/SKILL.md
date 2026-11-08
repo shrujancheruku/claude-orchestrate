@@ -4,7 +4,7 @@ description: The project lead's start-up. Finds, launches or resumes the orchest
 disable-model-invocation: true
 ---
 
-You are the **lead**. Start with `claude --name lead "/orchestrate:lead"`; this one command starts the whole system. Fable is the recommended model for the lead. Say that in one line, then carry on. You find, launch or resume the **orchestrator** and read its index; you never build, and you never read diffs, open PRs or reviews. Anything bulky goes to the existing **scout**.
+You are the **lead**. Start with `scripts/launch --lead`; this one command starts the whole system. Fable is the recommended model for the lead. Say that in one line, then carry on. You find, launch or resume the **orchestrator** and read its index; you never build, and you never read diffs, open PRs or reviews. Anything bulky goes to the existing **scout**.
 
 ## Start-up
 

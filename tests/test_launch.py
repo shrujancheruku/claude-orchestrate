@@ -128,12 +128,65 @@ class Launch(unittest.TestCase):
         self.assertIn("orchestrator", r.stderr)
         self.assertEqual(r.stdout, "")
 
-    def test_resume_naming_the_live_session_is_allowed_but_another_is_not(self):
+    def test_resume_refuses_a_live_session_id_and_any_live_orchestrator(self):
         self.live({"name": "orchestrator", "pid": 4242, "sessionId": "s1"})
-        ok = self.launch("--resume", "s1")
-        self.assertEqual(ok.returncode, 0, ok.stderr)
-        self.assertIn("ARG:--resume\nARG:s1\n", ok.stdout)
-        self.assertEqual(self.launch("--resume", "s2").returncode, 2)
+        for sid in ("s1", "s2"):
+            with self.subTest(sid):
+                r = self.launch("--resume", sid)
+                self.assertEqual(r.returncode, 2)
+                self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.live({"name": "other", "pid": 9, "sessionId": "s3"})
+        self.assertEqual(self.launch("--resume", "s3").returncode, 2)
+
+    def test_resume_of_a_stopped_session_runs(self):
+        self.live({"name": "orchestrator", "pid": None, "sessionId": "s1"})
+        r = self.launch("--resume", "s1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ARG:--resume\nARG:s1\n", r.stdout)
+
+    def test_agents_listing_that_cannot_be_trusted_fails_closed(self):
+        for body in ("not json", '{"agents": []}', "3"):
+            with self.subTest(body):
+                (self.tmp / "agents.json").write_text(body)
+                r = self.launch()
+                self.assertEqual(r.returncode, 2)
+                self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+                self.assertEqual(r.stdout, "")
+        script = self.bin / "claude"
+        script.write_text('#!/bin/sh\nif [ "$1" = agents ]; then exit 1; fi\necho ran\n')
+        r = self.launch()
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("ran", r.stdout)
+
+    def test_lead_checks_for_a_live_lead_only(self):
+        self.live({"name": "orchestrator", "pid": 1, "sessionId": "s1"})
+        self.assertEqual(self.launch("--lead").returncode, 0)
+        self.live({"name": "lead", "pid": 2, "sessionId": "s2"})
+        self.assertEqual(self.launch("--lead").returncode, 2)
+
+    def test_lead_refuses_flags_that_would_be_dropped(self):
+        for extra in (["--bg"], ["--resume", "s1"], ["403"], ["--greedy=2"], ["--no-model"]):
+            with self.subTest(extra):
+                self.assertEqual(self.launch("--print", "--lead", *extra).returncode, 2)
+
+    def test_lead_passes_the_permission_mode(self):
+        out = self.launch("--print", "--lead", "--permission-mode", "plan").stdout
+        self.assertIn("--permission-mode plan", out)
+
+    def test_unknown_permission_mode_is_refused(self):
+        self.assertNotEqual(self.launch("--print", "--permission-mode", "yolo").returncode, 0)
+
+    def test_values_that_could_be_flags_or_non_ascii_digits_are_refused(self):
+        for args in (["--resume=-x"], ["²"], ["--greedy=²"], ["--resume", "a b"]):
+            with self.subTest(args):
+                self.assertEqual(self.launch("--print", *args).returncode, 2)
+        self.set_model("--dangerously-skip-permissions")
+        self.assertEqual(self.launch("--print").returncode, 2)
+        self.assertEqual(self.launch("--print", "--no-model").returncode, 0)
+
+    def test_stopped_row_with_no_pid_key_does_not_block_a_launch(self):
+        self.live({"name": "orchestrator", "sessionId": "s1", "state": "idle"})
+        self.assertEqual(self.launch().returncode, 0)
 
     def test_stopped_row_does_not_block_a_launch(self):
         self.live({"name": "orchestrator", "pid": None, "sessionId": "s1"}, {"name": "lead", "pid": 7, "sessionId": "s2"})

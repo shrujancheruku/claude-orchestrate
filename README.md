@@ -23,13 +23,13 @@ You need `git` 2.38+, `gh` (signed in) and `python3` 3.9+.
 /orchestrate:run                       # works the backlog until nothing is left to take
 /orchestrate:run --greedy --profile    # as many tickets at once as don't collide, with a cost profile
 /orchestrate:start --greedy=4          # starts the orchestrator in the background from any session (a terminal: scripts/launch)
-claude --name lead "/orchestrate:lead" # optional: a lead session that starts and supervises the orchestrator
+scripts/launch --lead                  # optional: a lead session that starts and supervises the orchestrator
 ```
 
 1. **Write tickets.** orchestrate works the GitHub issues labelled `ready-for-agent`. It pairs with [Matt Pocock's skills](https://github.com/mattpocock/skills): `to-spec` and `to-tickets` write the backlog, `triage` labels it, and `/setup-matt-pocock-skills` writes the tracker and domain docs orchestrate reads.
 2. **Run `/orchestrate:setup`.** It scouts the repo and asks you, in one round, about slots, gates, who merges, models and review tiers. It writes `.claude/orchestration.md`, the config every agent reads.
 3. **Run `/orchestrate:run`.** It works until the backlog is empty or everything left needs you. `status` reports without acting, `<issue>` narrows to one ticket or one parent's sub-issues, `--greedy` runs every ticket that doesn't collide with another, and `--profile` records what the session cost.
-4. **Add a lead (optional).** `claude --name lead "/orchestrate:lead"` starts the whole system in one command and puts a planner above the orchestrator to answer its questions, triage what it discovers and write decisions down ([lead mode](docs/guide.md#lead-mode) in the guide covers the two-terminal start and each fallback).
+4. **Add a lead (optional).** `scripts/launch --lead` starts the whole system in one command and puts a planner above the orchestrator to answer its questions, triage what it discovers and write decisions down ([lead mode](docs/guide.md#lead-mode) in the guide covers the two-terminal start and each fallback).
 
 ## How it works
 
@@ -145,7 +145,7 @@ It reports what is true, with the command or `path:line` that shows it, and leav
 
 *The thoughtful planner, one level above. Answers the orchestrator's stops and keeps the record.*
 
-Defined by `skills/lead/SKILL.md`. Fable is recommended for it. Started with `claude --name lead "/orchestrate:lead"`, it checks its own name, reads the config and tracker docs, runs `scripts/lead-brief` for its index (glossary, ADR list, open `needs-lead` and `lead` tickets, the roadmap, and the PRs merged since its watermark with each large merge's risk notes), then finds the orchestrator. A live `orchestrator` session is reached by message. A stopped one is resumed. None is launched, in the background, on the config's model.
+Defined by `skills/lead/SKILL.md`. Fable is recommended for it. Started with `scripts/launch --lead`, it checks its own name, reads the config and tracker docs, runs `scripts/lead-brief` for its index (glossary, ADR list, open `needs-lead` and `lead` tickets, the roadmap, and the PRs merged since its watermark with each large merge's risk notes), then finds the orchestrator. A live `orchestrator` session is reached by message. A stopped one is resumed. None is launched, in the background, on the config's model.
 
 Its moves are the part you talk to. **Settling a stop:** answer on the ticket, edit the spec if the answer changes it, remove `needs-lead`, nudge the orchestrator; or split the ticket, or close it `wontfix`. **Settling an ADR conflict:** decide, then release the held PR or file a follow-up. **Discovered work:** dedupe against the backlog and turn what is real into tickets, as `needs-triage` drafts when you are away and as `ready-for-agent` only after triage with you. **Risk notes:** each gets one outcome, taken in, sent to a scout to check, or filed as a ticket. **Decision PRs:** each settled decision lands as one PR with the ADR and its glossary terms, behind a ticket the lead filed and claimed with the `lead` label; the orchestrator runs it through the same gate, review and merge as any other PR. It also measures CI wait every ten merges and drafts a CI-speed ticket when the p90 is over the limit.
 
