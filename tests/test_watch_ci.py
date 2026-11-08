@@ -1,5 +1,6 @@
 import contextlib
 import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -182,7 +183,10 @@ class WatchCi(unittest.TestCase):
     def test_default_interval_is_30_with_two_prs_and_60_with_three(self):
         sys.path.insert(0, str(SCRIPTS))
         self.addCleanup(sys.path.remove, str(SCRIPTS))
-        mod = importlib.machinery.SourceFileLoader("watch_ci_under_test", str(SCRIPTS / "watch-ci")).load_module()
+        loader = importlib.machinery.SourceFileLoader("watch_ci_under_test", str(SCRIPTS / "watch-ci"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
         self.assertEqual([mod.interval_for(n) for n in (1, 2, 3, 5)], [30, 30, 60, 60])
         self.assertEqual([mod.interval_for(n, 7) for n in (2, 3)], [7, 7])
         self.assertEqual(mod.interval_for(3, 0), 0)
