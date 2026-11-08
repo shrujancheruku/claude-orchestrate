@@ -117,7 +117,7 @@ CASES = [
     # #327: words that only name the script are data, not a run of it.
     ("orchestrate:worker", "python3 - <<'EOF'\np = 'scripts/merge'\nprint('`merge` run')\nEOF\ngit add x && git commit -q -m 'docs(merge): x'", "allow"),
     ("orchestrate:worker", 'git commit -m "fix: x" -m "(scripts/merge)"', "allow"),
-    ("orchestrate:worker", "gh pr create --body-file - <<'EOF'\nuses scripts/merge\nEOF", "allow"),
+    ("orchestrate:worker", "gh pr create --draft --body-file - <<'EOF'\nuses scripts/merge\nEOF", "allow"),
     ("orchestrate:worker", 'printf "%s" "x | scripts/merge"', "allow"),
     ("orchestrate:worker", "python3 - <<'EOF'\nx\nEOF\nscripts/merge 12", "deny"),
     ("orchestrate:worker", "sh -c 'echo hi; scripts/merge 12'", "deny"),
@@ -277,7 +277,23 @@ CASES = [
     ("orchestrate:scout", "git worktree add --detach /tmp/scratch/pr-71", "deny"),
     ("orchestrate:worker", "git add src/a.ts && git commit -m 'fix: a'", "allow"),
     ("orchestrate:worker", "git push -u origin api/162-reasons", "allow"),
-    ("orchestrate:worker", "gh pr create --title x --body y", "allow"),
+    ("orchestrate:worker", "gh pr create --draft --title x --body y", "allow"),
+    # A worker's PR is a draft first (#355); other roles are unchanged.
+    ("orchestrate:worker", "gh pr create --title x --body y", "deny"),
+    (None, "gh pr create --title x --body y", "allow"),
+    # gh's short and valued forms of --draft count (#355 review); --draft=false does not.
+    ("orchestrate:worker", "gh pr create -d --title x --body y", "allow"),
+    ("orchestrate:worker", "gh pr create --draft=true --title x --body y", "allow"),
+    ("orchestrate:worker", "gh pr create --draft=false --title x --body y", "deny"),
+    # The fallback when the draft itself failed: a `Draft unavailable:` body line (ADR 0011).
+    ("orchestrate:worker", "gh pr create --title x --body 'Draft unavailable: plan has no drafts\nCloses #1'", "allow"),
+    ("orchestrate:worker", "gh pr create --title x --body-file - <<'EOF'\nDraft unavailable: network\nCloses #1\nEOF", "allow"),
+    ("orchestrate:worker", "gh pr create --title x -b 'Draft unavailable: no drafts'", "allow"),
+    ("orchestrate:worker", "gh pr create --title x --body='Draft unavailable: no drafts'", "allow"),
+    ("orchestrate:worker", "gh pr create --title x -b 'Closes #1'", "deny"),
+    ("orchestrate:worker", "gh pr create --title x --body='Closes #1'", "deny"),
+    ("orchestrate:worker", "gh pr create --title x --body 'Draft unavailable:'", "deny"),
+    ("orchestrate:worker", "gh pr create --title x --body 'see Draft unavailable: no'", "deny"),
     ("orchestrate:worker", "make lint test > /tmp/out.txt", "allow"),
     ("orchestrate:worker", 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/verify" "make lint" --then "make test"', "allow"),
     ("orchestrate:worker", "python3 /plugins/orchestrate/scripts/verify --cwd . 'python3 -m unittest discover tests'", "allow"),
@@ -454,7 +470,7 @@ CASES += [
     ("orchestrate:worker", c, "allow")
     for c in (
         "git commit -m \"$(cat <<'EOF'\nfix: it's done\nEOF\n)\"",
-        'gh pr create --title x --body "$(cat body.md)"',
+        'gh pr create --draft --title x --body "$(cat body.md)"',
         'git push -u origin "$BRANCH"',
         "gh pr view 12 --json state | jq .state",
     )
@@ -842,6 +858,45 @@ def approved(agent_type, command, cwd=None):
     return bool(out) and out["permissionDecision"] == "allow"
 
 
+class PrCreateBodyFileTest(unittest.TestCase):
+    """A worker's non-draft `gh pr create` is allowed only with a `Draft unavailable:` body line; a
+    `--body-file <path>` is read from disk when the guard runs (relative paths against its cwd)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve() / "cwd"
+        self.cwd.mkdir()
+        self.outside = Path(tmp.name).resolve() / "outside"
+        self.outside.mkdir()
+        (self.outside / "marked.md").write_text("Draft unavailable: plan has no drafts\nCloses #1\n")
+        (self.outside / "plain.md").write_text("Closes #1\n")
+        (self.cwd / "rel.md").write_text("Draft unavailable: network\nCloses #1\n")
+
+    def denied(self, command):
+        out = raw("orchestrate:worker", command, self.cwd)
+        return bool(out) and out["permissionDecision"] == "deny"
+
+    def test_marked_file_by_any_flag_spelling_is_not_denied(self):
+        path = self.outside / "marked.md"
+        for flag in (f"--body-file {path}", f"-F {path}", f"--body-file={path}"):
+            with self.subTest(flag):
+                self.assertFalse(self.denied(f"gh pr create --title x {flag}"))
+
+    def test_unmarked_or_missing_file_is_denied(self):
+        for path in (self.outside / "plain.md", self.outside / "missing.md"):
+            with self.subTest(path.name):
+                self.assertTrue(self.denied(f"gh pr create --title x --body-file {path}"))
+
+    def test_relative_path_resolves_against_the_guards_cwd(self):
+        self.assertFalse(self.denied("gh pr create --title x --body-file rel.md"))
+        self.assertTrue(self.denied("gh pr create --title x --body-file nope.md"))
+
+    def test_refusal_says_the_body_file_must_already_exist(self):
+        reason = raw("orchestrate:worker", "gh pr create --title x --body-file nope.md", self.cwd)["permissionDecisionReason"]
+        self.assertIn("already exist", reason)
+
+
 class RoutineApprovalTest(unittest.TestCase):
     """The guard answers an explicit `allow` for each role's routine writes (#358), and nothing else."""
 
@@ -891,7 +946,6 @@ class RoutineApprovalTest(unittest.TestCase):
             "git -c core.hooksPath=/x push origin 358-ticket",
             "git push $REMOTE 358-ticket",
             "git push ext 358-ticket",
-            "gh pr create --title t",  # not a draft
             "gh pr edit $N --body-file b.md",
             "gh pr ready --undo 12",
             "gh pr close 12",
@@ -901,6 +955,12 @@ class RoutineApprovalTest(unittest.TestCase):
         ):
             with self.subTest(command):
                 self.assertIsNone(raw("orchestrate:worker", command, self.work))
+
+    def test_worker_pr_create_without_draft_is_refused_with_the_fix(self):
+        out = raw("orchestrate:worker", "gh pr create --title t --body b", self.work)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("--draft", out["permissionDecisionReason"])
+        self.assertIn("gh pr ready", out["permissionDecisionReason"])
 
     def test_push_outside_a_worktree_stays_silent(self):
         self.assertIsNone(raw("orchestrate:worker", "git push origin 358-ticket", self.main))
