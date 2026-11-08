@@ -298,6 +298,36 @@ class Rescue(unittest.TestCase):
         self.assertTrue((self.wt / "n.txt").exists())
         self.assertIn("worktree-agent-x1", git(self.wt, "branch", "--show-current"))
 
+    def lock_dead(self):
+        self.lock(f"claude agent agent-abc (pid {dead_pid()} start Sat Nov  7 06:14:20 2026)")
+
+    def test_a_branch_checked_out_in_another_worktree_exits_2_before_unlocking(self):
+        other = self.wt.parent / "other"
+        git(self.env.repo, "worktree", "add", "-b", "42-busy", str(other), "main")
+        self.harness_worktree()
+        self.lock_dead()
+        r = self.rescue_n()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn(str(other), r.stderr)
+        self.assertTrue(self.locked())
+        self.assertNotIn("lock:", r.stdout)  # liveness never ran
+        self.assertTrue(self.wt.exists())
+
+    def test_a_failed_switch_puts_the_lock_back(self):
+        git(self.env.repo, "switch", "-c", "42-conflict", "main")
+        (self.env.repo / "clash.txt").write_text("on the branch\n")
+        git(self.env.repo, "add", "clash.txt")
+        git(self.env.repo, "commit", "-m", "feat: clash")
+        git(self.env.repo, "switch", "main")
+        self.harness_worktree()
+        (self.wt / "clash.txt").write_text("untracked here\n")  # the switch would overwrite it
+        self.lock_dead()
+        r = self.rescue_n()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("cannot switch", r.stderr)
+        self.assertTrue(self.locked())
+        self.assertTrue((self.wt / "clash.txt").exists())
+
     def test_a_worktree_on_another_branch_is_refused_and_untouched(self):
         self.harness_worktree()
         git(self.wt, "switch", "-c", "7-other")

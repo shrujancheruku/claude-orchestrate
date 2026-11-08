@@ -198,6 +198,10 @@ def main(argv=None) -> int:
         if len(found) > 1:
             return fail(f"#{ticket} has more than one branch, cannot choose: {', '.join(found)}")
         target = found[0] if found else None
+        other = next((w["path"] for w in common.worktrees(root) if target and w["branch"] == target
+                      and Path(w["path"]).resolve() != Path(path).resolve()), None)
+        if other:
+            return fail(f"{target} is checked out in another worktree {other}, so {path} can't switch to it")
         if target and git(path, "merge-base", "--is-ancestor", "HEAD", target if has_local(root, target) else f"origin/{target}").code != 0:
             return fail(f"{path} has commits that are not on {target}, so it can't be rescued onto it")
         if target is None:
