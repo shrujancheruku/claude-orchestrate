@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv, git  # noqa: E402
 import common  # noqa: E402
+from test_holds import live_reason  # noqa: E402
 from merge_support import (CLOSED_ISSUE, ISSUE_CLOSE, ISSUE_VIEW, MergeMixin, OK, OPEN_ISSUE, PR_MERGE,  # noqa: E402
                            PR_VIEW, REF_GET, REPO_VIEW, pr)  # noqa: E402
 
@@ -360,11 +361,16 @@ class MergeTest(MergeMixin, unittest.TestCase):
         git(self.env.repo, "worktree", "add", *flags, str(wt))
         return wt
 
+    def pr_at(self, state, sha=None):
+        """The PR view with its head at `sha` (default: the main checkout's HEAD, where scratch trees are cut)."""
+        sha = sha or git(self.env.repo, "rev-parse", "HEAD")
+        return {"stdout": pr(state)["stdout"].replace("abc123", sha)}
+
     def test_merge_removes_the_prs_scratch_worktrees_and_only_those(self):
         mine = [self.scratch(n, "--detach") for n in ("pr-7", "pr-7b", "pr-7-r2")]
         other = self.scratch("pr-71", "--detach")      # PR 71's, not 7's
         on_branch = self.scratch("pr-7c", "-b", "other-br")   # a branch worktree is a worker's
-        self.seq({PR_VIEW: [pr("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        self.seq({PR_VIEW: [self.pr_at("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
         p = self.merge()
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.count("scratch worktree"), 3)
@@ -379,10 +385,52 @@ class MergeTest(MergeMixin, unittest.TestCase):
     def test_a_dirty_scratch_worktree_is_kept_and_reported(self):
         wt = self.scratch("pr-7", "--detach")
         (wt / "x.txt").write_text("untracked")
-        self.seq({PR_VIEW: [pr("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        self.seq({PR_VIEW: [self.pr_at("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
         p = self.merge()
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(wt.exists())
+
+    def closed(self):
+        self.seq({PR_VIEW: [self.pr_at("CLOSED")]})
+        return self.merge()
+
+    def test_a_pr_closed_unmerged_has_its_scratch_worktrees_removed(self):
+        mine = [self.scratch(n, "--detach") for n in ("pr-7", "pr-7-r2")]
+        other = self.scratch("pr-8", "--detach")
+        p = self.closed()
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.count("scratch worktree"), 2)
+        for wt in mine:
+            self.assertFalse(wt.exists(), wt)
+        self.assertTrue(other.exists())
+        self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user PR #7 closed without merging")
+
+    def test_a_dirty_scratch_worktree_of_a_closed_pr_is_kept_with_the_line(self):
+        wt = self.scratch("pr-7", "--detach")
+        (wt / "x.txt").write_text("untracked")
+        p = self.closed()
+        self.assertIn(f"scratch worktree ", p.stdout)
+        self.assertIn(f"{wt.name} NOT removed", p.stdout)
+        self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(wt.exists())
+
+    def test_a_scratch_worktree_outside_the_pr_is_kept(self):
+        outside = self.scratch("pr-7", "--detach")
+        (outside / "new.txt").write_text("x")
+        git(outside, "add", "new.txt")
+        git(outside, "commit", "-m", "not in the PR")
+        p = self.closed()
+        self.assertIn("NOT removed: its HEAD is not the PR head or an ancestor of it", p.stdout)
+        self.assertTrue(outside.exists())
+
+    def test_a_scratch_worktree_locked_by_another_live_session_is_kept(self):
+        live = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(live.kill)
+        wt = self.scratch("pr-7", "--detach")
+        git(self.env.repo, "worktree", "lock", "--reason", live_reason(live.pid), str(wt))
+        p = self.closed()
+        self.assertIn("NOT removed: its lock is held by another live session", p.stdout)
         self.assertTrue(wt.exists())
 
     def test_never_forces_worktree_removal(self):
