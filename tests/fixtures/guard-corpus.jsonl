@@ -548,3 +548,15 @@
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.11/scripts/verify' --config", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.12/scripts/verify' --config", "expected": "deny", "timeout": 300000, "source": "hand"}
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.13/scripts/verify' --config", "expected": "allow", "timeout": 600000, "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/53/comments -f path=hooks/guard.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/53/comments -f path=hooks/guard.py -f subject_type=line -f commit_id=abc1234 -f body='[blocking] x'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/53/comments -f path=hooks/guard.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --fixed abc1234", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/threads 12 reopen ID --why 'x'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/threads 12 --all", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cd /repo && /p/orchestrate/0.7.0/scripts/threads 12", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/threads 12 reopen ID --why 'x'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 reopen ID --why 'x'", "expected": "deny", "source": "hand"}

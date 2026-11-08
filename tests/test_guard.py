@@ -461,12 +461,53 @@ CASES += [("orchestrate:worker", c, "deny") for c in ("$(echo g)it push -f", "g$
 POST = "gh api --method POST repos/{owner}/{repo}/pulls/12/reviews --input - <<'EOF'\n"
 COMMENT = '{"event": "COMMENT", "body": "Round 1 — verdict: changes", "comments": []}'
 
+FILE_COMMENT = ("gh api --method POST repos/{owner}/{repo}/pulls/12/comments -f path=hooks/guard.py "
+                "-f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'")
+T = "/p/orchestrate/0.7.0/scripts/threads"
+THREADS_CASES = [
+    # (role, command, expected)
+    ("worker", f"{T} 12", "allow"),
+    ("worker", f"{T} 12 --all", "allow"),
+    ("worker", f"{T} 12 resolve ID --fixed abc1234", "allow"),
+    ("worker", f"{T} 12 resolve ID --left 'why'", "allow"),
+    ("worker", f"{T} 12 reopen ID --why 'x'", "allow"),
+    ("reviewer", f"{T} 12", "allow"),
+    ("reviewer", f"{T} 12 --all", "allow"),
+    ("reviewer", f"cd /repo && {T} 12 --all", "allow"),
+    ("reviewer", f"'{T}' 12 reopen ID --why 'still wrong'", "allow"),
+    ("reviewer", f"python3 {T} 12", "allow"),
+    ("reviewer", f"{T} 12 resolve ID --fixed abc1234", "deny"),
+    ("reviewer", f"{T} 12 resolve ID --left 'x'", "deny"),
+    ("reviewer", f"{T} 12 reopen ID", "deny"),
+    ("reviewer", f"echo hi && {T} 12", "deny"),
+    ("reviewer", f"{T} 12 && {T} 12 resolve ID --left x", "deny"),
+    ("reviewer", f"{T} 12 $(echo --all)", "deny"),
+    ("reviewer", f"{T} 12 > out", "deny"),
+    ("reviewer", "$CLAUDE_PLUGIN_ROOT/scripts/threads 12 resolve ID --left x", "deny"),
+    ("reviewer", '"${P}/scripts/threads" 12 resolve ID --left x', "deny"),
+    ("scout", "$CLAUDE_PLUGIN_ROOT/scripts/threads 12 resolve ID --left x", "deny"),
+    ("orchestrate-unknown", f"{T} 12 resolve ID --left x", "deny"),
+    ("scout", f"{T} 12", "allow"),
+    ("scout", f"{T} 12 --all", "allow"),
+    ("scout", f"{T} 12 resolve ID --left x", "deny"),
+    ("scout", f"{T} 12 reopen ID --why x", "deny"),
+    ("scout", f"echo {T} 12 resolve ID --left x", "allow"),  # names the script, doesn't run it
+]
+
 REVIEW_CASES = [
     # (command, expected), run with posting on
     (POST + COMMENT + "\nEOF", "allow"),
     (POST.replace("--method", "-X") + COMMENT + "\nEOF\n", "allow"),
     (POST.replace("'EOF'", '"EOF"') + COMMENT + "\nEOF", "allow"),
     (POST + '{"event": "COMMENT", "body": "rm -rf; git push > x"}\nEOF', "allow"),
+    (FILE_COMMENT, "allow"),
+    (FILE_COMMENT.replace("--method", "-X"), "allow"),
+    ("cd /repo && " + FILE_COMMENT, "allow"),
+    (FILE_COMMENT.replace("subject_type=file", "subject_type=line"), "deny"),
+    (FILE_COMMENT + " -f event=x", "deny"),
+    (FILE_COMMENT + " && echo hi", "deny"),
+    ("echo hi && " + FILE_COMMENT, "deny"),
+    (FILE_COMMENT.replace("POST", "PATCH"), "deny"),
     (POST + '{"event": "APPROVE", "body": "lgtm"}\nEOF', "deny"),
     (POST + '{"event": "REQUEST_CHANGES", "body": "x"}\nEOF', "deny"),
     (POST + '{"body": "no event"}\nEOF', "deny"),
@@ -721,6 +762,23 @@ class GuardTest(unittest.TestCase):
                     self.assertEqual(decide("orchestrate:reviewer", command, subdir), expected)
             # The same post goes through only for the reviewer.
             self.assertEqual(decide("orchestrate:scout", POST + COMMENT + "\nEOF", root), "deny")
+
+    def test_threads_by_role(self):
+        for role, command, expected in THREADS_CASES:
+            with self.subTest(role=role, command=command):
+                agent = role if role.startswith("orchestrate") else "orchestrate:" + role
+                if role == "orchestrate-unknown":
+                    agent = "orchestrate:retired"  # a role the guard doesn't know is judged as a scout
+                self.assertEqual(decide(agent, command, timeout=600000), expected)
+
+    def test_threads_refusal_names_the_allowed_forms(self):
+        for role, command, text in [
+            ("reviewer", f"{T} 12 resolve ID --left x", "never closes its own findings"),
+            ("reviewer", f"{T} 12 resolve ID --left x", "reopen <id> --why"),
+            ("scout", f"{T} 12 reopen ID --why x", "`threads <pr> --all`"),
+        ]:
+            payload = {"tool_input": {"command": command}, "agent_type": "orchestrate:" + role}
+            self.assertIn(text, self.run_guard(payload))
 
     def test_near_miss_names_the_shape(self):
         with tempfile.TemporaryDirectory() as root:

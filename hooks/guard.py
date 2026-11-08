@@ -609,12 +609,19 @@ MERGE_SCRIPT = re.compile(
 # An optional leading `cd <path> &&` is allowed, a plain cd and nothing chained after it.
 REVIEWS_PATH = re.compile(r"pulls/\d+/reviews")
 REVIEW_ENDPOINT = re.compile(r"repos/[^/\s]+/[^/\s]+/pulls/\d+/reviews")
+# A finding whose line is outside the diff is posted on its own as a file-level comment (agents/reviewer.md).
+FILE_COMMENT_PATH = re.compile(r"pulls/\d+/comments")
+FILE_COMMENT_ENDPOINT = re.compile(r"repos/[^/\s]+/[^/\s]+/pulls/\d+/comments")
+FILE_COMMENT_FIELDS = {"path", "subject_type", "commit_id", "body"}
 SHAPES = (
     "Post exactly one of these (an optional leading `cd <path> &&` is fine, nothing else chained, nothing after the heredoc):\n"
     "gh api --method POST repos/{owner}/{repo}/pulls/<n>/reviews --input - <<'EOF'\n"
     '{"event": "COMMENT", "body": "<body>", "comments": []}\nEOF\n'
     "gh pr review <n> --comment --body-file - <<'EOF'\n<body>\nEOF\n"
-    "gh pr review <n> --comment --body '<body, no single quotes>'"
+    "gh pr review <n> --comment --body '<body, no single quotes>'\n"
+    "A finding outside the diff, posted after the review as a file-level comment:\n"
+    "gh api --method POST repos/{owner}/{repo}/pulls/<n>/comments -f path=<path> -f subject_type=file "
+    "-f commit_id=<head sha> -f body=<finding>"
 )
 # The config line that turns posting on, e.g. `- **Post reviews:** yes`. Leaving `<` out of
 # the separator keeps the template's `<yes | no>` placeholder from reading as yes.
@@ -987,6 +994,15 @@ def review_shape(cmd: Command) -> str | None:
         if (len(args) == 5 and args[0] in ("-X", "--method") and args[1] == "POST"
                 and REVIEW_ENDPOINT.fullmatch(args[2]) and args[3:] == ["--input", "-"]):
             return "api"
+        if len(args) == 11 and args[0] in ("-X", "--method") and args[1] == "POST" and FILE_COMMENT_ENDPOINT.fullmatch(args[2]):
+            fields = {}
+            for flag, pair in zip(args[3::2], args[4::2]):
+                key, eq, value = pair.partition("=")
+                if flag != "-f" or not eq:
+                    return None
+                fields[key] = value
+            if set(fields) == FILE_COMMENT_FIELDS and fields["subject_type"] == "file":
+                return "file-comment"
         return None
     if words[1:3] != ["pr", "review"] or len(words) < 5 or not words[3].isdigit():
         return None
@@ -1021,7 +1037,8 @@ def review_aimed(call: Call) -> bool:
     back (a GET) isn't aimed at a post."""
     if call.is_sub("pr") and call.is_verb("review"):
         return True
-    return call.is_sub("api") and api_writes(call.args) and any(REVIEWS_PATH.search(a.text) for a in call.args)
+    return call.is_sub("api") and api_writes(call.args) and any(
+        REVIEWS_PATH.search(a.text) or FILE_COMMENT_PATH.search(a.text) for a in call.args)
 
 
 def review_post(p: Parsed) -> str | None:
@@ -1043,7 +1060,7 @@ def review_post(p: Parsed) -> str | None:
             return "it isn't in the accepted shape"
     post = cmds[at]
     shape = review_shape(post)
-    if shape is None or len(post.heredocs) != (0 if shape == "inline" else 1):
+    if shape is None or len(post.heredocs) != (0 if shape in ("inline", "file-comment") else 1):
         return "it isn't in the accepted shape"
     heredoc = post.heredocs[0] if post.heredocs else None
     if heredoc and not heredoc.quoted:
@@ -1101,17 +1118,76 @@ VERIFY_WRAPPERS = {"env", "nohup", "time", "exec", "command", "timeout", "bash",
 VERIFY_TIMEOUT_MS = 600000
 
 
-def runs_verify(parsed: "Parsed") -> bool:
+def script_call(parsed: "Parsed", script: "re.Pattern", dynamic_ok: bool = False) -> tuple | None:
+    """(the command, the words after the script's path) of the first simple command that runs a script
+    matching `script`, or None. With `dynamic_ok`, a command word holding an expansion whose text still
+    ends in the script's path (`$ROOT/scripts/threads`) counts as the script, so the caller can refuse it."""
     for cmd in parsed.cmds:
-        for w in cmd.words:
-            if w.dynamic:
+        for k, w in enumerate(cmd.words):
+            if w.dynamic and not (dynamic_ok and script.search(w.text)):
                 break
             if re.fullmatch(r"\w+=.*|-.*|\d+[smhd]?", w.text) or basename(w) in VERIFY_WRAPPERS:
                 continue
-            if VERIFY_SCRIPT.search(w.text):
-                return True
+            if script.search(w.text):
+                return cmd, cmd.words[k + 1:]
             break
-    return False
+    return None
+
+
+def runs_verify(parsed: "Parsed") -> bool:
+    return script_call(parsed, VERIFY_SCRIPT) is not None
+
+
+# The plugin's threads script (ADR-0006), judged like verify, by role. A worker closes its own threads; a
+# reviewer reads them and reopens one, but never closes a finding of its own; a scout only reads.
+THREADS_SCRIPT = re.compile(r"(?:^|/)scripts/threads$")
+THREADS_FORMS = {
+    "reviewer": "`threads <pr>`, `threads <pr> --all` and `threads <pr> reopen <id> --why <why>`",
+    "scout": "`threads <pr>` and `threads <pr> --all`",
+}
+
+
+def threads_form(args: list) -> str | None:
+    """Which form a threads call is, from its lexed words after the script: "list", "reopen", "resolve"
+    or None for anything else."""
+    words = [w.text for w in args]
+    if not words or not words[0].isdigit():
+        return None
+    rest = words[1:]
+    if rest in ([], ["--all"]):
+        return "list"
+    if len(rest) == 4 and rest[0] == "reopen" and rest[2] == "--why":
+        return "reopen"
+    if rest[:1] == ["resolve"]:
+        return "resolve"
+    return None
+
+
+def threads_refusal(role: str, parsed: "Parsed") -> str | None:
+    """Why a scout's or reviewer's call of scripts/threads is refused, or None. Not a threads call, or a
+    worker's (every form), is None. Like the review post: an optional leading `cd <path> &&`, nothing else
+    chained, no word with an expansion."""
+    found = script_call(parsed, THREADS_SCRIPT, dynamic_ok=True)
+    if found is None or role not in THREADS_FORMS:
+        return None
+    cmd, args = found
+    cmds = parsed.cmds
+    lead = cmds[0]
+    if cmd is not lead:
+        ok = (cmd is cmds[1] and [w.text for w in lead.words[:1]] == ["cd"] and len(lead.words) == 2
+              and only_plain_words(lead) and not lead.heredocs and cmd.joiner == "&&")
+    else:
+        ok = True
+    ok = ok and len(cmds) == (2 if cmd is not lead else 1) and not any(c.depth for c in cmds)
+    ok = ok and only_plain_words(cmd) and not cmd.heredocs
+    form = threads_form(args) if ok else None
+    allowed = form == "list" or (form == "reopen" and role == "reviewer")
+    if allowed:
+        return None
+    what = ("a reviewer never closes its own findings, so `resolve` is the worker's" if form == "resolve" and role == "reviewer"
+            else "a scout only reads threads" if form in ("resolve", "reopen")
+            else "it isn't in an accepted shape (an optional leading `cd <path> &&`, nothing else chained, plain words)")
+    return f"this threads call is refused because {what}. The {role} may run {THREADS_FORMS[role]}."
 
 
 def verdict(role: str, command: str, cwd: str, background: bool = False, timeout: object = None) -> str | None:
@@ -1149,6 +1225,9 @@ def verdict(role: str, command: str, cwd: str, background: bool = False, timeout
             return "the config doesn't say `Post reviews: yes`, so return your verdict without posting it."
         if problem:
             return f"this review post is refused because {problem}. {SHAPES}"
+    refused = threads_refusal(role, parsed)
+    if refused:
+        return refused
     if MERGE_SCRIPT.search(command):
         return (f"{who} can't run a command that merges a PR (merging belongs to the orchestrator). "
                 f"{NEXT_STEP[role]}")
