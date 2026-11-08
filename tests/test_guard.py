@@ -1095,9 +1095,14 @@ class RoutineApprovalTest(unittest.TestCase):
 
     def test_attached_and_clustered_short_body_file_forms_fail_closed(self):
         for command in ("gh pr edit -F/etc/passwd", "gh pr edit -F=/etc/passwd", "gh pr edit -dF /etc/passwd",
-                        "gh pr create --draft --title t -F/etc/passwd", "gh pr edit -F./b.md"):
+                        "gh pr create --draft --title t -F/etc/passwd", "gh pr edit -F../../.env", "gh pr edit -F=", "gh pr edit -F"):
             with self.subTest(command):
                 self.assertFalse(approved("orchestrate:worker", command, self.work))
+
+    def test_attached_short_body_file_inside_the_worktree_is_approved(self):
+        for command in ("gh pr create --draft --title t -Fb.md", "gh pr create --draft --title t -F=b.md"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
 
     def test_board_accepts_exactly_repo_dot_once(self):
         for command in (f"{SCRIPTS}/board --repo .", f"{SCRIPTS}/board --repo . --dry-run"):

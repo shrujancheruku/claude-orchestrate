@@ -647,7 +647,7 @@
 {"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" -F=/etc/passwd", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit --title \"TEXT\" -dF /etc/passwd", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit -F/etc/passwd", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:worker", "command": "gh pr edit -F/private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.md", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" -F/private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.md", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit --body-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/other-session/scratchpad/pr.md", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo . --dry-run", "expected": "approve", "source": "hand"}
@@ -657,3 +657,7 @@
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge ²", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cd ~/x && gh pr review 12 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cd * && gh pr review 12 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" -Fb.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" -F=b.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit -F~/x", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit -F../../.env", "expected": "silent", "source": "hand"}

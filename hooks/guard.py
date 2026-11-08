@@ -1564,13 +1564,21 @@ def body_file_ok(value: str, cwd: str, session: str = "") -> bool:
 
 def body_files_ok(args: list, cwd: str, session: str = "") -> bool:
     """Every `--body-file`, `--body-file=<path>` and `-F <path>` word of a `gh pr` call passes body_file_ok.
-    A short-option word that holds an `F` but is not exactly `-F` (`-F/etc/x`, `-F=x`, `-dF x`) is a form this
-    parser does not read, so it fails closed."""
+    The attached shorthand (`-F/etc/x`, `-F=x`) is read as pflag reads it; a
+    cluster holding an `F` after other letters (`-dF x`) is a form this parser does not read, so it fails closed."""
     j = 0
     while j < len(args):
-        if re.fullmatch(r"-[^-].*", args[j]) and "F" in args[j] and args[j] != "-F":
-            return False
-        name, eq, value = args[j].partition("=") if args[j].startswith("--") else (args[j], "", "")
+        word = args[j]
+        if re.fullmatch(r"-[^-F].*", word) and "F" in word:
+            return False  # a cluster such as `-dF x`: not read, so it fails closed
+        if word.startswith("-F") and len(word) > 2:
+            # pflag's attached shorthand: `-F<path>` and `-F=<path>` both name the path after the F
+            value = word[2:]
+            if not body_file_ok(value[1:] if value.startswith("=") else value, cwd, session):
+                return False
+            j += 1
+            continue
+        name, eq, value = word.partition("=") if word.startswith("--") else (word, "", "")
         j += 1
         if name in ("--body-file", "-F"):
             if not eq:
