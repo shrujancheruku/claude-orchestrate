@@ -64,13 +64,14 @@ class ReadinessTest(unittest.TestCase):
         return sha
 
     def merge(self, head, behind="0", update=None, approved="", flag=True, checks=GREEN, blockers=(),
-              branch="feat-br", closing=(), ticket=9, threads=None, issues=None, workflows=None):
+              branch="feat-br", closing=(), ticket=9, threads=None, issues=None, workflows=None, fork=False, after_head=None):
         pr_json = {"state": "OPEN", "headRefName": branch, "headRefOid": head, "statusCheckRollup": checks,
-                   "isCrossRepository": False, "closingIssuesReferences": [{"number": n} for n in closing]}
+                   "isCrossRepository": fork, "closingIssuesReferences": [{"number": n} for n in closing]}
         view = {"stdout": json.dumps(pr_json)}
         merged = {"stdout": json.dumps(dict(pr_json, state="MERGED"))}
         self.env.set_gh([
-            {"args": ["pr", "view"], "seq": [view, merged]},
+            {"args": ["pr", "view"], "seq": [view] + ([{"stdout": json.dumps(dict(pr_json, headRefOid=after_head))}]
+                                                      if after_head else []) + [merged]},
             {"args": ["repo", "view"], "stdout": '{"defaultBranchRef":{"name":"main"},"owner":{"login":"o"},"name":"r"}'},
             {"args": ["api", WF + head],
              **(workflows or {"exit": 1, "stderr": "gh: Not Found (HTTP 404)"})},
@@ -128,7 +129,20 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
         self.assertEqual(self.called(["pr", "update-branch"]), [["pr", "update-branch", "7"]])
         self.assertEqual(self.called(["pr", "merge"]), [])
-        self.assertRegex(p.stdout.splitlines()[-1], r"^next: wait-ci 7 [0-9a-f]{40}$")
+        # the head is still the old one right after update-branch: the host may not have applied it yet
+        self.assertEqual(p.stdout.splitlines()[-1], "next: wait-ci 7 ?")
+
+    def test_behind_reports_the_new_head_once_the_host_moved_it(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, behind="2", after_head="f" * 40)
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: wait-ci 7 " + "f" * 40)
+
+    def test_failing_update_of_a_fork_pr_asks_the_user(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, behind="1", fork=True, update={"exit": 1, "stderr": "cannot push to fork"})
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user PR #7 is a fork; its branch can't be updated")
 
     def test_failing_update_exits_1_with_the_output(self):
         head = self.push({"b.txt": "x\n"})

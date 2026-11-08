@@ -251,7 +251,7 @@ class VerdictLines(unittest.TestCase):
 
     def test_the_merge_step_names_no_exit_code(self):
         merge = self.step(self.skill(), "6. **Approved**", "7. **After the merge:**")
-        self.assertNotRegex(merge, r"(?i)\bexit \d")
+        self.assertNotRegex(merge, r"(?i)\bexits? \d")
 
     def test_the_guide_lists_the_vocabulary(self):
         guide = (ROOT / "docs/guide.md").read_text()

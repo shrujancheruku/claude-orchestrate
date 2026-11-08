@@ -248,12 +248,15 @@ def threads_rule(cwd, pr):
     return 1
 
 
-def new_head(cwd, pr):
-    """The PR's head after a branch update (what the CI to wait for runs on), or `?` when gh can't say."""
+def new_head(cwd, pr, old):
+    """The PR's head after a branch update (what the CI to wait for runs on). `?` when gh can't say or the head
+    is still `old`: the host may apply the update after `gh pr update-branch` returns, and the old head's green
+    CI must not be waited on (the run skill says `?` means `watch-ci <pr>`, whatever head it reports)."""
     try:
-        return github.pr_view(pr, "headRefOid", cwd).get("headRefOid") or "?"
+        head = github.pr_view(pr, "headRefOid", cwd).get("headRefOid")
     except github.GhError:
         return "?"
+    return head if head and head != old else "?"
 
 
 def readiness(cwd, pr, v, approved):
@@ -279,10 +282,12 @@ def readiness(cwd, pr, v, approved):
             github.update_branch(pr, cwd)
         except github.GhError as e:
             say(f"PR #{pr} is behind {default} by {behind} and update-branch failed: {e.message}")
-            verdict(f"send-back {pr}")
+            # A fork's branch can't be updated by the host or pushed to by the worker: sending it back would loop.
+            verdict(f"ask-user PR #{pr} is a fork; its branch can't be updated" if v.get("isCrossRepository")
+                    else f"send-back {pr}")
             return 1
         say(f"PR #{pr} was behind {default} by {behind}; branch updated; wait for CI, then run merge again")
-        verdict(f"wait-ci {pr} {new_head(cwd, pr)}")
+        verdict(f"wait-ci {pr} {new_head(cwd, pr, head)}")
         return 5
     changes = own_changes(cwd, approved, head, default)
     if changes is None:
@@ -485,7 +490,7 @@ def update_approved(cwd, merged_pr, default, specs):
                 continue
             github.update_branch(n, cwd)
             say(f"PR #{n} updated (behind by {behind}); wait for CI")
-            also(f"wait-ci {n} {new_head(cwd, n)}")
+            also(f"wait-ci {n} {new_head(cwd, n, v.get('headRefOid'))}")
         except github.GhError as e:
             say(f"PR #{n} not updated: {e.message}")
             also(f"left {n} not updated: {why_of(e.message)}")
