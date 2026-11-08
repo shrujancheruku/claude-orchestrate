@@ -38,7 +38,7 @@ class WorkerReport(unittest.TestCase):
             path = empty
         else:
             path = f"{self.env.bin}{os.pathsep}{os.environ['PATH']}"
-        env = dict(os.environ, PATH=path, FAKE_GH_STATE=str(self.env.gh_state))
+        env = dict(os.environ, PATH=path, FAKE_GH_STATE=str(self.env.gh_state), ORCHESTRATE_GH_5XX_TRIES="1")
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "worker-report"), ticket, "--branch", BRANCH, "--repo", "."],
             cwd=self.env.repo, env=env, input=text, capture_output=True, text=True, check=check)
