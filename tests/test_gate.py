@@ -357,10 +357,60 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.event()["failed"], [name])
         return r.stdout
 
-    def test_overlap_with_a_held_path_fails_with_holds_output(self):
-        self.prime(others=[{"number": 9, "headRefName": "other"}])
+    def test_an_overlap_with_a_ticket_that_has_no_pr_fails_with_holds_output(self):
+        # A building ticket (no PR yet) holds src/a.py: the hold was broken at dispatch, so the PR is sent back.
+        node = {"number": 12, "labels": {"nodes": []}, "assignees": {"totalCount": 1}}
+        self.prime(issues=[node])
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(exist_ok=True)
+        state.write_text(json.dumps({"session": "test-session", "tickets": {"12": {"touch_map": "src/a.py"}}}))
         out = self.failed_only(self.gate(), "no overlap with held paths")
-        self.assertIn("overlap: src/a.py (held by open PR #9)", out)
+        self.assertIn("overlap: src/a.py (held by building #12)", out)
+
+    def test_the_younger_of_two_open_prs_on_one_path_waits_for_the_older(self):
+        self.prime(others=[{"number": 5, "headRefName": "12-older"}])
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: rerun-after-ci"]), r.stdout + r.stderr)
+        self.assertIn("waits for #12 (PR #5) to merge: src/a.py", r.stdout)
+        self.assertNotIn("fail", r.stdout.replace("failed", ""))
+        self.assertEqual((self.event()["outcome"], self.event()["failed"]), ("unknown", []))
+
+    def test_the_older_of_two_open_prs_on_one_path_passes(self):
+        self.prime(others=[{"number": 9, "headRefName": "other"}])
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("pass", r.stdout)
+
+    def test_waiting_with_another_failure_is_sent_back(self):
+        self.prime(title="Add the thing", others=[{"number": 5, "headRefName": "12-older"}])
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (1, ["next: send-back 7"]))
+        self.assertIn("waits for #12 (PR #5)", r.stdout)
+
+    def test_holds_exit_1_with_no_output_is_could_not_run_not_an_overlap(self):
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("gate_under_test", str(Path(__file__).resolve().parent.parent / "scripts" / "gate"))
+        gate = module_from_spec(spec_from_loader("gate_under_test", loader))
+        loader.exec_module(gate)
+        crash = gate.common.Run(1, "", "Traceback (most recent call last):\nOSError: boom")
+        snap = mock.Mock(repo=None, issues=[], prs=[], merged=[])
+        with mock.patch.object(gate.common, "run", return_value=crash), mock.patch.object(gate.tracker, "Snapshot"), \
+                mock.patch.object(gate.repo, "main_checkout", return_value=str(self.env.repo)):
+            out = gate.overlap_check(7, str(self.env.repo), snap)
+        self.assertIsInstance(out, str)
+        self.assertIn("holds could not run (exit 1, no verdict)", out)
+
+    def test_run_gate_exit_codes_are_pinned(self):
+        """main() maps 0, 1 and 3 to a verdict and every other code to could-not-run: a new code must be added to
+        both on purpose, so this fails when run_gate returns one the mapping doesn't know (#453)."""
+        import re
+        src = (Path(__file__).resolve().parent.parent / "scripts" / "gate").read_text()
+        body = src.split("def run_gate", 1)[1]
+        codes = set(map(int, re.findall(r"return (\d)\b", body))) | set(map(int, re.findall(r"else (\d)\b", body)))
+        codes |= {0, 1, 3}  # the final `return 3 if undecided else 1 if failed else 0`
+        self.assertEqual(codes, {0, 1, 2, 3})
 
     def test_holds_that_cannot_run_is_gate_exit_2_not_a_failure(self):
         self.prime()

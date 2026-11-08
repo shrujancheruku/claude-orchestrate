@@ -15,14 +15,24 @@ The ticket's own PR and touch map are left out: --ticket N leaves out the PR who
 Output: one line per held path, `path (held by open PR #9, building #12, elsewhere #13, an exclusive hold)` (the form
 of the brief's `Held paths:` line), or `none`. Then `overlap: <path> (held by ...)` per counted overlap, `shared (not
 counted): ...` per overlap on a config shared file, or `overlap: none`. A missing state file means no building
-tickets. Exit codes: 0 nothing overlaps; 1 an overlap; 2 could not run (no `gh`, a failed `gh` or `git` call, an
-unreadable state file). Stdlib only, Python 3.9+.
+tickets.
+
+Two open PRs on one file are an ordering, not a failure (#399), and only `--pr` (the gate's check) applies it: the PR
+with the lower number is the older claim and passes; the younger prints `waits for #<ticket> (PR #<n>) to merge: <paths>`
+and exits 3. A file also held by a building, elsewhere or exclusive holder is a real overlap (exit 1), whatever the PRs.
+Why the PR number: it is in the snapshot, and the `assigned` time would cost a tracker call per claim.
+`--touch-map` (dispatch) has no PR yet, so every open PR holder there still counts.
+
+Exit codes: 0 nothing overlaps; 1 an overlap (and only that); 2 could not run (no `gh`, a failed `gh` or `git` call, an
+unreadable state file, any other error: `holds: could not run: <type>: <message>`); 3 `--pr` only: it waits for an older
+open PR. Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
 
 import argparse
 import fnmatch
+import re
 import sys
 from pathlib import Path
 
@@ -134,27 +144,49 @@ def is_shared(cfg, path: str) -> bool:
     return any(fnmatch.fnmatch(path, g) or path == g for g in cfg.shared_files)
 
 
-def report(held: dict, candidates: list, cfg) -> int:
+PR_HOLDER = re.compile(r"open PR #(\d+)$")
+
+
+def report(held: dict, candidates: list, cfg, own_pr=None, pr_tickets=None) -> int:
+    """Print the held paths and the overlaps; the exit code (0, 1, or 3 when only older open PRs overlap).
+    With `own_pr` (the gate's check), an open-PR holder is an ordering: a lower-numbered PR is older and makes this one
+    wait; a higher-numbered one is younger and is not counted. Any other holder of the same path still counts."""
+    pr_tickets = pr_tickets or {}
     for p, who in held.items():
         print(f"{p} (held by {', '.join(who)})")
     if not held:
         print("none")
-    counted = 0
+    counted, waits = 0, {}
     for c in candidates:
         for p, who in held.items():
-            if covers(p, c):
-                shown = f"{c} (held by {', '.join(who)})"
-                if is_shared(cfg, c) or is_shared(cfg, p):  # a directory candidate overlaps the held file under it
-                    print(f"shared (not counted): {shown}")
+            if not covers(p, c):
+                continue
+            shown = f"{c} (held by {', '.join(who)})"
+            if is_shared(cfg, c) or is_shared(cfg, p):  # a directory candidate overlaps the held file under it
+                print(f"shared (not counted): {shown}")
+                continue
+            if own_pr is not None and all(PR_HOLDER.match(w) for w in who):
+                older = [n for n in (int(PR_HOLDER.match(w).group(1)) for w in who) if n < own_pr]
+                if older:
+                    waits.setdefault(min(older), []).append(c)
                 else:
-                    print(f"overlap: {shown}")
-                    counted += 1
-    if not counted:
-        print("overlap: none")
-    return 1 if counted else 0
+                    print(f"younger PR (not counted): {shown}")
+                continue
+            print(f"overlap: {shown}")
+            counted += 1
+    if counted:
+        return 1
+    for n, paths in sorted(waits.items()):
+        ticket = pr_tickets.get(n)
+        who = f"#{ticket} (PR #{n})" if ticket is not None else f"PR #{n}"
+        print(f"waits for {who} to merge: {', '.join(sorted(set(paths)))}")
+    if waits:
+        return 3
+    print("overlap: none")
+    return 0
 
 
-def main(argv=None) -> int:
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--touch-map", nargs="+", metavar="ENTRIES", help="the ticket's touch-map entries (`path:line` is fine); an argument may hold several, comma-separated")
     ap.add_argument("--literal", action="store_true", help="with --touch-map: each argument is one path, never split (a path may hold a comma)")
@@ -194,7 +226,7 @@ def main(argv=None) -> int:
             own_ticket = ticket_of_branch(view.get("headRefName"))
             candidates = github.pr_files(own_pr, cwd=repo)
         open_prs = [p for p in snap.prs if isinstance(p, dict) and p.get("baseRefName", base) == base]
-        prs = {}
+        prs, pr_tickets = {}, {}
         for pr in open_prs:
             if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
                 raise github.GhError(github.MALFORMED, "gh returned a PR list entry without a number")
@@ -202,6 +234,7 @@ def main(argv=None) -> int:
                 continue
             if str(pr.get("headRefName") or "").startswith(RELEASE_PLEASE_PREFIX):
                 continue  # the release PR's files are never a real overlap, and its diff is not fetched
+            pr_tickets[pr["number"]] = ticket_of_branch(pr.get("headRefName"))
             prs[pr["number"]] = snap.pr_files(pr)  # cached in the snapshot, keyed by head SHA (#446)
         snap.save_cache()
         # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
@@ -215,7 +248,20 @@ def main(argv=None) -> int:
     except (KeyError, TypeError, ValueError) as e:
         print(f"holds: {e}", file=sys.stderr)
         return 2
-    return report(held_paths(cfg, prs, tickets, others), candidates, cfg)
+    return report(held_paths(cfg, prs, tickets, others), candidates, cfg,
+                  own_pr=int(own_pr) if own_pr is not None else None, pr_tickets=pr_tickets)
+
+
+def main(argv=None) -> int:
+    """`run`, with one catch-all: exit 1 means only "paths held" (#424), so an error nothing mapped (an unreadable
+    file, a bad config) is exit 2, never a traceback's exit 1 that the gate would read as an overlap."""
+    try:
+        return run(argv)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 - the point is to catch whatever escaped
+        print(f"holds: could not run: {type(e).__name__}: {common.one_line(str(e))}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
