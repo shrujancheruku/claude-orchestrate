@@ -109,11 +109,13 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIn("ci: pending", p.stdout)
         self.assertEqual(self.called(["pr", "merge"]), [])
+        self.assertEqual(p.stdout.splitlines()[-1], f"next: wait-ci 7 {head}")
 
     def test_unreadable_workflows_exit_2(self):
         head = self.push({"b.txt": "x\n"})
         p = self.merge(head, checks=[], approved=head, workflows={"exit": 1, "stderr": "gh: Server Error (HTTP 500)"})
         self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: could-not-run")
 
     def test_non_empty_rollup_makes_no_contents_call(self):
         head = self.push({"b.txt": "x\n"})
@@ -126,12 +128,14 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
         self.assertEqual(self.called(["pr", "update-branch"]), [["pr", "update-branch", "7"]])
         self.assertEqual(self.called(["pr", "merge"]), [])
+        self.assertRegex(p.stdout.splitlines()[-1], r"^next: wait-ci 7 [0-9a-f]{40}$")
 
     def test_failing_update_exits_1_with_the_output(self):
         head = self.push({"b.txt": "x\n"})
         p = self.merge(head, behind="1", update={"exit": 1, "stderr": "merge conflict between base and head"})
         self.assertEqual(p.returncode, 1)
         self.assertIn("merge conflict between base and head", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: send-back 7")
         self.assertEqual(self.called(["pr", "merge"]), [])
 
     def test_risk_path_change_since_the_approved_head_exits_6(self):
@@ -140,6 +144,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
         self.assertIn("auth/login.py", p.stdout)
         self.assertEqual(self.called(["pr", "merge"]), [])
+        self.assertEqual(p.stdout.splitlines()[-1], "next: re-review 7")
 
     def test_too_many_lines_exits_6(self):
         head = self.push({"c.txt": "x\n" * 11})
@@ -340,12 +345,14 @@ class ReadinessTest(unittest.TestCase):
         self.refused(p, "CI pending")
         self.assertIn("slow", p.stdout)
         self.assertIn(head[:12], p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], f"next: wait-ci 7 {head}")
 
     def test_failed_check_refuses(self):
         head = self.push({"b.txt": "x\n"})
         p = self.merge(head, behind="2", checks=GREEN + [{"name": "unit", "status": "COMPLETED", "conclusion": "FAILURE"}])
         self.refused(p, "CI failed")
         self.assertIn("unit", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: send-back 7")
 
     def test_cancelled_check_refuses(self):
         head = self.push({"b.txt": "x\n"})
@@ -366,6 +373,7 @@ class ReadinessTest(unittest.TestCase):
         head = self.push({"b.txt": "x\n"})
         p = self.merge(head, closing=[9], blockers=[(1, "OPEN"), (2, "OPEN")])
         self.refused(p, "ticket #9 has 2 open blocker(s)")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user ticket #9 has 2 open blocker(s)")
 
     def test_open_blocker_on_the_branch_number_refuses(self):
         head = self.push({"b.txt": "x\n"})
@@ -408,7 +416,8 @@ class ReadinessTest(unittest.TestCase):
     def test_unresolved_thread_refuses_with_count_author_and_url(self):
         p = self.merge(self.approved, threads=threads_reply((False, False, "rev", "https://x/1"), (True, False, "z", "https://x/2")))
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
-        self.assertEqual(p.stdout.splitlines(), ["PR #7 is not ready: 1 unresolved review thread(s)", "  rev https://x/1"])
+        self.assertEqual(p.stdout.splitlines(), ["PR #7 is not ready: 1 unresolved review thread(s)", "  rev https://x/1",
+                                                 "next: send-back 7"])
         self.assertEqual(self.called(["pr", "merge"]), [])
 
     def test_outdated_unresolved_thread_refuses(self):
@@ -420,7 +429,7 @@ class ReadinessTest(unittest.TestCase):
         p = self.merge(self.approved, threads=threads_reply((False, False, "shrujan", "https://x/9"), (False, False, "rev", "https://x/8")))
         self.assertEqual(p.returncode, 1)
         self.assertIn("2 unresolved", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[1:], ["  shrujan https://x/9", "  rev https://x/8"])
+        self.assertEqual(p.stdout.splitlines()[1:], ["  shrujan https://x/9", "  rev https://x/8", "next: send-back 7"])
 
     def test_all_resolved_passes(self):
         p = self.merge(self.approved, threads=threads_reply((True, False, "rev", "u"), (True, True, "rev", "u")))
