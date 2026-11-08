@@ -66,6 +66,8 @@ Every full pass suggests a change of one slot, between 1 and 5: lower after a us
 
 Use greedy when the backlog has several independent tickets and you have plan headroom to spend on finishing sooner: a batch of small fixes, or the leaves of a spec once their blockers have merged. Keep the config's count when tickets mostly touch the same files (overlap holds them at any count, so greedy gains nothing) or when usage is tight, since every running ticket adds a worker and its reviews. `--greedy=N` sets a lower or higher cap for one session without touching the config.
 
+**Rate limits.** A greedy run can hit GitHub's secondary rate limit (many `gh` calls at once). Every script waits it out: `scripts/github.py` retries up to 5 times, sleeping the `retry-after` seconds when `gh` shows them, else a minute (the time it records for the others). The hourly quota running out is not retried; the call fails at once with the reset time. A script's rate-limit hit is also written to `$XDG_CACHE_HOME/orchestrate/github-ratelimit-<host>.json` (`~/.cache` when unset), shared by every agent on the machine, so every other script waits too (up to 2 minutes, else it exits 2 with `rate limit until <time>`), and the error says the HTTP status and headers. After the fifth try it exits 2 too.
+
 ## The guard hook
 
 `hooks/guard.py` runs before every Bash call and every file edit (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) and refuses only for this plugin's agents (`agent_type` `orchestrate:<role>`); the orchestrator's own session (no `agent_type`) is never refused, only given the routine-step approval described below:
