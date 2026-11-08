@@ -74,8 +74,15 @@ def _template():
         atexit.register(tmp.cleanup)
         root = Path(tmp.name)
         origin, repo = root / "origin.git", root / "repo"
-        git(root, "init", "--bare", "-b", "main", str(origin))
-        git(root, "init", "-b", "main", str(repo))
+        # Git's auto maintenance (after a commit or push) detaches and holds `objects/maintenance.lock` for a
+        # moment; a copy of the template racing it fails with ENOENT (#415). Never start it: the -c flags cover
+        # the build, and the config below keeps it off in every copy, so no test's git command starts it either.
+        off = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
+        git(root, *off, "init", "--bare", "-b", "main", str(origin))
+        git(root, *off, "init", "-b", "main", str(repo))
+        for d in (origin, repo):
+            git(d, "config", "maintenance.auto", "false")
+            git(d, "config", "gc.auto", "0")
         for k, v in (("user.name", "Test"), ("user.email", "test@example.com"), ("commit.gpgsign", "false")):
             git(repo, "config", k, v)
         git(repo, "remote", "add", "origin", str(origin))
