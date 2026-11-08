@@ -2,7 +2,7 @@
 """snapshot [--repo DIR] [--out FILE] : read the tracker once and write it to a file.
 
 Reads the open issues (blockers, labels, assignee, body, parent, sub-issue summary, comments), the open and merged PRs,
-and the closed `wontfix` tickets still assigned, through one tracker.Snapshot, and writes them to FILE (default:
+the file list of each open PR (but release-please's), and the closed `wontfix` tickets still assigned, through one tracker.Snapshot, and writes them to FILE (default:
 <repo>/.claude/orchestrate-snapshot.json, gitignored). `claims`, `frontier`, `holds` and `lead-route` take
 `--snapshot FILE` and read it instead of fetching, so a reconcile pass reads the tracker once. Prints the path, one line.
 Exit codes: 0 written; 2 could not run (no `gh`, a failed `gh` call, a malformed reply, not a repository), one line on
@@ -30,7 +30,10 @@ def main(argv=None) -> int:
         common.die(f"snapshot: cannot run: {args.repo} is not in a git repository")
     out = Path(args.out) if args.out else root / SNAPSHOT
     try:
-        tracker.Snapshot(root).write(out)
+        snap = tracker.Snapshot(root)
+        snap.use_cache(out)  # entries whose PR head is unchanged are kept, not read again
+        snap.cache_pr_files()  # one read per open PR for the whole pass: `holds` reads them from the file
+        snap.write(out)
     except github.GhError as e:
         common.die(f"snapshot: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError, AttributeError) as e:

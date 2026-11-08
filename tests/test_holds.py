@@ -48,14 +48,14 @@ class Holds(unittest.TestCase):
         self.wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.wt_dir.cleanup)
 
-    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=()):
+    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=(), shas=None):
         """prs: {number: [paths]}; branches: {number: head branch}; issues: {ticket: state}, where CLOSED leaves the
         ticket out of the open issues and OPEN lists it; merged: head branches of merged PRs; unclaimed: open tickets with
         no assignee; open_tickets: open tickets assigned to the user (as is every other open ticket listed here);
         lead: open tickets labelled `lead`."""
         prs, branches = prs or {}, branches or {}
         listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": False,
-                    "isDraft": n in drafts} for n in prs]
+                    "isDraft": n in drafts, "headRefOid": (shas or {}).get(n)} for n in prs]
         open_nums = set(open_tickets) | set(unclaimed) | set(lead) | {n for n, st in (issues or {}).items() if st == "OPEN"}
         nodes = [{"number": n, "labels": {"nodes": [{"name": "lead"}] if n in lead else []},
                   "assignees": {"totalCount": 0 if n in unclaimed else 1}}
@@ -171,6 +171,50 @@ class Holds(unittest.TestCase):
         self.assertEqual(r.stdout.splitlines(), [
             "b.py (held by open PR #10)", "z.py (held by building #11)",
             "overlap: b.py (held by open PR #10)"])
+
+    def test_a_release_please_pr_holds_nothing_and_a_human_pr_on_its_files_is_held(self):
+        rp = "release-please--branches--main--components--orchestrate"
+        self.gh({5: ["CHANGELOG.md", "version.txt", ".release-please-manifest.json", ".claude-plugin/plugin.json"],
+                 6: ["scripts/x"], 8: ["CHANGELOG.md"]}, branches={5: rp, 6: "9-worker", 8: "12-human"})
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), ["scripts/x (held by open PR #6)", "CHANGELOG.md (held by open PR #8)", "overlap: none"])
+
+    CACHE = ".claude/orchestrate-snapshot.json"
+
+    def files_reads(self):
+        return [c for c in self.env.gh_calls() if len(c) > 1 and "/files" in c[1]]
+
+    def test_the_cache_serves_a_pr_whose_head_matches_without_snapshot_and_misses_are_written_back(self):
+        self.gh({5: ["scripts/b"], 6: ["scripts/c"]}, branches={5: "3-a", 6: "4-b"}, shas={5: "aaa", 6: "bbb"})
+        cache = self.env.repo / self.CACHE
+        cache.parent.mkdir(exist_ok=True)
+        cache.write_text(json.dumps({"pr_files": {"5": {"sha": "aaa", "files": ["scripts/a"]}}}))
+        r = self.holds("--touch-map", "scripts/a", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("scripts/a (held by open PR #5)", r.stdout)  # the cached list, not the stub's
+        self.assertEqual(len(self.files_reads()), 1, "only PR 6 (no cached entry) is fetched")
+        self.assertEqual(json.loads(cache.read_text())["pr_files"]["6"], {"sha": "bbb", "files": ["scripts/c"]})
+        self.gh({5: ["scripts/b"], 6: ["scripts/x"]}, branches={5: "3-a", 6: "4-b"}, shas={5: "aaa", 6: "bbb"})
+        before = len(self.files_reads())
+        self.holds("--touch-map", "scripts/a", "--ticket", "7")
+        self.assertEqual(len(self.files_reads()) - before, 0, "the next call in the pass hits the written-back entry")
+
+    def test_a_changed_head_refetches_and_a_corrupt_cache_fetches_everything(self):
+        self.gh({5: ["scripts/b"]}, branches={5: "3-a"}, shas={5: "new"})
+        cache = self.env.repo / self.CACHE
+        cache.parent.mkdir(exist_ok=True)
+        cache.write_text(json.dumps({"pr_files": {"5": {"sha": "old", "files": ["scripts/a"]}}}))
+        r = self.holds("--touch-map", "scripts/b", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(len(self.files_reads()), 1)
+        self.assertEqual(json.loads(cache.read_text())["pr_files"]["5"], {"sha": "new", "files": ["scripts/b"]})
+        cache.write_text("{not json")
+        self.gh({5: ["scripts/b"]}, branches={5: "3-a"}, shas={5: "new"})
+        before = len(self.files_reads())
+        r = self.holds("--touch-map", "scripts/b", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(len(self.files_reads()) - before, 1)
 
     def test_closed_ticket_holds_nothing(self):
         self.gh(issues={12: "CLOSED"})

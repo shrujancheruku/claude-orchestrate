@@ -14,7 +14,9 @@ and merge all ask it.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 
 import github
@@ -28,6 +30,10 @@ ROLES = {"ready-for-agent": "ready", "ready-for-human": "human"}
 # required, so prose like "Blocked by the outage, see #12" or "Blocked by #12" is not a blocker (it would hold a ticket silently).
 BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*:(.*)$", re.I)
 ISSUE_REF = re.compile(r"#(\d+)")
+# release-please's open PR holds nothing (scripts/holds), so nothing needs its file list either.
+RELEASE_PLEASE_PREFIX = "release-please--"
+# The snapshot file `snapshot` writes; its `pr_files` key is also the PR file-list cache `holds` and `gate` keep (#446).
+SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
 
 
 def label_strings(root: Path) -> dict:
@@ -161,14 +167,19 @@ class Snapshot:
     def __init__(self, cwd=None, **parts):
         self.cwd = cwd
         self._parts = {k: v for k, v in parts.items() if k in self.PARTS and v is not None}
+        # {PR number as text: {"sha": head commit, "files": [paths]}}: the open PRs' file lists, one REST read per PR per
+        # pass (there is no bulk endpoint), keyed by head SHA so a pushed PR refreshes its one entry (#446).
+        self._pr_files = dict(parts.get("pr_files") or {})
+        self._cache_path = None
+        self._dirty = False
 
     @classmethod
     def open(cls, path, cwd=None):
         """The snapshot in the file `path`, or a fetching one when `path` is None."""
-        return cls(cwd) if path is None else cls.read(path)
+        return cls(cwd) if path is None else cls.read(path, cwd)
 
     @classmethod
-    def read(cls, path):
+    def read(cls, path, cwd=None):
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
         except OSError as e:
@@ -177,10 +188,11 @@ class Snapshot:
             raise ValueError(f"{path} is not a snapshot")
         for i in data["issues"]:
             i["labels"] = set(i["labels"])
-        return cls(**data)
+        return cls(cwd, **data)
 
     def write(self, path) -> None:
         data = {k: getattr(self, k) for k in self.PARTS}
+        data["pr_files"] = self._open_entries(self._pr_files)
         data["issues"] = [dict(i, labels=sorted(i["labels"])) for i in data["issues"]]
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(json.dumps(data), encoding="utf-8")
@@ -217,6 +229,82 @@ class Snapshot:
     def abandoned(self) -> list:
         """Numbers of closed `wontfix` tickets that still have an assignee."""
         return self._part("abandoned", lambda: github.abandoned_tickets(self.repo, cwd=self.cwd))
+
+    def pr_files(self, pr: dict) -> list:
+        """The paths an open PR (a row of `prs`) changes: from the cache when its head commit is the cached one, else
+        fetched through `github.pr_files` and cached."""
+        key, sha = str(pr["number"]), pr.get("headRefOid")
+        hit = self._pr_files.get(key)
+        if sha and isinstance(hit, dict) and hit.get("sha") == sha and isinstance(hit.get("files"), list):
+            return list(hit["files"])
+        files = github.pr_files(pr["number"], cwd=self.cwd)
+        if sha:  # a PR row without a head commit cannot be keyed, so it is never cached
+            self._pr_files[key] = {"sha": sha, "files": files}
+            self._dirty = True
+        return list(files)
+
+    def _open_entries(self, entries: dict) -> dict:
+        """`entries` without the PRs that are no longer open, when the open PRs are known."""
+        if "prs" not in self._parts:
+            return dict(entries)
+        open_now = {str(p.get("number")) for p in self._parts["prs"] if isinstance(p, dict)}
+        return {k: v for k, v in entries.items() if k in open_now}
+
+    @staticmethod
+    def _cached_files(path) -> dict:
+        """The `pr_files` key of the file at `path`; {} when the file is missing, unreadable or not what we wrote."""
+        try:
+            got = json.loads(Path(path).read_text(encoding="utf-8")).get("pr_files")
+        except (OSError, ValueError, AttributeError):
+            return {}
+        return got if isinstance(got, dict) else {}
+
+    def use_cache(self, path) -> None:
+        """Keep the PR file lists in the file `path` (the snapshot file): read the entries there now, and let
+        `save_cache` write the misses back. The open PRs are still read live by the caller, so a head SHA that
+        differs from the cached one is a miss."""
+        self._cache_path = Path(path)
+        for k, v in self._cached_files(path).items():
+            self._pr_files.setdefault(k, v)
+
+    def save_cache(self) -> None:
+        """Write the entries fetched since `use_cache` back into the cache file, atomically (a temp file in the same
+        directory, then a rename), keeping whatever else the file holds. Best effort: a cache that cannot be written
+        costs the next call its fetches, nothing more."""
+        if not (self._cache_path and self._dirty):
+            return
+        path = self._cache_path
+        try:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = None
+            data = data if isinstance(data, dict) else {}
+            # Entries another process wrote since we read stay; ours win for the same PR.
+            data["pr_files"] = self._open_entries({**self._cached_files(path), **self._pr_files})
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".snapshot-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            self._dirty = False
+        except OSError:
+            pass
+
+    def cache_pr_files(self) -> None:
+        """Read the file list of every open PR whose files a reader may need (not release-please's), so `write` stores
+        them and the readers of the file fetch nothing."""
+        for pr in self.prs:
+            if isinstance(pr, dict) and isinstance(pr.get("number"), int) \
+                    and not str(pr.get("headRefName") or "").startswith(RELEASE_PLEASE_PREFIX):
+                self.pr_files(pr)
 
     def blockers(self, issue) -> list:
         """(number, from_body) for each open blocker of an issue (a dict, or a number: absent means closed, so none)."""
