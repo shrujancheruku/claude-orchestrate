@@ -164,13 +164,36 @@ class Holds(unittest.TestCase):
             "b.py (held by open PR #10)", "c.py (held by building #11)", "overlap: none"])
 
     def test_pre_merge_check_uses_the_prs_diff(self):
+        # PR 9 is mine; building #11 holds b.py too, so the overlap is real whatever the PR order.
         self.gh({9: ["a.py", "b.py"], 10: ["b.py"]}, branches={9: "7-mine", 10: "8-other"}, open_tickets=[7, 11])
-        self.state({7: ["a.py"], 11: ["z.py"]})
+        self.state({7: ["a.py"], 11: ["b.py"]})
         r = self.holds("--pr", "9")
         self.assertEqual(r.returncode, 1)
         self.assertEqual(r.stdout.splitlines(), [
-            "b.py (held by open PR #10)", "z.py (held by building #11)",
-            "overlap: b.py (held by open PR #10)"])
+            "b.py (held by open PR #10, building #11)", "overlap: b.py (held by open PR #10, building #11)"])
+
+    def test_the_younger_of_two_open_prs_waits_for_the_older_and_exits_3(self):
+        self.gh({9: ["a.py", "b.py"], 5: ["b.py", "c.py"]}, branches={9: "7-mine", 5: "4-older"})
+        r = self.holds("--pr", "9")
+        self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (3, "waits for #4 (PR #5) to merge: b.py"), r.stdout + r.stderr)
+        self.assertNotIn("overlap:", r.stdout)
+
+    def test_the_older_of_two_open_prs_passes_and_names_the_younger(self):
+        self.gh({9: ["b.py"], 10: ["b.py"]}, branches={9: "7-mine", 10: "8-other"})
+        r = self.holds("--pr", "9")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.stdout.splitlines()[-2:], ["younger PR (not counted): b.py (held by open PR #10)", "overlap: none"])
+
+    def test_waiting_on_a_pr_while_a_building_ticket_holds_the_path_is_an_overlap(self):
+        self.gh({9: ["b.py"], 5: ["b.py"]}, branches={9: "7-mine", 5: "4-older"}, open_tickets=[11])
+        self.state({11: ["b.py"]})
+        r = self.holds("--pr", "9")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertNotIn("waits for", r.stdout)
+
+    def test_dispatch_time_check_still_counts_an_open_pr_holder(self):
+        self.gh({5: ["b.py"]}, branches={5: "4-older"})
+        self.assertEqual(self.holds("--touch-map", "b.py", "--ticket", "7").returncode, 1)
 
     def test_a_release_please_pr_holds_nothing_and_a_human_pr_on_its_files_is_held(self):
         rp = "release-please--branches--main--components--orchestrate"
@@ -278,6 +301,18 @@ class Holds(unittest.TestCase):
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 2)
         self.assertNotIn("Traceback", r.stderr)
+
+    def test_an_error_nothing_maps_is_exit_2_with_one_line_not_a_traceback(self):
+        # An unreadable config is an OSError/UnicodeDecodeError outside the mapped set: exit 2, never Python's exit 1 (#424).
+        self.gh()
+        d = self.env.repo / ".claude"
+        d.mkdir(exist_ok=True)
+        (d / "orchestration.md").write_bytes(b"\xff\xfe\x00bad")
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertRegex(r.stderr.strip(), r"^holds: could not run: \w+: ")
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
 
     def test_gh_unavailable_could_not_run(self):
         r = self.env.run("holds", "--touch-map", "a.py", "--ticket", "7", check=False, no_gh=True)
