@@ -508,5 +508,24 @@ class Holds(unittest.TestCase):
         self.assertIn("holds: gh:", r.stderr)
 
 
+    def test_a_map_the_grammar_rejects_at_dispatch_is_exit_2_naming_the_entry(self):
+        self.gh()
+        for bad in ("scripts/a.py scripts/b.py", "see scripts/x.py", "a.py\nb.py"):
+            with self.subTest(bad):
+                r = self.holds("--touch-map", bad, "--ticket", "7")
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertIn("bad touch-map entry", r.stderr)
+
+    def test_an_unparsed_stored_map_holds_every_path_and_names_the_ticket(self):
+        self.gh(open_tickets=[12])
+        for stored in ("unparsed:see scripts/x.py", "a.py:10, 20"):  # rebuild-state's marker, and a hand edit
+            self.state({12: stored})
+            with self.subTest(stored):
+                r = self.holds("--touch-map", "anything/else.py", "--ticket", "7")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("overlap: anything/else.py (held by building #12)", r.stdout)
+                self.assertIn("building #12 has an unparsed touch map", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

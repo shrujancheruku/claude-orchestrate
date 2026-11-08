@@ -38,10 +38,36 @@ class WorkerReport(unittest.TestCase):
             path = empty
         else:
             path = f"{self.env.bin}{os.pathsep}{os.environ['PATH']}"
-        env = dict(os.environ, PATH=path, FAKE_GH_STATE=str(self.env.gh_state))
+        env = dict(os.environ, PATH=path, FAKE_GH_STATE=str(self.env.gh_state), ORCHESTRATE_GH_5XX_TRIES="1")
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "worker-report"), ticket, "--branch", BRANCH, "--repo", "."],
             cwd=self.env.repo, env=env, input=text, capture_output=True, text=True, check=check)
+
+    def reviewer(self, text):
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "494", "--reviewer"],
+                           cwd=self.env.repo, input=text, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_reviewer_report_with_a_suite_line_is_valid(self):
+        for suite in ("pass", "fail 2", "not run (S tier)", "`pass`"):
+            with self.subTest(suite=suite):
+                self.assertEqual(self.reviewer(f"verdict: approve\nround: 1\nsuite: {suite}\nblocking: 0\n"), "valid")
+
+    def test_reviewer_report_without_a_suite_line_is_incomplete(self):
+        self.assertEqual(self.reviewer("verdict: approve\nround: 1\nblocking: 0\n"), "incomplete suite-missing")
+
+    def test_reviewer_report_with_not_run_and_no_reason_is_incomplete(self):
+        for suite in ("not run", "not run ()"):
+            with self.subTest(suite=suite):
+                self.assertEqual(self.reviewer(f"suite: {suite}\n"), "incomplete suite-not-run-without-reason")
+
+    def test_reviewer_report_with_another_suite_value_is_incomplete(self):
+        self.assertEqual(self.reviewer("suite: probably fine\n"), "incomplete suite-unrecognised")
+
+    def test_reviewer_mode_needs_no_branch_and_writes_no_event(self):
+        self.reviewer("suite: pass\n")
+        self.assertEqual(self.env.events(), [])
 
     def verdict(self, text, **kw):
         r = self.report(text, **kw)

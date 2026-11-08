@@ -54,7 +54,9 @@ def label_strings(root: Path) -> dict:
 
 
 def _edit_times(node) -> list:
-    return [t["editedAt"] for t in ((node or {}).get("userContentEdits") or {}).get("nodes") or [] if t.get("editedAt")]
+    """The latest edit time of an issue or comment node (all the scripts compare is "edited after T"), as a list."""
+    edited = (node or {}).get("lastEditedAt")
+    return [edited] if edited else []
 
 
 def from_nodes(nodes) -> list:

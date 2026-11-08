@@ -45,6 +45,7 @@ class RetryTest(unittest.TestCase):
         github._paths.clear()
         self.addCleanup(github._paths.clear)
         os.environ.pop("ORCHESTRATE_GH_WAIT", None)
+        os.environ.pop("ORCHESTRATE_GH_5XX_TRIES", None)
         github.waited = 0.0
 
     def run_call(self, *replies, clock=1000.0):
@@ -85,6 +86,48 @@ class RetryTest(unittest.TestCase):
         text = "gh: API rate limit exceeded (HTTP 403)\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 1005"
         fake, sleeps, out, _ = self.run_call(fail(text), OK)
         self.assertEqual((out, len(sleeps)), ("done\n", 1))
+
+    def test_a_502_waits_then_succeeds(self):
+        fake, sleeps, out, err = self.run_call(fail("gh: HTTP 502"), OK)
+        self.assertEqual((out, err, sleeps, fake.calls), ("done\n", None, [2], 2))
+
+    def test_a_502_every_time_fails_after_the_tries_naming_the_5xx(self):
+        fake, sleeps, _, err = self.run_call(fail("gh: HTTP 502"))
+        self.assertEqual((fake.calls, sleeps, err.kind), (5, [2, 4, 8, 16], github.FAILED))
+        self.assertIn("HTTP 502", err.message)
+
+    def test_a_502_past_the_wait_budget_raises_naming_the_5xx(self):
+        os.environ["ORCHESTRATE_GH_WAIT"] = "3"
+        fake, sleeps, _, err = self.run_call(fail("gh: HTTP 502"))
+        self.assertEqual((fake.calls, sleeps), (2, [2]))
+        self.assertIn("HTTP 502", err.message)
+        self.assertIn("rate limit until", err.message)
+
+    def test_a_503_in_a_rest_reply_with_headers_is_retried(self):
+        rest = common.Run(1, "HTTP/2.0 503 Service Unavailable\n\n{}", "gh: Service Unavailable (HTTP 503)")
+        fake, sleeps, out, _ = self.run_call(rest, OK)
+        self.assertEqual((out, sleeps), ("done\n", [2]))
+
+    def test_a_502_in_a_graphql_call_is_retried(self):
+        fake = FakeGh(fail("gh: HTTP 502"), OK)
+        with unittest.mock.patch.object(common, "run", fake), \
+                unittest.mock.patch.object(github, "sleep", lambda s: None), \
+                unittest.mock.patch.object(github, "clock", lambda: 1000.0), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            out = github.call("api", "graphql", "-f", "query=query{viewer{login}}", cwd=self.dir.name)
+        self.assertEqual((out, fake.calls), ("done\n", 2))
+
+    def test_the_5xx_tries_can_be_cut_to_one(self):
+        os.environ["ORCHESTRATE_GH_5XX_TRIES"] = "1"
+        try:
+            fake, sleeps, _, err = self.run_call(fail("gh: HTTP 502"))
+        finally:
+            os.environ.pop("ORCHESTRATE_GH_5XX_TRIES")
+        self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
+
+    def test_a_404_is_not_retried(self):
+        fake, sleeps, _, err = self.run_call(fail("gh: Not Found (HTTP 404)"))
+        self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
 
     def test_other_failures_are_not_retried(self):
         fake, sleeps, _, err = self.run_call(fail("gh: Not Found (HTTP 404)"))
@@ -241,13 +284,48 @@ class RetryTest(unittest.TestCase):
         fake, sleeps, out, _ = self.run_call(OK)
         self.assertEqual((out, sleeps), ("done\n", []))
 
-    def test_a_write_is_retried_only_on_a_rate_limit(self):
-        for text in ("gh: Validation Failed (HTTP 422)", "gh: Server Error (HTTP 502)", "gh: Forbidden (HTTP 403)"):
+    def test_an_unmarked_write_is_retried_only_on_a_rate_limit(self):
+        for text in ("gh: Validation Failed (HTTP 422)", "gh: Forbidden (HTTP 403)", "gh: Server Error (HTTP 502)"):
             fake, sleeps = FakeGh(fail(text)), []
             with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append):
                 with self.assertRaises(github.GhError):
                     github.call("api", "--method", "POST", "x", cwd=self.dir.name)
             self.assertEqual((fake.calls, sleeps), (1, []), text)
+
+    def test_a_write_marked_idempotent_is_retried_on_a_502(self):
+        fake, sleeps = FakeGh(fail("gh: Server Error (HTTP 502)"), OK), []
+        with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            out = github.call("api", "--method", "POST", "x", cwd=self.dir.name, idempotent=True)
+        self.assertEqual((out, fake.calls), ("done\n", 2))
+
+    def test_a_graphql_mutation_is_a_write_and_a_query_is_a_read(self):
+        for query, calls in (("mutation { x }", 1), ("query { x }", 2)):
+            fake, sleeps = FakeGh(fail("gh: Server Error (HTTP 502)"), OK), []
+            with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append), \
+                    unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+                try:
+                    github.call("api", "graphql", "-f", f"query={query}", cwd=self.dir.name)
+                except github.GhError:
+                    pass
+            self.assertEqual(fake.calls, calls, query)
+
+    def test_a_4xx_whose_body_echoes_a_5xx_is_not_retried(self):
+        echo = common.Run(1, "HTTP/2.0 422 X\n\n{}", "gh: Validation Failed (HTTP 422): upstream said HTTP 502")
+        fake, sleeps, _, err = self.run_call(echo, OK)
+        self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
+
+    def test_close_issue_and_delete_branch_are_marked_idempotent(self):
+        seen = []
+
+        def fake_call(*args, cwd=None, idempotent=False):
+            seen.append(idempotent)
+            return ""
+        with unittest.mock.patch.object(github, "call", fake_call):
+            github.close_issue(5)
+            github.delete_branch("b")
+        self.assertEqual(seen[0], True)
+        self.assertIn(True, seen[1:])  # the DELETE
 
     def test_missing_gh_is_not_retried(self):
         fake, _, _, err = self.run_call(common.Run(common.NOT_FOUND, "", "gh: no such file"))
@@ -314,6 +392,29 @@ class CallLogTest(unittest.TestCase):
         self.assertIsInstance(e["ms"], int)
         self.assertTrue(e["script"])
         self.assertNotIn('"id"', self.log.read_text())  # no body
+
+    def test_a_graphql_call_logs_the_rate_limit_cost_the_query_asked_for(self):
+        body = '{"data": {"rateLimit": {"cost": 3}}}'
+        ok = common.Run(0, reply(200, body, x_ratelimit_used=10, x_ratelimit_resource="graphql"), "")
+        self.run_call([ok], "api", "graphql", "-f", "query=query { rateLimit { cost } }")
+        [e] = self.events()
+        self.assertEqual(e["cost"], 3)
+
+    def test_a_graphql_call_without_cost_logs_the_used_delta(self):
+        github._last_used.clear()
+        self.addCleanup(github._last_used.clear)
+        calls = [common.Run(0, reply(200, '{"data": {}}', x_ratelimit_used=u, x_ratelimit_resource="graphql"), "")
+                 for u in (100, 104)]
+        for c in calls:
+            self.run_call([c], "api", "graphql", "-f", "query=query { viewer { login } }")
+        first, second = self.events()
+        self.assertNotIn("cost", first)  # nothing to subtract from yet
+        self.assertEqual(second["cost"], 4)
+
+    def test_a_rest_call_logs_no_cost(self):
+        self.run_call([common.Run(0, reply(200, "{}", x_ratelimit_used=10, x_ratelimit_resource="core"), "")], "api", "x")
+        [e] = self.events()
+        self.assertNotIn("cost", e)
 
     def test_a_retried_call_writes_one_event_per_attempt_and_a_wait(self):
         limited = common.Run(1, reply(403, "{}", retry_after=2, x_ratelimit_remaining=0),

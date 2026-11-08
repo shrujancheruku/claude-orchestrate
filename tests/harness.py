@@ -254,6 +254,7 @@ class ScriptEnv:
             os.environ,
             PATH=search_path,
             FAKE_GH_STATE=str(self.gh_state),
+            ORCHESTRATE_GH_5XX_TRIES="1",  # a fake gh's 5xx is a plain failure here; github.call's retry is tested in test_github_retry
         )
         if self.gh_log:
             env.pop("ORCHESTRATE_GH_LOG", None)

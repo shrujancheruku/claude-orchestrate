@@ -7,6 +7,7 @@ The worktree-list parser stays in `common.worktrees`, which the liveness block t
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,8 +157,68 @@ def scratch_worktrees(pr, cwd) -> list:
             and Path(wt["path"]).resolve() != main]
 
 
-def remove_scratch(pr, cwd) -> list:
+def remove_scratch(pr, head_oid, cwd) -> list:
     """Remove PR `pr`'s scratch worktrees (`scratch_worktrees`) and say what happened to each, one line per tree.
-    The reviewer is refused `git worktree remove` by the guard, so the merge removes them (ADR-0004); plainly,
-    through `remove_worktree`, so a dirty tree is kept and reported. Never raises."""
-    return [remove_worktree(path, cwd) for path in scratch_worktrees(pr, cwd)]
+    The reviewer is refused `git worktree remove` by the guard, so merge and rescue remove them (ADR-0004) when the
+    PR is merged, closed unmerged, abandoned or rescued. Each goes through `worktree_refusal` (a worktree of this
+    repo, no live foreign lock, HEAD in the PR at `head_oid`), then plainly through `remove_worktree`, so a dirty
+    tree is kept and reported. Never raises."""
+    lines = []
+    for path in scratch_worktrees(pr, cwd):
+        why = worktree_refusal(path, None, head_oid, cwd, scratch=True)
+        lines.append(f"worktree {path} NOT removed: {why}" if why else remove_worktree(path, cwd))
+    return lines
+
+
+def same_path(a, b):
+    try:
+        return os.path.samefile(a, b)  # symlinks, trailing slashes, case on macOS
+    except OSError:
+        return False
+
+
+def head_in(tree, head_oid, cwd, exact):
+    """True when the worktree's HEAD is the PR head (`exact`) or that or an ancestor of it."""
+    h = common.run("git", "rev-parse", "HEAD", cwd=tree)
+    if h.code != 0 or not head_oid:
+        return False
+    if h.stdout.strip() == head_oid:
+        return True
+    return not exact and common.run("git", "merge-base", "--is-ancestor", h.stdout.strip(), head_oid, cwd=cwd).code == 0
+
+
+def worktree_refusal(path, branch, head_oid, cwd, scratch=False):
+    """Why `path` is not the merged PR's worktree (so merge must not unlock or remove it), or None when it is.
+
+    Removed only: a linked worktree of this repo (matched with samefile; a path no worktree matches is refused),
+    never the main checkout, never one whose lock is held by another live session, and either on the PR's branch,
+    or on the harness's `worktree-agent-<id>` branch of the `agent-<id>` directory with HEAD at the PR head or
+    an ancestor of it, or detached at the PR head (a lead-PR worktree). With `scratch` (a reviewer's `pr-<n>` tree,
+    which `scratch_worktrees` matched) the branch rules do not apply: it must be detached, with HEAD at the PR head or
+    an ancestor of it. A refusal is a skip, not a failure: the PR is already merged, closed, abandoned or rescued."""
+    full = Path(cwd) / path
+    trees = common.worktrees(cwd)
+    if not trees:
+        return "cannot list worktrees"
+    if same_path(full, trees[0]["path"]):
+        return "it is the main checkout"
+    wt = next((t for t in trees if same_path(full, t["path"])), None)
+    if wt is None:
+        return "it is not a worktree of this repo"
+    state, _ = common.worker_liveness(wt["locked"])
+    if state == "foreign-live":
+        return "its lock is held by another live session"
+    if scratch:
+        if wt["branch"] is None and head_in(wt["path"], head_oid, cwd, exact=False):
+            return None
+        return "its HEAD is not the PR head or an ancestor of it" if wt["branch"] is None else f"it is on {wt['branch']}, not detached"
+    name = Path(wt["path"]).name
+    if branch and wt["branch"] == branch:
+        return None
+    if wt["branch"] and name.startswith("agent-") and wt["branch"] == f"worktree-{name}":
+        if head_in(wt["path"], head_oid, cwd, exact=False):
+            return None
+        return f"its HEAD is not the PR head or an ancestor of it"
+    if wt["detached"] and head_in(wt["path"], head_oid, cwd, exact=True):
+        return None
+    return f"it is on {wt['branch'] or 'a detached HEAD'}, not {branch or 'the PR branch'} or its worker branch at the PR head"

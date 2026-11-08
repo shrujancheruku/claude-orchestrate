@@ -35,6 +35,10 @@ GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exis
 NO_REPO = re.compile(r"not a git repository|unable to read current working directory|"
                      r"cannot determine current working directory|getcwd", re.I)
 
+# GitHub bills a GraphQL call as (1 + the nodes each connection is asked under) / 100 points: a connection inside a
+# 100-node page costs 100 requests, one inside those 100 more costs 10,000. So the comments' edit history
+# (`userContentEdits`, 100 x 100 nodes) made this query ~105 points (#498). The scripts read only whether something
+# was edited after a time, which `lastEditedAt` answers with no connection: 1 + 4 x 100 requests, ~5 points.
 ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
     issues(first: 100, after: $after, states: OPEN, orderBy: {field: CREATED_AT, direction: ASC}) {
@@ -50,8 +54,8 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         labels(first: 30) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
-        userContentEdits(first: 20) { nodes { editedAt } }
-        comments(last: 100) { nodes { body createdAt userContentEdits(first: 20) { nodes { editedAt } } } }
+        lastEditedAt
+        comments(last: 100) { nodes { body createdAt lastEditedAt } }
       }
     }
   }
@@ -141,6 +145,22 @@ RATE_LIMITED = re.compile(r"secondary rate limit|abuse detection|API rate limit 
 RETRY_AFTER = re.compile(r"retry-after:?\s*(\d+)", re.I)
 QUOTA_EMPTY = re.compile(r"x-ratelimit-remaining:?\s*0\b", re.I)
 QUOTA_RESET = re.compile(r"x-ratelimit-reset:?\s*(\d+)", re.I)
+# A GitHub 5xx (500-504) is transient: retried like a secondary limit, on a short ladder (seconds) since no
+# reset is involved. A 4xx other than a rate limit is never retried.
+SERVER_ERROR = re.compile(r"\bHTTP 50[0-4]\b")
+SERVER_ERROR_PAUSES = (2, 4, 8, 16)
+
+
+def server_error_tries() -> int:
+    """ORCHESTRATE_GH_5XX_TRIES when it is a positive integer, else TRIES; the test harness sets 1 so a fake gh's
+    5xx fails at once instead of sleeping through the ladder."""
+    try:
+        value = int(os.environ.get("ORCHESTRATE_GH_5XX_TRIES", ""))
+    except ValueError:
+        return TRIES
+    return min(value, TRIES) if value > 0 else TRIES
+
+
 TRIES = 5
 # A reset further off than this is the hourly quota running out: waiting it out here would stall the script.
 PRIMARY_RESET_AFTER = 120
@@ -393,8 +413,32 @@ def _log(event: dict, cwd=None, args=None) -> None:
         pass
 
 
-def _log_attempt(args, cwd, attempt, ms, outcome, status, headers) -> None:
+_last_used: dict = {}  # x-ratelimit-resource -> the `used` this process last saw, for the per-call delta
+
+
+def _graphql_cost(stdout, headers):
+    """Points one GraphQL call cost: `rateLimit.cost` when the query asked for it, else how far the bucket's
+    `used` counter rose since this process's previous call (None for the first call, or without headers)."""
+    try:
+        cost = json.loads(stdout)["data"]["rateLimit"]["cost"]
+        if isinstance(cost, int):
+            return cost
+    except (ValueError, KeyError, TypeError):
+        pass
+    used = _int(headers or {}, "x-ratelimit-used")
+    resource = (headers or {}).get("x-ratelimit-resource")
+    if used is None or resource is None:
+        return None
+    before, _last_used[resource] = _last_used.get(resource), used
+    return used - before if before is not None and used >= before else None
+
+
+def _log_attempt(args, cwd, attempt, ms, outcome, status, headers, stdout="") -> None:
     event = {"attempt": attempt, "outcome": outcome, "ms": ms, "status": status}
+    if outcome == "ok" and args and args[0] == "api" and "graphql" in args:
+        cost = _graphql_cost(stdout, headers)
+        if cost is not None:
+            event["cost"] = cost
     if headers is None:
         event["headers"] = "unavailable"  # a subcommand, or a paginated api call: gh shows none
     else:
@@ -403,7 +447,7 @@ def _log_attempt(args, cwd, attempt, ms, outcome, status, headers) -> None:
     _log(event, cwd, args)
 
 
-def call(*args, cwd=None) -> str:
+def call(*args, cwd=None, idempotent: bool = False) -> str:
     """Run `gh <args>` and return stdout; raise GhError (missing, failed or ratelimited).
 
     Before the first try it waits out a reset another process recorded in STATE_FILE (or raises `ratelimited`
@@ -414,6 +458,11 @@ def call(*args, cwd=None) -> str:
 
     `gh api` runs with --include (paginated calls excepted): the headers are split off before the body is returned,
     and each attempt, with its status and rate-limit headers, is logged (see the call log above).
+
+    A 5xx (HTTP 500-504) is retried on a short ladder only for a read or a write the caller marks `idempotent`
+    (repeating it leaves the same state): a 5xx can come after GitHub applied a write, and repeating a creating
+    POST, a merge or a delete-style batch could then act twice. An unmarked write fails at once on a 5xx and the
+    caller decides (merge re-reads the state first). A rate limit is retried for every call: nothing ran.
     """
     global waited
     waited = 0.0  # the budget is for this call alone: watch-ci and merge --interval loop for hours in one process
@@ -436,13 +485,28 @@ def call(*args, cwd=None) -> str:
         if p.returncode == common.NOT_FOUND:
             raise GhError(MISSING, common.one_line(p.stderr))
         if p.returncode == 0:
-            _log_attempt(args, cwd, attempt, ms, "ok", status, headers)
+            _log_attempt(args, cwd, attempt, ms, "ok", status, headers, stdout)
             return stdout
         text = f"{p.stderr}\n{p.stdout}"
         limit = _rate_limit(text)
         if limit is None:
+            # The status line is the truth; the text is searched only when gh showed none, so a 4xx whose body
+            # echoes "HTTP 502" is not retried.
+            server = status in (500, 501, 502, 503, 504) if status is not None else bool(SERVER_ERROR.search(text))
+            server = server and (idempotent or not describe(args)["write"])
             _log_attempt(args, cwd, attempt, ms, "failed", status, headers)
-            raise GhError(FAILED, common.one_line(p.stderr or stdout))
+            if not server:
+                raise GhError(FAILED, common.one_line(p.stderr or stdout))
+            message = common.one_line(_evidence(text))
+            if attempt >= server_error_tries():
+                raise GhError(FAILED, message)
+            pause = SERVER_ERROR_PAUSES[min(attempt, len(SERVER_ERROR_PAUSES)) - 1]
+            print(f"github: HTTP {status or 502}, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
+            try:
+                _wait_until(clock() + pause, cwd)
+            except GhError as e:  # over the call's wait budget: say what failed, not only when to retry
+                raise GhError(e.kind, f"{message}; {e.message}")
+            continue
         _log_attempt(args, cwd, attempt, ms, "ratelimited", status, headers)
         message = common.one_line(_evidence(text))
         if not api and not (RETRY_AFTER.search(text) or QUOTA_EMPTY.search(text) or QUOTA_RESET.search(text)):
@@ -463,10 +527,10 @@ def call(*args, cwd=None) -> str:
         _wait_until(clock() + pause, cwd)
 
 
-def call_json(*args, shape=dict, cwd=None):
+def call_json(*args, shape=dict, cwd=None, idempotent: bool = False):
     """`call`, parsed as JSON of type `shape`; anything else is malformed."""
     try:
-        data = json.loads(call(*args, cwd=cwd))
+        data = json.loads(call(*args, cwd=cwd, idempotent=idempotent))
     except ValueError:
         raise GhError(MALFORMED, "gh returned malformed JSON") from None
     if not isinstance(data, shape):
@@ -633,7 +697,8 @@ def delete_branch(branch: str, cwd=None) -> str:
         if e.kind == FAILED and GONE.search(e.message):
             return "already gone"
     try:
-        call("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd)
+        # Idempotent: a repeat after a delete that landed reads as GONE below.
+        call("api", "-X", "DELETE", f"repos/{{owner}}/{{repo}}/git/refs/heads/{quoted}", cwd=cwd, idempotent=True)
     except GhError as e:
         if e.kind == FAILED and GONE.search(e.message):
             return "already gone"
@@ -701,7 +766,7 @@ def issue_claim(issue, cwd=None) -> tuple:
 
 def close_issue(issue, cwd=None) -> None:
     call("api", "-X", "PATCH", f"repos/{{owner}}/{{repo}}/issues/{_pr_number(issue)}", "-f", "state=closed",
-         "-f", "state_reason=completed", cwd=cwd)
+         "-f", "state_reason=completed", cwd=cwd, idempotent=True)  # closing a closed issue changes nothing
 
 
 def _pull(p: dict) -> dict:
