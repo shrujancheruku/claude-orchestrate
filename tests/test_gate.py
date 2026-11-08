@@ -401,7 +401,7 @@ class GateTest(unittest.TestCase):
                 self.prime(diff=added_file(path))
                 out = self.failed_only(self.gate(), "no secrets added")
                 self.assertIn(f"path {path}", out)
-                runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
+                self.env.clear_events()
 
     def test_secret_lines_fail(self):
         for line in ("-----BEGIN RSA PRIVATE " + "KEY-----", "-----BEGIN PRIVATE " + "KEY-----", "k = AKIA" + "ABCDEFGHIJKLMNOP",
@@ -409,7 +409,7 @@ class GateTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.prime(diff=added_file("src/ok.py", line))
                 self.failed_only(self.gate(), "no secrets added")
-                runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
+                self.env.clear_events()
 
     def test_a_removed_secret_line_or_deleted_secret_file_passes(self):
         diff = ("diff --git a/.env b/.env\ndeleted file mode 100644\n--- a/.env\n+++ /dev/null\n@@ -1 +0,0 @@\n-K=v\n"
@@ -450,11 +450,11 @@ class GateTest(unittest.TestCase):
                 self.prime(diff=added_file(f"web/{lock}", "{}"))
                 out = self.failed_only(self.gate(), "lockfile changes have a manifest change")
                 self.assertIn(f"web/{lock} changed but {manifest} did not", out)
-                runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
+                self.env.clear_events()
                 # the same lockfile with its manifest beside it passes
                 self.prime(diff=added_file(f"web/{lock}", "{}") + added_file(f"web/{manifest}", "{}"))
                 self.assertEqual(self.gate().returncode, 0)
-                runlog.log_path(self.env.repo, runlog.EVENTS_LOG).unlink()
+                self.env.clear_events()
 
     def test_manifest_in_another_directory_does_not_count(self):
         self.prime(diff=added_file("a/package-lock.json", "{}") + added_file("b/package.json", "{}"))
