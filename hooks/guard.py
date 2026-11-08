@@ -1244,7 +1244,7 @@ THREADS_ORCHESTRATOR_FLAGS = ("--all", "--fixed", "--left", "--verbose")
 
 def orchestrator_threads_form(cmd: Command, args: list) -> bool:
     """True when the orchestrator's threads call is one of its routine forms, each naming its PR: `<pr>`,
-    `<pr> --all`, or `<pr> resolve <id> --fixed|--left <value>`, with an optional trailing `--verbose`. Like
+    `<pr> --all`, or `<pr> resolve <id>... --fixed|--left <value>`, with an optional trailing `--verbose`. Like
     the worker's (#379) the script is the first word (no env prefix, no wrapper) and every flag is one of
     THREADS_ORCHESTRATOR_FLAGS in full. Anything else (`--repo`, `reopen`, an abbreviation, a number-less
     call) is left to the permission layer, so a mistaken `resolve` can't land on another PR or repository."""
@@ -1256,8 +1256,9 @@ def orchestrator_threads_form(cmd: Command, args: list) -> bool:
     rest = words[1:]
     if rest in ([], ["--all"]):
         return True
-    return (len(rest) == 4 and rest[0] == "resolve" and rest[2] in ("--fixed", "--left")
-            and not rest[1].startswith("-") and not rest[3].startswith("-"))
+    # `resolve` takes one or more thread ids, then exactly one of --fixed/--left with its value (scripts/threads).
+    return (len(rest) >= 4 and rest[0] == "resolve" and rest[-2] in ("--fixed", "--left")
+            and not any(w.startswith("-") for w in rest[1:-2] + rest[-1:]))
 
 
 def threads_refusal(role: str, parsed: "Parsed") -> str | None:

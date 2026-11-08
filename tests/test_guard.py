@@ -1024,6 +1024,8 @@ class RoutineApprovalTest(unittest.TestCase):
         for command in (f"{SCRIPTS}/threads 12", f"{SCRIPTS}/threads 12 --all", f"{SCRIPTS}/threads 12 --verbose",
                         f"{SCRIPTS}/threads 12 resolve PRRT_x --left 'the worker finished; left for a follow-up'",
                         f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --verbose",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y --left x",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y PRRT_z --fixed abc1234",
                         f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed abc1234"):
             with self.subTest(command):
                 self.assertTrue(approved(None, command, self.main))
@@ -1036,6 +1038,9 @@ class RoutineApprovalTest(unittest.TestCase):
             f"{SCRIPTS}/threads 12 resolve PRRT_x --left", f"{SCRIPTS}/threads 12 resolve PRRT_x",
             f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --fixed y",
             f"{SCRIPTS}/threads 12 resolve --left x --fixed y",
+            f"{SCRIPTS}/threads 12 resolve --left x",  # no thread id
+            f"{SCRIPTS}/threads 12 resolve PRRT_x -y --left x",  # an id starting with a dash
+            f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y --left x --repo /other",
             f"{SCRIPTS}/threads 12 resolve PRRT_x --left --repo",
             f"{SCRIPTS}/threads 12 reopen PRRT_x --why x", f"{SCRIPTS}/threads 12 --repo /other",
             f"{SCRIPTS}/threads 12 --all extra", f"{SCRIPTS}/threads PRRT_x resolve 12 --left x",

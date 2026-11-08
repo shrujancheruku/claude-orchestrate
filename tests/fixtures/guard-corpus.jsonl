@@ -609,3 +609,6 @@
 {"role": "orchestrate:orchestrator", "command": "env /p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x'", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x' && rm -rf x", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/tmp/x/scripts/threads 12 resolve ID --left 'x'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID1 ID2 --left 'the worker finished; left for a follow-up'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve --left 'x'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID -y --left 'x'", "expected": "silent", "source": "hand"}
