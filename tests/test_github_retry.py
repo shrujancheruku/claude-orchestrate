@@ -275,13 +275,20 @@ class RetryTest(unittest.TestCase):
         fake, sleeps, out, _ = self.run_call(OK)
         self.assertEqual((out, sleeps), ("done\n", []))
 
-    def test_a_write_is_retried_only_on_a_rate_limit(self):
-        for text in ("gh: Validation Failed (HTTP 422)", "gh: Server Error (HTTP 502)", "gh: Forbidden (HTTP 403)"):
+    def test_a_write_is_retried_only_on_a_rate_limit_or_a_5xx(self):
+        for text in ("gh: Validation Failed (HTTP 422)", "gh: Forbidden (HTTP 403)"):
             fake, sleeps = FakeGh(fail(text)), []
             with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append):
                 with self.assertRaises(github.GhError):
                     github.call("api", "--method", "POST", "x", cwd=self.dir.name)
             self.assertEqual((fake.calls, sleeps), (1, []), text)
+
+    def test_a_write_hitting_a_502_is_retried(self):
+        fake, sleeps = FakeGh(fail("gh: Server Error (HTTP 502)"), OK), []
+        with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            out = github.call("api", "--method", "POST", "x", cwd=self.dir.name)
+        self.assertEqual((out, fake.calls), ("done\n", 2))
 
     def test_missing_gh_is_not_retried(self):
         fake, _, _, err = self.run_call(common.Run(common.NOT_FOUND, "", "gh: no such file"))
