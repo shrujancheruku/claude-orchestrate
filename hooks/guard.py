@@ -1238,6 +1238,28 @@ def numberless_threads_form(cmd: Command, args: list) -> str | None:
     return words[0] if words[0] in ("resolve", "reopen") else None
 
 
+# The only flags the orchestrator's threads call may carry, spelled in full and each once (#389).
+THREADS_ORCHESTRATOR_FLAGS = ("--all", "--fixed", "--left", "--verbose")
+
+
+def orchestrator_threads_form(cmd: Command, args: list) -> bool:
+    """True when the orchestrator's threads call is one of its routine forms, each naming its PR: `<pr>`,
+    `<pr> --all`, or `<pr> resolve <id> --fixed|--left <value>`, with an optional trailing `--verbose`. Like
+    the worker's (#379) the script is the first word (no env prefix, no wrapper) and every flag is one of
+    THREADS_ORCHESTRATOR_FLAGS in full. Anything else (`--repo`, `reopen`, an abbreviation, a number-less
+    call) is left to the permission layer, so a mistaken `resolve` can't land on another PR or repository."""
+    words = [w.text for w in args]
+    if len(cmd.words) - len(args) != 1 or not words or not words[0].isdigit():
+        return False
+    if words and words[-1] == "--verbose":
+        words = words[:-1]
+    rest = words[1:]
+    if rest in ([], ["--all"]):
+        return True
+    return (len(rest) == 4 and rest[0] == "resolve" and rest[2] in ("--fixed", "--left")
+            and not rest[1].startswith("-") and not rest[3].startswith("-"))
+
+
 def threads_refusal(role: str, parsed: "Parsed") -> str | None:
     """Why a scout's or reviewer's call of scripts/threads is refused, or None. Not a threads call, or a
     worker's (every form), is None. Like the review post: an optional leading `cd <path> &&`, nothing else
@@ -1499,6 +1521,8 @@ def approval(role: str | None, command: str, cwd: str) -> bool:
         for pattern, name in ((MERGE_SCRIPT, "merge"), (THREADS_SCRIPT, "threads"), (BOARD_SCRIPT, "board")):
             found = script_call(parsed, pattern)
             if found is not None:
+                if name == "threads" and not orchestrator_threads_form(found[0], found[1]):
+                    return False
                 return own_script(found[0], found[1], cwd, name)
         return plain_gh and parsed.calls[0].is_sub("issue") and parsed.calls[0].is_verb("edit", "comment", "create", "close")
     return False

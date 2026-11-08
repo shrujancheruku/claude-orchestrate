@@ -599,3 +599,13 @@
 {"role": "orchestrate:reviewer", "command": "gh pr review 354 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit --body-file .claude/pr-body.md && gh pr ready", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit --body-file .claude/pr-body.md; gh pr ready", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'the worker finished; left for a follow-up'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --fixed abc1234", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads resolve ID --left 'x'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x' --repo /other", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x' --rep /other", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "GH_REPO=o/r /p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "env /p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x' && rm -rf x", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/tmp/x/scripts/threads 12 resolve ID --left 'x'", "expected": "silent", "source": "hand"}
