@@ -2,7 +2,7 @@
 
     touch map = `none` | entry (SEP entry)*          SEP = `,` or `;` or `. ` outside parentheses
     entry     = path [`:` L [`-` L]] [`(` note `)`]  backticks around the path are tolerated
-    path      = no `:` or parentheses; may hold a space inside (`a b/c.py`), but not a bare `and`/`or` word
+    path      = no `:` or parentheses; may hold a space inside (`a b/c.py`) unless it reads as two paths or prose (see _bad_path)
     note      = free text; parentheses inside it must balance (`(a (b) c)` is one note)
     `-`       = a hyphen or an en dash (`10-20`, `10–20`)
 
@@ -42,8 +42,24 @@ _ENTRY = re.compile(
     r"(?::(?P<start>\d+)(?:[-–](?P<end>\d+))?)?`?"
     r"(?:\s*\((?P<note>.*)\))?$"
 )
-# A space inside a path is allowed, but prose joining two paths ("a.py and b.py") is not one path.
-_PROSE_WORD = re.compile(r"\s(?:and|or)\s", re.I)
+# A space inside a path is allowed (`a b/c.py`), but only when it cannot be two paths or prose run together. Rule, and
+# its limit: split the path on spaces; reject an empty piece (two spaces), a piece that is a prose word (_PROSE) or bare
+# punctuation (`-`), and two or more pieces that look like a path (a `/` or a file extension). Any control character
+# (a newline, a tab) is rejected anywhere in the entry. So `a.py b.py`, `scripts/a.py scripts/b.py`, `a.py - b.py`,
+# `see scripts/x.py` and `a.py, and b.py` are rejected. The limit: a directory or file whose own name is one of the
+# _PROSE words as a space-separated word or as the first directory of one (`my or dir/x.py`, `brand or/x.py`) is rejected too, and a path whose prose lead-in is not in
+# the list (`touch scripts/x.py`) is read as a path with a space. When in doubt the rule rejects.
+_PROSE = frozenset("and or plus also with then see in into to of for from the edit update add modify change new".split())
+_PATHLIKE = re.compile(r"/|[^.]\.[A-Za-z][A-Za-z0-9]*$")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _bad_path(path: str) -> bool:
+    if " " not in path:
+        return False
+    pieces = path.split(" ")
+    return (any(not p or p.lower().split("/")[0] in _PROSE or not re.search(r"\w", p) for p in pieces)
+            or sum(bool(_PATHLIKE.search(p)) for p in pieces) > 1)
 
 
 def _balanced(note: str) -> bool:
@@ -79,7 +95,7 @@ def parse(text) -> list:
     entries = []
     for raw in _split(text):
         m = _ENTRY.match(raw)
-        if not m or _PROSE_WORD.search(m["path"]) or not _balanced(m["note"] or "") or re.fullmatch(r"[\d\-–]+", m["path"]) or (m["end"] and int(m["end"]) < int(m["start"])):
+        if not m or _CONTROL.search(raw) or _bad_path(m["path"]) or not _balanced(m["note"] or "") or re.fullmatch(r"[\d\-–]+", m["path"]) or (m["end"] and int(m["end"]) < int(m["start"])):
             raise TouchMapError(f"bad touch-map entry: {raw!r} (want path[:L[-L]] [(note)])")
         path = m["path"][2:] if m["path"].startswith("./") else m["path"]
         note = " ".join(m["note"].split()) if m["note"] else None
