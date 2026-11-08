@@ -45,6 +45,7 @@ class RetryTest(unittest.TestCase):
         github._paths.clear()
         self.addCleanup(github._paths.clear)
         os.environ.pop("ORCHESTRATE_GH_WAIT", None)
+        os.environ.pop("ORCHESTRATE_GH_5XX_TRIES", None)
         github.waited = 0.0
 
     def run_call(self, *replies, clock=1000.0):
@@ -115,6 +116,14 @@ class RetryTest(unittest.TestCase):
                 unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
             out = github.call("api", "graphql", "-f", "query=query{viewer{login}}", cwd=self.dir.name)
         self.assertEqual((out, fake.calls), ("done\n", 2))
+
+    def test_the_5xx_tries_can_be_cut_to_one(self):
+        os.environ["ORCHESTRATE_GH_5XX_TRIES"] = "1"
+        try:
+            fake, sleeps, _, err = self.run_call(fail("gh: HTTP 502"))
+        finally:
+            os.environ.pop("ORCHESTRATE_GH_5XX_TRIES")
+        self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
 
     def test_a_404_is_not_retried(self):
         fake, sleeps, _, err = self.run_call(fail("gh: Not Found (HTTP 404)"))

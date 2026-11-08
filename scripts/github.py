@@ -145,6 +145,18 @@ QUOTA_RESET = re.compile(r"x-ratelimit-reset:?\s*(\d+)", re.I)
 # reset is involved. A 4xx other than a rate limit is never retried.
 SERVER_ERROR = re.compile(r"\bHTTP 50[0-4]\b")
 SERVER_ERROR_PAUSES = (2, 4, 8, 16)
+
+
+def server_error_tries() -> int:
+    """ORCHESTRATE_GH_5XX_TRIES when it is a positive integer, else TRIES; the test harness sets 1 so a fake gh's
+    5xx fails at once instead of sleeping through the ladder."""
+    try:
+        value = int(os.environ.get("ORCHESTRATE_GH_5XX_TRIES", ""))
+    except ValueError:
+        return TRIES
+    return min(value, TRIES) if value > 0 else TRIES
+
+
 TRIES = 5
 # A reset further off than this is the hourly quota running out: waiting it out here would stall the script.
 PRIMARY_RESET_AFTER = 120
@@ -450,7 +462,7 @@ def call(*args, cwd=None) -> str:
             if not server:
                 raise GhError(FAILED, common.one_line(p.stderr or stdout))
             message = common.one_line(_evidence(text))
-            if attempt == TRIES:
+            if attempt >= server_error_tries():
                 raise GhError(FAILED, message)
             pause = SERVER_ERROR_PAUSES[min(attempt, len(SERVER_ERROR_PAUSES)) - 1]
             print(f"github: HTTP {status or 502}, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
