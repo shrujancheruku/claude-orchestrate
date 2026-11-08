@@ -32,7 +32,7 @@ def run_module(tests_dir, module):
     # A temp XDG_CACHE_HOME per module: tests that reach scripts/github.py must never read or write the
     # developer's real rate-limit backoff file.
     with tempfile.TemporaryDirectory() as cache:
-        env = dict(os.environ, PYTHONPATH=path, XDG_CACHE_HOME=cache, ORCHESTRATE_GH_LOG="off")
+        env = dict(os.environ, PYTHONPATH=path, XDG_CACHE_HOME=cache)
         p = subprocess.run([sys.executable, "-m", "unittest", module], cwd=str(tests_dir), env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
     out = p.stdout
