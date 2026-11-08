@@ -182,11 +182,26 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual(self.verdict(text), "valid stopped transient")
         self.assertEqual(self.verdict(text), "valid stopped transient")
         self.assertEqual(self.verdict(text), "valid stopped transient exhausted")
+        events = [e for e in self.env.events() if e["kind"] == "worker-report"]
+        self.assertEqual([e.get("exhausted") for e in events], [None, None, True])
         # A different command starts a new count; another verdict in between resets it.
         other = "status: stopped\nstop-reason: transient\nfailed-command: gh pr create\n"
         self.assertEqual(self.verdict(other), "valid stopped transient")
         self.assertEqual(self.verdict("status: stopped\nstop-reason: ambiguous\n"), "valid stopped ambiguous")
         self.assertEqual(self.verdict(other), "valid stopped transient")
+
+    def test_the_bound_ignores_interim_and_a_bang_prefix(self):
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: transient\nfailed-command: gh pr ready 12\n"),
+                         "valid stopped transient")
+        self.assertEqual(self.verdict("working on it"), "interim")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: transient\nfailed-command: ! gh  pr ready 12\n"),
+                         "valid stopped transient")
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: transient\nfailed-command: gh pr ready 12\n"),
+                         "valid stopped transient exhausted")
+
+    def test_waiting_on_a_person_is_not_a_wait_until_a_time(self):
+        self.assertEqual(self.verdict("status: stopped\nstop-reason: human-only\nstopped-because: waiting until you confirm\n"),
+                         "valid stopped human-only")
 
     def test_exit_2_without_gh(self):
         r = self.report("status: pr-opened\n", check=False, no_gh=True)

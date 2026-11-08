@@ -40,7 +40,8 @@ STOP_REASONS = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only
 # The orchestrator retries a `transient` stop without the developer, at most this many times per failed command.
 TRANSIENT_RETRIES = 2
 RATE_LIMIT = re.compile(r"(?:api|secondary|github) rate[ -]limit|rate[ -]limit (?:exceeded|was hit|reset)", re.I)
-WAIT_UNTIL = re.compile(r"\b(?:wait(?:ing)?|retry|try again|resets?)\s+(?:until|after|at)\b", re.I)
+# The phrase must be followed by a clock time or a date, so "waiting until you confirm" stays a human's.
+WAIT_UNTIL = re.compile(r"\b(?:wait(?:ing)?|retry|try again|resets?)\s+(?:until|after|at)\s+(?:\d|`?\d{4}-\d\d)", re.I)
 RETRY_AFTER = re.compile(r"^[ \t>*-]*retry-after:[ \t]*`*(.*?)`*[ \t]*$", re.I | re.M)
 FAILED_COMMAND = re.compile(r"^[ \t>*-]*failed-command:[ \t]*`*([^\s`].*?)`*[ \t]*$", re.I | re.M)
 STATUS = re.compile(r"^[ \t>*-]*status:[ \t]*(pr-opened|stopped)\b", re.I | re.M)
@@ -153,6 +154,7 @@ def main(argv=None) -> int:
     if words[:3] == ("valid", "stopped", "transient"):
         if transient_run(args.repo, ticket, fields["failed_command"]) >= TRANSIENT_RETRIES:
             words = (*words, "exhausted")
+            fields["exhausted"] = True
     elif words[0] == "valid" and runlog_dup(args.repo, ticket, words, fields):
         words = ("duplicate", *words)
     try:
@@ -163,14 +165,19 @@ def main(argv=None) -> int:
     return 0
 
 
+def norm_command(c) -> str:
+    """A failed command compared without a leading `! ` and with its whitespace collapsed."""
+    return re.sub(r"\s+", " ", re.sub(r"^\s*!\s*", "", c or "")).strip()
+
+
 def transient_run(repo, ticket, command) -> int:
     """How many `transient` stops in a row, newest first and ending at the latest verdict for this ticket, were on
-    this failed command: the retries already spent (a duplicate does not count; any other verdict ends the run)."""
+    this failed command: the retries already spent (a duplicate or an interim does not count; any other verdict ends the run)."""
     n = 0
     for e in reversed(list(common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG)))):
-        if e.get("kind") != runlog.WORKER_REPORT or str(e.get("ref")) != str(ticket) or e.get("outcome") == "duplicate":
+        if e.get("kind") != runlog.WORKER_REPORT or str(e.get("ref")) != str(ticket) or e.get("outcome") in ("duplicate", "interim"):
             continue
-        if e.get("stop_reason") != "transient" or e.get("failed_command") != command:
+        if e.get("stop_reason") != "transient" or norm_command(e.get("failed_command")) != norm_command(command):
             break
         n += 1
     return n
