@@ -190,6 +190,12 @@ class Prompts(unittest.TestCase):
         self.assertNotIn("reviews/<id>/comments", s)
         self.assertNotIn("fixed in <sha>", s)
 
+    def test_worker_weighs_body_minors_and_answers_them_in_a_pr_comment(self):
+        s = self.text("agents/worker.md")
+        self.assertIn("pulls/<pr>/reviews/<id>", s)  # the review body, read as well as the threads
+        self.assertIn("gh pr comment <pr>", s)  # a body minor has no thread to close
+        self.assertIn("outside the PR's diff", self.text("agents/reviewer.md"))
+
     def test_run_skill_does_not_restate_the_reply_form(self):
         s = self.text("skills/run/SKILL.md")
         self.assertIn("closes each minor's thread", s)

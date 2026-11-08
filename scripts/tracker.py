@@ -1,21 +1,33 @@
-"""The takeable rule and the frontier, as pure functions on the open-issues snapshot (ADR-0006, #273).
+"""The takeable rule and the frontier, as pure functions on the open issues, and the Snapshot that holds them (ADR-0006, #273, #337).
 
-Stdlib only, Python 3.9+. A library: imported, never run; it never calls `gh`. `from_nodes` turns
-`github.open_issues`' GraphQL nodes into the plain dicts every other function takes:
+Stdlib only, Python 3.9+. A library: imported, never run. The functions never call `gh`; only a `Snapshot` does, through
+`github`, and once per part per process. `from_nodes` turns `github.open_issues`' GraphQL nodes into the plain dicts every
+other function takes:
     {number, title, url, body, labels (set), claimed, blockers (open native blockers, sorted),
-     sub_issues {total, completed}, parent (number | None)}
-The snapshot is open-only, so an issue number absent from it is closed (or does not exist) and blocks nothing.
+     sub_issues {total, completed}, parent (number | None),
+     body_edits [ISO time], comments [{body, created, edits [ISO time]}]}
+The issues are open-only, so an issue number absent from them is closed (or does not exist) and blocks nothing.
+`Snapshot.blockers` is the one blocker rule (native edges plus the body `Blocked by:` line): frontier, lead-route, gate
+and merge all ask it.
 """
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
+
+import github
 
 WAYFINDER_PREFIX = "wayfinder:"
 # The tracker doc's fallback form: a `Blocked by: #1, #2` line (a bold or quoted lead-in allowed). The colon, or a `#`
 # right after, is required so prose like "Blocked by the outage, see #12" is not a blocker.
 BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*(?::|(?=\s*#))(.*)$", re.I)
 ISSUE_REF = re.compile(r"#(\d+)")
+
+
+def _edit_times(node) -> list:
+    return [t["editedAt"] for t in ((node or {}).get("userContentEdits") or {}).get("nodes") or [] if t.get("editedAt")]
 
 
 def from_nodes(nodes) -> list:
@@ -27,6 +39,9 @@ def from_nodes(nodes) -> list:
         out.append({
             "number": int(n["number"]), "title": n.get("title") or "", "url": n.get("url") or "",
             "body": n.get("body") or "",
+            "body_edits": _edit_times(n),
+            "comments": [{"body": c.get("body") or "", "created": c.get("createdAt"), "edits": _edit_times(c)}
+                         for c in (n.get("comments") or {}).get("nodes") or []],
             "labels": {x["name"] for x in (n.get("labels") or {}).get("nodes") or []},
             "claimed": ((n.get("assignees") or {}).get("totalCount") or 0) > 0,
             "blockers": sorted(int(b["number"]) for b in (n.get("blockedBy") or {}).get("nodes") or []
@@ -100,3 +115,80 @@ def scoped(issues, parent=None, ticket=None) -> list:
     if ticket is not None:
         return [i for i in issues if i["number"] == ticket]
     return list(issues)
+
+
+class Snapshot:
+    """What the tracker says right now: open issues, open PRs, merged PRs of the default branch, and the closed `wontfix`
+    tickets still assigned. Each part is read through `github` on first use and kept, so one process reads each once and
+    a script that needs only the issues never reads the PRs. `Snapshot.read(path)` serves every part from a file that
+    `scripts/snapshot` wrote, and then nothing is fetched."""
+
+    PARTS = ("repo", "issues", "prs", "merged", "abandoned")
+
+    def __init__(self, cwd=None, **parts):
+        self.cwd = cwd
+        self._parts = {k: v for k, v in parts.items() if k in self.PARTS and v is not None}
+
+    @classmethod
+    def open(cls, path, cwd=None):
+        """The snapshot in the file `path`, or a fetching one when `path` is None."""
+        return cls(cwd) if path is None else cls.read(path)
+
+    @classmethod
+    def read(cls, path):
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except OSError as e:
+            raise ValueError(f"cannot read snapshot {path}: {e.strerror or e}") from None
+        if not isinstance(data, dict) or not all(k in data for k in cls.PARTS):
+            raise ValueError(f"{path} is not a snapshot")
+        for i in data["issues"]:
+            i["labels"] = set(i["labels"])
+        return cls(**data)
+
+    def write(self, path) -> None:
+        data = {k: getattr(self, k) for k in self.PARTS}
+        data["issues"] = [dict(i, labels=sorted(i["labels"])) for i in data["issues"]]
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(data), encoding="utf-8")
+
+    def _part(self, name, fetch):
+        if name not in self._parts:
+            self._parts[name] = fetch()
+        return self._parts[name]
+
+    @property
+    def repo(self) -> dict:
+        return self._part("repo", lambda: github.repo_info(self.cwd))
+
+    @property
+    def default_branch(self) -> str:
+        name = (self.repo.get("defaultBranchRef") or {}).get("name")
+        if not isinstance(name, str):
+            raise github.GhError(github.MALFORMED, "gh returned no default branch")
+        return name
+
+    @property
+    def issues(self) -> list:
+        return self._part("issues", lambda: from_nodes(github.open_issues(self.repo, cwd=self.cwd)))
+
+    @property
+    def prs(self) -> list:
+        return self._part("prs", lambda: github.open_prs_with_heads(cwd=self.cwd))
+
+    @property
+    def merged(self) -> list:
+        return self._part("merged", lambda: github.merged_prs(self.default_branch, cwd=self.cwd))
+
+    @property
+    def abandoned(self) -> list:
+        """Numbers of closed `wontfix` tickets that still have an assignee."""
+        return self._part("abandoned", lambda: github.abandoned_tickets(self.repo, cwd=self.cwd))
+
+    def blockers(self, issue) -> list:
+        """(number, from_body) for each open blocker of an issue (a dict, or a number: absent means closed, so none)."""
+        if not isinstance(issue, dict):
+            issue = next((i for i in self.issues if i["number"] == issue), None)
+            if issue is None:
+                return []
+        return open_blockers(issue, {i["number"] for i in self.issues})

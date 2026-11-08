@@ -91,7 +91,7 @@ class Decider:
             out = sys.stdout.getvalue()
         finally:
             sys.stdin, sys.stdout = stdin, stdout
-        return "deny" if out and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" else "allow"
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"].replace("allow", "approve") if out else "allow"
 
 
 class GuardCorpus(unittest.TestCase):
@@ -111,7 +111,7 @@ class GuardCorpus(unittest.TestCase):
                 self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source", "background", "timeout"})
                 self.assertTrue(row["role"].startswith("orchestrate:"), row["role"])
                 self.assertTrue(row["command"].strip())
-                self.assertIn(row["expected"], ("allow", "deny"))
+                self.assertIn(row["expected"], ("allow", "approve", "silent", "deny"))
                 if "gap" in row:
                     self.assertRegex(row["gap"], r"^#\d+$")
         keys = [(r["role"], r["command"]) for r in self.rows]
@@ -122,13 +122,17 @@ class GuardCorpus(unittest.TestCase):
             actual = self.decide(row["role"], row["command"], row.get("background", False), row.get("timeout"))
             label = f"line {n} ({row['role']}): {row['command'][:100]!r}"
             with self.subTest(label):
+                # `allow` means the rules accept the call (silently or by an explicit approval); `approve` is
+                # the explicit `permissionDecision: "allow"` (#358); `silent` is neither, so the permission layer decides.
+                matches = actual == row["expected"] or (row["expected"] == "allow" and actual == "approve") or (
+                    row["expected"] == "silent" and actual == "allow")
                 if "gap" in row:
-                    self.assertNotEqual(
-                        actual, row["expected"],
+                    self.assertFalse(
+                        matches,
                         f"{row['gap']} looks fixed: the guard now gives the expected decision; drop `gap`",
                     )
                 else:
-                    self.assertEqual(actual, row["expected"], f"guard says {actual}, corpus says {row['expected']}")
+                    self.assertTrue(matches, f"guard says {actual}, corpus says {row['expected']}")
 
     def test_hand_written_lines_pin_over_allowing(self):
         hand = [r for r in self.rows if r.get("source") == "hand"]

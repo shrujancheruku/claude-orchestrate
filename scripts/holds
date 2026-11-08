@@ -4,7 +4,7 @@
 The one place the overlap rule lives. A path is held by an open PR (its diff, through `gh`), by a
 building ticket (its touch map in the state file), by an Elsewhere ticket (a live worker in another session:
 the changes in its worktree, ADR 0009) or by an exclusive hold (the config). The ticket states come from the
-claims module (scripts/claims.py): one tracker read per run, never a `gh` call per ticket. Paths are compared
+claims module (scripts/claims.py): one tracker Snapshot per run (`--snapshot FILE` reads one `snapshot` wrote), never a `gh` call per ticket. Paths are compared
 as files: any `:line` or line range is stripped, so a different section of one file still overlaps.
 The ticket's own PR and touch map are left out: --ticket N leaves out the PR whose branch starts `N-`;
 --pr N leaves out PR N and the ticket its branch names.
@@ -28,6 +28,7 @@ import claims
 import common
 import config
 import github
+import tracker
 from repo import STATE, ticket_of_branch, worktree_changes
 
 NOTE_SUFFIX = re.compile(r"\s*\([^()]*\)$")
@@ -38,13 +39,6 @@ def plain(entry: str) -> str:
     """A touch-map entry as a file path: no trailing `(note)`, no `:line` or line range, no leading `./`."""
     path = LINE_SUFFIX.sub("", NOTE_SUFFIX.sub("", entry.strip().strip("`")))
     return path[2:] if path.startswith("./") else path
-
-
-def claim_issues(nodes: list) -> list:
-    """The open issues as claims.claims takes them, from github.open_issues' GraphQL nodes (the shape scripts/claims builds)."""
-    return [{"number": int(n["number"]),
-             "claimed": ((n.get("assignees") or {}).get("totalCount") or 0) > 0,
-             "labels": {x["name"] for x in (n.get("labels") or {}).get("nodes") or []}} for n in nodes]
 
 
 def claimed_paths(found: dict, own, base: str) -> tuple:
@@ -124,6 +118,7 @@ def main(argv=None) -> int:
     ap.add_argument("--pr", help="check this PR's diff against the others (the gate's overlap check)")
     ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
     ap.add_argument("--state", help=f"the state file (default: <repo>/{STATE})")
+    ap.add_argument("--snapshot", help="read the tracker from this file (scripts/snapshot) instead of fetching")
     args = ap.parse_args(argv)
     if bool(args.pr) == bool(args.touch_map is not None):
         ap.error("give --touch-map (with --ticket) or --pr, not both or neither")
@@ -133,10 +128,8 @@ def main(argv=None) -> int:
     cfg = config.Config.load(repo)
     state_file = Path(args.state) if args.state else repo / STATE
     try:
-        info = github.repo_info(cwd=repo)
-        base = (info.get("defaultBranchRef") or {}).get("name")
-        if not isinstance(base, str):
-            raise github.GhError(github.MALFORMED, "gh returned no default branch")
+        snap = tracker.Snapshot.open(args.snapshot, repo)
+        base = snap.default_branch
         own_pr, own_ticket = None, args.ticket
         if args.pr:
             own_pr = common.pr_ref(args.pr)[0]
@@ -145,7 +138,7 @@ def main(argv=None) -> int:
             candidates = github.pr_files(own_pr, cwd=repo)
         else:
             candidates = [plain(e) for e in args.touch_map if plain(e) and plain(e).lower() != "none"]
-        open_prs = github.open_prs(base, cwd=repo)
+        open_prs = [p for p in snap.prs if isinstance(p, dict) and p.get("baseRefName", base) == base]
         prs = {}
         for pr in open_prs:
             if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
@@ -156,8 +149,7 @@ def main(argv=None) -> int:
         # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
         # `changes` is a no-op: holds needs each worktree's changed paths, not the dirty and unpushed counts claims
         # would take, and a git failure there would stop a pass that never needed them.
-        found = claims.claims(repo, state_file, claim_issues(github.open_issues(info, cwd=repo)), open_prs,
-                              github.merged_prs(base, cwd=repo), changes=lambda path, branch: None)
+        found = claims.claims(repo, state_file, snap.issues, snap.prs, snap.merged, changes=lambda path, branch: None)
         tickets, others = claimed_paths(found, own_ticket, base)
     except github.GhError as e:
         print(f"holds: gh: {e.message}", file=sys.stderr)

@@ -95,7 +95,7 @@ EOF
 
 `gh pr review <n> --comment --body '<body>'` also works for a short body with no single quotes, `$`, backticks or backslashes. A plain `cd <path> &&` may come first; chain nothing else, and put nothing after the heredoc. `--approve` and `--request-changes` are refused. The `gh api` shape is the one that takes inline `comments`.
 
-- **Body:** `Round <n> · verdict: <approve | changes> · tier: <S | M | L>`, then the spec and standards lines, then the `## Discovered work` section, then the risk notes (L), each as `path:line-range — what to look at`. No finding goes in the body.
+- **Body:** `Round <n> · verdict: <approve | changes> · tier: <S | M | L>`, then the spec and standards lines, then the `## Discovered work` section, then the risk notes (L), each as `path:line-range — what to look at`. A finding goes in the body only when its file is outside the PR's diff, since no thread can hold it: list it there as `- [blocking | minor] [spec | standards] path:line — what's wrong → what would fix it`, after the spec and standards lines.
 - **Comments:** one per finding, so every finding is a review thread, starting `[blocking]` or `[minor]`, then what's wrong and what would fix it. The review's `comments` take only findings whose line is in the diff (the reviews endpoint has no file-level form). A finding whose line is outside the diff is a **file-level** comment, posted after the review on its own: `gh api --method POST repos/{owner}/{repo}/pulls/<n>/comments -f path=<path> -f subject_type=file -f commit_id=<head sha> -f body=<finding>`. Only when GitHub rejects the payload, post again with every finding in the body.
 - Escape the JSON properly; a malformed payload is refused.
 

@@ -24,17 +24,23 @@ class GateTest(unittest.TestCase):
         self.addCleanup(self.env.close)
 
     def prime(self, title="feat(x): add y", mergeable="MERGEABLE", behind=0, head="br", base="main", body="",
-              diff=CLEAN_DIFF, blockers=0, ticket=270, others=(), behind_reply=None, view_reply=None, issues=()):
+              diff=CLEAN_DIFF, blockers=0, ticket=270, others=(), behind_reply=None, view_reply=None, issues=(),
+              ticket_body="", body_blocked_by=()):
         """Canned gh replies for the gate and for the `holds --pr` subprocess it runs: one PR view serves both."""
         view = {"title": title, "mergeable": mergeable, "baseRefName": base, "headRefName": head, "headRefOid": HEAD,
                 "body": body, "files": [{"path": "src/a.py"}]}
+        # The ticket's own node: `blockers` native open edges (900+i), `body_blocked_by` open issues named on its body line.
+        nodes = list(issues)
+        if blockers or ticket_body or body_blocked_by:
+            nodes.append({"number": ticket, "body": ticket_body,
+                          "blockedBy": {"nodes": [{"number": 900 + i, "state": "OPEN"} for i in range(blockers)]}})
+            nodes += [{"number": n} for n in body_blocked_by]
         self.env.set_gh([
             view_reply or {"args": ["pr", "view"], "stdout": json.dumps(view)},
             {"args": ["pr", "diff"], "stdout": diff},
-            {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": list(issues)}}}})},
+            {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": nodes}}}})},
             {"args": ["pr", "list"], "stdout": json.dumps(list(others))},
             {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}})},
-            {"args": ["api", f"repos/{{owner}}/{{repo}}/issues/{ticket}"], "stdout": f"{blockers}\n"},
             behind_reply or {"args": ["api"], "stdout": f"{behind}\n"},
         ])
 
@@ -309,8 +315,23 @@ class GateTest(unittest.TestCase):
     def test_ticket_with_no_open_blocker_passes(self):
         self.prime(head="270-slug", blockers=0)
         self.assertEqual(self.gate().returncode, 0)
-        self.assertIn(["api", "repos/{owner}/{repo}/issues/270", "--jq", ".issue_dependencies_summary.blocked_by"],
-                      self.env.gh_calls())
+
+    def test_a_malformed_issues_reply_is_gate_exit_2_not_a_failure(self):
+        self.prime(head="270-slug")
+        # `holds` (a subprocess) reads the issues first and gets a good reply; the gate's own read gets a bad node.
+        def reply(nodes):
+            return {"stdout": json.dumps({"data": {"repository": {"issues": {"nodes": nodes}}}})}
+        responses = json.loads(self.env.gh_state.read_text())["responses"]
+        self.env.set_gh([{"args": ["api", "graphql"], "seq": [reply([]), reply([{"title": "no number"}])]}] + responses)
+        r = self.gate()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("malformed issues reply", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_a_body_only_blocker_fails_dependencies(self):
+        self.prime(head="270-slug", ticket_body="Blocked by: #5", body_blocked_by=[5])
+        out = self.failed_only(self.gate(), "dependencies merged")
+        self.assertIn("#270 has 1 open blocker(s): #5 (body)", out)
 
     def test_ticket_comes_from_the_closing_reference_without_a_ticket_branch(self):
         self.prime(body="Closes #41\n", ticket=41, blockers=1)
