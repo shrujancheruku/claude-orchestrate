@@ -150,7 +150,7 @@ The board is rebuilt from tracker, PR and claim state only (the claim states are
 Switch the project's view to the **Board** layout, grouped by `Stage`, once by hand: views have no `gh` or API surface, so the script can't do it. The option order is the column order. A failure prints one line and exits 1, and `run` carries on. The lead never reads or writes the board, and GitHub's built-in project workflows aren't used.
 
 ```
-scripts/board [--repo .]
+scripts/board [--repo .] [--dry-run]
 ```
 
 ## Profiling
