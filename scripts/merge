@@ -369,6 +369,7 @@ def run_merge(argv=None) -> int:
     attempt = state == "OPEN"  # run the merge command only while the PR is open
     refused = None
     while True:
+        github.reset_wait_budget()  # a poll of a loop that can run for hours gets its own wait budget
         if attempt:
             try:
                 github.merge_pr(pr, args.method, head_oid, cwd)

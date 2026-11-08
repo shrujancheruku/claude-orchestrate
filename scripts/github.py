@@ -8,8 +8,9 @@ Each function runs one `gh` call and returns parsed data or raises `GhError`, wh
              (one whose message says git has no repository or working directory counts as could not run)
              (a secondary rate limit is retried with backoff first; primary-quota exhaustion is not)
   ratelimited a rate limit that retrying here did not clear (hourly quota, a wait over the budget, or every try used)
+  servererror a 5xx (or a dropped connection) that outlasted the retries or the wait budget: no reset is coming
   malformed  `gh` printed unparseable JSON, or JSON of the wrong shape for the call (a `[]` for a PR)
-`could_not_run(e)` maps missing, malformed and ratelimited to each script's "could not run" exit (2).
+`could_not_run(e)` maps missing, malformed, ratelimited and servererror to each script's "could not run" exit (2).
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import common
 import runlog
 from repo import STATE
 
-MISSING, FAILED, MALFORMED, RATELIMITED = "missing", "failed", "malformed", "ratelimited"
+MISSING, FAILED, MALFORMED, RATELIMITED, SERVER_ERROR = "missing", "failed", "malformed", "ratelimited", "servererror"
 # A 404/422 on a branch ref: the host already removed it.
 GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exist", re.I)
 
@@ -90,9 +91,13 @@ PROJECT_QUERY = """query($owner: String!, $number: Int!, $after: String) {
 }"""
 
 # Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
-ABANDON_QUERY = """query($owner: String!, $name: String!) {
+# The filter keeps only the assigned ones (`assignee: "*"` is any assignee), so a grooming pass that closes a dozen
+# tickets `wontfix` cannot push an assigned one past the page (#476); `after` pages the unlikely overflow.
+ABANDON_QUERY = """query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    issues(first: 30, states: CLOSED, labels: ["wontfix"], orderBy: {field: UPDATED_AT, direction: DESC}) {
+    issues(first: 30, after: $after, states: CLOSED, labels: ["wontfix"], filterBy: {assignee: "*"},
+           orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
       nodes { number assignees(first: 1) { totalCount } }
     }
   }
@@ -136,7 +141,7 @@ class GhError(Exception):
 
 def could_not_run(e: GhError) -> bool:
     """True when the script should exit 2 ("could not run") rather than treat the call as one more failure."""
-    return e.kind in (MISSING, MALFORMED, RATELIMITED) or (e.kind == FAILED and bool(NO_REPO.search(e.message)))
+    return e.kind in (MISSING, MALFORMED, RATELIMITED, SERVER_ERROR) or (e.kind == FAILED and bool(NO_REPO.search(e.message)))
 
 
 # GitHub's secondary rate limit (too many concurrent or back-to-back requests), and the "API rate limit
@@ -147,7 +152,10 @@ QUOTA_EMPTY = re.compile(r"x-ratelimit-remaining:?\s*0\b", re.I)
 QUOTA_RESET = re.compile(r"x-ratelimit-reset:?\s*(\d+)", re.I)
 # A GitHub 5xx (500-504) is transient: retried like a secondary limit, on a short ladder (seconds) since no
 # reset is involved. A 4xx other than a rate limit is never retried.
-SERVER_ERROR = re.compile(r"\bHTTP 50[0-4]\b")
+SERVER_ERROR_TEXT = re.compile(r"\bHTTP 50[0-4]\b")
+# Failures with no status line that are transient too, for a read only: a truncated reply (a 5xx whose body gh
+# could not parse) and a dropped connection.
+TRANSIENT_TEXT = re.compile(r"unexpected end of JSON input|connection reset|ECONNRESET", re.I)
 SERVER_ERROR_PAUSES = (2, 4, 8, 16)
 
 
@@ -174,11 +182,14 @@ clock = time.time
 # Where that can't be written it falls back to <git common dir>/orchestrate-ratelimit.json.
 FALLBACK_FILE = "orchestrate-ratelimit.json"
 DEFAULT_PAUSE = 60  # no retry-after or reset header: assume a minute
-# The most one `call` sleeps in total, across the shared-file wait and every retry. The orchestrator runs these
-# scripts through Bash (two-minute default timeout) and neither `merge --timeout` nor the watch-ci deadline sees a
-# sleep, so a longer wait is returned as `rate limit until <time>` (exit 2) for the caller to retry later.
+# The most one script run waits in total, across every call, the shared-file wait and every retry (#491). The
+# orchestrator runs these scripts through Bash (two-minute default timeout) and neither `merge --timeout` nor the
+# watch-ci deadline sees a sleep, so a longer wait is returned as `rate limit until <time>` (exit 2) for the caller
+# to retry later. The budget is per process, not per call: `waited` adds up every sleep, so a later call that would
+# sleep past it fails at once. A loop that runs for hours (watch-ci, merge) calls `reset_wait_budget()` each tick so
+# every tick gets its own.
 DEFAULT_WAIT_BUDGET = 75
-waited = 0.0  # seconds the current call has slept so far; reset at the start of each call, so a long-lived loop gets a fresh budget per call
+waited = 0.0  # seconds this process has slept in rate-limit and 5xx waits since the last reset_wait_budget()
 
 
 def wait_budget() -> float:
@@ -190,8 +201,14 @@ def wait_budget() -> float:
     return value if value >= 0 else DEFAULT_WAIT_BUDGET
 
 
+def reset_wait_budget() -> None:
+    """Start a fresh wait budget: a long-lived loop calls this at the top of each tick."""
+    global waited
+    waited = 0.0
+
+
 def _wait_until(reset: float, cwd=None, shared: bool = False) -> None:
-    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the current call's wait budget.
+    """Sleep until `reset`, or raise `ratelimited` with the time when that would pass the process's wait budget.
 
     `shared` marks a wait for a reset another process recorded, not this process's own hit; it is logged so the
     profile shows how much waiting one hit multiplied across scripts."""
@@ -464,8 +481,6 @@ def call(*args, cwd=None, idempotent: bool = False) -> str:
     POST, a merge or a delete-style batch could then act twice. An unmarked write fails at once on a 5xx and the
     caller decides (merge re-reads the state first). A rate limit is retried for every call: nothing ran.
     """
-    global waited
-    waited = 0.0  # the budget is for this call alone: watch-ci and merge --interval loop for hours in one process
     _wait_for_shared_reset(cwd)
     # `gh api` prints the response headers only with --include; they carry the status and the rate-limit evidence.
     # A paginated reply holds one header block per page, so that one runs without them.
@@ -492,20 +507,24 @@ def call(*args, cwd=None, idempotent: bool = False) -> str:
         if limit is None:
             # The status line is the truth; the text is searched only when gh showed none, so a 4xx whose body
             # echoes "HTTP 502" is not retried.
-            server = status in (500, 501, 502, 503, 504) if status is not None else bool(SERVER_ERROR.search(text))
-            server = server and (idempotent or not describe(args)["write"])
+            read = not describe(args)["write"]
+            server = status in (500, 501, 502, 503, 504) if status is not None else bool(SERVER_ERROR_TEXT.search(text))
+            server = server and (idempotent or read)
+            # A truncated reply or a dropped connection shows no status; only a read repeats safely on it.
+            server = server or (status is None and read and bool(TRANSIENT_TEXT.search(text)))
             _log_attempt(args, cwd, attempt, ms, "failed", status, headers)
             if not server:
                 raise GhError(FAILED, common.one_line(p.stderr or stdout))
             message = common.one_line(_evidence(text))
             if attempt >= server_error_tries():
-                raise GhError(FAILED, message)
+                raise GhError(SERVER_ERROR, message)
             pause = SERVER_ERROR_PAUSES[min(attempt, len(SERVER_ERROR_PAUSES)) - 1]
-            print(f"github: HTTP {status or 502}, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
+            what = f"HTTP {status or 502}" if status or SERVER_ERROR_TEXT.search(text) else "transient failure"
+            print(f"github: {what}, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
             try:
                 _wait_until(clock() + pause, cwd)
-            except GhError as e:  # over the call's wait budget: say what failed, not only when to retry
-                raise GhError(e.kind, f"{message}; {e.message}")
+            except GhError as e:  # over the wait budget: say what failed, not only when to retry
+                raise GhError(SERVER_ERROR, f"{message}; {e.message}")
             continue
         _log_attempt(args, cwd, attempt, ms, "ratelimited", status, headers)
         message = common.one_line(_evidence(text))
@@ -583,15 +602,19 @@ PR_FIELDS = {
     "isCrossRepository": _cross_repo,
 }
 # These two have no REST form (the closing issues and the check rollup are GraphQL-only): one explicit query.
-# It reads at most 20 closing issues and 100 check contexts and has no pageInfo, so a PR past either limit is
-# truncated, as `gh pr view --json` was (a follow-up could page them).
+# The check contexts come 100 a page and are paged on `hasNextPage` (`$after`), up to PR_CHECK_PAGES pages: a CI
+# verdict read from a partial list could pass a failing check, so a PR past the cap raises instead (fail closed,
+# #461). A PR closing more than 100 issues raises the same way. The `detailsUrl` of a check run is carried so a
+# reader (`watch-ci` stuck-job detection) sees the same fields as `gh pr list --json statusCheckRollup`.
 GRAPHQL_PR_FIELDS = {"closingIssuesReferences", "statusCheckRollup"}
-PR_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
+PR_CHECK_PAGES = 10
+PR_QUERY = """query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     state headRefName headRefOid isCrossRepository
-    closingIssuesReferences(first: 20) { nodes { number } }
-    commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
-      __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+    closingIssuesReferences(first: 100) { pageInfo { hasNextPage } nodes { number } }
+    commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor } nodes {
+      __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state } } } } } } }
   } }
 }"""
 
@@ -614,25 +637,43 @@ def pr_view(pr, fields: str, cwd=None) -> dict:
 
 
 def _pr_view_graphql(pr, wanted, cwd=None) -> dict:
-    data = call_json("api", "graphql", "-f", f"query={PR_QUERY}", "-F", "owner={owner}", "-F", "name={repo}",
-                     "-F", f"number={_pr_number(pr)}", cwd=cwd)
-    try:
-        node = data["data"]["repository"]["pullRequest"]
-        if not isinstance(node, dict):
-            raise TypeError
-        commits = (node.get("commits") or {}).get("nodes") or []
-        rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup") or {}) if commits else {}
-        full = dict(node,
-                    closingIssuesReferences=[n for n in (node.get("closingIssuesReferences") or {}).get("nodes") or []
-                                             if isinstance(n, dict)],
-                    statusCheckRollup=[n for n in (rollup.get("contexts") or {}).get("nodes") or []
-                                       if isinstance(n, dict) and n.get("__typename")])
-        unknown = [f for f in wanted if f not in full]
-        if unknown:
-            raise ValueError(f"pr_view: no GraphQL form for {', '.join(unknown)}")
-        return {f: full[f] for f in wanted}
-    except (KeyError, TypeError, IndexError):
-        raise GhError(MALFORMED, "gh returned an unexpected reply (pull request)") from None
+    checks, after, seen = [], None, set()
+    for _ in range(PR_CHECK_PAGES):
+        args = ["api", "graphql", "-f", f"query={PR_QUERY}", "-F", "owner={owner}", "-F", "name={repo}",
+                "-F", f"number={_pr_number(pr)}"]
+        if after:
+            args += ["-f", f"after={after}"]
+        data = call_json(*args, cwd=cwd)
+        try:
+            node = data["data"]["repository"]["pullRequest"]
+            if not isinstance(node, dict):
+                raise TypeError
+            commits = (node.get("commits") or {}).get("nodes") or []
+            rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup") or {}) if commits else {}
+            contexts = rollup.get("contexts") or {}
+            checks += [n for n in contexts.get("nodes") or [] if isinstance(n, dict) and n.get("__typename")]
+            info = contexts.get("pageInfo") or {}
+            after = info.get("endCursor") if info.get("hasNextPage") else None
+        except (KeyError, TypeError, IndexError, AttributeError):
+            raise GhError(MALFORMED, "gh returned an unexpected reply (pull request)") from None
+        if "statusCheckRollup" not in wanted or not after:
+            break
+        if after in seen:
+            raise GhError(MALFORMED, "gh returned a repeated page cursor (checks)")
+        seen.add(after)
+    else:
+        if after:
+            raise GhError(MALFORMED, f"the pull request has more than {PR_CHECK_PAGES * 100} checks; "
+                                     "CI cannot be judged from a partial list")
+    closing = node.get("closingIssuesReferences") or {}
+    if "closingIssuesReferences" in wanted and (closing.get("pageInfo") or {}).get("hasNextPage"):
+        raise GhError(MALFORMED, "the pull request closes more than 100 issues; the list is partial")
+    full = dict(node, closingIssuesReferences=[n for n in closing.get("nodes") or [] if isinstance(n, dict)],
+                statusCheckRollup=checks)
+    unknown = [f for f in wanted if f not in full]
+    if unknown:
+        raise ValueError(f"pr_view: no GraphQL form for {', '.join(unknown)}")
+    return {f: full[f] for f in wanted}
 
 
 def _pages(path: str, cwd=None, max_pages: int = 10) -> list:
@@ -653,9 +694,24 @@ def pr_diff(pr, cwd=None) -> str:
 
 
 def current_pr_number(cwd=None) -> str:
-    """The number of the open PR whose head is the checked-out branch ("" when there is none)."""
-    rows = call_json("api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open", shape=list, cwd=cwd)
-    return str(rows[0].get("number", "")) if rows and isinstance(rows[0], dict) else ""
+    """The number of the PR for the checked-out branch ("" when there is none): the open one when there is one, else
+    the newest closed or merged one (a worker resolving threads after its PR closed still needs it).
+
+    The `head=<owner>:<branch>` filter finds a PR whose head is in the base repository. A fork's PR has the fork's
+    owner there, so when the filter finds nothing the newest pulls are searched for the local HEAD commit, which
+    a fork head shares."""
+    rows = call_json("api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100", shape=list,
+                     cwd=cwd)
+    rows = [r for r in rows if isinstance(r, dict)]
+    if not rows:
+        p = common.run("git", "rev-parse", "HEAD", cwd=cwd)
+        sha = p.stdout.strip() if p.returncode == 0 else ""
+        if sha:
+            rows = [r for r in call_json("api", "repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc"
+                                                "&per_page=100", shape=list, cwd=cwd)
+                    if isinstance(r, dict) and (r.get("head") or {}).get("sha") == sha]
+    rows.sort(key=lambda r: r.get("state") != "open")  # stable: open first, then the host's order
+    return str(rows[0].get("number", "")) if rows else ""
 
 
 def behind_by(base: str, head: str, cwd=None) -> int:
@@ -742,7 +798,8 @@ def ci_verdict(checks) -> tuple:
 def has_workflows(head: str, cwd=None) -> bool:
     """True when the tree at `head` holds a `.yml`/`.yaml` file under .github/workflows (one contents call).
 
-    A 404 (no such directory) or a listing with no workflow file is False; any other failure raises GhError."""
+    A 404 (no such directory), a file at the path or a listing with no workflow file is False; an error
+    object or any other failure raises GhError."""
     try:
         out = call("api", f"repos/{{owner}}/{{repo}}/contents/.github/workflows?ref={head}", cwd=cwd)
     except GhError as e:
@@ -753,8 +810,16 @@ def has_workflows(head: str, cwd=None) -> bool:
         entries = json.loads(out)
     except ValueError:
         raise GhError(MALFORMED, "gh returned malformed JSON") from None
+    if isinstance(entries, dict):
+        # An error object (rate limit, auth, 5xx) must not read as "no workflows": merge would then call an empty
+        # check rollup green. Only a file at the path is a clean "none configured".
+        if entries.get("type") == "file":
+            print("github: .github/workflows is a file, not a directory", file=sys.stderr)
+            return False
+        raise GhError(MALFORMED, "contents reply: "
+                      + common.one_line(str(entries.get("message") or "not a directory listing")))
     if not isinstance(entries, list):
-        return False  # a file, not a directory, sits at the path
+        raise GhError(MALFORMED, "contents reply: not a directory listing")
     return any(isinstance(e, dict) and str(e.get("name", "")).lower().endswith((".yml", ".yaml")) for e in entries)
 
 
@@ -788,13 +853,23 @@ def open_prs_with_heads(cwd=None) -> list:
             if isinstance(p, dict)]
 
 
+MERGED_PAGES = 10  # closed pages read at most (1,000 PRs), however many of them closed unmerged
+
+
 def merged_prs(base, cwd=None, limit: int = 200) -> list:
-    """The newest merged PRs (on `base`, or any base when it is None) by last update, at most `limit` closed ones
-    read: an older merged PR is still caught by its closed issue (`Closes #n`)."""
+    """The newest `limit` merged PRs (on `base`, or any base when it is None) by last update. Closed-unmerged PRs
+    share the closed list, so it is read page by page until `limit` merged ones are held (or MERGED_PAGES pages are
+    read, or the list ends): they cannot use up the window and push a merged PR out of it. An older merged PR is
+    still caught by its closed issue (`Closes #n`)."""
     where = f"&base={urllib.parse.quote(base, safe='')}" if base else ""
-    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls?state=closed{where}&sort=updated&direction=desc&per_page=100",
-                  cwd, max_pages=max(1, -(-limit // 100)))
-    return [_pull(p) for p in rows if isinstance(p, dict) and p.get("merged_at")]
+    path = f"repos/{{owner}}/{{repo}}/pulls?state=closed{where}&sort=updated&direction=desc&per_page=100"
+    merged = []
+    for page in range(1, MERGED_PAGES + 1):
+        got = call_json("api", f"{path}&page={page}", shape=list, cwd=cwd)
+        merged += [_pull(p) for p in got if isinstance(p, dict) and p.get("merged_at")]
+        if len(merged) >= limit or len(got) < 100:
+            break
+    return merged[:limit]
 
 
 def pr_files(pr, cwd=None) -> list:
@@ -844,7 +919,7 @@ def open_issues(repo: dict, cwd=None) -> list:
         seen.add(after)
 
 
-def _connection(query, variables, path, after=None, cwd=None) -> list:
+def _connection(query, variables, path, after=None, cwd=None, what: str = "review threads") -> list:
     """Every node of one GraphQL connection, all pages. `path` runs from the reply's `data` to the connection;
     `variables` are passed as -F (numbers) or -f (strings, never coerced); `after` starts past a known cursor."""
     nodes, seen = [], set()
@@ -861,16 +936,16 @@ def _connection(query, variables, path, after=None, cwd=None) -> list:
                 conn = conn[key]
             page = conn["nodes"]
         except (KeyError, TypeError):
-            raise GhError(MALFORMED, "gh returned an unexpected reply (review threads)") from None
+            raise GhError(MALFORMED, f"gh returned an unexpected reply ({what})") from None
         if not isinstance(page, list):
-            raise GhError(MALFORMED, "gh returned an unexpected reply (review threads)")
+            raise GhError(MALFORMED, f"gh returned an unexpected reply ({what})")
         nodes += page
         info = conn.get("pageInfo") or {}
         after = info.get("endCursor") if info.get("hasNextPage") else None
         if not after:
             return nodes
         if after in seen:  # a cursor that does not advance would loop for ever
-            raise GhError(MALFORMED, "gh returned a repeated page cursor (review threads)")
+            raise GhError(MALFORMED, f"gh returned a repeated page cursor ({what})")
         seen.add(after)
 
 
@@ -923,16 +998,16 @@ def pr_commit_shas(pr, cwd=None) -> list:
 
 
 def abandoned_tickets(repo: dict, cwd=None) -> list:
-    """Numbers of closed `wontfix` tickets that are still assigned (the newest 30 closed ones)."""
+    """Numbers of closed `wontfix` tickets that are still assigned (the query filters on the assignee, every page)."""
     try:
         owner, name = repo["owner"]["login"], repo["name"]
     except (KeyError, TypeError):
         raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
-    data = call_json("api", "graphql", "-f", f"query={ABANDON_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}", cwd=cwd)
+    nodes = _connection(ABANDON_QUERY, {"owner": owner, "name": name}, ("repository", "issues"), cwd=cwd,
+                        what="closed issues")
     try:
-        nodes = data["data"]["repository"]["issues"]["nodes"]
-        return sorted(int(n["number"]) for n in nodes if ((n.get("assignees") or {}).get("totalCount") or 0) > 0)
-    except (KeyError, TypeError, ValueError):
+        return sorted({int(n["number"]) for n in nodes if ((n.get("assignees") or {}).get("totalCount") or 0) > 0})
+    except (KeyError, TypeError, ValueError, AttributeError):
         raise GhError(MALFORMED, "gh returned an unexpected reply (closed issues)") from None
 
 

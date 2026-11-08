@@ -140,7 +140,7 @@ def pr_graphql_reply(view):
     return json.dumps({"data": {"repository": {"pullRequest": node}}})
 
 
-PR_GRAPHQL = ["api", "graphql", "-f", "~query=query($owner: String!, $name: String!, $number: Int!)"]
+PR_GRAPHQL = ["api", "graphql", "-f", "~query=query($owner: String!, $name: String!, $number: Int!, $after: String)"]
 
 
 def gh_repo_view(owner="o", name="r", default="main"):

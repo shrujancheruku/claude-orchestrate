@@ -121,21 +121,22 @@ class Threads(unittest.TestCase):
         self.assertEqual((ev["kind"], ev["outcome"], ev["ref"], ev["thread"], ev["author"]), ("threads", "resolved", 12, "T1", "rev"))
 
     def test_no_pr_argument_resolves_the_thread_on_the_current_branchs_pr(self):
-        self.gh(reply([thread("T1")]), extra=[{"args": ["api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open"], "stdout": '[{"number": 12}]'}])
+        self.gh(reply([thread("T1")]), extra=[{"args": ["api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100"], "stdout": '[{"number": 12}]'}])
         r = self.env.run("threads", "resolve", "T1", "--fixed", SHA[:10])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(["api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open"], self.env.gh_calls())
+        self.assertIn(["api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100"], self.env.gh_calls())
         self.assertEqual(len(self.mutations()), 2)
         self.assertEqual(self.env.events()[-1]["ref"], 12)
 
     def test_no_pr_argument_lists_the_current_branchs_threads(self):
-        self.gh(reply([thread("T1")]), extra=[{"args": ["api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open"], "stdout": '[{"number": 12}]'}])
+        self.gh(reply([thread("T1")]), extra=[{"args": ["api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100"], "stdout": '[{"number": 12}]'}])
         r = self.env.run("threads")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(r.stdout.startswith("T1 rev a.py:3"))
 
     def test_no_pr_argument_on_a_branch_with_no_pr_is_could_not_run_with_no_fallback(self):
-        self.env.set_gh([gh_repo_view(), {"args": ["api", "~repos/{owner}/{repo}/pulls?head="], "stdout": "[]"}])
+        self.env.set_gh([gh_repo_view(), {"args": ["api", "~repos/{owner}/{repo}/pulls?head="], "stdout": "[]"},
+                         {"args": ["api", "~repos/{owner}/{repo}/pulls?state=all"], "stdout": "[]"}])
         r = self.env.run("threads", "resolve", "T1", "--fixed", SHA[:10], check=False)
         self.assertEqual(r.returncode, 2)
         self.assertIn("could not read the current branch", r.stderr)
