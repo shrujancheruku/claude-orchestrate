@@ -215,22 +215,31 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
         self.assertIn("auth/login.py", p.stdout)
 
-    def test_a_moved_block_counts_its_rows_not_one_line(self):
+    def moved_block(self):
+        """A block of added lines in a risk-path file of main, moved after approval; the merge result."""
         body = [f"line{i}\n" for i in range(40)]
         block = [f"new{i}\n" for i in range(12)]
-        self.env.commit("big.txt", "".join(body), "feat: big on main")
+        self.env.commit("auth/big.txt", "".join(body), "feat: big on main")
         git(self.repo, "push", "-q", "origin", "main")
 
         def insert_at(n):
             def edit(r):
                 git(r, "merge", "-q", "main")
-                (r / "big.txt").write_text("".join(body[:n] + block + body[n:]))
+                (r / "auth" / "big.txt").write_text("".join(body[:n] + block + body[n:]))
             return edit
         approved = self.on_br(insert_at(5))
-        head = self.on_br(lambda r: (r / "big.txt").write_text("".join(body[:30] + block + body[30:])))
-        p = self.merge(head, approved=approved)
+        head = self.on_br(lambda r: (r / "auth" / "big.txt").write_text("".join(body[:30] + block + body[30:])))
+        return self.merge(head, approved=approved)
+
+    def test_a_moved_block_is_a_non_zero_delta(self):
+        p = self.moved_block()
         self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
-        self.assertIn("over the S thresholds", p.stdout)
+        self.assertIn("auth/big.txt", p.stdout)
+
+    def test_a_moved_block_is_still_counted_with_diff_context_zero(self):
+        git(self.repo, "config", "diff.context", "0")
+        p = self.moved_block()
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
 
     def test_a_revert_is_in_the_delta(self):
         approved = self.on_br(lambda r: (r / "auth" / "x.py").parent.mkdir(exist_ok=True) or (r / "auth" / "x.py").write_text("1\n"))
