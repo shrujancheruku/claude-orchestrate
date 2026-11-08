@@ -334,7 +334,7 @@ class GateTest(unittest.TestCase):
         self.env.set_gh([{"args": ["api", "graphql"], "seq": [reply([{"title": "no number"}])]}] + responses)
         r = self.gate()
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("malformed issues reply", r.stderr)
+        self.assertIn("malformed gh reply", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
     def test_a_body_only_blocker_fails_dependencies(self):

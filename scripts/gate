@@ -130,8 +130,8 @@ def overlap_check(pr, cwd, snap):
                            "--snapshot", str(path), cwd=cwd)
     except github.GhError as e:
         return f"holds could not run: gh failed: {e.message}"
-    except (KeyError, TypeError, ValueError) as e:  # a malformed issues reply: could not run, not a failed check
-        return f"gh returned a malformed issues reply ({e!r})"
+    except (KeyError, TypeError, ValueError) as e:  # a malformed gh reply: could not run, not a failed check
+        return f"gh returned a malformed gh reply ({e!r})"
     except OSError as e:
         return f"holds could not run: cannot write the snapshot: {e.strerror or e}"
     if p.code == 0:
