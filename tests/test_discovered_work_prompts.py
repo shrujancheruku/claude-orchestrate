@@ -35,7 +35,7 @@ class DiscoveredWork(unittest.TestCase):
         self.assertIn("**API questions.**", s)
         self.assertIn("Never send a write to the host to find out", s)
         self.assertIn("The only writes you ever make are under **Post**", s)
-        self.assertIn("The review post and its file-level comments", s)
+        self.assertIn("The review post (below) is the only write", s)
         self.assertIn("not even a trial of a payload shape", s)
 
     def test_run_summary_lists_discovered_work_prs(self):
