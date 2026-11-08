@@ -140,6 +140,20 @@ class Holds(unittest.TestCase):
         self.assertIn("shared (not counted): CHANGELOG.md (held by open PR #9)", r.stdout)
         self.assertIn("overlap: none", r.stdout)
 
+    def test_a_directory_candidate_counts_a_held_file_and_not_a_shared_one(self):
+        self.gh({9: ["db/schema.sql"]})
+        self.config()
+        r = self.holds("--touch-map", "db/", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("overlap: db/ (held by open PR #9)", r.stdout)
+        (self.env.repo / ".claude" / "orchestration.md").write_text(
+            CONFIG.format(holds="none").replace("`CHANGELOG.md`", "`db/shared.sql`"))
+        self.gh({9: ["db/shared.sql"]})
+        r = self.holds("--touch-map", "db/", "--ticket", "7")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("shared (not counted): db/ (held by open PR #9)", r.stdout)
+        self.assertIn("overlap: none", r.stdout)
+
     def test_exclusive_hold(self):
         self.gh()
         self.config("while #42 is open, nothing else touches `db/`.")

@@ -132,7 +132,7 @@ def report(held: dict, candidates: list, cfg) -> int:
         for p, who in held.items():
             if covers(p, c):
                 shown = f"{c} (held by {', '.join(who)})"
-                if is_shared(cfg, c):
+                if is_shared(cfg, c) or is_shared(cfg, p):  # a directory candidate overlaps the held file under it
                     print(f"shared (not counted): {shown}")
                 else:
                     print(f"overlap: {shown}")
