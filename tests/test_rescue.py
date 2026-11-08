@@ -92,6 +92,59 @@ class Rescue(unittest.TestCase):
         self.assertEqual(self.remote_log().splitlines(), [])  # nothing new on the branch beyond main
         self.assertFalse(self.wt.exists())
 
+    def scratch(self, name, *flags):
+        tree = self.wt.parent / name
+        git(self.env.repo, "worktree", "add", "--detach", *flags, str(tree), BRANCH)
+        return tree
+
+    def test_with_pr_the_prs_scratch_worktrees_are_removed_and_only_those(self):
+        self.worktree()
+        self.commit_in_wt()
+        mine = [self.scratch("pr-9"), self.scratch("pr-9-r2")]
+        other = self.scratch("pr-91")
+        r = self.rescue("--pr", "9")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.count("scratch worktree"), 2)
+        for tree in mine:
+            self.assertFalse(tree.exists(), tree)
+        self.assertTrue(other.exists())
+
+    def test_without_pr_no_scratch_worktree_is_touched(self):
+        self.worktree()
+        tree = self.scratch("pr-9")
+        r = self.rescue()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("scratch", r.stdout)
+        self.assertTrue(tree.exists())
+
+    def test_a_dirty_scratch_worktree_is_kept_with_the_line_and_the_rescue_still_succeeds(self):
+        self.worktree()
+        tree = self.scratch("pr-9")
+        (tree / "x.txt").write_text("untracked")
+        r = self.rescue("--pr", "9")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("scratch worktree ", r.stdout)
+        self.assertIn(f"{tree.name} NOT removed", r.stdout)
+        self.assertTrue(tree.exists())
+        self.assertFalse(self.wt.exists())
+
+    def test_a_scratch_worktree_outside_the_branch_or_locked_by_a_live_session_is_kept(self):
+        self.worktree()
+        elsewhere = self.wt.parent / "pr-9"
+        git(self.env.repo, "worktree", "add", "--detach", str(elsewhere), "main")
+        (elsewhere / "n.txt").write_text("x")
+        git(elsewhere, "add", "n.txt")
+        git(elsewhere, "commit", "-m", "not in the branch")
+        live = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(live.kill)
+        locked = self.scratch("pr-9b")
+        git(self.env.repo, "worktree", "lock", "--reason", live_reason(live.pid), str(locked))
+        r = self.rescue("--pr", "9")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("NOT removed: its HEAD is not the PR head or an ancestor of it", r.stdout)
+        self.assertIn("NOT removed: its lock is held by another live session", r.stdout)
+        self.assertTrue(elsewhere.exists() and locked.exists())
+
     def test_unpushed_commits_only_are_pushed_then_removed(self):
         self.worktree(push=True)
         self.commit_in_wt("one.txt")
