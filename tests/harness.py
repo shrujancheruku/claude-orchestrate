@@ -140,7 +140,9 @@ def pr_graphql_reply(view):
     return json.dumps({"data": {"repository": {"pullRequest": node}}})
 
 
-PR_GRAPHQL = ["api", "graphql", "-f", "~query=query($owner: String!, $name: String!, $number: Int!, $after: String)"]
+# Prefix of PR_QUERY (the check-rollup read); THREADS_QUERY opens with the same variables, so the body is part of it.
+PR_GRAPHQL = ["api", "graphql", "-f", "~query=query($owner: String!, $name: String!, $number: Int!, $after: String) {\n"
+              "  repository(owner: $owner, name: $name) { pullRequest"]
 
 
 def gh_repo_view(owner="o", name="r", default="main"):
