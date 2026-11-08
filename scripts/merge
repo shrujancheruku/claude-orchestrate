@@ -15,7 +15,7 @@ already in progress"; the branch can survive), so the PR's state is the only tru
 the merge, then re-checks the PR until it is MERGED or --timeout runs out. Only once MERGED does it:
 delete the remote branch (over `gh api`, so it works where origin is SSH) and the local one, unless it
 is the default branch, main/master or a fork's branch; close the PR's linked tickets that the host
-left open (a --ticket the PR does not link is only reported); remove --worktree (a "not a working tree" answer is fine: the harness may
+left open (a --ticket the PR does not link is only reported); remove --worktree only when it is a linked worktree of this repo (not the main checkout, no live foreign lock) on the PR's branch, or on `worktree-agent-<id>` or detached with HEAD at the PR head (else one `NOT removed` line; a "not a working tree" answer is fine: the harness may
 have removed it; a harness-locked tree is unlocked first, then removed plainly, never forced), and append one `merge` event (ref = the PR number, outcome merged|timeout|closed,
 plus branch, branch_deleted, tickets). The merge passes the approved head as `sha`, so a push after
 review is a refusal (a 409; exit 1). Prints one line per step.
@@ -51,6 +51,7 @@ Stdlib only, Python 3.9+.
 
 import argparse
 import difflib
+import os
 from pathlib import Path
 import re
 import sys
@@ -97,6 +98,55 @@ def delete_remote_branch(branch, cwd):
         return True, github.delete_branch(branch, cwd)
     except github.GhError as e:
         return False, f"NOT deleted: {e.message}"
+
+
+def _same_path(a, b):
+    try:
+        return os.path.samefile(a, b)  # symlinks, trailing slashes, case on macOS
+    except OSError:
+        return False
+
+
+def _head_in(tree, head_oid, cwd, exact):
+    """True when the worktree's HEAD is the PR head (`exact`) or that or an ancestor of it."""
+    h = common.run("git", "rev-parse", "HEAD", cwd=tree)
+    if h.code != 0 or not head_oid:
+        return False
+    if h.stdout.strip() == head_oid:
+        return True
+    return not exact and common.run("git", "merge-base", "--is-ancestor", h.stdout.strip(), head_oid, cwd=cwd).code == 0
+
+
+def worktree_refusal(path, branch, head_oid, cwd):
+    """Why `path` is not the merged PR's worktree (so merge must not unlock or remove it), or None when it is.
+
+    Removed only: a linked worktree of this repo (matched with samefile; a path no worktree matches is refused),
+    never the main checkout, never one whose lock is held by another live session, and either on the PR's branch,
+    or on the harness's `worktree-agent-<id>` branch of the `agent-<id>` directory with HEAD at the PR head or
+    an ancestor of it, or detached at the PR head (a lead-PR worktree). A refusal is a skip, not a failure:
+    the merge has already happened."""
+    full = Path(cwd) / path
+    trees = common.worktrees(cwd)
+    if not trees:
+        return "cannot list worktrees"
+    if _same_path(full, trees[0]["path"]):
+        return "it is the main checkout"
+    wt = next((t for t in trees if _same_path(full, t["path"])), None)
+    if wt is None:
+        return "it is not a worktree of this repo"
+    state, _ = common.worker_liveness(wt["locked"])
+    if state == "foreign-live":
+        return "its lock is held by another live session"
+    name = Path(wt["path"]).name
+    if branch and wt["branch"] == branch:
+        return None
+    if wt["branch"] and name.startswith("agent-") and wt["branch"] == f"worktree-{name}":
+        if _head_in(wt["path"], head_oid, cwd, exact=False):
+            return None
+        return f"its HEAD is not the PR head or an ancestor of it"
+    if wt["detached"] and _head_in(wt["path"], head_oid, cwd, exact=True):
+        return None
+    return f"it is on {wt['branch'] or 'a detached HEAD'}, not {branch or 'the PR branch'} or its worker branch at the PR head"
 
 
 def delete_local_branch(branch, cwd):
@@ -441,7 +491,8 @@ def run_merge(argv=None) -> int:
             say(f"ticket #{t} NOT closed: {e.message}")
 
     if args.worktree:
-        say(remove_worktree(args.worktree, cwd))
+        refusal = worktree_refusal(args.worktree, branch, head_oid, cwd)
+        say(f"worktree {args.worktree} NOT removed: {refusal}" if refusal else remove_worktree(args.worktree, cwd))
     # The reviewer's pr-<n> scratch trees: the guard refuses it `git worktree remove`, so the merge does (ADR-0004).
     for line in remove_scratch(pr, cwd):
         say(f"scratch {line}")

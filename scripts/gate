@@ -99,7 +99,7 @@ def lockfiles_without_manifest(changed):
     return out
 
 
-def dependencies_check(view, snap):
+def dependencies_check(view, snap, cwd="."):
     """Pass when the PR's ticket has no open blocker and the PR is based on the default branch."""
     name = "dependencies merged"
     ticket = repo.ticket_of_branch(view.get("headRefName"))
@@ -113,7 +113,7 @@ def dependencies_check(view, snap):
     if blockers:
         problems.append(f"#{ticket} has {len(blockers)} open blocker(s): "
                         + " ".join(f"#{n} (body)" if from_body else f"#{n}" for n, from_body in blockers))
-    default = github.default_branch()
+    default = github.default_branch(cwd)
     if view.get("baseRefName") != default:
         problems.append(f"based on {view.get('baseRefName')}, not {default}: a dependency is not merged")
     return check(name, not problems, "\n".join(problems))
@@ -156,7 +156,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
     # GitHub computes mergeability lazily: UNKNOWN right after a push usually settles in seconds.
     for attempt in range(retries + 1):
         try:
-            view = github.pr_view(pr, "title,mergeable,baseRefName,headRefName,headRefOid,body")
+            view = github.pr_view(pr, "title,mergeable,baseRefName,headRefName,headRefOid,body", cwd)
         except github.GhError as e:
             if e.kind == github.MALFORMED:
                 return None, "gh pr view returned malformed JSON"
@@ -170,7 +170,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
     mergeable = view.get("mergeable", "UNKNOWN")
     behind = None
     try:
-        behind = github.behind_by(base, view.get("headRefName"))
+        behind = github.behind_by(base, view.get("headRefName"), cwd)
     except github.GhError:
         pass  # shown as ? and logged as null
     problems = []
@@ -189,8 +189,8 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
         return None, overlap
     results.append(overlap)
     try:
-        results.append(dependencies_check(view, snap))
-        diff = github.call("pr", "diff", str(pr), cwd=cwd)
+        results.append(dependencies_check(view, snap, cwd))
+        diff = github.pr_diff(pr, cwd)
     except github.GhError as e:
         return None, e.message if e.kind == github.MALFORMED else f"gh failed: {e.message}"
     except (KeyError, TypeError, ValueError) as e:  # a malformed issues reply: could not run, not a failed check

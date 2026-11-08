@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""launch [--greedy[=N] | <ticket>] [--bg] [--resume <sessionId>] [--lead] [--permission-mode MODE] [--print] [--repo PATH] : start the orchestrator.
+
+The one place that knows the orchestrator's launch line; the lead, `/orchestrate:start` and the docs quote this
+script (ADR-0006). The flags cannot live in settings: the session-only auto-mode switch exists only as inline
+`--settings` JSON, a project `defaultMode` or `model` would leak into the developer's own sessions, and
+`--plugin-dir` is needed when the plugin runs from a checkout. The line is built from, in order:
+    --resume <sessionId>        only when resuming; --bg follows when given
+    --name orchestrator --permission-mode <mode> (default acceptEdits)
+    --settings '{"disableAutoMode":"disable"[,"crossSessionInbound":"accept"]}'
+                                crossSessionInbound is added with --bg or bypassPermissions: without it a
+                                background orchestrator holds every message from the lead behind a dialog
+    --model <m>                 only when the config's Models table names one in its Orchestrator row
+    --plugin-dir <root>         only when the plugin is a checkout: ${CLAUDE_PLUGIN_ROOT}, else this script's
+                                parent; a root under <claude dir>/plugins/ is a marketplace install and gets no flag
+    "/orchestrate:run --greedy" the prompt: `--greedy=N` or a ticket number is passed through; none with --resume
+--no-model drops --model whatever the config says. --lead builds the lead's line instead: `--name lead`, crossSessionInbound accepted (a lead in a prompting mode
+holds every pass table from a bypass orchestrator otherwise), the plugin flag, prompt "/orchestrate:lead".
+Default runs it in the foreground (the terminal becomes the session); --bg runs `claude --bg` and passes its
+output through; --print only prints the command. Exit codes: 0 launched or printed; 2 could not run: a live
+session already named `orchestrator` (`lead` for --lead) or, with --resume, one live under that id; `claude agents`
+failing or not printing a list; or a bad argument, one line on stderr. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import common  # noqa: E402
+import config  # noqa: E402
+
+NAME = "orchestrator"
+MODES = ("acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan")
+TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")  # a session id or model name: never starts with `-`, so never a flag
+DIGITS = re.compile(r"[0-9]+")  # ASCII only: str.isdigit() accepts other scripts
+SETTINGS = {"disableAutoMode": "disable"}
+INBOUND = {"crossSessionInbound": "accept"}
+
+
+def plugin_root() -> Path:
+    env = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    return Path(env) if env else Path(__file__).resolve().parent.parent
+
+
+def is_marketplace(root: Path) -> bool:
+    """A plugin installed from a marketplace lives under <claude dir>/plugins/; anything else is a checkout."""
+    plugins = (common.claude_dir() / "plugins").resolve()
+    resolved = root.resolve()
+    return resolved == plugins or plugins in resolved.parents
+
+
+def build(args, root: Path, model) -> list:
+    """The argv of the launch, `claude` first, from parsed arguments, the plugin root and the Orchestrator model."""
+    argv = ["claude"]
+    if args.lead:
+        argv += ["--name", "lead", "--settings", json.dumps(INBOUND, separators=(",", ":"))]
+        if args.permission_mode:
+            argv += ["--permission-mode", args.permission_mode]
+        if not is_marketplace(root):
+            argv += ["--plugin-dir", str(root)]
+        return argv + ["/orchestrate:lead"]
+    if args.resume:
+        argv += ["--resume", args.resume]
+    if args.bg:
+        argv.append("--bg")
+    settings = dict(SETTINGS)
+    mode = args.permission_mode or "acceptEdits"
+    if args.bg or mode == "bypassPermissions":
+        settings.update(INBOUND)
+    argv += ["--name", NAME, "--permission-mode", mode,
+             "--settings", json.dumps(settings, separators=(",", ":"))]
+    if model:
+        argv += ["--model", model]
+    if not is_marketplace(root):
+        argv += ["--plugin-dir", str(root)]
+    if not args.resume:
+        argv.append(prompt(args))
+    return argv
+
+
+def prompt(args) -> str:
+    if args.ticket:
+        return f"/orchestrate:run {args.ticket}"
+    return "/orchestrate:run --greedy" + (f"={args.greedy}" if args.greedy else "")
+
+
+def render(argv: list) -> str:
+    """The command as a shell line: the settings JSON in single quotes, the prompt in double quotes."""
+    parts = []
+    for i, a in enumerate(argv):
+        if i == len(argv) - 1 and a.startswith("/orchestrate:"):
+            parts.append(f'"{a}"')
+        else:
+            parts.append(shlex.quote(a))
+    return " ".join(parts)
+
+
+def live_sessions() -> list:
+    """The rows of `claude agents --json` that are live (a pid), as dicts; [] when `claude` is not installed.
+
+    Fails closed: a nonzero exit, output that is not JSON or JSON that is not a list means we cannot tell whether
+    an orchestrator is already live, which is exit 2 with one line.
+    """
+    if not shutil.which("claude"):
+        return []  # the launch itself then fails with its own line
+    code, out, _ = common.run("claude", "agents", "--json")
+    if code != 0:
+        common.die(f"launch: cannot run: `claude agents --json` failed (exit {code}); cannot tell whether a session is live")
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        common.die("launch: cannot run: `claude agents --json` did not print a list; cannot tell whether a session is live")
+    return [r for r in rows if isinstance(r, dict) and r.get("pid") is not None]
+
+
+def parse(argv):
+    ap = argparse.ArgumentParser(prog="launch", description=__doc__.split("\n")[0])
+    ap.add_argument("ticket", nargs="?", help="a ticket number: run narrows to it")
+    ap.add_argument("--greedy", nargs="?", const="", default=None, metavar="N", help="greedy mode, as --greedy=N")
+    ap.add_argument("--bg", action="store_true", help="run as a background session")
+    ap.add_argument("--resume", metavar="SESSION_ID", help="resume that session with the same flags and no prompt")
+    ap.add_argument("--lead", action="store_true", help="the lead's line instead of the orchestrator's")
+    ap.add_argument("--permission-mode", choices=MODES, help="the session's mode (orchestrator default acceptEdits)")
+    ap.add_argument("--no-model", action="store_true", help="omit --model (the lead's one relaunch after model_not_found)")
+    ap.add_argument("--print", action="store_true", help="print the command, run nothing")
+    ap.add_argument("--repo", default=".", help="the repo whose config names the model (default .)")
+    args = ap.parse_args(argv)
+    if args.ticket is not None:
+        args.ticket = args.ticket.lstrip("#")
+        if not DIGITS.fullmatch(args.ticket):
+            common.die(f"launch: cannot run: {args.ticket!r} is not a ticket number")
+    if args.greedy and not DIGITS.fullmatch(args.greedy):
+        common.die(f"launch: cannot run: --greedy={args.greedy} is not a number")
+    if args.ticket and args.greedy is not None:
+        common.die("launch: cannot run: give --greedy or a ticket, not both")
+    if args.resume is not None and not TOKEN.fullmatch(args.resume):
+        common.die(f"launch: cannot run: {args.resume!r} is not a session id")
+    if args.resume and (args.ticket or args.greedy is not None):
+        common.die("launch: cannot run: --resume takes no prompt")
+    if args.lead and (args.bg or args.resume or args.ticket or args.greedy is not None or args.no_model):
+        common.die("launch: cannot run: --lead takes only --permission-mode and --print")
+    return args
+
+
+def main(argv=None) -> int:
+    args = parse(argv)
+    model = None if args.lead or args.no_model else config.Config.load(args.repo).orchestrator_model
+    if model is not None and not TOKEN.fullmatch(model):
+        common.die(f"launch: cannot run: the config's Orchestrator model {model!r} is not a model name")
+    cmd = build(args, plugin_root(), model)
+    if args.print:
+        print(render(cmd))
+        return 0
+    live = live_sessions()
+    name = "lead" if args.lead else NAME
+    clash = [r for r in live if r.get("name") == name or (args.resume and r.get("sessionId") == args.resume)]
+    if clash:
+        common.die(f"launch: cannot run: a live session named {clash[0].get('name')} already exists "
+                   f"({clash[0].get('sessionId')}); message it instead of starting another")
+    if not shutil.which("claude"):
+        common.die("launch: cannot run: `claude` is not on PATH")
+    if args.bg:
+        code, out, err = common.run(*cmd)
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+        return code
+    os.execvp(cmd[0], cmd)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
