@@ -13,6 +13,7 @@ from pathlib import Path
 from harness import ScriptEnv, gh_pr_list, git
 
 import common
+import session
 
 CONFIG = """## Slots
 
@@ -236,6 +237,42 @@ class Holds(unittest.TestCase):
     def test_gh_failure_could_not_run(self):
         self.env.set_gh([{"args": ["repo", "view"], "stderr": "HTTP 502\n", "exit": 1}])
         self.assertEqual(self.holds("--touch-map", "a.py", "--ticket", "7").returncode, 2)
+
+    def test_comma_separated_touch_map_is_split_into_entries(self):
+        for arg in ("scripts/session.py:252, scripts/rebuild-state:74", "scripts/session.py:252,scripts/rebuild-state:74"):
+            with self.subTest(arg):
+                self.gh(open_tickets=[341])
+                self.state({341: ["scripts/rebuild-state:10"]})
+                r = self.holds("--touch-map", arg, "--ticket", "338")
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("overlap: scripts/rebuild-state (held by building #341)", r.stdout)
+
+    def test_separate_touch_map_arguments_overlap(self):
+        self.gh(open_tickets=[341])
+        self.state({341: ["scripts/rebuild-state:10"]})
+        r = self.holds("--touch-map", "scripts/session.py:252", "scripts/rebuild-state:74", "--ticket", "338")
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_note_with_a_comma_stays_in_its_entry(self):
+        self.assertEqual(session.split_entries("a:1, b:2 (note, with comma)"), ["a:1", "b:2 (note, with comma)"])
+        self.gh(open_tickets=[12])
+        self.state({12: ["a", "b"]})
+        r = self.holds("--touch-map", "a:1, b:2 (note, with comma)", "--ticket", "7")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout.splitlines()[-2:], [
+            "overlap: a (held by building #12)", "overlap: b (held by building #12)"])
+
+    def test_all_notes_argument_is_ignored_and_no_path_is_exit_two(self):
+        r = self.holds("--touch-map", "(just a note)", "--ticket", "7")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(r.stderr.splitlines(), ["ignored: (just a note)", "holds: --touch-map yields no path"])
+
+    def test_an_ignored_argument_does_not_stop_the_check(self):
+        self.gh()
+        r = self.holds("--touch-map", "(note)", "a.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+        self.assertEqual(r.stderr.splitlines(), ["ignored: (note)"])
 
     def test_usage(self):
         self.assertEqual(self.holds().returncode, 2)

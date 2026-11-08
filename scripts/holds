@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""holds (--touch-map PATH... --ticket N | --pr N) [--repo DIR] [--state FILE] : what is held, and does this overlap it.
+"""holds (--touch-map ENTRIES... --ticket N | --pr N) [--repo DIR] [--state FILE] : what is held, and does this overlap it.
 
 The one place the overlap rule lives. A path is held by an open PR (its diff, through `gh`), by a
 building ticket (its touch map in the state file, or its worktree's changes when this session's own worker has no record), by an Elsewhere ticket (a live worker in another session:
@@ -28,6 +28,7 @@ import claims
 import common
 import config
 import github
+import session
 import tracker
 from repo import STATE, ticket_of_branch, worktree_changes
 
@@ -39,6 +40,20 @@ def plain(entry: str) -> str:
     """A touch-map entry as a file path: no trailing `(note)`, no `:line` or line range, no leading `./`."""
     path = LINE_SUFFIX.sub("", NOTE_SUFFIX.sub("", entry.strip().strip("`")))
     return path[2:] if path.startswith("./") else path
+
+
+def candidate_paths(args: list) -> list:
+    """The paths of the `--touch-map` arguments: each is split into entries (commas and semicolons outside parentheses, as
+    `session.touch_map` does), so one quoted string and separate arguments give the same paths. An argument that yields
+    no path (empty, only notes, `none`) is reported on stderr as `ignored: <arg>`."""
+    paths = []
+    for arg in args:
+        found = [plain(e) for e in session.split_entries(arg)]
+        found = [p for p in found if p and p.lower() != "none"]
+        if not found:
+            print(f"ignored: {arg}", file=sys.stderr)
+        paths.extend(found)
+    return paths
 
 
 def claimed_paths(found: dict, own, base: str) -> tuple:
@@ -117,7 +132,7 @@ def report(held: dict, candidates: list, cfg) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--touch-map", nargs="+", metavar="PATH", help="the ticket's touch-map entries (`path:line` is fine)")
+    ap.add_argument("--touch-map", nargs="+", metavar="ENTRIES", help="the ticket's touch-map entries (`path:line` is fine); an argument may hold several, comma-separated")
     ap.add_argument("--ticket", type=int, help="the ticket number, to leave out its own PR and touch map")
     ap.add_argument("--pr", help="check this PR's diff against the others (the gate's overlap check)")
     ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
@@ -128,6 +143,12 @@ def main(argv=None) -> int:
         ap.error("give --touch-map (with --ticket) or --pr, not both or neither")
     if args.touch_map is not None and args.ticket is None:
         ap.error("--touch-map needs --ticket")
+    candidates = None
+    if args.touch_map is not None:
+        candidates = candidate_paths(args.touch_map)
+        if not candidates:
+            print("holds: --touch-map yields no path", file=sys.stderr)
+            return 2
     repo = Path(args.repo)
     cfg = config.Config.load(repo)
     state_file = Path(args.state) if args.state else repo / STATE
@@ -140,8 +161,6 @@ def main(argv=None) -> int:
             view = github.pr_view(own_pr, "headRefName", cwd=repo)
             own_ticket = ticket_of_branch(view.get("headRefName"))
             candidates = github.pr_files(own_pr, cwd=repo)
-        else:
-            candidates = [plain(e) for e in args.touch_map if plain(e) and plain(e).lower() != "none"]
         open_prs = [p for p in snap.prs if isinstance(p, dict) and p.get("baseRefName", base) == base]
         prs = {}
         for pr in open_prs:
