@@ -180,6 +180,74 @@ class ReadinessTest(unittest.TestCase):
         git(self.repo, "checkout", "-q", "main")
         return head
 
+    def on_br(self, edit, message="fix: edit"):
+        """Run `edit(repo)` on feat-br, commit everything and push; the new head."""
+        git(self.repo, "checkout", "-q", "feat-br")
+        edit(self.repo)
+        git(self.repo, "add", "-A", "--", ".", ":!.claude")  # not the harness's state file
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", message)
+        sha = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "push", "-q", "origin", "feat-br")
+        git(self.repo, "checkout", "-q", "main")
+        return sha
+
+    def test_a_file_added_then_removed_after_approval_is_in_the_delta(self):
+        # The real #411 shape: a leaked 11-line file in the approved head, removed after.
+        approved = self.on_br(lambda r: (r / "leak.txt").write_text("x\n" * 11))
+        head = self.on_br(lambda r: (r / "leak.txt").unlink())
+        p = self.merge(head, approved=approved)
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
+        self.assertIn("changed 11 line(s) in 1 file(s)", p.stdout)
+
+    def test_a_revert_is_in_the_delta(self):
+        approved = self.on_br(lambda r: (r / "auth" / "x.py").parent.mkdir(exist_ok=True) or (r / "auth" / "x.py").write_text("1\n"))
+        head = self.on_br(lambda r: (r / "auth" / "x.py").unlink())
+        p = self.merge(head, approved=approved)
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
+        self.assertIn("auth/x.py", p.stdout)
+
+    def test_a_line_move_on_a_risk_path_is_in_the_delta(self):
+        text = "".join(f"line{i}\n" for i in range(10))
+        moved = "".join(f"line{i}\n" for i in (1, 0, 2, 3, 4, 5, 6, 7, 8, 9))
+        approved = self.on_br(lambda r: ((r / "auth").mkdir(exist_ok=True), (r / "auth" / "m.py").write_text(text)))
+        head = self.on_br(lambda r: (r / "auth" / "m.py").write_text(moved))
+        p = self.merge(head, approved=approved)
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
+        self.assertIn("auth/m.py", p.stdout)
+
+    def test_a_mode_only_change_on_a_risk_path_is_in_the_delta(self):
+        approved = self.on_br(lambda r: ((r / "auth").mkdir(exist_ok=True), (r / "auth" / "run.sh").write_text("echo\n")))
+        head = self.on_br(lambda r: (r / "auth" / "run.sh").chmod(0o755))
+        p = self.merge(head, approved=approved)
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
+        self.assertIn("auth/run.sh", p.stdout)
+
+    def test_an_empty_file_added_on_a_risk_path_is_in_the_delta(self):
+        head = self.on_br(lambda r: ((r / "auth").mkdir(exist_ok=True), (r / "auth" / "empty").write_text("")))
+        p = self.merge(head)
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
+        self.assertIn("auth/empty", p.stdout)
+
+    def test_an_empty_file_removed_counts_as_a_file(self):
+        approved = self.on_br(lambda r: ((r / "auth").mkdir(exist_ok=True), (r / "auth" / "empty").write_text("")))
+        head = self.on_br(lambda r: (r / "auth" / "empty").unlink())
+        self.assertEqual(self.merge(head, approved=approved).returncode, 6)
+
+    def test_main_editing_the_prs_own_file_elsewhere_is_not_in_the_delta(self):
+        body = "".join(f"line{i}\n" for i in range(40))
+        self.env.commit("big.txt", body, "feat: big on main")
+        git(self.repo, "push", "-q", "origin", "main")
+        def edit_near_top(r):
+            git(r, "merge", "-q", "main")
+            (r / "big.txt").write_text(body.replace("line2\n", "line2 PR\n"))
+        approved = self.on_br(edit_near_top)
+        # main now edits the far end of the same file, and the host merges it into the branch.
+        self.env.commit("big.txt", body.replace("line37\n", "line37 main\n"), "feat: main edits big")
+        git(self.repo, "push", "-q", "origin", "main")
+        head = self.on_br(lambda r: git(r, "merge", "-q", "--no-ff", "-m", "Merge main", "main"))
+        p = self.merge(head, approved=approved)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
     def test_a_main_update_alone_is_an_empty_delta(self):
         head = self.update_from_main("big.txt", "x\n" * 50)
         p = self.merge(head)

@@ -40,7 +40,7 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
-import collections
+import difflib
 from pathlib import Path
 import re
 import sys
@@ -108,9 +108,12 @@ def own_changes(cwd, approved, head, default):
 
     Compares what the PR adds to the default branch at each head (see pr_patch), so a merge of the
     default branch (the sweep's, or update-branch) contributes nothing, even in a file the PR also
-    changes; a rebase that kept the same change counts nothing either. A line one side has and the
-    other lacks counts once. (set(), 0) means the PR's own change is the same at both heads. An unknown
-    SHA or a failed git call gives None, which callers treat as needing re-review.
+    changes far from the PR's hunks; a rebase that kept the same change counts nothing either. Every
+    file whose patch differs between the two heads counts as a file (so it meets the risk-path check),
+    even when only its mode changed or it is an empty file added or removed; its lines are the patch
+    +/- lines that differ (context fixes where each sits, so a moved line counts), at least one. (set(), 0) means the PR's
+    own change is the same at both heads. An unknown SHA or a failed git call gives None, which callers
+    treat as needing re-review.
     """
     run("git", "fetch", "--quiet", "origin", cwd=cwd)
     old, new = pr_patch(cwd, approved, default), pr_patch(cwd, head, default)
@@ -118,41 +121,47 @@ def own_changes(cwd, approved, head, default):
         return None
     files, lines = set(), 0
     for path in set(old) | set(new):
-        a, b = old.get(path, collections.Counter()), new.get(path, collections.Counter())
-        n = sum(((a - b) + (b - a)).values())
-        if n:
-            files.add(path)
-            lines += n
+        a, b = old.get(path, ()), new.get(path, ())
+        if a == b:
+            continue
+        files.add(path)
+        # Changed lines only (not context, mode or file-name rows); a file that differs counts at least one.
+        n = sum(1 for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+                if tag != "equal" for row in a[i1:i2] + b[j1:j2]
+                if row[:1] in ("+", "-") and not row.startswith(("+++ ", "--- ")))
+        lines += max(n, 1)
     return files, lines
 
 
 def pr_patch(cwd, sha, default):
-    """{file: Counter of (sign, text)} the PR adds on top of `origin/<default>` at `sha`, or None.
+    """{file: tuple of patch lines} the PR adds on top of `origin/<default>` at `sha`, or None.
 
     The diff from the merge base of `sha` and the default branch to `sha`, so what the default branch
-    brought in is not in it. -U0 keeps context lines out of it.
+    brought in is not in it. Each file's tuple is its patch with the context lines, the mode lines and
+    a bare `@@` for each hunk header: the line numbers (which shift when the default branch edits the
+    file elsewhere) and blob hashes are dropped, the position of every change is kept by its context.
     """
     base = run("git", "merge-base", f"origin/{default}", sha, cwd=cwd)
     if base.returncode != 0 or not base.stdout.strip():
         return None
-    diff = run("git", "diff", "--no-renames", "--no-color", "-U0", base.stdout.strip(), sha, cwd=cwd)
+    diff = run("git", "diff", "--no-renames", "--no-color", base.stdout.strip(), sha, cwd=cwd)
     if diff.returncode != 0:
         return None
     files, cur, index = {}, None, ""
     for row in diff.stdout.splitlines():
         if row.startswith("diff --git "):
-            cur = files.setdefault(row.rpartition(" b/")[2], collections.Counter())
+            cur = files.setdefault(row.rpartition(" b/")[2], [])
         elif cur is None:
             continue
         elif row.startswith("index "):
-            index = row
+            index = row  # a blob hash: kept only for a binary file, whose change shows nowhere else
         elif row.startswith("Binary files"):
-            cur[("b", index)] += 1
-        elif row.startswith(("+++", "---")):
-            continue
-        elif row[:1] in ("+", "-"):
-            cur[(row[0], row[1:])] += 1
-    return files
+            cur += [index, row]
+        elif row.startswith("@@"):
+            cur.append("@@")
+        else:
+            cur.append(row)
+    return {path: tuple(rows) for path, rows in files.items()}
 
 
 def merge_rule(cwd, pr, v, head):
