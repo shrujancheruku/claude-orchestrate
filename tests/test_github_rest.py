@@ -245,6 +245,9 @@ class Rest(unittest.TestCase):
             self.assertEqual(github.current_pr_number(), "21")
             replies[newest] = [pull(4, sha="other")]
             self.assertEqual(github.current_pr_number(), "")
+            # a same-repo PR at the same commit (a branch cut from its tip) is that PR's, not this branch's
+            replies[newest] = [pull(5, ref="a", sha="abc123")]
+            self.assertEqual(github.current_pr_number(), "")
 
     # --- issues ---
 

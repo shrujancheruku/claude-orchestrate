@@ -10,6 +10,8 @@ Each function runs one `gh` call and returns parsed data or raises `GhError`, wh
   ratelimited a rate limit that retrying here did not clear (hourly quota, a wait over the budget, or every try used)
   servererror a 5xx (or a dropped connection) that outlasted the retries or the wait budget: no reset is coming
   malformed  `gh` printed unparseable JSON, or JSON of the wrong shape for the call (a `[]` for a PR)
+The wait budget is per process: every long-running loop must call `reset_wait_budget()` each tick, as merge and
+watch-ci do, or its first rate-limit wait uses up the budget for every later tick.
 `could_not_run(e)` maps missing, malformed, ratelimited and servererror to each script's "could not run" exit (2).
 """
 
@@ -699,7 +701,8 @@ def current_pr_number(cwd=None) -> str:
 
     The `head=<owner>:<branch>` filter finds a PR whose head is in the base repository. A fork's PR has the fork's
     owner there, so when the filter finds nothing the newest pulls are searched for the local HEAD commit, which
-    a fork head shares."""
+    a fork head shares. Only fork heads count: a same-repo PR at the same commit (a branch cut from the tip of
+    another PR's branch) is that other PR's, not this branch's."""
     rows = call_json("api", "repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all&per_page=100", shape=list,
                      cwd=cwd)
     rows = [r for r in rows if isinstance(r, dict)]
@@ -709,7 +712,7 @@ def current_pr_number(cwd=None) -> str:
         if sha:
             rows = [r for r in call_json("api", "repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc"
                                                 "&per_page=100", shape=list, cwd=cwd)
-                    if isinstance(r, dict) and (r.get("head") or {}).get("sha") == sha]
+                    if isinstance(r, dict) and (r.get("head") or {}).get("sha") == sha and _cross_repo(r)]
     rows.sort(key=lambda r: r.get("state") != "open")  # stable: open first, then the host's order
     return str(rows[0].get("number", "")) if rows else ""
 

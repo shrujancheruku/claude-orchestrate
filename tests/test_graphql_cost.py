@@ -59,30 +59,42 @@ class QueryCost(unittest.TestCase):
             with self.subTest(name):
                 self.assertLessEqual(points(q), MAX_POINTS)
 
-    def test_a_query_constant_cannot_escape_the_guard_by_its_name(self):
-        # Discovery is by content: any module-level string that opens with `query` or `mutation`, whatever its name.
-        by_content = {k for k, v in vars(github).items() if isinstance(v, str) and v.lstrip().startswith(("query", "mutation"))}
-        for name in by_content:
+    def query_constants(self):
+        """{name: text} of every module-level string in a script module that is, or is named like, a GraphQL document:
+        one that opens with `query`, `mutation` or `{` (an anonymous query), or whose name ends in `_QUERY`."""
+        found = {}
+        for mod in (github, lead_brief):
+            for k, v in vars(mod).items():
+                if isinstance(v, str) and (k.endswith("_QUERY") or v.lstrip().startswith(("query", "mutation", "{"))):
+                    found[k] = v
+        return found
+
+    def test_a_query_constant_cannot_escape_the_guard_by_its_name_or_its_module(self):
+        found = self.query_constants()
+        self.assertIn("ISSUES_QUERY", found)
+        self.assertIn("MERGED_QUERY", found)  # lead-brief's, found rather than listed
+        for name, q in found.items():
             with self.subTest(name):
                 self.assertTrue(name.endswith("_QUERY"), f"{name} is a query but not named *_QUERY")
-                self.assertLessEqual(points(vars(github)[name]), MAX_POINTS)
+                limit = lead_brief.MERGED_LIMIT if "$limit" in q else 100
+                self.assertLessEqual(points(q, limit), MAX_POINTS)
 
     def test_every_graphql_call_site_in_scripts_sends_a_known_query_constant(self):
-        known = {k for k, v in vars(github).items() if k.endswith("_QUERY") and isinstance(v, str)} | {"MERGED_QUERY"}
+        known = set(self.query_constants())
         known.add("query")  # github._connection's parameter: its callers pass the constants above
         sites = re.compile(r"query=\{(?:[\w.]+\.)?(\w+)\}")
+        # `query=` followed by anything but a `{name}` placeholder: a literal query, or `"query=" + Q` built by hand
+        literal = re.compile(r"""query=(?!\{)[A-Za-z{]|["']query=["']\s*\+""")
         found = set()
         for path in sorted(SCRIPTS.iterdir()):
             if path.is_dir() or path.suffix in (".md", ".json"):
                 continue
-            found |= set(sites.findall(path.read_text(encoding="utf-8", errors="replace")))
+            text = path.read_text(encoding="utf-8", errors="replace")
+            found |= set(sites.findall(text))
+            with self.subTest(path.name):
+                self.assertIsNone(literal.search(text), "a graphql call site builds its query outside `query={NAME}`")
         self.assertTrue(found)
         self.assertLessEqual(found, known, "a graphql call site sends a query outside the *_QUERY set")
-        literal = re.compile(r"query=(?!\{)[A-Za-z{]")
-        for path in sorted(SCRIPTS.iterdir()):
-            if not path.is_dir() and path.suffix not in (".md", ".json"):
-                with self.subTest(path.name):
-                    self.assertIsNone(literal.search(path.read_text(encoding="utf-8", errors="replace")))
 
     def test_the_merged_prs_query_costs_at_most_five_points(self):
         self.assertLessEqual(points(lead_brief.MERGED_QUERY, lead_brief.MERGED_LIMIT), MAX_POINTS)
