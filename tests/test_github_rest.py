@@ -277,11 +277,14 @@ class GraphqlBraces(unittest.TestCase):
     """The fake gh never parses a query, so a lost brace passed every other test (#462): count them here."""
 
     def test_every_graphql_query_has_balanced_braces(self):
-        queries = {k: v for k, v in vars(github).items() if k.endswith("_QUERY") and isinstance(v, str)}
+        # Scan by content, not name, so a new query or mutation constant cannot be skipped.
+        queries = {k: v for k, v in vars(github).items()
+                   if isinstance(v, str) and v.lstrip().startswith(("query", "mutation"))}
         self.assertIn("PR_QUERY", queries)
         for name, q in queries.items():
             with self.subTest(name):
-                self.assertEqual(q.count("{"), q.count("}"))
+                self.assertEqual(q.count("{"), q.count("}"), "braces")
+                self.assertEqual(q.count("("), q.count(")"), "parentheses")
 
 
 if __name__ == "__main__":
