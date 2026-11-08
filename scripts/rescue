@@ -243,11 +243,12 @@ def main(argv=None) -> int:
         return fail(str(e))
     say(f"changed {len(changed)} paths")
 
-    status = git(path, "status", "--porcelain")
+    # Nothing under .claude/ belongs in a PR (#413): a leaked pr-body.md or agent file is left behind, not staged.
+    status = git(path, "status", "--porcelain", "--", ".", ":!.claude")
     if status.code != 0:
         return fail(f"git status failed in {path}: {common.one_line(status.stderr)}")
     if status.stdout.strip():
-        add = git(path, "add", "-A")
+        add = git(path, "add", "-A", "--", ".", ":!.claude")
         msg = f"chore(wip): rescue #{ticket}" if created else f"chore(wip): {args.title}" if args.title else f"chore(wip): #{ticket} work in progress" if ticket is not None \
             else "chore(wip): work in progress"
         c = git(path, "commit", "--no-verify", "-m", msg) if add.code == 0 else add
@@ -257,6 +258,10 @@ def main(argv=None) -> int:
         say(f"committed {k} paths {git(path, 'rev-parse', '--short', 'HEAD').stdout.strip()}")
     else:
         say("committed 0 paths: tree clean")
+
+    left = git(path, "status", "--porcelain", "--untracked-files=all", "--", ".claude").stdout.splitlines()
+    if left:
+        say(f"left behind (not committed): {len(left)} paths under .claude/: " + ", ".join(x[3:] for x in left))
 
     n = unpushed(path, branch)
     if n is None:
