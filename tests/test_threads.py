@@ -138,7 +138,7 @@ class Threads(unittest.TestCase):
         self.env.set_gh([gh_repo_view(), {"args": ["api", "~repos/{owner}/{repo}/pulls?head="], "stdout": "[]"}])
         r = self.env.run("threads", "resolve", "T1", "--fixed", SHA[:10], check=False)
         self.assertEqual(r.returncode, 2)
-        self.assertIn("no pull requests found", r.stderr)
+        self.assertIn("could not read the current branch", r.stderr)
         self.assertEqual(self.mutations(), [])
         self.assertFalse(any(c[:3] == ["api", "graphql", "-f"] for c in self.env.gh_calls()))
 

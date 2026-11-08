@@ -32,7 +32,7 @@ class Rescue(unittest.TestCase):
         self.nothing_held()
 
     def nothing_held(self):
-        self.env.set_gh([gh_repo_view("main"), gh_pr_list([], "--state", "open"), graphql(),
+        self.env.set_gh([gh_repo_view(), gh_pr_list([], "--state", "open"), graphql(),
                          gh_pr_list([], "--state", "merged")])
 
     def worktree(self, push=False):
@@ -206,7 +206,7 @@ class Rescue(unittest.TestCase):
         self.worktree()
         (self.wt / "shared.txt").write_text("a\n")
         self.env.set_gh([
-            gh_repo_view("main"),
+            gh_repo_view(),
             gh_pr_list([{"number": 9, "headRefName": "b9", "isCrossRepository": False}], "--state", "open"),
             graphql(),
             {"args": ["api", "~repos/{owner}/{repo}/pulls/9/files"], "stdout": json.dumps([{"filename": "shared.txt"}])},

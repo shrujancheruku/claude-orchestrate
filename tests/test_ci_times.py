@@ -106,7 +106,7 @@ class CiTimes(unittest.TestCase):
         prs = {n: (n, [(f"s{n}", n, [check("test", 0, 1, push=n)])]) for n in range(1, 13)}
         self.serve(prs)
         self.assertEqual(self.times()[0], "heads: 10 green over 10 PRs (0 never green)")
-        viewed = {c[1].split("/")[3] for c in self.env.gh_calls() if c[0] == "api" and c[1].endswith("/commits?per_page=100&page=1")}
+        viewed = {c[1].split("/")[4] for c in self.env.gh_calls() if c[0] == "api" and c[1].endswith("/commits?per_page=100&page=1")}
         self.assertEqual(viewed, {str(n) for n in range(3, 13)})
 
     def test_since_a_time_takes_every_pr_merged_from_then(self):

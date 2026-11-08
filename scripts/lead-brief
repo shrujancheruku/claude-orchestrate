@@ -68,6 +68,13 @@ def gh_json(root, *args, shape=dict):
         raise Unavailable(f"gh failed: {e.message}")
 
 
+def repo_info(root) -> dict:
+    try:
+        return github.repo_info(root)
+    except github.GhError as e:
+        raise Unavailable(f"gh failed: {e.message}")
+
+
 def repo_vars(repo) -> list:
     try:
         return ["-F", f"owner={repo['owner']['login']}", "-F", f"name={repo['name']}"]
@@ -252,7 +259,7 @@ def section_merges(root, repo, now) -> list:
 
 def checkpoint(root, number) -> int:
     try:
-        prs, total = load_merged(root, repo_vars(gh_json(root, "repo", "view", "--json", "owner,name")))
+        prs, total = load_merged(root, repo_vars(repo_info(root)))
     except Unavailable as e:
         common.die(f"lead-brief: cannot checkpoint: {e}")
     pr = next((p for p in prs if p["number"] == number), None)
@@ -289,7 +296,7 @@ def main(argv=None) -> int:
         return memo[key]
 
     def repo():
-        return once("repo", lambda: gh_json(root, "repo", "view", "--json", "owner,name"))
+        return once("repo", lambda: repo_info(root))
 
     def snapshot():  # one open-issues read, shared by the tickets and roadmap sections
         return once("issues", lambda: open_issues(root, repo()))
