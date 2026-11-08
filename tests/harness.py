@@ -160,9 +160,14 @@ def gh_pr_list(prs, *prefix):
 
 
 class ScriptEnv:
-    """Use as `env = ScriptEnv(); self.addCleanup(env.close)`."""
+    """Use as `env = ScriptEnv(); self.addCleanup(env.close)`.
 
-    def __init__(self):
+    Scripts run with ORCHESTRATE_GH_LOG=off, so the event log holds only what a test provokes; pass
+    `gh_log=True` for a test of the `gh_call` profiling events themselves.
+    """
+
+    def __init__(self, gh_log=False):
+        self.gh_log = gh_log
         self._tmp = tempfile.TemporaryDirectory()
         root = Path(self._tmp.name)
         self.origin = root / "origin.git"
@@ -214,9 +219,15 @@ class ScriptEnv:
         f = Path(str(self.gh_state) + ".stdin")
         return [json.loads(line) for line in f.read_text().splitlines()] if f.exists() else []
 
-    def events(self):
+    def events(self, profiling=False):
+        """The event log's rows; `gh_call` profiling rows are left out unless `profiling=True`."""
         log = runlog.log_path(self.repo, runlog.EVENTS_LOG)
-        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return rows if profiling else [r for r in rows if r.get("kind") != runlog.GH_CALL]
+
+    def clear_events(self):
+        """Forget the events so far (a test that runs a script in a loop, one fresh log per pass)."""
+        runlog.log_path(self.repo, runlog.EVENTS_LOG).unlink(missing_ok=True)
 
     def _tmp_empty(self):
         empty = Path(self._tmp.name) / "empty-bin"
@@ -237,6 +248,10 @@ class ScriptEnv:
             PATH=search_path,
             FAKE_GH_STATE=str(self.gh_state),
         )
+        if self.gh_log:
+            env.pop("ORCHESTRATE_GH_LOG", None)
+        else:
+            env["ORCHESTRATE_GH_LOG"] = "off"
         return subprocess.run(
             [sys.executable, str(path), *map(str, args)],
             cwd=cwd or self.repo, env=env, capture_output=True, text=True, check=check,
