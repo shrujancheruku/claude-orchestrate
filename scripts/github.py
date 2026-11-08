@@ -490,6 +490,8 @@ PR_FIELDS = {
     "isCrossRepository": _cross_repo,
 }
 # These two have no REST form (the closing issues and the check rollup are GraphQL-only): one explicit query.
+# It reads at most 20 closing issues and 100 check contexts and has no pageInfo, so a PR past either limit is
+# truncated, as `gh pr view --json` was (a follow-up could page them).
 GRAPHQL_PR_FIELDS = {"closingIssuesReferences", "statusCheckRollup"}
 PR_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {

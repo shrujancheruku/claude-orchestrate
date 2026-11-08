@@ -33,8 +33,8 @@ DEFAULT_PR_COUNT = 10
 DEFAULT_LIMIT_MINUTES = 10
 SLOWEST = 3
 LIST_LIMIT = 100  # merged PRs fetched; --since beyond the newest 100 is cut off
-# Not paginated: `check-runs?per_page=100` and `pr view --json commits` stop at 100, so a head with more
-# check runs than that could read as green from a partial list.
+# Not paginated: `check-runs?per_page=100` stops at 100, so a head with more check runs than that could read as
+# green from a partial list. (The PR's commits are paged by github.pr_commits.)
 GOOD = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 
 
