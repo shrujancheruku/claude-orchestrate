@@ -74,6 +74,14 @@ _Avoid_: WIP PR, early PR
 A claimed ticket blocked on the user: a gate, a question or a third review round. With a lead live it waits on the lead instead and carries `needs-lead`. Source: `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.
 _Avoid_: blocked, on hold
 
+**Snapshot**:
+The one read of the tracker a pass works from: the open issues with their blockers (native edges plus the body `Blocked by:` line), the open PRs with their draft state, and the merged branches. `scripts/tracker.py` owns it and `scripts/snapshot` writes it to a file; `frontier`, `claims`, `holds`, `lead-route` and `gate` read it. Source: `scripts/tracker.py`, `scripts/snapshot`.
+_Avoid_: cache, issue list, tracker state
+
+**Scratch worktree**:
+A detached worktree a reviewer adds under its scratchpad (`pr-<n>`, `pr-<n>b`, `pr-<n>-r2`) to read or run a PR's head. `merge` removes the merged PR's scratch worktrees; nothing else does. Source: `agents/reviewer.md`, `scripts/merge`.
+_Avoid_: review worktree, temp checkout
+
 **State file**:
 `.claude/orchestrate-state.json`, gitignored: for each ticket this session dispatched a worker for, the agent ID, worktree path (null once gone), worker model, time of its last report and the brief's touch map. Rebuilt by `scripts/rebuild-state`, never written by the orchestrator, and a cache that the tracker overrules. `scripts/claims` is its one reader. Source: `scripts/rebuild-state`, `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: status file, session file
@@ -97,7 +105,7 @@ _Avoid_: hand-back (that is the sweep's `HANDBACK` line), result, completion (th
 ### Overlap
 
 **Touch map**:
-The files a ticket is expected to change, as a prediction rather than a fence. Source: `agents/scout.md`, `skills/run/brief.md`.
+The files a ticket is expected to change, as a prediction rather than a fence. Its grammar is `path[:L[-L]] [(note)]`, one entry per comma (`none` for an empty map). `scripts/touchmap.py` is its one parser and formatter, and the brief carries the canonical form. Source: `scripts/touchmap.py`, `agents/scout.md`, `skills/run/brief.md`.
 _Avoid_: file list, change set
 
 **Held path**:
