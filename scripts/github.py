@@ -7,7 +7,7 @@ Each function runs one `gh` call and returns parsed data or raises `GhError`, wh
   failed     `gh` exited non-zero (message = its stderr, else stdout, on one line)
              (one whose message says git has no repository or working directory counts as could not run)
              (a secondary rate limit is retried with backoff first; primary-quota exhaustion is not)
-  ratelimited a rate limit that retrying here cannot clear in time (hourly quota, or a wait over the budget)
+  ratelimited a rate limit that retrying here did not clear (hourly quota, a wait over the budget, or every try used)
   malformed  `gh` printed unparseable JSON, or JSON of the wrong shape for the call (a `[]` for a PR)
 `could_not_run(e)` maps missing, malformed and ratelimited to each script's "could not run" exit (2).
 """
@@ -112,7 +112,7 @@ RATE_LIMITED = re.compile(r"secondary rate limit|abuse detection|API rate limit 
 RETRY_AFTER = re.compile(r"retry-after:?\s*(\d+)", re.I)
 QUOTA_EMPTY = re.compile(r"x-ratelimit-remaining:?\s*0\b", re.I)
 QUOTA_RESET = re.compile(r"x-ratelimit-reset:?\s*(\d+)", re.I)
-TRIES, FIRST_WAIT, MAX_WAIT = 5, 2, 60
+TRIES = 5
 # A reset further off than this is the hourly quota running out: waiting it out here would stall the script.
 PRIMARY_RESET_AFTER = 120
 
@@ -133,7 +133,17 @@ def _utc(epoch: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
+_paths = {}  # (cwd, cache dir, host) -> the file, resolved once so the fallback is announced once
+
+
 def _state_path(cwd) -> Path:
+    key = (str(cwd), os.environ.get("XDG_CACHE_HOME"), os.environ.get("GH_HOST"))
+    if key not in _paths:
+        _paths[key] = _resolve_state_path(cwd)
+    return _paths[key]
+
+
+def _resolve_state_path(cwd) -> Path:
     cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     host = os.environ.get("GH_HOST") or "github.com"
     path = Path(cache) / "orchestrate" / f"github-ratelimit-{host}.json"
@@ -215,12 +225,11 @@ def call(*args, cwd=None) -> str:
 
     Before the first try it waits out a reset another process recorded in STATE_FILE (or raises `ratelimited`
     when that is over WAIT_BUDGET away). A secondary rate limit is then retried up to TRIES times, sleeping the
-    `retry-after` seconds when gh shows them, else FIRST_WAIT doubling to MAX_WAIT, and recording its reset in
+    `retry-after` seconds when gh shows them, else until the reset it just recorded (DEFAULT_PAUSE), and recording its reset in
     STATE_FILE for the others. The hourly quota (remaining 0, reset far off) raises `ratelimited` at once with the
     reset time, since waiting for it would stall the caller. A rate-limit message carries the HTTP status and headers.
     """
     _wait_for_shared_reset(cwd)
-    wait = FIRST_WAIT
     for attempt in range(1, TRIES + 1):
         p = common.run("gh", *args, cwd=cwd)
         if p.returncode == common.NOT_FOUND:
@@ -235,14 +244,14 @@ def call(*args, cwd=None) -> str:
         after, reset, empty = limit
         if empty and reset is not None and reset - clock() > PRIMARY_RESET_AFTER:
             raise GhError(RATELIMITED, f"{message} (hourly quota used up; resets at {_utc(reset)})")
-        pause = after if after is not None else wait
-        _record_reset(cwd, clock() + (after if after is not None else
-                                      reset - clock() if reset is not None and reset > clock() else DEFAULT_PAUSE))
+        # gh shows no headers on a plain failure, so a bare rate limit waits out the recorded reset (a minute),
+        # not a short ladder that would burn all the tries inside one limit window.
+        pause = after if after is not None else (reset - clock() if reset is not None and reset > clock() else DEFAULT_PAUSE)
+        _record_reset(cwd, clock() + pause)
         if attempt == TRIES:
-            raise GhError(FAILED, message)
+            raise GhError(RATELIMITED, message)
         print(f"github: rate limited, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
         sleep(pause)
-        wait = min(wait * 2, MAX_WAIT)
 
 
 def call_json(*args, shape=dict, cwd=None):

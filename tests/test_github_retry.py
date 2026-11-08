@@ -42,6 +42,8 @@ class RetryTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("GH_HOST", None)
+        github._paths.clear()
+        self.addCleanup(github._paths.clear)
 
     def run_call(self, *replies, clock=1000.0):
         fake, sleeps = FakeGh(*replies), []
@@ -58,11 +60,12 @@ class RetryTest(unittest.TestCase):
         fake, sleeps, out, err = self.run_call(fail(SECONDARY), fail(SECONDARY), OK)
         self.assertEqual((out, err, sleeps, fake.calls), ("done\n", None, [1, 1], 3))
 
-    def test_without_retry_after_backs_off_doubling_to_the_cap(self):
+    def test_bare_rate_limit_without_headers_waits_the_recorded_minute(self):
         msg = fail("gh: API rate limit already exceeded for user ID 1. (HTTP 403)")
         fake, sleeps, out, err = self.run_call(msg)
-        self.assertEqual(sleeps, [2, 4, 8, 16])
-        self.assertEqual((fake.calls, err.kind), (5, github.FAILED))
+        self.assertEqual(sleeps, [60, 60, 60, 60])  # tens of seconds, not a short ladder
+        self.assertEqual((fake.calls, err.kind), (5, github.RATELIMITED))
+        self.assertTrue(github.could_not_run(err))
 
     def test_gives_up_after_five_tries_with_ghs_message(self):
         _, _, _, err = self.run_call(fail(SECONDARY))
@@ -138,6 +141,18 @@ class RetryTest(unittest.TestCase):
                 path = github._state_path(repo)
             self.assertEqual(path, Path(repo) / ".git" / "orchestrate-ratelimit.json")
 
+    def test_fallback_is_announced_once_however_many_calls(self):
+        with tempfile.TemporaryDirectory() as repo:
+            common.run("git", "init", "-q", repo)
+            blocker = Path(self.dir.name) / "blocked"
+            blocker.write_text("a file")
+            err = unittest.mock.MagicMock()
+            with unittest.mock.patch.dict("os.environ", {"XDG_CACHE_HOME": str(blocker)}), \
+                    unittest.mock.patch.object(sys, "stderr", err):
+                for _ in range(3):
+                    github._state_path(repo)
+            self.assertEqual(sum("not writable" in "".join(c.args) for c in err.write.call_args_list), 1)
+
     def test_host_names_the_file(self):
         with unittest.mock.patch.dict("os.environ", {"GH_HOST": "ghe.example"}):
             self.assertEqual(github._state_path(None).name, "github-ratelimit-ghe.example.json")
@@ -147,6 +162,14 @@ class RetryTest(unittest.TestCase):
         self.state.write_text("not json")
         fake, sleeps, out, _ = self.run_call(OK)
         self.assertEqual((out, sleeps), ("done\n", []))
+
+    def test_a_write_is_retried_only_on_a_rate_limit(self):
+        for text in ("gh: Validation Failed (HTTP 422)", "gh: Server Error (HTTP 502)", "gh: Forbidden (HTTP 403)"):
+            fake, sleeps = FakeGh(fail(text)), []
+            with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append):
+                with self.assertRaises(github.GhError):
+                    github.call("api", "--method", "POST", "x", cwd=self.dir.name)
+            self.assertEqual((fake.calls, sleeps), (1, []), text)
 
     def test_missing_gh_is_not_retried(self):
         fake, _, _, err = self.run_call(common.Run(common.NOT_FOUND, "", "gh: no such file"))

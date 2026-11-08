@@ -35,7 +35,6 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
    - Add `--greedy[=N]` to a full or parent pass to size the slot count from how many tickets can run at once, up to N (5 by default): see [Choosing a slot count](#choosing-a-slot-count).
    - Add `--profile` to any of these to profile the session as it runs: see [Profiling](#profiling).
    - The two combine: `/orchestrate:run --greedy --profile` runs greedy and profiles it, which is how to find out whether greedy paid off on your backlog.
-   - **Rate limits.** A greedy run can hit GitHub's secondary rate limit (many `gh` calls at once). Every script waits it out: `scripts/github.py` retries up to 5 times, sleeping the `retry-after` seconds or backing off from 2s to 60s. The hourly quota running out is not retried; the call fails at once with the reset time. A script's rate-limit hit is also written to `$XDG_CACHE_HOME/orchestrate/github-ratelimit-<host>.json` (`~/.cache` when unset), shared by every agent on the machine, so every other script waits too (up to 2 minutes, else it exits 2 with `rate limit until <time>`), and the error says the HTTP status and headers.
 
 ### Concepts
 
@@ -66,6 +65,8 @@ Every full pass suggests a change of one slot, between 1 and 5: lower after a us
 `/orchestrate:run --greedy[=N]` sizes the count for you instead. Each pass dispatches every takeable ticket whose touch map overlaps no held path, up to a cap of N (5 by default, 1 to 8), and never stops a worker in flight. It holds for the session, never edits the config, drops back to the config's count after a usage limit until the reset, and makes no per-pass suggestion. Each report starts `Greedy · cap N · running M`. The reasoning is in [ADR-0007](adr/0007-greedy-slots.md).
 
 Use greedy when the backlog has several independent tickets and you have plan headroom to spend on finishing sooner: a batch of small fixes, or the leaves of a spec once their blockers have merged. Keep the config's count when tickets mostly touch the same files (overlap holds them at any count, so greedy gains nothing) or when usage is tight, since every running ticket adds a worker and its reviews. `--greedy=N` sets a lower or higher cap for one session without touching the config.
+
+**Rate limits.** A greedy run can hit GitHub's secondary rate limit (many `gh` calls at once). Every script waits it out: `scripts/github.py` retries up to 5 times, sleeping the `retry-after` seconds when `gh` shows them, else a minute (the time it records for the others). The hourly quota running out is not retried; the call fails at once with the reset time. A script's rate-limit hit is also written to `$XDG_CACHE_HOME/orchestrate/github-ratelimit-<host>.json` (`~/.cache` when unset), shared by every agent on the machine, so every other script waits too (up to 2 minutes, else it exits 2 with `rate limit until <time>`), and the error says the HTTP status and headers. After the fifth try it exits 2 too.
 
 ## The guard hook
 
