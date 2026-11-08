@@ -179,6 +179,14 @@ class Holds(unittest.TestCase):
             "b.py (held by open PR #10)", "z.py (held by building #11)",
             "overlap: b.py (held by open PR #10)"])
 
+    def test_a_release_please_pr_holds_nothing_and_a_human_pr_on_its_files_is_held(self):
+        rp = "release-please--branches--main--components--orchestrate"
+        self.gh({5: ["CHANGELOG.md", "version.txt", ".release-please-manifest.json", ".claude-plugin/plugin.json"],
+                 6: ["scripts/x"], 8: ["CHANGELOG.md"]}, branches={5: rp, 6: "9-worker", 8: "12-human"})
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), ["scripts/x (held by open PR #6)", "CHANGELOG.md (held by open PR #8)", "overlap: none"])
+
     def test_closed_ticket_holds_nothing(self):
         self.gh(issues={12: "CLOSED"})
         self.state({12: ["src/x.py"]})
