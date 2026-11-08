@@ -236,8 +236,7 @@ def sync(owner, number, repo, writes=None):
         # Plugin features degrade: the worker and Backlog cards still sync, only the lead's cards are skipped.
         print(f"board: lead cards skipped: lead-route failed: {common.one_line(e.message)}", file=sys.stderr)
     in_backlog = tracker.backlog(issues, labels)
-    merged_at = github.call_json("pr", "list", "--state", "merged", "--limit", "100", "--json",
-                                 "number,headRefName,mergedAt", shape=list, cwd=repo)
+    merged_at = github.merged_prs(None, cwd=repo, limit=100)
 
     proj = github.call_json("project", "view", str(number), *own, "--format", "json", cwd=repo)
     fields = github.call_json("project", "field-list", str(number), *own, "--format", "json", cwd=repo)

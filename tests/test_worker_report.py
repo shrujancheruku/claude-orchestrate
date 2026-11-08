@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, gh_pulls  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 HEAD = "7e38ea0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -21,8 +21,7 @@ NOTICE = "<task-id>a1</task-id>\n<status>completed</status>\n<summary>Agent comp
 
 
 def prs(*items, draft=()):
-    return [{"args": ["pr", "list"], "stdout": json.dumps(
-        [{"number": n, "headRefName": b, "headRefOid": h, "isDraft": n in draft} for n, b, h in items])}]
+    return [gh_pulls([{"number": n, "headRefName": b, "headRefOid": h, "isDraft": n in draft} for n, b, h in items], "open")]
 
 
 class WorkerReport(unittest.TestCase):
@@ -166,7 +165,7 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual(r.stdout, "")
 
     def test_exit_2_on_a_failed_pr_lookup(self):
-        self.env.set_gh([{"args": ["pr", "list"], "stderr": "HTTP 502", "exit": 1}])
+        self.env.set_gh([{"args": ["api", "~repos/{owner}/{repo}/pulls"], "stderr": "HTTP 502", "exit": 1}])
         r = self.report("status: pr-opened\n", check=False)
         self.assertEqual((r.returncode, len(r.stderr.strip().splitlines())), (2, 1))
         self.assertEqual([e for e in self.env.events() if e["kind"] == "worker-report"], [])

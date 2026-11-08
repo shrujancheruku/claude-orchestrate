@@ -7,10 +7,11 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv  # noqa: E402
+from harness import ScriptEnv, gh_pulls, gh_repo_view, rest_pull  # noqa: E402
 import runlog  # noqa: E402
 
 HEAD = "a1b2c3d4" * 5
+PULL = "repos/{owner}/{repo}/pulls/7"
 CLEAN_DIFF = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
 
 
@@ -28,7 +29,7 @@ class GateTest(unittest.TestCase):
               ticket_body="", body_blocked_by=()):
         """Canned gh replies for the gate and for the `holds --pr` subprocess it runs: one PR view serves both."""
         view = {"title": title, "mergeable": mergeable, "baseRefName": base, "headRefName": head, "headRefOid": HEAD,
-                "body": body, "files": [{"path": "src/a.py"}]}
+                "body": body}
         # The ticket's own node: `blockers` native open edges (900+i), `body_blocked_by` open issues named on its body line.
         nodes = list(issues)
         if blockers or ticket_body or body_blocked_by:
@@ -36,11 +37,15 @@ class GateTest(unittest.TestCase):
                           "blockedBy": {"nodes": [{"number": 900 + i, "state": "OPEN"} for i in range(blockers)]}})
             nodes += [{"number": n} for n in body_blocked_by]
         self.env.set_gh([
-            view_reply or {"args": ["pr", "view"], "stdout": json.dumps(view)},
+            view_reply or {"args": ["api", PULL], "stdout": json.dumps(rest_pull(**view))},
+            {"args": ["api", "~" + PULL + "/files"], "stdout": json.dumps([{"filename": "src/a.py"}])},
+            *[{"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{o['number']}/files"],
+               "stdout": json.dumps([{"filename": "src/a.py"}])} for o in others],
             {"args": ["pr", "diff"], "stdout": diff},
             {"args": ["api", "graphql"], "stdout": json.dumps({"data": {"repository": {"issues": {"nodes": nodes}}}})},
-            {"args": ["pr", "list"], "stdout": json.dumps(list(others))},
-            {"args": ["repo", "view"], "stdout": json.dumps({"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}})},
+            gh_pulls(list(others), "open"),
+            gh_pulls([], "closed"),
+            gh_repo_view(),
             behind_reply or {"args": ["api"], "stdout": f"{behind}\n"},
         ])
 
@@ -57,6 +62,37 @@ class GateTest(unittest.TestCase):
         self.assertEqual((e["kind"], e["ref"]), ("gate", 7))
         return e
 
+    def next_lines(self, r):
+        return [l for l in r.stdout.splitlines() if l.startswith("next:")]
+
+    def test_a_failed_check_ends_send_back(self):
+        self.prime(title="Add the thing")
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (1, ["next: send-back 7"]))
+        self.assertEqual(r.stdout.splitlines()[-1], "next: send-back 7")
+
+    def test_unknown_mergeability_ends_rerun_after_ci(self):
+        self.prime(mergeable="UNKNOWN")
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: rerun-after-ci"]))
+
+    def test_every_could_not_run_path_ends_could_not_run(self):
+        self.prime()
+        paths = {"missing cwd": ("--cwd", str(self.env.repo / "gone")), "bad timeout": ("--timeout", "0")}
+        for name, flags in paths.items():
+            with self.subTest(name):
+                r = self.gate(*flags)
+                self.assertEqual((r.returncode, self.next_lines(r)), (2, ["next: could-not-run"]))
+        self.env.set_gh([{"args": ["pr", "view"], "stderr": "boom", "exit": 1}])
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (2, ["next: could-not-run"]))
+        self.assertNotIn("next:", r.stderr)
+
+    def test_help_prints_no_verdict(self):
+        r = self.env.run("gate", "--help", check=False)
+        self.assertEqual((r.returncode, "next:" in r.stdout.split("\n\n", 1)[0]), (0, False))
+        self.assertFalse(r.stdout.rstrip().splitlines()[-1].startswith("next:"))
+
     def test_one_gate_run_reads_the_issues_once(self):
         # #367: the gate hands its snapshot to `holds --snapshot`, so the issues are fetched by the gate alone.
         self.prime(blockers=0, ticket_body="x")
@@ -72,6 +108,7 @@ class GateTest(unittest.TestCase):
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         lines = r.stdout.splitlines()
+        self.assertEqual(lines.pop(), f"next: review {HEAD}")
         self.assertEqual(lines[0], f"PR #7 head {HEAD}")
         self.assertEqual(len(lines), 8)  # head, title, mergeable, overlap, dependencies, secrets, lockfiles, run:
         self.assertTrue(all(l.startswith("pass") for l in lines[1:]), lines)
@@ -143,7 +180,7 @@ class GateTest(unittest.TestCase):
                     "user's config scripts (degrade instead).")
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len(r.stdout.splitlines()), 7)  # the built-in checks only
+        self.assertEqual(len(r.stdout.splitlines()), 8)  # the built-in checks only, then next:
         self.assertNotIn("README.md", r.stdout)
 
     def test_missing_cwd_exits_2_before_any_check(self):
@@ -163,7 +200,7 @@ class GateTest(unittest.TestCase):
         r = self.gate("--cwd", str(other))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("pwd", r.stdout)
-        self.assertEqual(len(r.stdout.splitlines()), 8)
+        self.assertEqual(len(r.stdout.splitlines()), 9)
 
     def test_several_markers_in_one_item_all_run(self):
         self.prime()
@@ -214,7 +251,7 @@ class GateTest(unittest.TestCase):
         r = self.gate()
         self.assertEqual(r.returncode, 3, r.stdout)
         self.assertIn("again", r.stdout)
-        views = [c for c in self.env.gh_calls() if c[:2] == ["pr", "view"]]
+        views = [c for c in self.env.gh_calls() if c[:2] == ["api", PULL]]
         self.assertGreater(len(views), 1)
         self.assertEqual(self.env.events()[-1]["outcome"], "unknown")
 
@@ -243,18 +280,18 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.event()["outcome"], "unknown")
 
     def test_unknown_settles_to_mergeable_on_retry(self):
-        views = [json.dumps({"title": "feat(x): add y", "mergeable": m, "baseRefName": "main", "headRefName": "br",
-                             "headRefOid": HEAD, "body": "", "files": [{"path": "src/a.py"}]})
+        views = [json.dumps(rest_pull(title="feat(x): add y", mergeable=m, baseRefName="main", headRefName="br",
+                                      headRefOid=HEAD, body=""))
                  for m in ("UNKNOWN", "MERGEABLE")]
-        self.prime(view_reply={"args": ["pr", "view"], "seq": [{"stdout": views[0]}, {"stdout": views[1]},
+        self.prime(view_reply={"args": ["api", PULL], "seq": [{"stdout": views[0]}, {"stdout": views[1]},
                                                               {"stdout": views[1]}, {"stdout": views[1]}]})
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(self.env.gh_calls()[1][:2], ["pr", "view"])
+        self.assertEqual(self.env.gh_calls()[1][:2], ["api", PULL])
         self.assertEqual(self.event()["outcome"], "pass")
 
     def test_gh_failure_exits_2(self):
-        self.env.set_gh([{"args": ["pr", "view"], "stderr": "boom", "exit": 1}])
+        self.env.set_gh([{"args": ["api", PULL], "stderr": "boom", "exit": 1}])
         r = self.gate()
         self.assertEqual(r.returncode, 2)
         self.assertIn("boom", r.stderr)
@@ -263,7 +300,7 @@ class GateTest(unittest.TestCase):
         self.prime()
         r = self.gate()
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(len(r.stdout.splitlines()), 7)
+        self.assertEqual(len(r.stdout.splitlines()), 8)
 
     def test_missing_gh_is_could_not_run(self):
         r = self.env.run("gate", "7", "--retry-delay", "0", check=False, no_gh=True)
@@ -274,14 +311,14 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.env.events(), [])
 
     def test_malformed_gh_json_is_could_not_run(self):
-        self.env.set_gh([{"args": ["pr", "view"], "stdout": "<html>not json"}])
+        self.env.set_gh([{"args": ["api", PULL], "stdout": "<html>not json"}])
         r = self.gate()
         self.assertEqual(r.returncode, 2)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("malformed", r.stderr)
 
     def test_json_of_the_wrong_shape_is_could_not_run(self):
-        self.env.set_gh([{"args": ["pr", "view"], "stdout": "[1, 2]"}])
+        self.env.set_gh([{"args": ["api", PULL], "stdout": "[1, 2]"}])
         self.assertEqual(self.gate().returncode, 2)
 
     def test_non_positive_timeout_is_could_not_run(self):
@@ -310,7 +347,7 @@ class GateTest(unittest.TestCase):
 
     def test_holds_that_cannot_run_is_gate_exit_2_not_a_failure(self):
         self.prime()
-        self.env.set_gh([{"args": ["pr", "list"], "stderr": "HTTP 502", "exit": 1}] + json.loads(self.env.gh_state.read_text())["responses"])
+        self.env.set_gh([{"args": ["api", "~repos/{owner}/{repo}/pulls?state=open"], "stderr": "HTTP 502", "exit": 1}] + json.loads(self.env.gh_state.read_text())["responses"])
         r = self.gate()
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("holds could not run", r.stderr)

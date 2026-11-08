@@ -127,7 +127,7 @@ What `scripts/merge` does after a merge: updating every other open PR whose bran
 _Avoid_: refresh, rebase-all
 
 **CI green**:
-What `scripts/merge` requires of a PR head before merging: every check in the rollup is SUCCESS, SKIPPED or NEUTRAL, or (once #362 lands) the rollup is empty and the head's tree has no workflow files. A failed check is red; anything else, an empty rollup with workflows present included, is pending, and a pending or red head never merges. Source: `docs/adr/0012-ci-green-without-workflows.md`; the code is `ci_verdict` in `scripts/github.py`, which until #362 treats every empty rollup as pending.
+What `scripts/merge` requires of a PR head before merging: every check in the rollup is SUCCESS, SKIPPED or NEUTRAL, or the rollup is empty and the head's tree has no workflow files. A failed check is red; anything else, an empty rollup with workflows present included, is pending, and a pending or red head never merges. Source: `docs/adr/0012-ci-green-without-workflows.md`; the code is `ci_verdict` in `scripts/github.py`, which treats every empty rollup as pending and leaves the no-workflows case to `scripts/merge`.
 _Avoid_: CI passed, checks done, no CI (that is one reason for green, not the state)
 
 **Approved head**:
