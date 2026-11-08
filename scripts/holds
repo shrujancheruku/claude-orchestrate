@@ -96,8 +96,8 @@ def claimed_paths(found: dict, own, base: str) -> tuple:
 
 
 def covers(held: str, path: str) -> bool:
-    """A held entry covers a path when it is that file, or a directory (`db/`) containing it."""
-    return path == held or (held.endswith("/") and path.startswith(held))
+    """Whether a held entry and a path name the same file, or one is a directory (`db/`) containing the other (touchmap.overlaps)."""
+    return touchmap.overlaps(touchmap.Entry(held), touchmap.Entry(path))
 
 
 def held_paths(cfg, prs: dict, tickets: dict, others: dict) -> dict:

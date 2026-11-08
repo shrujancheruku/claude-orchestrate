@@ -36,7 +36,7 @@ class Entry:
 
 _ENTRY = re.compile(
     r"^`?(?P<path>[^\s`:()]+)`?"
-    r"(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?"
+    r"(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?`?"
     r"(?:\s*\((?P<note>[^()]*)\))?$"
 )
 
@@ -65,7 +65,7 @@ def parse(text) -> list:
     entries = []
     for raw in _split(text):
         m = _ENTRY.match(raw)
-        if not m or m["path"].isdigit() or (m["end"] and int(m["end"]) < int(m["start"])):
+        if not m or re.fullmatch(r"[\d\-–]+", m["path"]) or (m["end"] and int(m["end"]) < int(m["start"])):
             raise TouchMapError(f"bad touch-map entry: {raw!r} (want path[:L[-L]] [(note)])")
         path = m["path"][2:] if m["path"].startswith("./") else m["path"]
         note = " ".join(m["note"].split()) if m["note"] else None
