@@ -7,21 +7,24 @@ Each function runs one `gh` call and returns parsed data or raises `GhError`, wh
   failed     `gh` exited non-zero (message = its stderr, else stdout, on one line)
              (one whose message says git has no repository or working directory counts as could not run)
              (a secondary rate limit is retried with backoff first; primary-quota exhaustion is not)
+  ratelimited a rate limit that retrying here cannot clear in time (hourly quota, or a wait over the budget)
   malformed  `gh` printed unparseable JSON, or JSON of the wrong shape for the call (a `[]` for a PR)
-`could_not_run(e)` maps missing and malformed to each script's "could not run" exit (2).
+`could_not_run(e)` maps missing, malformed and ratelimited to each script's "could not run" exit (2).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
 import urllib.parse
+from pathlib import Path
 
 import common
 
-MISSING, FAILED, MALFORMED = "missing", "failed", "malformed"
+MISSING, FAILED, MALFORMED, RATELIMITED = "missing", "failed", "malformed", "ratelimited"
 # A 404/422 on a branch ref: the host already removed it.
 GONE = re.compile(r"\b(?:404|422)\b|not found|does not exist|reference.*not exist", re.I)
 
@@ -100,7 +103,7 @@ class GhError(Exception):
 
 def could_not_run(e: GhError) -> bool:
     """True when the script should exit 2 ("could not run") rather than treat the call as one more failure."""
-    return e.kind in (MISSING, MALFORMED) or (e.kind == FAILED and bool(NO_REPO.search(e.message)))
+    return e.kind in (MISSING, MALFORMED, RATELIMITED) or (e.kind == FAILED and bool(NO_REPO.search(e.message)))
 
 
 # GitHub's secondary rate limit (too many concurrent or back-to-back requests), and the "API rate limit
@@ -117,6 +120,57 @@ PRIMARY_RESET_AFTER = 120
 sleep = time.sleep
 clock = time.time
 
+# Written on a rate-limit reply so every other process waits too, not each discovering the wall alone.
+STATE_FILE = Path(".claude") / "orchestrate-ratelimit.json"
+DEFAULT_PAUSE = 60  # no retry-after or reset header: assume a minute
+WAIT_BUDGET = 120   # the longest a call waits for the shared reset before exiting 2
+HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
+
+
+def _utc(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _state_path(cwd) -> Path:
+    return Path(cwd or ".") / STATE_FILE
+
+
+def _shared_reset(cwd) -> float:
+    """The reset epoch another process recorded, or 0 when there is none or it has passed (the file is then removed)."""
+    path = _state_path(cwd)
+    try:
+        reset = float(json.loads(path.read_text())["reset"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+    if reset > clock():
+        return reset
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return 0
+
+
+def _record_reset(cwd, reset: float) -> None:
+    """Keep the later of the recorded reset and `reset`; best effort, a write failure only loses the sharing."""
+    path = _state_path(cwd)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"reset": max(reset, _shared_reset(cwd))}))
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _wait_for_shared_reset(cwd) -> None:
+    reset = _shared_reset(cwd)
+    if not reset:
+        return
+    if reset - clock() > WAIT_BUDGET:
+        raise GhError(RATELIMITED, f"rate limit until {_utc(reset)}")
+    sleep(max(reset - clock(), 0))
+
 
 def _rate_limit(text: str):
     """None when `text` is no rate limit; else (retry-after seconds or None, reset epoch or None, quota empty)."""
@@ -127,13 +181,29 @@ def _rate_limit(text: str):
             bool(QUOTA_EMPTY.search(text)))
 
 
-def call(*args, cwd=None) -> str:
-    """Run `gh <args>` and return stdout; raise GhError (missing or failed).
+def _evidence(text: str) -> str:
+    """Which limit fired: the HTTP status, the rate-limit headers gh showed, then the first line of the body."""
+    status = HTTP_STATUS.search(text)
+    parts = [f"HTTP {status.group(1)}"] if status else []
+    for name in ("retry-after", "x-ratelimit-remaining", "x-ratelimit-reset"):
+        m = re.search(rf"{name}:?\s*(\d+)", text, re.I)
+        if m:
+            parts.append(f"{name}: {m.group(1)}")
+    first = next((ln.strip() for ln in text.splitlines()
+                  if ln.strip() and not re.match(r"(retry-after|x-ratelimit-\S+):", ln.strip(), re.I)), "")
+    return f"{first} [{', '.join(parts)}]" if parts else first
 
-    A secondary rate limit is retried up to TRIES times, sleeping the `retry-after` seconds when gh shows them,
-    else FIRST_WAIT doubling to MAX_WAIT. The hourly quota (remaining 0, reset far off) fails at once with the
-    reset time, since waiting for it would stall the caller.
+
+def call(*args, cwd=None) -> str:
+    """Run `gh <args>` and return stdout; raise GhError (missing, failed or ratelimited).
+
+    Before the first try it waits out a reset another process recorded in STATE_FILE (or raises `ratelimited`
+    when that is over WAIT_BUDGET away). A secondary rate limit is then retried up to TRIES times, sleeping the
+    `retry-after` seconds when gh shows them, else FIRST_WAIT doubling to MAX_WAIT, and recording its reset in
+    STATE_FILE for the others. The hourly quota (remaining 0, reset far off) raises `ratelimited` at once with the
+    reset time, since waiting for it would stall the caller. A rate-limit message carries the HTTP status and headers.
     """
+    _wait_for_shared_reset(cwd)
     wait = FIRST_WAIT
     for attempt in range(1, TRIES + 1):
         p = common.run("gh", *args, cwd=cwd)
@@ -141,17 +211,19 @@ def call(*args, cwd=None) -> str:
             raise GhError(MISSING, common.one_line(p.stderr))
         if p.returncode == 0:
             return p.stdout
-        message = common.one_line(p.stderr or p.stdout)
-        limit = _rate_limit(f"{p.stderr}\n{p.stdout}")
+        text = f"{p.stderr}\n{p.stdout}"
+        limit = _rate_limit(text)
         if limit is None:
-            raise GhError(FAILED, message)
+            raise GhError(FAILED, common.one_line(p.stderr or p.stdout))
+        message = common.one_line(_evidence(text))
         after, reset, empty = limit
         if empty and reset is not None and reset - clock() > PRIMARY_RESET_AFTER:
-            at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset))
-            raise GhError(FAILED, f"{message} (hourly quota used up; resets at {at})")
+            raise GhError(RATELIMITED, f"{message} (hourly quota used up; resets at {_utc(reset)})")
+        pause = after if after is not None else wait
+        _record_reset(cwd, clock() + (after if after is not None else
+                                      reset - clock() if reset is not None and reset > clock() else DEFAULT_PAUSE))
         if attempt == TRIES:
             raise GhError(FAILED, message)
-        pause = after if after is not None else wait
         print(f"github: rate limited, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
         sleep(pause)
         wait = min(wait * 2, MAX_WAIT)

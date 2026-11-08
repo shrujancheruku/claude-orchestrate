@@ -1,6 +1,8 @@
 """Unit tests for the secondary-rate-limit retry in scripts/github.py `call`."""
 
+import json
 import sys
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -31,6 +33,11 @@ OK = common.Run(0, "done\n", "")
 
 
 class RetryTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.state = Path(self.dir.name) / ".claude" / "orchestrate-ratelimit.json"
+
     def run_call(self, *replies, clock=1000.0):
         fake, sleeps = FakeGh(*replies), []
         with unittest.mock.patch.object(common, "run", fake), \
@@ -38,7 +45,7 @@ class RetryTest(unittest.TestCase):
                 unittest.mock.patch.object(github, "clock", lambda: clock), \
                 unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
             try:
-                return fake, sleeps, github.call("api", "x"), None
+                return fake, sleeps, github.call("api", "x", cwd=self.dir.name), None
             except github.GhError as e:
                 return fake, sleeps, None, e
 
@@ -71,6 +78,56 @@ class RetryTest(unittest.TestCase):
     def test_other_failures_are_not_retried(self):
         fake, sleeps, _, err = self.run_call(fail("gh: Not Found (HTTP 404)"))
         self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
+
+    def test_error_carries_status_headers_and_first_body_line(self):
+        _, _, _, err = self.run_call(fail("gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 1\nmore"))
+        self.assertIn("HTTP 403", err.message)
+        self.assertIn("retry-after: 1", err.message)
+        self.assertIn("secondary rate limit", err.message)
+
+    def test_rate_limit_records_reset_for_other_processes(self):
+        self.run_call(fail(SECONDARY), OK, clock=1000.0)
+        self.assertEqual(json.loads(self.state.read_text())["reset"], 1001.0)
+
+    def test_no_header_records_a_minute(self):
+        self.run_call(fail("gh: API rate limit already exceeded for user ID 1. (HTTP 403)"), OK, clock=1000.0)
+        self.assertEqual(json.loads(self.state.read_text())["reset"], 1060.0)
+
+    def test_two_calls_wait_for_a_future_reset_before_calling_gh(self):
+        self.state.parent.mkdir()
+        self.state.write_text(json.dumps({"reset": 1030.0}))
+        now = [1000.0]
+        order = []
+        fake = FakeGh(OK)
+
+        def run(*a, **k):
+            order.append(("gh", now[0]))
+            return fake(*a, **k)
+
+        def nap(s):
+            order.append(("sleep", s))
+            now[0] += s
+
+        with unittest.mock.patch.object(common, "run", run), unittest.mock.patch.object(github, "sleep", nap), \
+                unittest.mock.patch.object(github, "clock", lambda: now[0]):
+            github.call("api", "x", cwd=self.dir.name)
+            github.call("api", "y", cwd=self.dir.name)
+        self.assertEqual(order, [("sleep", 30.0), ("gh", 1030.0), ("gh", 1030.0)])
+        self.assertFalse(self.state.exists())  # past reset: removed
+
+    def test_wait_over_budget_is_exit_two_without_calling_gh(self):
+        self.state.parent.mkdir()
+        self.state.write_text(json.dumps({"reset": 1000 + 3600.0}))
+        fake, sleeps, _, err = self.run_call(OK)
+        self.assertEqual((fake.calls, sleeps, err.kind), (0, [], github.RATELIMITED))
+        self.assertIn("rate limit until 1970-01-01T01:16:40Z", err.message)
+        self.assertTrue(github.could_not_run(err))
+
+    def test_garbage_state_file_is_ignored(self):
+        self.state.parent.mkdir()
+        self.state.write_text("not json")
+        fake, sleeps, out, _ = self.run_call(OK)
+        self.assertEqual((out, sleeps), ("done\n", []))
 
     def test_missing_gh_is_not_retried(self):
         fake, _, _, err = self.run_call(common.Run(common.NOT_FOUND, "", "gh: no such file"))

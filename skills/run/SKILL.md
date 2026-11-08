@@ -159,6 +159,7 @@ There is no way to see how much usage is left, so react to failures rather than 
 - **Fill to independence.** Free slots are the cap minus the claimed tickets, and step 4 fills them as usual: every takeable ticket whose touch map overlaps no held path is dispatched, up to the cap. Never stop an in-flight worker to shrink the count; it shrinks as tickets merge and fewer independent ones remain.
 - **The config is untouched.** Its **Slots** line stays the count for passes without `--greedy`; never edit it for greedy.
 - **For the session.** Greedy holds for every later wake (worker and reviewer completions, `watch-ci` lines, usage-limit cron hops) until the user runs `/orchestrate:run` without it.
+- **The request budget.** GitHub allows about 80 content-creating requests a minute and 500 an hour per user, shared by every agent on the machine, so a cap above 3 waits for the write-count tickets filed alongside #383. The scripts share one backoff (`.claude/orchestrate-ratelimit.json`): the first to hit the secondary limit stops the others' calls until the reset.
 - **After a usage limit**, run at the config's count until the reset, then greedy again.
 - **Scope.** Greedy applies to a full pass and a parent. With `status` or a ticket, say in one line that greedy is ignored for this pass.
 - **No slot suggestion.** Greedy passes make none. If the cap was reached with independent tickets still waiting, say in one line: "cap N reached with M independent tickets waiting; `--greedy=<N>` raises it."
