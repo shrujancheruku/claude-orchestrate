@@ -3,7 +3,7 @@
 
 With --approved-head (the PR head the reviewer approved; the orchestrator always passes it) the script
 first decides readiness and merges nothing unless the PR is ready: CI not green on the head (a check
-pending, failed, cancelled or missing, or no checks at all) or an open blocker on the PR's ticket (the
+pending, failed, cancelled or missing, or no checks at all while the head has workflow files; no checks and no workflow files is green, `ci: none configured`) or an open blocker on the PR's ticket (the
 branch's `<number>-` prefix, else the PR's closing reference), or an unresolved review thread (outdated or not, any author; the count line, then one
 `  <author> <url>` line each), is a refusal (exit 1, the clause named); a PR behind the default branch is
 updated with `gh pr update-branch` (exit 5); the worker's own change since the approved head, not counting
@@ -144,7 +144,6 @@ def merge_rule(cwd, pr, v, head):
             return 2
         if not configured:
             say(f"PR #{pr}: ci: none configured (no workflow files on {head[:12]})")
-            verdict = "pass"
         else:
             say(f"PR #{pr} is not ready: ci: pending on {head[:12]}: workflows exist but no checks reported yet")
             return 1

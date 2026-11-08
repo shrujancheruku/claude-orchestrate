@@ -354,7 +354,7 @@ def has_workflows(head: str, cwd=None) -> bool:
     try:
         out = call("api", f"repos/{{owner}}/{{repo}}/contents/.github/workflows?ref={head}", cwd=cwd)
     except GhError as e:
-        if e.kind == FAILED and re.search(r"\b404\b|not found", e.message, re.I):
+        if e.kind == FAILED and re.search(r"\(HTTP 404\)", e.message):
             return False
         raise
     try:
