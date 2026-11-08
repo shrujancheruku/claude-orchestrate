@@ -44,7 +44,7 @@ class LeadSkill(unittest.TestCase):
                     "## Agent Brief", "wontfix", "blocking edges", "needs-triage",
                     "`Source:` line", "over: yes", "every 10 merges", "PR ready",
                     ":grilling", ":domain-modeling", "Never invoke `wayfinder`",
-                    "Relaying"])
+                    "Answering asks", "Never by relay"])
 
 
 if __name__ == "__main__":

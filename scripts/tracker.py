@@ -20,10 +20,31 @@ from pathlib import Path
 import github
 
 WAYFINDER_PREFIX = "wayfinder:"
+TRIAGE_LABELS = Path("docs/agents/triage-labels.md")
+DEFAULTS = {"ready": "ready-for-agent", "human": "ready-for-human", "lead": "lead"}
+# The lead label stays fixed (as in scripts/claims): its table row has no role name in column one to match.
+ROLES = {"ready-for-agent": "ready", "ready-for-human": "human"}
 # The tracker doc's fallback form: a `Blocked by: #1, #2` line (a bold or quoted lead-in allowed). The colon, or a `#`
 # right after, is required so prose like "Blocked by the outage, see #12" is not a blocker.
 BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*(?::|(?=\s*#))(.*)$", re.I)
 ISSUE_REF = re.compile(r"#(\d+)")
+
+
+def label_strings(root: Path) -> dict:
+    """The repo's label strings: the mapping table's second column, by role (first column); a default for a missing row.
+    ValueError when the table exists but cannot be read (the label strings would be a guess)."""
+    labels = dict(DEFAULTS)
+    try:
+        text = (root / TRIAGE_LABELS).read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return labels
+    except OSError as e:
+        raise ValueError(f"cannot read {TRIAGE_LABELS}: {e.strerror or e}") from None
+    for line in text.splitlines():
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] in ROLES and re.fullmatch(r"[\w:./-]+", cells[1]):
+            labels[ROLES[cells[0]]] = cells[1]
+    return labels
 
 
 def _edit_times(node) -> list:
@@ -100,6 +121,18 @@ def takeable(issues, labels) -> list:
     """The takeable tickets, ascending: open, `ready-for-agent`, and none of the reasons in `why_not`."""
     return sorted((i for i in issues if labels["ready"] in i["labels"] and why_not(i, labels, issues) is None),
                   key=lambda i: i["number"])
+
+
+def backlog(issues, labels) -> list:
+    """The unclaimed `ready-for-agent` tickets in the order the board's Backlog column shows them: the takeable ones
+    (frontier order, ascending) and then the held ones (blocked), ascending. Parents, `lead` and `wayfinder:` tickets are not
+    in it, as they are not work a worker takes."""
+    take = takeable(issues, labels)
+    taken = {i["number"] for i in take}
+    held = sorted((i for i in issues if labels["ready"] in i["labels"] and i["number"] not in taken
+                   and not i["claimed"] and i["sub_issues"]["total"] == 0 and labels["lead"] not in i["labels"]
+                   and not any(x.startswith(WAYFINDER_PREFIX) for x in i["labels"])), key=lambda i: i["number"])
+    return take + held
 
 
 def closed_parents(issues) -> list:

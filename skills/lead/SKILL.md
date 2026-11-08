@@ -75,6 +75,9 @@ Run `"${CLAUDE_SKILL_DIR}/../../scripts/ci-times"` every 10 merges (counted from
 - Fix the failures the orchestrator sends back on your PRs.
 - You never merge anything (ADR 0004).
 
-### Relaying
+### Answering asks
 
-Pass the orchestrator's developer asks on to the developer without deciding them.
+In lead mode the orchestrator never asks the developer directly: every ask comes to you by SendMessage, and your reply is the answer. Decide whether you can answer it or must bubble it up.
+- **Answer** what is a judgment call inside the build loop: a third review round, closing a parent whose children have all merged, a slot suggestion, a hand-back or abandon, which of two in-flight PRs goes first.
+- **Relay to the developer** what the config or the repo reserves for a human: config gates, anything under Human-only steps, release PRs, repo settings, permissions, spending money, and anything you are unsure of. Each relayed ask names the choices and your recommendation. Pass the developer's answer back to the orchestrator, and never answer a relayed ask on the developer's behalf.
+- **Never by relay:** a config merge gate on a PR that changes the permission layer itself (`hooks/**`, `.claude-plugin/**`, the guard). The orchestrator asks the developer directly, and your relayed approval does not count.
