@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """worker-report <ticket> --branch <branch> [--repo DIR] : classify a worker's completion (ADR 0006)
+worker-report <pr> --reviewer                                : classify a reviewer's completion (#416)
 
 Reads the worker's whole completion text (the harness notice plus the report) on stdin, prints one verdict
 line and appends a `worker-report` event to the run log. The orchestrator applies the line word for word:
@@ -15,6 +16,10 @@ line and appends a `worker-report` event to the run log. The orchestrator applie
     missing-report none              a bare completion notice, and no open PR on --branch
     limit [<reset time>]             no report, and the text names a usage limit
     error <gist>                     no report, and the text names another API error
+With `--reviewer` the text is a reviewer's short report and no PR is looked up, no `--branch` is needed and no event is
+written. It prints `valid` when the report has a `suite:` line that is `pass`, `fail <n>` or `not run (<reason>)`,
+else `incomplete <why>` (`suite-missing`, `suite-not-run-without-reason` or `suite-unrecognised`): the orchestrator
+sends an incomplete report back to the reviewer once.
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
 no-primary-source, worktree-gone, transient (a host failure nobody decides: the event carries `retry_after` and
 `failed_command`; a `permission-denied` or `human-only` report whose text names a rate limit or a wait-until time is
@@ -135,14 +140,37 @@ def _classify(text: str, branch: str, lookup) -> tuple:
     return ("valid", "pr-opened", str(pr["number"]), pr["headRefOid"]), {"status": status, "head": pr["headRefOid"], "pr": pr["number"]}
 
 
+SUITE = re.compile(r"^[ \t>*-]*suite:[ \t]*`*(.*?)`*[ \t]*$", re.I | re.M)
+SUITE_OK = re.compile(r"pass|fail\s+\d+|not run\s*\(\s*\S[^)]*\)", re.I)
+
+
+def classify_reviewer(text: str) -> tuple:
+    """`("valid",)` or `("incomplete", why)` for a reviewer's report. The last `suite:` line counts."""
+    found = SUITE.findall(text)
+    if not found:
+        return ("incomplete", "suite-missing")
+    value = found[-1].strip()
+    if SUITE_OK.fullmatch(value):
+        return ("valid",)
+    if re.fullmatch(r"not run\s*(\(\s*\))?", value, re.I):
+        return ("incomplete", "suite-not-run-without-reason")
+    return ("incomplete", "suite-unrecognised")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("ticket", help="the ticket number")
-    ap.add_argument("--branch", required=True, help="the ticket's branch")
+    ap.add_argument("--branch", help="the ticket's branch (required unless --reviewer)")
+    ap.add_argument("--reviewer", action="store_true", help="classify a reviewer's report by its `suite:` line")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
     _, ticket = common.pr_ref(args.ticket)
     text = sys.stdin.read()
+    if args.reviewer:
+        print(" ".join(classify_reviewer(text)))
+        return 0
+    if not args.branch:
+        common.die("worker-report: --branch is required (unless --reviewer)")
 
     def lookup():
         try:

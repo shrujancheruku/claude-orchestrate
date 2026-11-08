@@ -268,10 +268,6 @@ class VerdictLines(unittest.TestCase):
                 self.assertIn(word, doc)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReviewerChecksOutByHash(unittest.TestCase):
     """#416: the reviewer reads the PR head by hash and runs the suite in the foreground, the way verify does."""
 
@@ -282,7 +278,7 @@ class ReviewerChecksOutByHash(unittest.TestCase):
         self.assertIn("headRefOid", self.REVIEWER)
         self.assertIn("git fetch origin <hash>", self.REVIEWER)
         self.assertNotIn("git fetch origin pull/", self.REVIEWER)
-        self.assertNotIn("FETCH_HEAD`\n", self.REVIEWER.split("## Tiers")[0].split("headRefOid")[0])
+        self.assertIn("read `headRefOid` again just before you post", self.REVIEWER)
 
     def test_suite_runs_in_the_pr_tree_through_verify_in_the_foreground(self):
         self.assertIn("scripts/verify --config --cwd <scratch>/pr-<n>", self.REVIEWER)
@@ -293,6 +289,19 @@ class ReviewerChecksOutByHash(unittest.TestCase):
         self.assertEqual(self.REVIEWER.count("suite: pass | fail <n> | not run (<reason>)"), 2)
         self.assertIn("head: <hash reviewed>", self.REVIEWER)
 
+    def test_run_skill_reruns_a_stale_head_and_owns_the_reviewer_worktree(self):
+        self.assertIn("is stale: run it again", self.RUN)
+        self.assertIn("detached `pr-<n>` worktree under its scratchpad", self.RUN)
+        self.assertIn("until that lands, remove the `pr-<n>` trees", self.RUN)
+
+    def test_run_skill_classifies_every_reviewer_report_with_the_script(self):
+        self.assertIn('scripts/worker-report" <pr> --reviewer', self.RUN)
+
     def test_run_skill_sends_back_a_report_without_a_suite_reason(self):
-        self.assertIn("`suite: not run` with no reason", self.RUN)
-        self.assertIn("same agent, SendMessage", self.RUN)
+        self.assertIn("(no `suite:` line, or `not run` with no reason) is sent back to the same reviewer once", self.RUN)
+        self.assertIn("incomplete <why>", self.RUN)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
