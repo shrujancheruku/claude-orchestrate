@@ -114,6 +114,17 @@ CASES = [
     ("orchestrate:worker", "grep -n x scripts/merge", "allow"),
     ("orchestrate:worker", "sh -c 'cat scripts/merge'", "allow"),
     (None, '"${CLAUDE_SKILL_DIR}/../../scripts/merge" 12', "allow"),  # the orchestrator's own session
+    # #327: words that only name the script are data, not a run of it.
+    ("orchestrate:worker", "python3 - <<'EOF'\np = 'scripts/merge'\nprint('`merge` run')\nEOF\ngit add x && git commit -q -m 'docs(merge): x'", "allow"),
+    ("orchestrate:worker", 'git commit -m "fix: x" -m "(scripts/merge)"', "allow"),
+    ("orchestrate:worker", "gh pr create --body-file - <<'EOF'\nuses scripts/merge\nEOF", "allow"),
+    ("orchestrate:worker", 'printf "%s" "x | scripts/merge"', "allow"),
+    ("orchestrate:worker", "python3 - <<'EOF'\nx\nEOF\nscripts/merge 12", "deny"),
+    ("orchestrate:worker", "sh -c 'echo hi; scripts/merge 12'", "deny"),
+    ("orchestrate:worker", "cd scripts && sh -c './merge 1'", "deny"),
+    ("orchestrate:worker", "cd scripts && sh -c ./merge", "deny"),
+    ("orchestrate:worker", 'cd scripts && sh -c "./merge 1" && cd -', "deny"),
+    ("orchestrate:worker", 'cd scripts && sh -c "./merge 1"; cd /tmp', "deny"),
     ("orchestrate:scout", "git -C /repo checkout main", "deny"),
     ("orchestrate:scout", "git worktree add ../x", "deny"),
     ("orchestrate:scout", "gh issue comment 5 --body hi", "deny"),

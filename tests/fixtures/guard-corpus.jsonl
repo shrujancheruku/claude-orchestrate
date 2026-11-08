@@ -560,3 +560,6 @@
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 reopen ID --why 'x'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git commit -m \"fix: x\" -m \"(scripts/merge)\"", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:worker", "command": "printf \"%s\" \"x | scripts/merge\"", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr merge 12", "expected": "deny", "source": "hand"}
