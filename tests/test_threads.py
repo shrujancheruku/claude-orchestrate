@@ -173,9 +173,10 @@ class Prompts(unittest.TestCase):
     def text(self, name):
         return (ROOT / name).read_text()
 
-    def test_reviewer_posts_file_level_comments_and_reopens_in_round_2(self):
+    def test_reviewer_reopens_in_round_2_and_never_posts_file_level_comments(self):
         s = self.text("agents/reviewer.md")
-        self.assertIn("pulls/<n>/comments -f path=<path> -f subject_type=file", s)
+        self.assertNotIn("subject_type=file", s)
+        self.assertIn("## Outside the diff", s)
         self.assertIn("threads <pr> --all", s)
         self.assertIn("threads <pr> reopen", s)
         for form in ("fixed in <sha>", "left: <why>", "reopened: <why>"):
