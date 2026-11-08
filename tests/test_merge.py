@@ -5,12 +5,15 @@ The sweep after a merge is in test_merge_sweep.py and test_merge_regenerate.py; 
 """
 
 import json
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv, git  # noqa: E402
+import common  # noqa: E402
 from merge_support import (CLOSED_ISSUE, ISSUE_CLOSE, ISSUE_VIEW, MergeMixin, OK, OPEN_ISSUE, PR_MERGE,  # noqa: E402
                            PR_VIEW, REF_GET, REPO_VIEW, pr)  # noqa: E402
 
@@ -260,20 +263,97 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertIn("NOT removed: it is the main checkout", p.stdout)
         self.assertTrue((self.env.repo / ".git").exists())
 
-    def test_worker_branch_of_the_agent_directory_is_removed(self):
-        wt = self.env.repo.parent / "agent-abc123"
-        git(self.env.repo, "worktree", "add", "-b", "worktree-agent-abc123", str(wt))
-        p = self.merged(wt)
-        self.assertIn("worktree", p.stdout)
+    def merged_at(self, wt, sha, *extra):
+        reply = pr("MERGED")
+        reply = {"stdout": reply["stdout"].replace("abc123", sha)}
+        self.seq({PR_VIEW: [reply], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        p = self.merge("--worktree", str(wt), *extra)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p
+
+    def agent_tree(self, branch="worktree-agent-abc123", name="agent-abc123"):
+        wt = self.env.repo.parent / name
+        git(self.env.repo, "worktree", "add", "-b", branch, str(wt))
+        return wt
+
+    def test_worker_branch_at_the_pr_head_is_removed(self):
+        wt = self.agent_tree()
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
         self.assertNotIn("NOT removed", p.stdout)
         self.assertFalse(wt.exists())
 
+    def test_worker_branch_behind_the_pr_head_is_removed(self):
+        wt = self.agent_tree()
+        (self.env.repo / "later.txt").write_text("x")
+        git(self.env.repo, "add", "later.txt")
+        git(self.env.repo, "commit", "-m", "later")
+        p = self.merged_at(wt, git(self.env.repo, "rev-parse", "HEAD"))
+        self.assertNotIn("NOT removed", p.stdout)
+        self.assertFalse(wt.exists())
+
+    def test_worker_branch_not_in_the_pr_head_is_kept(self):
+        wt = self.agent_tree()
+        base = git(wt, "rev-parse", "HEAD")
+        (wt / "mine.txt").write_text("x")
+        git(wt, "add", "mine.txt")
+        git(wt, "commit", "-m", "unmerged work")
+        p = self.merged_at(wt, base)
+        self.assertIn("NOT removed: its HEAD is not the PR head", p.stdout)
+        self.assertTrue(wt.exists())
+
     def test_worker_branch_of_a_different_directory_is_kept(self):
-        wt = self.env.repo.parent / "agent-abc123"
-        git(self.env.repo, "worktree", "add", "-b", "worktree-agent-zzz", str(wt))
-        p = self.merged(wt)
+        wt = self.agent_tree("worktree-agent-zzz")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
         self.assertIn("NOT removed", p.stdout)
         self.assertTrue(wt.exists())
+
+    def test_detached_worktree_is_removed_only_at_the_pr_head(self):
+        at = self.env.repo.parent / "lead-at"
+        git(self.env.repo, "worktree", "add", "--detach", str(at))
+        p = self.merged_at(at, git(at, "rev-parse", "HEAD"))
+        self.assertNotIn("NOT removed", p.stdout)
+        self.assertFalse(at.exists())
+        away = self.env.repo.parent / "lead-away"
+        git(self.env.repo, "worktree", "add", "--detach", str(away))
+        p = self.merged_at(away, "f" * 40)
+        self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(away.exists())
+
+    def test_a_lock_held_by_another_live_session_is_not_unlocked(self):
+        sleeper = subprocess.Popen(["sleep", "60"])   # live, and not an ancestor of merge
+        self.addCleanup(sleeper.wait)
+        self.addCleanup(sleeper.kill)
+        start = common.process_start(sleeper.pid).strftime(common.LSTART_FORMAT)
+        wt = self.locked_worktree(f"claude agent agent-other (pid {sleeper.pid} start {start})")
+        p = self.merged(wt)
+        self.assertIn("NOT removed: its lock is held by another live session", p.stdout)
+        self.assertTrue(wt.exists())
+        self.assertIn("locked claude agent", git(self.env.repo, "worktree", "list", "--porcelain"))
+
+    def test_path_forms_of_the_same_worktree_all_match(self):
+        parent = self.env.repo.parent
+        for form in ("relative", "symlink", "slash"):
+            git(self.env.repo, "worktree", "add", "-b", f"br-{form}", str(parent / f"wt-{form}"))
+        (parent / "link-to-wt").symlink_to(parent / "wt-symlink")
+        forms = (("relative", os.path.relpath(parent / "wt-relative", self.env.repo)),
+                 ("symlink", str(parent / "link-to-wt")),
+                 ("slash", str(parent / "wt-slash") + "/"))
+        for form, arg in forms:
+            sha = git(parent / f"wt-{form}", "rev-parse", "HEAD")
+            reply = {"stdout": pr("MERGED", branch=f"br-{form}")["stdout"].replace("abc123", sha)}
+            self.seq({PR_VIEW: [reply], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+            p = self.merge("--worktree", arg)
+            self.assertNotIn("NOT removed", p.stdout, form)
+            self.assertFalse((parent / f"wt-{form}").exists(), form)
+
+    def test_another_repos_path_is_refused(self):
+        other = self.env.repo.parent / "other-repo"
+        other.mkdir()
+        git(other, "init", "-q", "-b", "feat-br")
+        git(other, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x")
+        p = self.merged(other)
+        self.assertIn("NOT removed: it is not a worktree of this repo", p.stdout)
+        self.assertTrue(other.exists())
 
     def scratch(self, name, *flags):
         wt = self.env.repo.parent / "scratch" / name
