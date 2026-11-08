@@ -127,6 +127,11 @@ def overlap_check(pr, cwd, snap):
     # PRs and merged PRs; `abandoned` is not its business, so the file carries an empty one rather than a fetch.
     try:
         full = tracker.Snapshot(cwd, repo=snap.repo, issues=snap.issues, prs=snap.prs, merged=snap.merged, abandoned=[])
+        # The open PRs' file lists come from the main checkout's snapshot file when their head SHAs match (#446); the
+        # misses are fetched once here and written back, and holds reads them from the temp file below.
+        full.use_cache(Path(repo.main_checkout(cwd)) / tracker.SNAPSHOT_FILE)
+        full.cache_pr_files()
+        full.save_cache()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "snapshot.json"
             full.write(path)
