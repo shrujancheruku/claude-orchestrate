@@ -524,6 +524,43 @@ class Board(unittest.TestCase):
         self.gh(owner="Organization", tickets=[ticket(1, claimed=True)], cards=[card(1, "Building")])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
 
+    def test_a_board_over_a_hundred_cards_reads_a_second_page_with_the_cursor(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)])
+        first = json.loads(self.project_reply([card(1, "Building")], [FIELD])["stdout"])
+        first["data"]["repositoryOwner"]["projectV2"]["items"]["pageInfo"] = {"hasNextPage": True, "endCursor": "C1"}
+        second = self.project_reply([card(2, "Building")], [FIELD])
+        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)],
+                project={"seq": [out(first), second]})
+        r = self.env.run("board", "--verbose", check=False)
+        self.assertEqual((r.returncode, r.stderr.strip()), (0, "writes: 0"))
+        reads = [c for c in self.env.gh_calls() if any(a.startswith("query=query($owner: String!, $number") for a in c)]
+        self.assertEqual(len(reads), 2)
+        self.assertNotIn("after=C1", reads[0])
+        self.assertIn("after=C1", reads[1])
+
+    def test_a_failed_batch_names_its_rows_and_says_the_later_ones_were_not_sent(self):
+        self.config()
+        numbers = range(1, 26)
+        self.gh(tickets=[ticket(n, claimed=True) for n in numbers], cards=[card(n, "Done") for n in numbers],
+                extra=[{"args": ["api", "graphql", "-f", self.MUTATION_Q],
+                        "seq": [out({"data": {}}), {"exit": 1, "stderr": "gh: boom"}]}])
+        r = self.env.run("board", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stderr.strip(), "board: writes 21-25 of 25 failed, later requests not sent: gh: boom")
+        self.assertEqual(len(self.mutations()), 2)
+
+    def test_a_stage_field_that_is_not_single_select_is_an_error_not_a_create(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True)])
+        reply = json.loads(self.project_reply([], [FIELD])["stdout"])
+        reply["data"]["repositoryOwner"]["projectV2"]["field"] = {}
+        self.gh(tickets=[ticket(1, claimed=True)], project=out(reply))
+        r = self.env.run("board", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not a single-select field", r.stderr)
+        self.assertEqual(self.mutations(), [])
+
 
 class Prompts(unittest.TestCase):
     def test_setup_offers_the_board_and_writes_the_line(self):

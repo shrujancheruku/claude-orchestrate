@@ -190,6 +190,15 @@ class Writes:
         else:
             self.adds.append(ticket)
 
+    @staticmethod
+    def send(fields, label, repo):
+        """One aliased mutation. A failure names the rows it held and says the later requests were not sent; the next
+        sync re-reads the board and writes what is still missing."""
+        try:
+            return graphql("mutation { " + " ".join(fields) + " }", repo)
+        except github.GhError as e:
+            raise github.GhError(e.kind, f"{label} failed, later requests not sent: {e.message}") from None
+
     def flush(self, project_id, slug, repo):
         """Send the queued writes: one content-id read and the adds first (if any card is new), then the rest."""
         new = {}
@@ -207,7 +216,7 @@ class Writes:
                         raise github.GhError(github.MALFORMED, f"gh returned no id for issue #{n}")
                     fields.append(f"m{k}: addProjectV2ItemById(input: {{projectId: {json.dumps(project_id)}, "
                                   f"contentId: {json.dumps(content)}}}) {{ item {{ id }} }}")
-                data = graphql("mutation { " + " ".join(fields) + " }", repo).get("data") or {}
+                data = self.send(fields, f"adds {start + 1}-{start + len(chunk)} of {len(self.adds)}", repo).get("data") or {}
                 for k, n in enumerate(chunk):
                     item = ((data.get(f"m{k}") or {}).get("item") or {}).get("id")
                     if not item:
@@ -218,7 +227,7 @@ class Writes:
             return new[int(item_id[4:])] if item_id.startswith("new:") else item_id
         for start in range(0, len(self.queue), self.size):
             fields = [f"m{k}: {f(resolve)}" for k, f in enumerate(self.queue[start:start + self.size])]
-            graphql("mutation { " + " ".join(fields) + " }", repo)
+            self.send(fields, f"writes {start + 1}-{start + len(fields)} of {len(self.queue)}", repo)
         self.adds, self.queue = [], []
 
 
@@ -299,7 +308,11 @@ def read_project(owner, number, repo):
         project = found.get("projectV2")
         if not isinstance(project, dict):
             raise github.GhError(github.FAILED, f"project {number} not found for {owner}")
-        field = field or project.get("field") or None
+        found_field = project.get("field")
+        if found_field is not None and not found_field.get("id"):
+            # The field query only answers for a single-select field; creating one would repeat the name.
+            raise github.GhError(github.FAILED, f"the project's {FIELD} field is not a single-select field")
+        field = field or found_field
         page = project["items"]
         for n in page["nodes"]:
             c = n.get("content") or {}
