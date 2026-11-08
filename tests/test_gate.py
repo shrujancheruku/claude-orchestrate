@@ -57,6 +57,15 @@ class GateTest(unittest.TestCase):
         self.assertEqual((e["kind"], e["ref"]), ("gate", 7))
         return e
 
+    def test_one_gate_run_reads_the_issues_once(self):
+        # #367: the gate hands its snapshot to `holds --snapshot`, so the issues are fetched by the gate alone.
+        self.prime(blockers=0, ticket_body="x")
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        issue_reads = [c for c in self.env.gh_calls() if c[:2] == ["api", "graphql"]]
+        self.assertEqual(len(issue_reads), 1, issue_reads)
+        self.assertEqual(self.env.gh_unmatched(), [])
+
     def test_passing_gate(self):
         self.prime()
         self.config("codegen is current (run: `echo ok`), see `README.md`")
@@ -318,14 +327,14 @@ class GateTest(unittest.TestCase):
 
     def test_a_malformed_issues_reply_is_gate_exit_2_not_a_failure(self):
         self.prime(head="270-slug")
-        # `holds` (a subprocess) reads the issues first and gets a good reply; the gate's own read gets a bad node.
+        # The gate reads the issues once (#367) and gets a bad node.
         def reply(nodes):
             return {"stdout": json.dumps({"data": {"repository": {"issues": {"nodes": nodes}}}})}
         responses = json.loads(self.env.gh_state.read_text())["responses"]
-        self.env.set_gh([{"args": ["api", "graphql"], "seq": [reply([]), reply([{"title": "no number"}])]}] + responses)
+        self.env.set_gh([{"args": ["api", "graphql"], "seq": [reply([{"title": "no number"}])]}] + responses)
         r = self.gate()
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("malformed issues reply", r.stderr)
+        self.assertIn("malformed gh reply", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
     def test_a_body_only_blocker_fails_dependencies(self):
