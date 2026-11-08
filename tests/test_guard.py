@@ -123,6 +123,8 @@ CASES = [
     ("orchestrate:worker", "sh -c 'echo hi; scripts/merge 12'", "deny"),
     ("orchestrate:worker", "cd scripts && sh -c './merge 1'", "deny"),
     ("orchestrate:worker", "cd scripts && sh -c ./merge", "deny"),
+    ("orchestrate:worker", 'cd scripts && sh -c "./merge 1" && cd -', "deny"),
+    ("orchestrate:worker", 'cd scripts && sh -c "./merge 1"; cd /tmp', "deny"),
     ("orchestrate:scout", "git -C /repo checkout main", "deny"),
     ("orchestrate:scout", "git worktree add ../x", "deny"),
     ("orchestrate:scout", "gh issue comment 5 --body hi", "deny"),

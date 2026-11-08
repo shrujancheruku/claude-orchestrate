@@ -1127,16 +1127,12 @@ BARE_MERGE = re.compile(r"^\./merge$")
 def runs_merge(parsed: "Parsed") -> bool:
     if script_call(parsed, MERGE_SCRIPT, dynamic_ok=True) is not None:
         return True
-    # parse() already lexes `sh -c '<cmd>'` into the commands after the shell's own, so the inner commands
-    # are in parsed.cmds. A `cd <..>scripts` stays in effect until the next cd, `sh -c` included (#327).
-    in_scripts = False
-    for cmd in parsed.cmds:
-        words = cmd.words
-        if len(words) == 2 and basename(words[0]) == "cd":
-            in_scripts = re.search(r"scripts/?$", words[1].text) is not None
-        elif in_scripts and script_call(Parsed([cmd]), BARE_MERGE) is not None:
-            return True
-    return False
+    # parse() lexes `sh -c '<cmd>'` into commands appended after all the outer ones, so order is lost. Once
+    # a `cd <..>scripts` appears anywhere in the line, a bare `./merge` anywhere counts: it errs towards
+    # denying (`cd scripts; cd /tmp; ./merge`) rather than miss `cd scripts && sh -c ./merge && cd -` (#327).
+    cd_scripts = any(len(c.words) == 2 and basename(c.words[0]) == "cd" and re.search(r"scripts/?$", c.words[1].text)
+                     for c in parsed.cmds)
+    return cd_scripts and any(script_call(Parsed([c]), BARE_MERGE) is not None for c in parsed.cmds)
 
 
 def runs_verify(parsed: "Parsed") -> bool:
