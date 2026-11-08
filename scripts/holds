@@ -49,10 +49,14 @@ def state_paths(value) -> list:
     """The paths of a state file's `touch_map`: the canonical string `rebuild-state` writes (or an older list of entries)."""
     if isinstance(value, list):
         value = ", ".join(e for e in value if isinstance(e, str))
+    if not isinstance(value, str):
+        return []
+    if value.startswith(touchmap.UNPARSED):
+        return [touchmap.HOLDS_ALL]
     try:
-        return [e.path for e in touchmap.parse(value)] if isinstance(value, str) else []
+        return [e.path for e in touchmap.parse(value)]
     except touchmap.TouchMapError:
-        return []  # rebuild-state stores only a map that parsed; anything else is a hand edit, held as nothing
+        return [touchmap.HOLDS_ALL]  # a hand edit the grammar rejects fails closed: it holds every path, never none
 
 
 def candidate_paths(args: list, literal: bool = False) -> tuple:
@@ -87,6 +91,8 @@ def claimed_paths(found: dict, own, base: str) -> tuple:
                 paths = worktree_changes(c.worktree, base) if c.worktree else []
             else:
                 paths = state_paths(c.worker.get("touch_map"))
+                if touchmap.HOLDS_ALL in paths:
+                    print(f"holds: building #{n} has an unparsed touch map, so it holds every path until its state is fixed or it finishes", file=sys.stderr)
             if paths:
                 tickets[n] = paths
         elif c.state == "elsewhere" or (c.state == "with-lead" and c.lock and c.lock[0] in ("ours", "foreign-live") and c.worktree):
