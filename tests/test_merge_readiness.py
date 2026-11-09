@@ -425,7 +425,9 @@ class ReadinessTest(unittest.TestCase):
     def test_no_ticket_passes_without_asking_for_blockers(self):
         head = self.push({"b.txt": "x\n"})
         self.assertEqual(self.merge(head, blockers=[(3, "OPEN")]).returncode, 0)
-        self.assertEqual([c for c in self.env.gh_calls() if "query=" + github.ISSUES_QUERY in c], [])
+        # no `api graphql` call carries the open-issues query (checked on what the fake gh recorded)
+        sent = [a for c in self.env.gh_calls() if c[:2] == ["api", "graphql"] for a in c if a.startswith("query=")]
+        self.assertFalse([q for q in sent if "issues(first: 100" in q], sent)
 
     def test_a_body_only_blocker_refuses_too(self):
         head = self.push({"b.txt": "x\n"})

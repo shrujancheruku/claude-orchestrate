@@ -139,7 +139,8 @@ def main(argv=None) -> int:
     sent = 0
     try:
         if pr is None:
-            # The current-branch form (a worker's): the open PR whose head is the checked-out branch.
+            # The current-branch form (a worker's): the PR for the checked-out branch (the open one, else the newest
+            # closed or merged one, else a fork's PR with this head commit).
             pr = github.current_pr_number(cwd)
             if not pr.isdigit():
                 common.die("threads: could not read the current branch's PR number from gh")

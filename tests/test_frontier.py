@@ -59,8 +59,12 @@ class Frontier(unittest.TestCase):
         self.assertEqual(self.frontier().stdout, "#1 title 1\n#2 title 2\n#3 title 3\n")
 
     def test_the_open_issues_query_pages_by_creation_oldest_first(self):
-        import github
-        self.assertIn("orderBy: {field: CREATED_AT, direction: ASC}", github.ISSUES_QUERY)
+        # the query the script sent (the fake gh recorded it), not the module constant
+        self.serve(page([node(1)]))
+        self.frontier()
+        [call] = [c for c in self.env.gh_calls() if c[:2] == ["api", "graphql"]]
+        sent = next(a for a in call if a.startswith("query="))
+        self.assertIn("CREATED_AT, direction: ASC", sent)
 
     def test_a_repeated_cursor_is_malformed_not_a_loop(self):
         self.serve(page([node(1)], cursor="SAME"))

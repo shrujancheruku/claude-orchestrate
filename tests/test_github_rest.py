@@ -4,6 +4,7 @@ Each converted function is run against a fake REST reply; the asserts are on the
 value it returns in the shape its callers already read.
 """
 
+import io
 import json
 import re
 import sys
@@ -100,6 +101,26 @@ class Rest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertNotIn("base=", self.paths(calls)[0])
 
+    def test_merged_prs_are_not_starved_by_closed_unmerged_prs(self):
+        unmerged = [pull(n, state="closed") for n in range(100)]
+        base = f"{PULLS}?state=closed&base=main&sort=updated&direction=desc&per_page=100"
+        merged = [pull(500 + n, state="closed", merged_at="2026-01-02T00:00:00Z") for n in range(3)]
+        calls = self.gh({f"{base}&page=1": unmerged, f"{base}&page=2": unmerged, f"{base}&page=3": merged})
+        rows = github.merged_prs("main", limit=3)
+        self.assertEqual([r["number"] for r in rows], [500, 501, 502])
+        self.assertEqual(len(calls), 3)
+
+    def test_merged_prs_stops_paging_once_the_window_holds_the_limit(self):
+        merged = [pull(n, state="closed", merged_at="2026-01-02T00:00:00Z") for n in range(100)]
+        calls = self.gh({"*": merged})
+        self.assertEqual(len(github.merged_prs("main", limit=150)), 150)
+        self.assertEqual(len(calls), 2)
+
+    def test_merged_prs_caps_the_pages_it_reads(self):
+        calls = self.gh({"*": [pull(n, state="closed") for n in range(100)]})
+        self.assertEqual(github.merged_prs("main"), [])
+        self.assertEqual(len(calls), github.MERGED_PAGES)
+
     def test_pr_files_pages_and_returns_paths(self):
         first = [{"filename": f"f{n}"} for n in range(100)]
         self.gh({f"{PULLS}/9/files?per_page=100&page=1": first, f"{PULLS}/9/files?per_page=100&page=2": [{"filename": "last"}]})
@@ -195,11 +216,38 @@ class Rest(unittest.TestCase):
         self.assertEqual(github.pr_commits(4), [{"oid": "a", "committedDate": "2026-01-01T00:00:00Z"}])
 
     def test_current_pr_number_looks_up_the_open_pr_by_head(self):
-        path = f"{PULLS}?head={{owner}}:{{branch}}&state=open"
-        self.gh({path: [pull(12)]})
+        path = f"{PULLS}?head={{owner}}:{{branch}}&state=all&per_page=100"
+        self.gh({path: [pull(12)], "*": "[]"})
         self.assertEqual(github.current_pr_number(), "12")
-        self.gh({path: []})
+        self.gh({path: [], "*": "[]"})
         self.assertEqual(github.current_pr_number(), "")
+
+    def test_current_pr_number_prefers_the_open_pr_but_finds_a_closed_one(self):
+        path = f"{PULLS}?head={{owner}}:{{branch}}&state=all&per_page=100"
+        self.gh({path: [pull(9, state="closed", merged_at="2026-01-01T00:00:00Z"), pull(12), pull(3, state="closed")]})
+        self.assertEqual(github.current_pr_number(), "12")
+        self.gh({path: [pull(9, state="closed", merged_at="2026-01-01T00:00:00Z"), pull(3, state="closed")]})
+        self.assertEqual(github.current_pr_number(), "9")  # the newest of the closed ones
+
+    def test_current_pr_number_finds_a_fork_head_by_the_local_head_commit(self):
+        by_head = f"{PULLS}?head={{owner}}:{{branch}}&state=all&per_page=100"
+        newest = f"{PULLS}?state=all&sort=updated&direction=desc&per_page=100"
+        replies = {by_head: [], newest: [pull(4, sha="other"), pull(21, sha="abc123", fork=True, state="closed")]}
+
+        def fake(*cmd, **kw):
+            if cmd[0] == "git":
+                return common.Run(0, "abc123\n", "")
+            path = next(a for a in cmd[1:] if a.startswith("repos/"))
+            return common.Run(0, json.dumps(replies[path]), "")
+
+        with unittest.mock.patch.object(common, "run", fake), \
+                unittest.mock.patch.dict("os.environ", {"ORCHESTRATE_GH_LOG": "off"}):
+            self.assertEqual(github.current_pr_number(), "21")
+            replies[newest] = [pull(4, sha="other")]
+            self.assertEqual(github.current_pr_number(), "")
+            # a same-repo PR at the same commit (a branch cut from its tip) is that PR's, not this branch's
+            replies[newest] = [pull(5, ref="a", sha="abc123")]
+            self.assertEqual(github.current_pr_number(), "")
 
     # --- issues ---
 
@@ -247,9 +295,127 @@ class Rest(unittest.TestCase):
         for fn in (lambda: github.open_prs("main"), lambda: github.open_prs_with_heads(), lambda: github.merged_prs("main"),
                    lambda: github.pr_files(1), lambda: github.current_pr_number()):
             fn()
-        for c in calls:
+        for c in (c for c in calls if c[0] != "rev-parse"):
             self.assertEqual(c[:2], ["api", "--include"])
             self.assertFalse(github.describe(c[1:] if c[1] != "--include" else ["api", *c[2:]])["graphql"])
+
+
+def graphql_reply(checks, next_cursor=None, closing=(), closing_more=False):
+    ctx = {"nodes": checks, "pageInfo": {"hasNextPage": bool(next_cursor), "endCursor": next_cursor}}
+    node = {"state": "OPEN", "headRefName": "b", "headRefOid": "s", "isCrossRepository": False,
+            "closingIssuesReferences": {"nodes": [{"number": n} for n in closing], "pageInfo": {"hasNextPage": closing_more}},
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": ctx}}}]}}
+    return json.dumps({"data": {"repository": {"pullRequest": node}}})
+
+
+def check_run(n, conclusion="SUCCESS"):
+    return {"__typename": "CheckRun", "name": f"c{n}", "status": "COMPLETED", "conclusion": conclusion,
+            "detailsUrl": f"https://github.com/o/r/actions/runs/{n}/job/{n}"}
+
+
+class PrChecks(unittest.TestCase):
+    def serve(self, *replies):
+        calls, queue = [], list(replies)
+
+        def fake(*cmd, **kw):
+            calls.append(list(cmd[1:]))
+            return common.Run(0, queue.pop(0), "")
+
+        patcher = unittest.mock.patch.object(common, "run", fake)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        env = unittest.mock.patch.dict("os.environ", {"ORCHESTRATE_GH_LOG": "off"})
+        env.start()
+        self.addCleanup(env.stop)
+        return calls
+
+    def test_101_checks_are_read_in_two_pages_and_the_last_one_decides(self):
+        first = [check_run(n) for n in range(100)]
+        calls = self.serve(graphql_reply(first, next_cursor="C1"), graphql_reply([check_run(100, "FAILURE")]))
+        checks = github.pr_view(7, "statusCheckRollup")["statusCheckRollup"]
+        self.assertEqual(len(checks), 101)
+        self.assertEqual(github.ci_verdict(checks), ("failed", ["c100"]))
+        self.assertNotIn("after=C1", calls[0])
+        self.assertIn("after=C1", calls[1])
+
+    def test_a_pr_past_the_page_cap_fails_closed(self):
+        self.serve(*[graphql_reply([check_run(n)], next_cursor=f"C{n}") for n in range(github.PR_CHECK_PAGES)])
+        with self.assertRaises(github.GhError) as e:
+            github.pr_view(7, "statusCheckRollup")
+        self.assertEqual(e.exception.kind, github.MALFORMED)
+        self.assertIn("partial list", e.exception.message)
+
+    def test_a_repeated_check_cursor_is_malformed_not_a_loop(self):
+        self.serve(graphql_reply([check_run(1)], next_cursor="SAME"), graphql_reply([check_run(2)], next_cursor="SAME"))
+        with self.assertRaises(github.GhError) as e:
+            github.pr_view(7, "statusCheckRollup")
+        self.assertEqual(e.exception.kind, github.MALFORMED)
+
+    def test_closing_issues_alone_do_not_page_the_checks(self):
+        calls = self.serve(graphql_reply([check_run(1)], next_cursor="C1", closing=[3]))
+        self.assertEqual(github.pr_view(7, "closingIssuesReferences"), {"closingIssuesReferences": [{"number": 3}]})
+        self.assertEqual(len(calls), 1)
+
+    def test_more_than_100_closing_issues_fails_closed(self):
+        self.serve(graphql_reply([], closing=[1], closing_more=True))
+        with self.assertRaises(github.GhError):
+            github.pr_view(7, "closingIssuesReferences")
+
+    def test_pr_view_carries_the_details_url_of_a_check_run(self):
+        self.serve(graphql_reply([check_run(5)]))
+        [check] = github.pr_view(7, "statusCheckRollup")["statusCheckRollup"]
+        self.assertEqual(check["detailsUrl"], "https://github.com/o/r/actions/runs/5/job/5")
+        self.assertIn("detailsUrl", github.PR_QUERY)
+
+
+class Workflows(Rest):
+    PATH = "repos/{owner}/{repo}/contents/.github/workflows?ref=abc"
+
+    def test_a_listing_with_a_workflow_is_true_whatever_the_case(self):
+        self.gh({self.PATH: [{"name": "ci.YML"}]})
+        self.assertTrue(github.has_workflows("abc"))
+
+    def test_an_error_object_raises_instead_of_reading_as_none_configured(self):
+        self.gh({self.PATH: {"message": "API rate limit exceeded", "documentation_url": "x"}})
+        with self.assertRaises(github.GhError) as e:
+            github.has_workflows("abc")
+        self.assertEqual((e.exception.kind, e.exception.message), (github.MALFORMED, "contents reply: API rate limit exceeded"))
+
+    def test_a_file_at_the_path_is_false_with_one_stderr_line(self):
+        self.gh({self.PATH: {"type": "file", "name": "workflows"}})
+        err = io.StringIO()
+        with unittest.mock.patch.object(sys, "stderr", err):
+            self.assertFalse(github.has_workflows("abc"))
+        self.assertEqual(err.getvalue(), "github: .github/workflows is a file, not a directory\n")
+
+    def test_a_404_is_false(self):
+        def missing(*cmd, **kw):
+            return common.Run(1, "", "gh: Not Found (HTTP 404)")
+        with unittest.mock.patch.object(common, "run", missing), unittest.mock.patch.dict("os.environ", {"ORCHESTRATE_GH_LOG": "off"}):
+            self.assertFalse(github.has_workflows("abc"))
+
+
+class Abandoned(unittest.TestCase):
+    REPO = {"owner": {"login": "o"}, "name": "r"}
+
+    def page(self, numbers, cursor=None):
+        return json.dumps({"data": {"repository": {"issues": {
+            "pageInfo": {"hasNextPage": bool(cursor), "endCursor": cursor},
+            "nodes": [{"number": n, "assignees": {"totalCount": 1}} for n in numbers]}}}})
+
+    def test_the_query_filters_on_any_assignee_and_overflow_is_paged(self):
+        calls, queue = [], [self.page(range(100, 130), cursor="C1"), self.page([7])]
+
+        def fake(*cmd, **kw):
+            calls.append(list(cmd[1:]))
+            return common.Run(0, queue.pop(0), "")
+
+        with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.dict("os.environ", {"ORCHESTRATE_GH_LOG": "off"}):
+            found = github.abandoned_tickets(self.REPO)
+        self.assertEqual(found, [7] + list(range(100, 130)))  # the 31st, oldest, is routed
+        sent = next(a for a in calls[0] if a.startswith("query="))
+        self.assertIn('filterBy: {assignee: "*"}', sent)
+        self.assertIn("after=C1", calls[1])
 
 
 # The one `gh pr|issue|repo` subcommand left in scripts/, with why; nothing else is added without a REST form to point at.
