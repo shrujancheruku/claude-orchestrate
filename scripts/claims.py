@@ -23,10 +23,12 @@ only the harness branch: its claim has `branch None` and `pending_branch` set, a
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import common
+import runlog
 from repo import ticket_of_branch
 
 LEAD_LABEL = "lead"  # a ticket the lead owns: no worker is dispatched for it
@@ -70,17 +72,34 @@ def _sessions(path) -> tuple:
     raise ValueError(f"state file {path} has no tickets object")
 
 
+def add_session_arg(ap) -> None:
+    """The `--session <id>` option every script that reads the state file or writes events takes (#532)."""
+    ap.add_argument("--session", default=None, metavar="ID",
+                    help="this session's id: its state-file entry is the current one, not the last rebuilder's")
+
+
+def use_session(session) -> None:
+    """Make `session` (a `--session` value) this process's current session: read_state, read_other_state, claims and
+    the events runlog and github write all follow $ORCHESTRATE_SESSION. Without one nothing changes."""
+    if session:
+        os.environ[runlog.SESSION_ENV] = session
+
+
+def _chosen(session, current):
+    return session or os.environ.get(runlog.SESSION_ENV) or current
+
+
 def read_state(path, session=None) -> dict:
     """{ticket as str: worker record} of the current session; a missing file is no workers. `session` (the caller's own
     id, from `--session`) names the current session; without it the one that rebuilt last is (#532)."""
     current, sessions = _sessions(path)
-    return sessions.get(session if session else current, {})
+    return sessions.get(_chosen(session, current), {})
 
 
 def read_other_state(path, session=None) -> dict:
     """{ticket as str: worker record} under any other session: candidates for Elsewhere, never for Building."""
     current, sessions = _sessions(path)
-    current = session if session else current
+    current = _chosen(session, current)
     out = {}
     for sid, tickets in sessions.items():
         if sid != current:

@@ -212,7 +212,9 @@ def run(argv=None) -> int:
     ap.add_argument("--repo", default=".", help="the repo root (default: the current directory)")
     ap.add_argument("--state", help=f"the state file (default: <repo>/{STATE})")
     ap.add_argument("--snapshot", help="read the tracker from this file (scripts/snapshot) instead of fetching")
+    claims.add_session_arg(ap)
     args = ap.parse_args(argv)
+    claims.use_session(args.session)
     if bool(args.pr) == bool(args.touch_map is not None):
         ap.error("give --touch-map (with --ticket) or --pr, not both or neither")
     if args.touch_map is not None and args.ticket is None:

@@ -254,7 +254,9 @@ def run_gate(argv=None) -> int:
     ap.add_argument("--timeout", type=float, default=checks.DEFAULT_TIMEOUT,
                     help="seconds a repo-specific command may run before it is killed (default: %(default)g)")
     ap.add_argument("--retry-delay", type=float, default=2.5, help="seconds between mergeability retries")
+    claims.add_session_arg(ap)
     args = ap.parse_args(argv)
+    claims.use_session(args.session)
     if args.timeout <= 0:
         print("gate: --timeout must be above 0", file=sys.stderr)
         return 2
