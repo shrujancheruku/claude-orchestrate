@@ -52,9 +52,50 @@ class TrustedAuthors(unittest.TestCase):
         self.assertEqual([c["body"] for c in got["comments"]], ["hi"])
         self.assertEqual(got["untrusted_comments"], 0)
 
+    def test_bot_logins_match_with_or_without_the_suffix(self):
+        # GraphQL's author.login for a bot comes back without `[bot]`; the config may carry it.
+        self.assertTrue(github.is_trusted(None, "dependabot", ("dependabot[bot]",)))
+        self.assertTrue(github.is_trusted(None, "dependabot[bot]", ("dependabot",)))
+        self.assertTrue(github.is_trusted("NONE", "Dependabot[bot]", ("dependabot[bot]",)))
+        self.assertFalse(github.is_trusted(None, "renovate", ("dependabot[bot]",)))
+        got = tracker.from_nodes([node(1, [cnode("bump", "NONE", "dependabot")])], ("dependabot[bot]",))[0]
+        self.assertEqual(got["untrusted_comments"], 0)
+
     def test_fork_prs_are_not_the_runs_own(self):
         prs = [{"number": 1, "isCrossRepository": False}, {"number": 2, "isCrossRepository": True}, {"number": 3}]
         self.assertEqual([p["number"] for p in github.own_prs(prs)], [1, 3])
+
+
+def edited(editor, author="eve", association="NONE"):
+    return dict(node(1), editor={"login": editor} if editor else None, author={"login": author},
+                authorAssociation=association, lastEditedAt="2026-01-02T00:00:00Z",
+                labels={"nodes": [{"name": "ready-for-agent"}]})
+
+
+class EditedBody(unittest.TestCase):
+    """ADR-0015: a body its untrusted author edited after labelling is not takeable, and the run says why."""
+
+    def why(self, n, trusted=()):
+        i = tracker.from_nodes([n], trusted)[0]
+        return tracker.why_not(i, LABELS, [i])
+
+    def test_the_untrusted_author_editing_last_makes_it_not_takeable(self):
+        self.assertIn("untrusted-edit", self.why(edited("eve")))
+
+    def test_a_collaborator_editing_last_makes_it_takeable_again(self):
+        self.assertIsNone(self.why(edited("maint")))
+
+    def test_a_collaborator_author_editing_their_own_body_is_trusted(self):
+        self.assertIsNone(self.why(edited("maint", "maint", "OWNER")))
+
+    def test_a_configured_login_editing_its_own_body_is_trusted(self):
+        self.assertIsNone(self.why(edited("Eve"), ("eve",)))
+
+    def test_a_never_edited_body_is_trusted(self):
+        self.assertIsNone(self.why(edited(None)))
+
+    def test_an_untrusted_edit_is_not_in_takeable(self):
+        self.assertEqual(tracker.takeable(tracker.from_nodes([edited("eve")]), LABELS), [])
 
 
 class Takeable(unittest.TestCase):
