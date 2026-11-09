@@ -44,6 +44,23 @@ def load_guard():
     return guard
 
 
+class SharedRule(unittest.TestCase):
+    """One match rule for holds and replay: equality or a glob, case-sensitive on every platform."""
+
+    def test_table(self):
+        cfg = config.Config(shared_files=("docs/*.md", "CHANGELOG.md", "Docs/*"))
+        for path, want in [
+            ("docs/guide.md", True),     # glob
+            ("CHANGELOG.md", True),      # exact path
+            ("changelog.md", False),     # case mismatch on an exact path
+            ("DOCS/guide.md", False),    # case mismatch on a glob
+            ("Docs/a.md", True),
+            ("src/docs/guide.md", False),
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(cfg.is_shared(path), want)
+
+
 class TrustedAuthors(unittest.TestCase):
     def test_logins_on_the_backlog_line_are_read_lowercase(self):
         text = "## Backlog\n\n- **Trusted authors:** `Alice`, `@bob`, `ci-bot[bot]`\n\n## Slots\n- **Trusted authors:** `nope`\n"

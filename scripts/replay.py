@@ -33,6 +33,7 @@ from pathlib import Path
 
 import checks
 import common
+import config
 
 LINE_REPLAY, WORD_MERGE, HANDED_BACK = "line-replay", "word-merge", "handed-back"
 REGENERATED = "regenerated"  # a generated file rebuilt by its glob's command (profile.py counts this name)
@@ -41,7 +42,7 @@ REGENERATE_TIMEOUT = 300  # seconds a regenerate command may run before it is ha
 
 
 def is_shared(path, patterns):
-    return any(fnmatch.fnmatchcase(path, p) for p in patterns)
+    return config.shared_match(path, patterns)
 
 
 def _changes(base, other, who):
