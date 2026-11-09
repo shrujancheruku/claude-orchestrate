@@ -5,7 +5,7 @@ The one place that knows the orchestrator's launch line; the lead, `/orchestrate
 script (ADR-0006). The flags cannot live in settings: the session-only auto-mode switch exists only as inline
 `--settings` JSON, a project `defaultMode` or `model` would leak into the developer's own sessions, and
 `--plugin-dir` is needed when the plugin runs from a checkout. The line is built from, in order:
-    --resume <sessionId>        only when resuming; --bg follows when given
+    --resume <sessionId>        only when resuming; --bg follows when given (see the background resume below)
     --name orchestrator --permission-mode <mode> (default acceptEdits)
     --settings '{"disableAutoMode":"disable"[,"crossSessionInbound":"accept"]}'
                                 crossSessionInbound is added with --bg or bypassPermissions: without it a
@@ -20,6 +20,15 @@ script (ADR-0006). The flags cannot live in settings: the session-only auto-mode
                                 change reaches a run only through a relaunch or resume via launch.
     "/orchestrate:run --greedy" the prompt: `--greedy=N` or a ticket number is passed through, and `--profile`
                                 is appended; none with --resume
+Resuming a row whose `kind` is `background` is different (#555): Claude Code keeps a background session's saved options
+(plugin dir, model, mode, settings), and any flag passed alongside the resume forks an idle copy instead of continuing it.
+So the line is only `claude --resume <id> --bg [<prompt>]`, and --bg is added whether or not it was given. The prompt is
+the session's original start prompt: the first user message beginning `/orchestrate:run` in its saved transcript
+(<claude dir>/projects/*/<id>.jsonl, read only), else built from the `<ticket>` or `--greedy[=N]` (and `--profile`) given
+here; with neither, no prompt is passed and one stderr line names `claude attach <id>` and the `/orchestrate:run` line to type
+(a resumed session cannot start that skill itself: it has `disable-model-invocation`). An explicit `--permission-mode` that
+is not the row's saved mode (its `permissionMode`, else the transcript's), or whose saved mode cannot be read, exits 2.
+An interactive or unknown-kind row keeps the flags above, and takes no prompt.
 --resume-latest resumes for the caller: with no live `orchestrator` row, the stopped row of this repo (its `cwd`)
 with the newest `startedAt`; a tie or a missing `startedAt` falls back to the row `claude agents --json --all`
 lists last. One line on stderr says which sessionId was chosen and why.
@@ -55,6 +64,7 @@ NAME = "orchestrator"
 MODES = ("acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan")
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")  # a session id or model name: never starts with `-`, so never a flag
 DIGITS = re.compile(r"[0-9]+")  # ASCII only: str.isdigit() accepts other scripts
+RUN_PROMPT = re.compile(r"/orchestrate:(?:run|lead)(?: [A-Za-z0-9=#._-]+)*")  # a prompt safe inside double quotes
 SETTINGS = {"disableAutoMode": "disable"}
 INBOUND = {"crossSessionInbound": "accept"}
 SNAPSHOT_DIRS = (".claude-plugin", "hooks", "agents", "skills", "scripts")  # what the plugin loads
@@ -134,9 +144,14 @@ def snapshot(root: Path, fetch: bool = True):
     return dest, sha
 
 
-def build(args, plugin_dir, model) -> list:
-    """The argv of the launch, `claude` first, from parsed arguments, the plugin snapshot (None: none) and the Orchestrator model."""
+def build(args, plugin_dir, model, start=None) -> list:
+    """The argv of the launch, `claude` first, from parsed arguments, the plugin snapshot (None: none) and the Orchestrator model.
+
+    `start` is set only for a background resume (args.bg_resume): the line is then the resume alone, plus the start prompt if any.
+    """
     argv = ["claude"]
+    if getattr(args, "bg_resume", False):
+        return argv + ["--resume", args.resume, "--bg"] + ([start] if start else [])
     if args.lead:
         argv += ["--name", "lead", "--settings", json.dumps(INBOUND, separators=(",", ":"))]
         if args.permission_mode:
@@ -180,7 +195,7 @@ def render(argv: list) -> str:
     """The command as a shell line: the settings JSON in single quotes, the prompt in double quotes."""
     parts = []
     for i, a in enumerate(argv):
-        if i == len(argv) - 1 and a.startswith("/orchestrate:"):
+        if i == len(argv) - 1 and RUN_PROMPT.fullmatch(a):
             parts.append(f'"{a}"')
         else:
             parts.append(shlex.quote(a))
@@ -262,13 +277,66 @@ def latest_stopped(rows: list, repo: Path):
     return tied[-1], f"{why} of {len(mine)} stopped {NAME} rows of this repo"
 
 
+def row_of(session_id):
+    """The `claude agents --json --all` row of a session id, or None: best effort, any failure means an unknown kind."""
+    if not shutil.which("claude"):
+        return None
+    code, out, _ = common.run("claude", "agents", "--json", "--all")
+    try:
+        rows = json.loads(out) if code == 0 else None
+    except ValueError:
+        rows = None
+    for r in rows if isinstance(rows, list) else []:
+        if isinstance(r, dict) and r.get("sessionId") == session_id:
+            return r
+    return None
+
+
+def user_text(rec) -> str:
+    """The text a user record carries: a string or its text blocks joined; a slash command's `<command-name>` form rebuilt."""
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, list):
+        content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+    if not isinstance(content, str):
+        return ""
+    name = re.search(r"<command-name>\s*(/?[^<\s]+)\s*</command-name>", content)
+    if name:
+        args = re.search(r"<command-args>(.*?)</command-args>", content, re.S)
+        cmd = name.group(1) if name.group(1).startswith("/") else "/" + name.group(1)
+        return (cmd + " " + args.group(1).strip()).strip() if args else cmd
+    return content.strip()
+
+
+def saved_transcript(session_id):
+    """(start prompt, permission mode) from a session's saved transcript; each None when absent or unreadable.
+
+    The prompt is the first user message that is an `/orchestrate:run` call on one line (anything else is not trusted
+    into an argv); the mode is the last `permissionMode` the transcript records. The file is only read.
+    """
+    prompt_, mode = None, None
+    try:
+        path = common.find_transcript(session_id)
+        for rec in common.read_jsonl(path) if path else ():
+            if isinstance(rec.get("permissionMode"), str):
+                mode = rec["permissionMode"]
+            if prompt_ is None and rec.get("type") == "user":
+                text = user_text(rec)
+                if text.startswith("/orchestrate:run") and RUN_PROMPT.fullmatch(text):
+                    prompt_ = text
+    except OSError:
+        pass
+    return prompt_, mode
+
+
 def parse(argv):
     ap = argparse.ArgumentParser(prog="launch", description=__doc__.split("\n")[0])
     ap.add_argument("ticket", nargs="?", help="a ticket number: run narrows to it")
     ap.add_argument("--greedy", nargs="?", const="", default=None, metavar="N", help="greedy mode, as --greedy=N")
     ap.add_argument("--profile", action="store_true", help="the run also records itself and saves a profile")
     ap.add_argument("--bg", action="store_true", help="run as a background session")
-    ap.add_argument("--resume", metavar="SESSION_ID", help="resume that session with the same flags and no prompt")
+    ap.add_argument("--resume", metavar="SESSION_ID",
+                    help="resume that session: a background one with only --bg and its start prompt, any other with the same flags and no prompt")
     ap.add_argument("--resume-latest", action="store_true",
                     help="--resume the stopped orchestrator row of this repo with the newest startedAt")
     ap.add_argument("--lead", action="store_true", help="the lead's line instead of the orchestrator's")
@@ -289,8 +357,6 @@ def parse(argv):
         common.die(f"launch: cannot run: {args.resume!r} is not a session id")
     if args.resume and args.resume_latest:
         common.die("launch: cannot run: give --resume <sessionId> or --resume-latest, not both")
-    if (args.resume or args.resume_latest) and (args.ticket or args.greedy is not None or args.profile):
-        common.die("launch: cannot run: --resume takes no prompt")
     if args.lead and (args.bg or args.resume or args.resume_latest or args.no_model):
         common.die("launch: cannot run: --lead takes only --greedy[=N] or a ticket, --profile, --permission-mode and --print")
     return args
@@ -304,6 +370,7 @@ def main(argv=None) -> int:
         model, role = (cfg.lead_model, "Lead") if args.lead else (cfg.orchestrator_model, "Orchestrator")
         if model is not None and not TOKEN.fullmatch(model):
             common.die(f"launch: cannot run: the config's {role} model {model!r} is not a model name")
+    row = None
     if args.resume_latest:
         row, why = latest_stopped(agent_rows(everything=True), Path(args.repo))
         if row is None:
@@ -312,6 +379,24 @@ def main(argv=None) -> int:
         if not isinstance(args.resume, str) or not TOKEN.fullmatch(args.resume):
             common.die(f"launch: cannot run: the chosen {NAME} row has no usable sessionId")
         print(f"launch: resuming {args.resume}: {why}", file=sys.stderr)
+    start = None
+    if args.resume and not args.lead:
+        row = row or row_of(args.resume)
+        tokens = args.ticket or args.greedy is not None
+        if row is not None and row.get("kind") == "background":
+            args.bg_resume, args.bg = True, True
+            saved_prompt, saved_mode = saved_transcript(args.resume)
+            saved_mode = row.get("permissionMode") if isinstance(row.get("permissionMode"), str) else saved_mode
+            if args.permission_mode and args.permission_mode != saved_mode:
+                common.die(f"launch: cannot run: a background session keeps its saved options (mode "
+                           f"{saved_mode or 'unreadable'}), so --permission-mode {args.permission_mode} cannot apply; "
+                           f"start a fresh orchestrator without --resume to change it")
+            start = saved_prompt or (prompt(args) if tokens else None)
+            if start is None:
+                print(f"launch: {args.resume} has no saved start prompt and none was given; once it is resumed run "
+                      f"`claude attach {args.resume}` and type: /orchestrate:run --greedy", file=sys.stderr)
+        elif tokens or args.profile:
+            common.die("launch: cannot run: --resume takes no prompt for a session that is not a background one")
     root = plugin_root()
     if not args.print:  # refuse before exporting a snapshot a refused launch would not use
         live = live_sessions()
@@ -323,10 +408,10 @@ def main(argv=None) -> int:
         if not shutil.which("claude"):
             common.die("launch: cannot run: `claude` is not on PATH")
     plugin_dir = None
-    if not is_marketplace(root):
+    if not is_marketplace(root) and not getattr(args, "bg_resume", False):  # a background resume names no plugin dir
         plugin_dir, sha = snapshot(root, fetch=not args.print)
         print(f"launch: plugin snapshot {sha[:12]} at {plugin_dir}", file=sys.stderr)
-    cmd = build(args, plugin_dir, model)
+    cmd = build(args, plugin_dir, model, start)
     if args.print:
         print(render(cmd))
         return 0

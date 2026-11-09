@@ -361,6 +361,67 @@ class Launch(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("ARG:--resume\nARG:a\n", r.stdout)
 
+    # A background row keeps its saved options: flags would fork an idle copy (#555).
+    def bg_row(self, sid="b1", **extra):
+        return {"name": "orchestrator", "pid": None, "sessionId": sid, "kind": "background", "cwd": str(self.repo), **extra}
+
+    def transcript(self, sid, *records):
+        d = self.claude_dir / "projects" / "-repo"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{sid}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+
+    def user(self, text):
+        return {"type": "user", "message": {"role": "user", "content": text}}
+
+    def test_background_resume_passes_only_the_resume_and_bg(self):
+        self.live(self.bg_row())
+        self.transcript("b1", self.user("hello"), self.user("/orchestrate:run 533 --profile"))
+        out = self.launch("--print", "--resume", "b1").stdout.strip()
+        self.assertEqual(out, 'claude --resume b1 --bg "/orchestrate:run 533 --profile"')
+        r = self.launch("--resume-latest")  # --bg is added though not given, and the fake claude echoes the argv
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "ARG:--resume\nARG:b1\nARG:--bg\nARG:/orchestrate:run 533 --profile\n")
+        self.assertNotIn("plugin snapshot", r.stderr)
+
+    def test_background_resume_reads_a_slash_command_record(self):
+        self.live(self.bg_row())
+        self.transcript("b1", self.user("<command-name>/orchestrate:run</command-name>\n<command-args>--greedy=4</command-args>"))
+        self.assertTrue(self.launch("--print", "--resume", "b1").stdout.strip().endswith('"/orchestrate:run --greedy=4"'))
+
+    def test_background_resume_without_a_transcript_builds_the_prompt_from_tokens(self):
+        self.live(self.bg_row())
+        out = self.launch("--print", "--resume", "b1", "--greedy=4", "--profile").stdout.strip()
+        self.assertEqual(out, 'claude --resume b1 --bg "/orchestrate:run --greedy=4 --profile"')
+        self.assertEqual(self.launch("--print", "--resume", "b1", "403").stdout.strip(),
+                         'claude --resume b1 --bg "/orchestrate:run 403"')
+
+    def test_background_resume_with_no_prompt_prints_the_attach_line(self):
+        self.live(self.bg_row())
+        r = self.launch("--print", "--resume", "b1")
+        self.assertEqual(r.stdout.strip(), "claude --resume b1 --bg")
+        self.assertIn("claude attach b1", r.stderr)
+        self.assertIn("/orchestrate:run", r.stderr)
+
+    def test_background_resume_refuses_a_permission_mode_that_differs_or_is_unreadable(self):
+        self.live(self.bg_row())
+        self.transcript("b1", {"type": "user", "permissionMode": "acceptEdits", "message": {"content": "x"}})
+        for sid, mode in (("b1", "bypassPermissions"), ("nope", "acceptEdits")):
+            with self.subTest(sid):
+                self.live(self.bg_row(sid))
+                r = self.launch("--print", "--resume", sid, "--permission-mode", mode)
+                self.assertEqual(r.returncode, 2)
+                self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+                self.assertIn("saved options", r.stderr)
+        self.live(self.bg_row())
+        self.assertEqual(self.launch("--print", "--resume", "b1", "--permission-mode", "acceptEdits").returncode, 0)
+
+    def test_interactive_resume_keeps_the_flags_and_takes_no_prompt(self):
+        self.live(self.bg_row("i1", kind="interactive"))
+        out = self.launch("--print", "--resume", "i1").stdout.strip()
+        self.assertIn("--name orchestrator --permission-mode acceptEdits", out)
+        self.assertIn(f"--plugin-dir {self.snap}", out)
+        self.assertEqual(self.launch("--print", "--resume", "i1", "--greedy=2").returncode, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
