@@ -114,6 +114,14 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertRegex(p.stdout.splitlines()[-1], r"^next: ask-user merge refused for PR #7: ")
 
+    def test_pr_number_in_error_text_is_not_retried_as_transient(self):
+        # A 5xx in a PR number like 512 must not match TRANSIENT and cause a false retry (#536).
+        self.seq({PR_VIEW: [pr("OPEN")], PR_MERGE: [{"exit": 1, "stderr": "PR 512 is not mergeable"}],
+                  ("api", "repos/{owner}/{repo}/pulls/7"): [{"stdout": json.dumps(rest_pull())}]})
+        p = self.merge()
+        self.assertEqual(p.returncode, 1)
+        self.assertRegex(p.stdout.splitlines()[-1], r"^next: ask-user merge refused for PR #7: ")
+
     def test_rest_error_texts_against_the_retry_patterns(self):
         # GitHub's docs give only the statuses (405 cannot be performed, 409 sha mismatch); these texts are what the API sends.
         merge_script = (Path(common.__file__).parent / "merge").read_text()
@@ -126,7 +134,10 @@ class MergeTest(MergeMixin, unittest.TestCase):
                  ("Head branch was modified. Review and try the merge again. (HTTP 409)", False, False),
                  ("Base branch was modified. Review and try the merge again. (HTTP 405)", False, True),
                  ("Merge already in progress (HTTP 405)", True, False),
-                 ("Server Error (HTTP 502)", False, True)]
+                 ("Server Error (HTTP 502)", False, True),
+                 ("PR 512 is not mergeable", False, False),
+                 ("(HTTP 502)", False, True),
+                 ("Pull Request is not mergeable (HTTP 502)", False, True)]
         for text, progress, transient in cases:
             with self.subTest(text=text):
                 self.assertEqual(bool(ns["IN_PROGRESS"].search(text)), progress)

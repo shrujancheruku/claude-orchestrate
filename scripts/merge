@@ -74,7 +74,8 @@ from repo import remove_scratch, remove_worktree, worktree_gone, worktree_refusa
 # "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
 IN_PROGRESS = re.compile(r"already in progress|already merged", re.I)
 PROTECTED = ("main", "master")
-TRANSIENT = re.compile(r"\b5\d\d\b|bad gateway|service unavailable|gateway time-?out|timed? ?out|"
+# A 5xx HTTP status or known transient error wordings. Must not match a bare 5xx number (e.g. PR 512, #536).
+TRANSIENT = re.compile(r"\(HTTP 5\d\d\)|\bHTTP 5\d\d\b|bad gateway|service unavailable|gateway time-?out|timed? ?out|"
                        r"connection (?:reset|refused)|try again|base branch was modified", re.I)
 
 
