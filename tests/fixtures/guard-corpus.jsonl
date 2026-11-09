@@ -685,7 +685,7 @@
 {"role": "orchestrate:reviewer", "command": "scripts/threads 12 reopen PRRT_a --why", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git add a.py && git commit -q -m \"fix: a\" && git push origin 537-ticket", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git push origin 537-ticket || gh pr comment --body-file b.md", "expected": "deny", "source": "hand"}
-{"role": "orchestrate:worker", "command": "git add a.py && git commit -q -m \"fix: a\"", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git add a.py && git commit -q -m \"fix: a\"", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git push origin 537-ticket 2>&1 | tail -2", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "sleep 20; claude agents --json", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:lead-session", "command": "sleep 20; claude agents --json", "expected": "silent", "source": "hand"}
@@ -700,3 +700,39 @@
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/rebuild-state\" 00000000-0000-0000-0000-000000000000 --repo . ; \"$S/claims\" --session 00000000-0000-0000-0000-000000000000 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 40", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/lead-route\" --session 00000000-0000-0000-0000-000000000000 --lead live --cap 4 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 20", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/holds\" --session 00000000-0000-0000-0000-000000000000 --touch-map \"hooks/guard.py:1-9\" --ticket 537 | tail -n 5", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep -n x tests/test_guard.py | sed -n 1,60p", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "sed -n 106p docs/guide.md | tr 'a' 'b' | awk '{print $1}'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "ls scripts | grep -E 'ver|gate'; git status --short | head", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "find . -maxdepth 3 -name verify", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git fetch origin 2>&1 | tail -2", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git ls-remote --heads origin 562-guard-readonly-compound", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "grep -n x hooks/guard.py | sed -n 1,60p; git status --short | head", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git fetch origin 2>&1 | tail -2; git ls-remote --heads origin 562-x", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "find . -maxdepth 3 -name verify; ls scripts | grep -E 'ver|gate'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/snapshot\" --repo . 2>&1 | tail -n 40; echo \"exit $?\"", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "gh issue view 5 --json title --jq .title; gh issue view 6 --json title --jq .title", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; printf 'x' | \"$S/worker-report\"", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "for n in 5 6 7; do gh issue view $n --json title --jq .title; done", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep x > out", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "sed -i 's/x/y/' ../outside", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "find . -delete", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "awk '{system(\"x\")}' f", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh api -X POST repos/owner/r/issues", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat $(echo f)", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "echo x | sh", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "xargs rm", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "grep x > out", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cat $(echo f)", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "ls | tee out", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.0/scripts/verify' --config --branch 562-ticket 2>&1 | tail -15", "expected": "approve", "source": "hand", "timeout": 600000}
+{"role": "orchestrate:worker", "command": "python3 -m unittest tests.test_guard 2>&1 | tail -15", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "sed -i '' -e 's|x|y|' tests/test_guard.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "python3 - <<'E'\nBODY\nE", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/gate\" 561 --session 00000000-0000-0000-0000-000000000000 --cwd .claude/worktrees/agent-x", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/gate\" 1 --cwd /etc", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/gate\" 1 --cwd ../x", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/pr-559 && /p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/pr-559 2>&1 | tail -25", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/pr-559 2>&1 | tail -10", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/pr-559 && gh pr view 559 --json title; grep -n x hooks/guard.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/plain 2>&1 | tail -10", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/plain && ls", "expected": "silent", "source": "hand"}

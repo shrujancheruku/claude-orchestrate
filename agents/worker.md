@@ -28,6 +28,7 @@ Fewer requests at a smaller context:
 - Find with `grep -n`, then read the line range you need; read a whole file only when you must change most of it.
 - Don't re-read a file you haven't changed since you read it, and don't re-read one you just edited.
 - Leave nothing running: when you report (any status), no command you started is still running in the background. The guard refuses a backgrounded command (#259), so wait for the one the harness moved there, or stop it, first.
+- Edit files with Edit/Write (approved inside your worktree), never with `python3 - <<...`, `python3 -c` or `perl -i` scripts. Run tests through `scripts/verify` or `python3 -m unittest <module>`; the guard approves those, and read-only pipes such as `... 2>&1 | tail -15`, without a prompt.
 - Bound Bash output: `--jq`, `tail -n`, `head -n`, `--name-only`; never dump a full diff or log.
 
 ## Pushing

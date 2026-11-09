@@ -78,7 +78,8 @@ SESSION = "00000000-0000-0000-0000-000000000000"
 class Decider:
     """Runs the guard's main() in-process on the hook's JSON input, so 500 calls take a second."""
 
-    def __init__(self, cwd, worker_cwd=None):
+    def __init__(self, cwd, worker_cwd=None, scratch=None):
+        self.scratch = scratch
         spec = importlib.util.spec_from_file_location("guard_under_test", GUARD)
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
@@ -96,8 +97,11 @@ class Decider:
         # `orchestrate:orchestrator` is the main session, which has no agent type. An orchestrator row names the
         # plugin's scripts under the placeholder prefix every row uses; it is pointed at the real directory here,
         # because only the plugin's own script is approved.
-        if role in MAIN_SESSIONS:
-            command = command.replace("/p/orchestrate/0.7.0/scripts/", f"{ROOT / 'scripts'}/")
+        # A worker's and a reviewer's verify rows name it the same way (#562), and a reviewer's scratch checkout
+        # is the placeholder directory below, a git worktree of the corpus repo made in setUpClass.
+        command = command.replace("/p/orchestrate/0.7.0/scripts/", f"{ROOT / 'scripts'}/")
+        if self.scratch:
+            command = command.replace("/tmp/scratch-559/pr-559", self.scratch)
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" else self.cwd, "session_id": SESSION}
         if background:
             payload["tool_input"]["run_in_background"] = True
@@ -138,7 +142,15 @@ class GuardCorpus(unittest.TestCase):
         work.mkdir(parents=True)
         (work / ".git").write_text(f"gitdir: {git_dir}\n")
         (main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
-        cls.decide = Decider(cls.tmp.name, str(work.resolve()))
+        # The reviewer's scratch checkout (#562): outside the repo, a linked worktree of it, and so is a plain
+        # directory that is not (a corpus row names it by the same placeholder).
+        (Path(cls.tmp.name) / ".git" / "worktrees" / "scratch").mkdir(parents=True)
+        scratch_tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(scratch_tmp.cleanup)
+        scratch = Path(scratch_tmp.name).resolve() / "pr-559"
+        scratch.mkdir()
+        (scratch / ".git").write_text(f"gitdir: {Path(cls.tmp.name).resolve()}/.git/worktrees/scratch\n")
+        cls.decide = Decider(cls.tmp.name, str(work.resolve()), str(scratch))
 
     def test_corpus_is_seeded_and_well_formed(self):
         self.assertGreater(len(self.rows), 400)
