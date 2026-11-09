@@ -136,18 +136,17 @@ class ScriptEnvCopyRace(unittest.TestCase):
             self.assertEqual(git(d, "config", "maintenance.auto"), "false")
             self.assertEqual(git(d, "config", "gc.auto"), "0")
 
-    def test_a_copy_succeeds_while_a_maintenance_lock_is_held(self):
-        # On the old code a `git maintenance` holding objects/maintenance.lock raced the copy (#415). Hold one in
-        # the template, then copy: the copy works and the template keeps maintenance and gc off.
-        template = harness._template()
-        lock = template / "repo" / ".git" / "objects" / "maintenance.lock"
-        lock.write_text("")
-        self.addCleanup(lock.unlink)
+    def test_a_commit_in_a_copy_never_starts_git_maintenance(self):
+        # The race (#415) needs a `git maintenance run --auto` child, which a commit spawns unless
+        # maintenance.auto is false. Trace the commit's child processes: with the config gone from the
+        # template it spawns one and this fails; it is the behaviour the fix guards, not config text.
         env = ScriptEnv()
         self.addCleanup(env.close)
-        self.assertEqual(git(template / "repo", "config", "maintenance.auto"), "false")
-        self.assertEqual(git(template / "repo", "config", "gc.auto"), "0")
-        self.assertEqual(git(env.repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+        trace = Path(env._tmp.name) / "trace2.json"
+        r = subprocess.run(["git", "commit", "--allow-empty", "-m", "chore: probe"], cwd=env.repo,
+                           env=dict(os.environ, GIT_TRACE2_EVENT=str(trace)), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("\"maintenance\",\"run\"", trace.read_text())
 
     def test_scripts_and_env_come_from_the_tests_own_tree(self):
         # A copy of tests/ with its own scripts/ (a scratch worktree at an older commit) must run those scripts,

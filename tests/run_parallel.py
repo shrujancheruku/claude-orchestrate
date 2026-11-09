@@ -54,8 +54,11 @@ def count_other_runners(ps_output, me):
         pid, _, cmd = line.strip().partition(" ")
         words = cmd.split()
         # An interpreter running the script; a shell wrapper or an editor naming it is not a run.
-        if (pid.isdigit() and int(pid) != me and len(words) > 1 and os.path.basename(words[0]).startswith("python")
-                and os.path.basename(words[1]) == "run_parallel.py"):
+        # Interpreter flags (`python3 -u run_parallel.py`) and a capitalised name (`Python`, macOS) still count.
+        if not (pid.isdigit() and int(pid) != me and words and os.path.basename(words[0]).lower().startswith("python")):
+            continue
+        script = next((w for w in words[1:] if not w.startswith("-")), "")
+        if os.path.basename(script) == "run_parallel.py":
             n += 1
     return n
 

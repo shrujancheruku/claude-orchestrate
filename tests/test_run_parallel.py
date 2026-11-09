@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_parallel  # noqa: E402
 
-RUNNER =Path(__file__).resolve().parent / "run_parallel.py"
+RUNNER = Path(__file__).resolve().parent / "run_parallel.py"
 PASSING = "class T(unittest.TestCase):\n    def test_x(self): pass\n"
 
 
@@ -96,11 +96,14 @@ class DefaultJobsTest(unittest.TestCase):
           "  102 python3 /y/tests/run_parallel.py -j 2 /y/tests\n"
           "  103 /bin/sh -c python3 /z/tests/run_parallel.py\n"
           "  104 vim tests/run_parallel.py\n"
-          "  105 python3 /y/tests/test_run_parallel.py\n")
+          "  105 python3 /y/tests/test_run_parallel.py\n"
+          "  106 python3 -u /w/tests/run_parallel.py\n"
+          "  107 /Library/Frameworks/Python.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python "
+          "/v/tests/run_parallel.py\n")
 
     def test_other_runs_are_counted_without_this_one_or_lookalikes(self):
-        self.assertEqual(run_parallel.count_other_runners(self.PS, me=101), 1)
-        self.assertEqual(run_parallel.count_other_runners(self.PS, me=999), 2)
+        self.assertEqual(run_parallel.count_other_runners(self.PS, me=101), 3)
+        self.assertEqual(run_parallel.count_other_runners(self.PS, me=999), 4)
         self.assertEqual(run_parallel.count_other_runners("", me=1), 0)
 
     def test_jobs_drop_with_the_other_live_runs_and_never_below_one(self):
