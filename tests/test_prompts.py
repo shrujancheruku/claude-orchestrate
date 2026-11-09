@@ -1,0 +1,88 @@
+"""scripts/prompts: counts and lists the permission-prompt log (#569)."""
+
+import json
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+PROMPTS = ROOT / "scripts" / "prompts"
+
+
+def entry(time, tool="Bash", agent=None, session="s1", **tool_input):
+    return {"time": time, "session_id": session, "agent_type": agent, "tool_name": tool, "cwd": "/x",
+            "tool_input": tool_input or {"command": "ls"}, "permission_mode": "default"}
+
+
+class Prompts(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name).resolve()
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        (self.repo / ".claude").mkdir()
+
+    def write(self, entries, name="orchestrate-prompts.jsonl"):
+        (self.repo / ".claude" / name).write_text("".join(json.dumps(e) + "\n" for e in entries) + "not json\n")
+
+    def run_prompts(self, *args):
+        r = subprocess.run([str(PROMPTS), "--repo", str(self.repo), *args], capture_output=True, text=True, timeout=60)
+        return r
+
+    def test_no_log_is_zero(self):
+        r = self.run_prompts()
+        self.assertEqual((r.returncode, r.stdout), (0, "prompts: 0\n"))
+
+    def test_counts_and_lists(self):
+        self.write([
+            entry("2026-11-09T10:00:00+00:00", command="git push"),
+            entry("2026-11-09T10:01:00+00:00", "Edit", "orchestrate:worker", file_path="/a/b.py"),
+            entry("2026-11-09T10:02:00+00:00", "Bash", "orchestrate:worker", command="make\n  test"),
+            entry("2026-11-09T10:03:00+00:00", "Skill", "orchestrate:reviewer", **{}),
+        ])
+        out = self.run_prompts().stdout.splitlines()
+        self.assertEqual(out[0], "prompts: 4")
+        self.assertEqual(out[1], "by role: worker 2, orchestrator 1, reviewer 1")
+        self.assertEqual(out[2], "by tool: Bash 2, Edit 1, Skill 1")
+        self.assertEqual(out[3], "2026-11-09T10:00:00+00:00 orchestrator Bash git push")
+        self.assertEqual(out[4], "2026-11-09T10:01:00+00:00 worker Edit /a/b.py")
+        self.assertEqual(out[5], "2026-11-09T10:02:00+00:00 worker Bash make test")
+
+    def test_session_and_since(self):
+        self.write([entry("2026-11-09T10:00:00Z", session="a"), entry("2026-11-09T11:00:00Z", session="b"),
+                    entry("2026-11-09T12:00:00Z", session="b")])
+        self.assertEqual(self.run_prompts("--session", "b").stdout.splitlines()[0], "prompts: 2")
+        self.assertEqual(self.run_prompts("--since", "2026-11-09T11:30:00Z").stdout.splitlines()[0], "prompts: 1")
+        self.assertEqual(self.run_prompts("--session", "b", "--since", "2026-11-09T11:00:00Z").stdout.splitlines()[0], "prompts: 2")
+
+    def test_bad_since_and_exclusive_flags(self):
+        r = self.run_prompts("--since", "soon")
+        self.assertEqual((r.returncode, r.stdout), (2, ""))
+        self.assertEqual(len(r.stderr.splitlines()), 1)
+        self.assertEqual(self.run_prompts("--since", "2026-11-09", "--watermark").returncode, 2)
+
+    def test_watermark_is_the_last_pass_record(self):
+        self.write([entry("2026-11-09T10:00:00Z"), entry("2026-11-09T12:00:00Z")])
+        # no pass record yet: everything counts
+        self.assertEqual(self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()[0], "prompts: 2")
+        profiles = self.repo / ".claude" / "orchestrate-profiles"
+        profiles.mkdir()
+        (profiles / "passes.jsonl").write_text(
+            json.dumps({"ts": "2026-11-09T11:00:00+00:00", "session": "s1"}) + "\n"
+            + json.dumps({"ts": "2026-11-09T13:00:00+00:00", "session": "other"}) + "\n")
+        out = self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()
+        self.assertEqual(out[0], "prompts: 1")
+        self.assertTrue(out[-1].startswith("2026-11-09T12:00:00Z"))
+
+    def test_output_is_bounded(self):
+        self.write([entry(f"2026-11-09T10:{i // 60:02d}:{i % 60:02d}Z", command="c" * 500) for i in range(100)])
+        out = self.run_prompts().stdout.splitlines()
+        self.assertEqual(out[0], "prompts: 100")
+        self.assertEqual(out[3], "... 60 earlier")
+        self.assertEqual(len(out), 4 + 40)
+        self.assertTrue(all(len(line) < 300 for line in out))
+
+
+if __name__ == "__main__":
+    unittest.main()
