@@ -6,7 +6,7 @@
 
 - **Tracker docs:** `docs/agents/issue-tracker.md` (operations, blocking, claiming) and `docs/agents/triage-labels.md` (label strings), from `/setup-matt-pocock-skills`. Takeable tickets are what `scripts/frontier` lists, in ascending issue number. Claim = assign to the user.
 - **Domain docs:** `docs/agents/domain.md` (the glossary and ADRs workers and reviewers follow).
-- **Board:** https://github.com/users/shrujancheruku/projects/1
+- **Board:** <https://github.com/users/shrujancheruku/projects/1>
 
 ## Slots
 
@@ -65,13 +65,13 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 
 ## Models
 
-| Role | Model | Effort |
-|---|---|---|
-| Lead | opus (used when scripts/launch --lead starts it; a hand-started session keeps its own) | |
-| Orchestrator | opus (used when the lead launches it; a hand-started session keeps its own) | |
-| Worker | sonnet; haiku for S tickets (at most 3 files, the **Tiers** file limit) | medium |
-| Scout | haiku | low |
-| Reviewer | S haiku · M sonnet · L sonnet (high effort) | medium |
+| Role         | Model                                                                                  | Effort |
+| ------------ | -------------------------------------------------------------------------------------- | ------ |
+| Lead         | opus (used when scripts/launch --lead starts it; a hand-started session keeps its own) |        |
+| Orchestrator | sonnet (used when the lead launches it; a hand-started session keeps its own)          |        |
+| Worker       | sonnet; haiku for S tickets (at most 3 files, the **Tiers** file limit)                | medium |
+| Scout        | haiku                                                                                  | low    |
+| Reviewer     | S haiku · M sonnet · L sonnet (high effort)                                            | medium |
 
 ## Review
 
