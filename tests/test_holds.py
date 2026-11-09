@@ -251,13 +251,37 @@ class Holds(unittest.TestCase):
         r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
         self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
 
-    def test_open_ticket_with_open_pr_is_held_by_the_pr_only(self):
+    def test_open_ticket_with_open_pr_holds_its_touch_map_joined_with_the_prs_files(self):
         self.gh({9: ["src/x.py"]}, branches={9: "12-the-fix"}, open_tickets=[12])
+        self.state({12: ["src/x.py", "src/y.py"]})
+        r = self.holds("--touch-map", "src/x.py", "src/y.py", "--ticket", "7")
+        self.assertEqual(r.stdout.splitlines(), [
+            "src/x.py (held by open PR #9)", "src/y.py (held by open PR #9)",
+            "overlap: src/x.py (held by open PR #9)", "overlap: src/y.py (held by open PR #9)"])
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_pr_file_outside_the_touch_map_is_named_as_a_pr_file(self):
+        self.gh({9: ["tests/test_other.py"]}, branches={9: "12-the-fix"}, open_tickets=[12])
+        self.state({12: ["src/x.py"]})
+        r = self.holds("--touch-map", "tests/test_other.py", "--ticket", "7")
+        self.assertIn("overlap: tests/test_other.py (held by open PR #9 file)", r.stdout.splitlines())
+        self.assertEqual(r.returncode, 1)
+
+    def test_an_empty_start_pr_still_holds_its_declared_touch_map(self):
+        self.gh({9: []}, branches={9: "12-the-fix"}, open_tickets=[12])
         self.state({12: ["src/x.py"]})
         r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
         self.assertEqual(r.stdout.splitlines(), [
             "src/x.py (held by open PR #9)", "overlap: src/x.py (held by open PR #9)"])
         self.assertEqual(r.returncode, 1)
+
+    def test_a_building_ticket_holds_an_unpushed_edit_outside_its_touch_map(self):
+        self.gh(open_tickets=[12])
+        self.state({12: ["src/x.py"]})
+        self.dirty(self.worktree("12-widget", reason=live_reason()))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("overlap: a.py (held by building #12)", r.stdout.splitlines())
 
     def test_a_building_ticket_with_a_draft_holds_its_touch_map_and_the_drafts_diff(self):
         self.gh({9: ["src/drafted.py"]}, branches={9: "12-the-fix"}, open_tickets=[12], drafts={9})
@@ -485,7 +509,7 @@ class Holds(unittest.TestCase):
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
 
-    def test_open_pr_ticket_is_held_only_through_its_pr(self):
+    def test_open_pr_ticket_is_held_through_its_pr(self):
         self.gh({9: ["src/x.py"]}, branches={9: "12-the-fix"}, open_tickets=[12])
         self.dirty(self.worktree("12-the-fix", reason=live_reason()))
         r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
@@ -493,13 +517,15 @@ class Holds(unittest.TestCase):
         self.assertEqual(r.stdout.splitlines(), [
             "src/x.py (held by open PR #9)", "overlap: src/x.py (held by open PR #9)"])
 
-    def test_building_ticket_is_not_held_twice(self):
+    def test_building_ticket_holds_its_map_and_its_worktree_changes_once_each(self):
         self.gh(open_tickets=[12])
         self.state({12: ["src/x.py"]})
         self.dirty(self.worktree("12-widget", reason=live_reason()))
         r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
         self.assertEqual(r.stdout.splitlines(), [
-            "src/x.py (held by building #12)", "overlap: src/x.py (held by building #12)"])
+            "src/x.py (held by building #12)", "README.md (held by building #12)",
+            "a.py (held by building #12)", "c.txt (held by building #12)",
+            "overlap: src/x.py (held by building #12)"])
 
     def test_own_ticket_worktree_is_left_out(self):
         self.gh(open_tickets=[7])
