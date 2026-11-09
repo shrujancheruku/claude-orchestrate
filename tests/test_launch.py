@@ -130,11 +130,27 @@ class Launch(unittest.TestCase):
         shas = [self.sha]
         for n in range(2, 6):
             shas.append(self.commit_plugin(f"v{n}"))
-            self.assertEqual(self.launch("--print").returncode, 0)
+            self.assertEqual(self.launch().returncode, 0)
             base = self.cache / "orchestrate" / "plugin"
-            os.utime(base / shas[-1], (n * 1000, n * 1000))  # a deterministic age order
+            os.utime(base / shas[-1], (n * 1000, n * 1000))  # long ago, in a deterministic age order
         base = self.cache / "orchestrate" / "plugin"
         self.assertEqual(sorted(p.name for p in base.iterdir()), sorted(shas[-3:]))
+
+    def test_a_snapshot_used_within_a_day_and_a_print_are_never_pruned(self):
+        base = self.cache / "orchestrate" / "plugin"
+        shas = [self.sha]
+        self.assertEqual(self.launch().returncode, 0)
+        for n in range(2, 5):  # all recent: a live session may be loading any of them
+            shas.append(self.commit_plugin(f"v{n}"))
+            self.assertEqual(self.launch().returncode, 0)
+        self.assertEqual(sorted(p.name for p in base.iterdir()), sorted(shas))
+        for sha in shas:
+            os.utime(base / sha, (1000, 1000))
+        shas.append(self.commit_plugin("v5"))
+        self.assertEqual(self.launch("--print").returncode, 0)  # --print prunes nothing
+        self.assertEqual(len(list(base.iterdir())), 5)
+        self.assertEqual(self.launch().returncode, 0)  # a real launch prunes the old ones
+        self.assertEqual(len(list(base.iterdir())), 3)
 
     def test_a_plugin_root_that_is_not_a_checkout_is_refused(self):
         r = self.launch("--print", root=self.tmp / "bin")

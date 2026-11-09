@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,6 +59,7 @@ SETTINGS = {"disableAutoMode": "disable"}
 INBOUND = {"crossSessionInbound": "accept"}
 SNAPSHOT_DIRS = (".claude-plugin", "hooks", "agents", "skills", "scripts")  # what the plugin loads
 KEEP = 3  # snapshots kept after a launch, the one in use included
+MIN_AGE = 24 * 3600  # a snapshot younger than this is never pruned: a live session may still load it
 
 
 def plugin_root() -> Path:
@@ -121,10 +123,14 @@ def snapshot(root: Path, fetch: bool = True):
                     raise
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+    if not fetch:  # --print launches nothing, so it prunes nothing
+        return dest, sha
+    # A snapshot used within MIN_AGE seconds may belong to a running orchestrator or lead: never prune it.
     old = sorted((p for p in base.iterdir() if p.is_dir() and re.fullmatch(r"[0-9a-f]{40}", p.name) and p != dest),
                  key=lambda p: p.stat().st_mtime, reverse=True)
     for p in old[KEEP - 1:]:
-        shutil.rmtree(p, ignore_errors=True)
+        if time.time() - p.stat().st_mtime > MIN_AGE:
+            shutil.rmtree(p, ignore_errors=True)
     return dest, sha
 
 
