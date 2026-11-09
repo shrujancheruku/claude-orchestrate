@@ -145,6 +145,8 @@ class GuardCorpus(unittest.TestCase):
         # The reviewer's scratch checkout (#562): outside the repo, a linked worktree of it, and so is a plain
         # directory that is not (a corpus row names it by the same placeholder).
         (Path(cls.tmp.name) / ".git" / "worktrees" / "scratch").mkdir(parents=True)
+        # The reviewer's cwd is a repo with a remote too: `git ls-remote` is approved for a configured remote only (#566).
+        (Path(cls.tmp.name) / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
         scratch_tmp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(scratch_tmp.cleanup)
         scratch = Path(scratch_tmp.name).resolve() / "pr-559"

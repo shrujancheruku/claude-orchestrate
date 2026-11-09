@@ -736,3 +736,19 @@
 {"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/pr-559 && gh pr view 559 --json title; grep -n x hooks/guard.py", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/plain 2>&1 | tail -10", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/plain && ls", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat /tmp/notes.txt | head -5; sed -n 1,5p /private/tmp/x; grep -rn token hooks tests", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat .claude/orchestration.md; find . -maxdepth 2 -name '*.pem'; awk '{print $1}' README.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git ls-remote origin 566-x | head -3", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cat /tmp/scratch-559/pr-559/hooks/guard.py | head -20; grep -n x /tmp/scratch-559/pr-559/README.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat ~/.ssh/KEY", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep -r pattern ~/.config", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat /etc/passwd", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "find / -name '*.pem'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat ../../../../../../../../../../../../etc/hosts", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cat ../../../../../../../../../../../../etc/hosts", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "awk 'BEGIN{print ENVIRON[\"GH_TOKEN\"]}'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git ls-remote https://example.com/x", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "awk 'BEGIN{ARGV[1]=\"/etc/hosts\";ARGC=2} {print}'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "rg --files /etc", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "rg --files hooks | head", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git ls-remote user@example.com:o/r.git", "expected": "silent", "source": "hand"}
