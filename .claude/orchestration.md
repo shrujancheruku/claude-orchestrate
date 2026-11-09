@@ -27,7 +27,7 @@ Code must stay Python 3.9 compatible; CI runs 3.9 and 3.x. No lint or codegen st
 
 ## Shared files
 
-A **shared file** is one many PRs edit. The `merge` script resolves collisions in the files listed here by replaying each PR's lines onto main, so nobody merges them by hand; a conflict in any other file is handed to the worker.
+A **shared file** is one many PRs edit. The `merge` script resolves collisions in the files listed here by replaying each PR's lines onto main, so nobody merges them by hand (paths match case-sensitively); a conflict in any other file is handed to the worker.
 
 - **Shared files:**
   - `README.md`: edit only the section for the feature the PR changes.
