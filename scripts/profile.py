@@ -1178,7 +1178,10 @@ def cmd_record(argv: list) -> None:
         if args.pass_json:
             common.die("profile record: --nudged takes no pass JSON")
         # Not a pass the profile counts for slots (no `slots`); it is the one record `claims` reads for a nudge.
-        runlog.append_pass(args.repo, args.session, {"scope": runlog.NUDGE_SCOPE, "nudged": [args.nudged]})
+        try:
+            runlog.append_pass(args.repo, args.session, {"scope": runlog.NUDGE_SCOPE, "nudged": [args.nudged]})
+        except runlog.NoSession as e:
+            common.die(f"profile record: {e}")  # this CLI's whole job is the record
         return
     if not args.pass_json:
         common.die("profile record: expected the pass as JSON, or --nudged <ticket>")
@@ -1190,7 +1193,10 @@ def cmd_record(argv: list) -> None:
         common.die("profile record: expected a JSON object")
     if not isinstance(entry.get("greedy", False), bool):
         common.die("profile record: greedy must be true or false")
-    runlog.append_pass(args.repo, args.session, entry)
+    try:
+        runlog.append_pass(args.repo, args.session, entry)
+    except runlog.NoSession as e:
+        common.die(f"profile record: {e}")
 
 
 MIN_MERGED = 20  # a trial with fewer merged tickets is inconclusive
