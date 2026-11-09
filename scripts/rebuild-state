@@ -114,7 +114,7 @@ def sessions_of(out: Path) -> dict:
     if not isinstance(data, dict):
         return {}
     if isinstance(data.get("sessions"), dict):
-        return {k: v for k, v in data["sessions"].items() if isinstance(v, dict)}
+        return {k: v for k, v in data["sessions"].items() if isinstance(v, dict) and isinstance(v.get("tickets"), dict)}
     if isinstance(data.get("session"), str) and isinstance(data.get("tickets"), dict):
         return {data["session"]: {"tickets": data["tickets"]}}
     return {}

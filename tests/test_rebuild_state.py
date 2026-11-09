@@ -189,6 +189,14 @@ class RebuildState(unittest.TestCase):
         self.assertIn("sess-1", raw["sessions"])
         self.assertNotIn("tickets", raw)
 
+    def test_an_entry_without_a_tickets_object_is_dropped_on_rebuild(self):
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(exist_ok=True)
+        state.write_text(json.dumps({"session": "x", "sessions": {
+            "x": {"tickets": {"3": {}}}, "bad": {"tickets": None}, "worse": {}, "str": "no"}}))
+        self.rebuild()
+        self.assertEqual(self.tickets_by_session(), {"x": ["3"], "sess-1": []})
+
     def test_concurrent_rebuilds_for_two_sessions_lose_no_entry(self):
         # Many rounds, so an unlocked read-modify-write would lose an entry.
         for rnd in range(5):
