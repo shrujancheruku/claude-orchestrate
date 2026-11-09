@@ -65,7 +65,8 @@ class Prompts(unittest.TestCase):
     def test_watermark_is_the_last_pass_record(self):
         self.write([entry("2026-11-09T10:00:00Z"), entry("2026-11-09T12:00:00Z")])
         # no pass record yet: everything counts
-        self.assertEqual(self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()[0], "prompts: 2")
+        self.assertEqual(self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()[0],
+                         "prompts: 2 (no mark yet: counted from the start of the log)")
         profiles = self.repo / ".claude" / "orchestrate-profiles"
         profiles.mkdir()
         (profiles / "passes.jsonl").write_text(
@@ -74,6 +75,32 @@ class Prompts(unittest.TestCase):
         out = self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()
         self.assertEqual(out[0], "prompts: 1")
         self.assertTrue(out[-1].startswith("2026-11-09T12:00:00Z"))
+
+    def test_mark_works_without_a_pass_log(self):
+        self.write([entry("2026-11-09T10:00:00Z"), entry("2999-01-01T00:00:00Z")])
+        r = self.run_prompts("--session", "s1", "--mark")
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.stdout.startswith("mark: 20"))
+        self.assertFalse((self.repo / ".claude" / "orchestrate-profiles").exists())
+        out = self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()
+        self.assertEqual(out[0], "prompts: 1")  # only the entry after the mark, and no "no mark" note
+        # another session's mark does not move this one; no session reads only sessionless marks
+        self.assertEqual(self.run_prompts("--session", "s2", "--watermark").stdout.splitlines()[0][:12], "prompts: 0 (")
+        self.assertEqual(self.run_prompts("--watermark").stdout.splitlines()[0][:12], "prompts: 2 (")
+
+    def test_session_mark_does_not_move_the_sessionless_watermark(self):
+        self.write([entry("2026-11-09T10:00:00Z"), entry("2026-11-09T12:00:00Z"), entry("2026-11-09T14:00:00Z")])
+        mark = self.repo / ".claude" / "orchestrate-prompts.mark"
+        mark.parent.mkdir(exist_ok=True)
+        mark.write_text(
+            json.dumps({"ts": "2026-11-09T11:00:00+00:00", "session": None}) + "\n"
+            + json.dumps({"ts": "2026-11-09T13:00:00+00:00", "session": "s1"}) + "\n")
+        self.assertEqual(self.run_prompts("--watermark").stdout.splitlines()[0], "prompts: 2")
+        self.assertEqual(self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()[0], "prompts: 1")
+
+    def test_mark_is_exclusive_with_since(self):
+        self.assertEqual(self.run_prompts("--mark", "--since", "2026-11-09").returncode, 2)
+        self.assertEqual(self.run_prompts("--mark", "--watermark").returncode, 2)
 
     def test_output_is_bounded(self):
         self.write([entry(f"2026-11-09T10:{i // 60:02d}:{i % 60:02d}Z", command="c" * 500) for i in range(100)])
