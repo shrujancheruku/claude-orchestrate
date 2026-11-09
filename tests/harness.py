@@ -197,7 +197,17 @@ class ScriptEnv:
         gh = self.bin / "gh"
         gh.write_text(FAKE_GH)
         gh.chmod(0o755)
+        # A `claude` that answers `agents --json [--all]` with the rows set_agents wrote, and fails when none were: a
+        # script that asks which sessions exist never reaches the real CLI, and prunes nothing it can't see (#532).
+        self.agents_file = root / "agents.json"
+        claude = self.bin / "claude"
+        claude.write_text(f'#!/bin/sh\nif [ "$1" = agents ] && [ -f "{self.agents_file}" ]; then cat "{self.agents_file}"; exit 0; fi\nexit 1\n')
+        claude.chmod(0o755)
         self.set_gh([])
+
+    def set_agents(self, *session_ids):
+        """What `claude agents --json --all` lists: one row per session id."""
+        self.agents_file.write_text(json.dumps([{"sessionId": i, "name": "x"} for i in session_ids]))
 
     def close(self):
         self._tmp.cleanup()

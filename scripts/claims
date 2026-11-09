@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claims [<ticket>] [--repo DIR] [--state FILE] : what state is each claimed ticket in?
+"""claims [<ticket>] [--repo DIR] [--state FILE] [--session ID] : what state is each claimed ticket in?
 
 One line per claimed ticket in ascending ticket order, or the one named (the rules are in scripts/claims.py):
     #<n> <state> <branch | none-yet | no-branch> pr <num | none> worker <agent-id> <model> | unknown | none worktree <path | gone> lock <lock> [<changes>]
@@ -16,12 +16,14 @@ unreadable state file), one line on stderr. Stdlib only, Python 3.9+.
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import claims
 import common
 import github
+import runlog
 import tracker
 from repo import STATE
 
@@ -45,15 +47,19 @@ def main(argv=None) -> int:
     ap.add_argument("ticket", nargs="?", type=int, help="print only this ticket")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     ap.add_argument("--state", default=None, help="state file (default: <repo>/.claude/orchestrate-state.json)")
+    ap.add_argument("--session", default=None,
+                    help="this session's id: its state-file entry is the current one, not the last rebuilder's (#532)")
     ap.add_argument("--snapshot", default=None, help="read the tracker from this file (scripts/snapshot) instead of fetching")
     args = ap.parse_args(argv)
+    if args.session:
+        os.environ[runlog.SESSION_ENV] = args.session  # github's gh_call events are written under it too
     root = Path(args.repo).resolve()
     if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
         common.die(f"claims: cannot run: {args.repo} is not in a git repository")
     state_file = Path(args.state) if args.state else root / STATE
     try:
         snap = tracker.Snapshot.open(args.snapshot, root)
-        found = claims.claims(root, state_file, snap.issues, snap.prs, snap.merged)
+        found = claims.claims(root, state_file, snap.issues, snap.prs, snap.merged, session=args.session)
     except github.GhError as e:
         common.die(f"claims: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError) as e:

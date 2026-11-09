@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import common  # noqa: E402
@@ -102,6 +103,11 @@ class RunLogTest(unittest.TestCase):
         (self.repo / repo.STATE).parent.mkdir(parents=True, exist_ok=True)
         (self.repo / repo.STATE).write_text(json.dumps({"session": "b", "sessions": {"a": {"tickets": {}}, "b": {"tickets": {}}}}))
         self.assertEqual(runlog.current_session(self.repo), "b")
+
+    def test_the_session_env_var_set_by_a_session_flag_overrides_the_last_rebuilder(self):
+        self.stamp(self.repo, "last-rebuilder")
+        with mock.patch.dict("os.environ", {runlog.SESSION_ENV: "mine"}):
+            self.assertEqual(runlog.append_event(self.repo, "gate", "pass")["session"], "mine")
 
     def test_an_explicit_session_overrides_the_state_file(self):
         self.stamp(self.repo, "stamped")
