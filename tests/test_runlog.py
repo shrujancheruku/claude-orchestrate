@@ -98,6 +98,11 @@ class RunLogTest(unittest.TestCase):
         self.assertEqual(runlog.append_event(wt, "gate", "pass", ref=1)["session"], "sess")
         self.assertEqual([e["ref"] for e in runlog.read_events(self.repo, "sess", *self.span)], [1])
 
+    def test_the_session_is_the_one_that_rebuilt_last_in_a_multi_session_file(self):
+        (self.repo / repo.STATE).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / repo.STATE).write_text(json.dumps({"session": "b", "sessions": {"a": {"tickets": {}}, "b": {"tickets": {}}}}))
+        self.assertEqual(runlog.current_session(self.repo), "b")
+
     def test_an_explicit_session_overrides_the_state_file(self):
         self.stamp(self.repo, "stamped")
         runlog.append_event(self.repo, "gate", "pass", session="given")
