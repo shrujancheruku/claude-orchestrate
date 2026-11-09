@@ -279,6 +279,7 @@ Every mechanical rule the prompts once restated is a script under `scripts/`, fo
 | `holds` | orchestrator and `gate` | Decides what is held and whether a ticket or PR overlaps it |
 | `worker-report` | orchestrator, on each worker completion | Classifies the completion text into one verdict and logs it |
 | `threads` | worker, reviewer, orchestrator | Lists a PR's review threads, and resolves or reopens one or several (one request for all) with a reply (`fixed in <sha>`, `left: <why>`, `reopened: <why>`) |
+| `prompts` | orchestrator, each pass | Counts the permission-prompt log (`.claude/orchestrate-prompts.jsonl`, written by the `PermissionRequest` hook `hooks/prompt_log.py`) by role and tool, and lists the newest prompts |
 | `verify` | worker | Runs the config's verify commands, one line per result |
 | `watch-ci` | orchestrator, via a Monitor | Prints one line per PR as its checks settle, with the head commit; takes `merge`'s `<pr> <head>` hint, ends a PR with an `error` line on no CI run in five minutes or a head never reached, and withholds any pass after an error; one `gh` request per tick for all PRs, every 30 s (60 s with three or more) |
 | `gate` | orchestrator, before review | Title, mergeability, held paths, dependencies, secrets, lockfiles and the config's `run:` checks |
