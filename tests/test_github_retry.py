@@ -46,9 +46,10 @@ class RetryTest(unittest.TestCase):
         self.addCleanup(github._paths.clear)
         os.environ.pop("ORCHESTRATE_GH_WAIT", None)
         os.environ.pop("ORCHESTRATE_GH_5XX_TRIES", None)
-        github.waited = 0.0
+        github.reset_wait_budget()
 
     def run_call(self, *replies, clock=1000.0):
+        github.reset_wait_budget()  # each run_call stands for a fresh process
         fake, sleeps = FakeGh(*replies), []
         with unittest.mock.patch.object(common, "run", fake), \
                 unittest.mock.patch.object(github, "sleep", sleeps.append), \
@@ -93,8 +94,10 @@ class RetryTest(unittest.TestCase):
 
     def test_a_502_every_time_fails_after_the_tries_naming_the_5xx(self):
         fake, sleeps, _, err = self.run_call(fail("gh: HTTP 502"))
-        self.assertEqual((fake.calls, sleeps, err.kind), (5, [2, 4, 8, 16], github.FAILED))
+        self.assertEqual((fake.calls, sleeps, err.kind), (5, [2, 4, 8, 16], github.SERVER_ERROR))
         self.assertIn("HTTP 502", err.message)
+        self.assertNotEqual(err.kind, github.RATELIMITED)  # no reset is coming, so no "retry after"
+        self.assertTrue(github.could_not_run(err))
 
     def test_a_502_past_the_wait_budget_raises_naming_the_5xx(self):
         os.environ["ORCHESTRATE_GH_WAIT"] = "3"
@@ -123,7 +126,24 @@ class RetryTest(unittest.TestCase):
             fake, sleeps, _, err = self.run_call(fail("gh: HTTP 502"))
         finally:
             os.environ.pop("ORCHESTRATE_GH_5XX_TRIES")
-        self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.FAILED))
+        self.assertEqual((fake.calls, sleeps, err.kind), (1, [], github.SERVER_ERROR))
+
+    def test_a_truncated_reply_is_retried_for_a_read(self):
+        fake, sleeps, out, err = self.run_call(fail("unexpected end of JSON input"), OK)
+        self.assertEqual((out, err, sleeps, fake.calls), ("done\n", None, [2], 2))
+
+    def test_a_connection_reset_is_retried_for_a_read(self):
+        fake, sleeps, out, err = self.run_call(fail("read tcp 1.2.3.4:443: connection reset by peer"), OK)
+        self.assertEqual((out, err, sleeps, fake.calls), ("done\n", None, [2], 2))
+
+    def test_a_transient_text_is_never_retried_for_a_write(self):
+        for text in ("unexpected end of JSON input", "connection reset by peer"):
+            github.reset_wait_budget()
+            fake, sleeps = FakeGh(fail(text), OK), []
+            with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.object(github, "sleep", sleeps.append):
+                with self.assertRaises(github.GhError) as e:
+                    github.call("api", "-X", "POST", "repos/{owner}/{repo}/issues", cwd=self.dir.name, idempotent=True)
+            self.assertEqual((fake.calls, sleeps, e.exception.kind), (1, [], github.FAILED))
 
     def test_a_404_is_not_retried(self):
         fake, sleeps, _, err = self.run_call(fail("gh: Not Found (HTTP 404)"))
@@ -202,7 +222,7 @@ class RetryTest(unittest.TestCase):
         fake, sleeps, _, err = self.run_call(fail(text), OK)  # the fake clock stands still, so each wait is 40 s
         self.assertEqual((sleeps, fake.calls, err.kind), ([40.0], 1, github.RATELIMITED))
 
-    def test_the_budget_is_per_call_so_a_second_hit_after_a_success_waits(self):
+    def test_a_loop_that_resets_the_budget_each_tick_waits_on_a_second_hit(self):
         # One process, as in a watch-ci loop: hit, wait, success, hit again. The second hit must wait, not exit 2.
         text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 60"
         fake, sleeps, now = FakeGh(fail(text), OK, OK, fail(text), OK), [], [1000.0]
@@ -217,9 +237,39 @@ class RetryTest(unittest.TestCase):
                 unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
             outs = []
             for _ in range(3):
+                github.reset_wait_budget()  # the loop's tick
                 outs.append(github.call("api", "x", cwd=self.dir.name))
                 now[0] += 600  # a polling loop's interval
         self.assertEqual((outs, sleeps), (["done\n"] * 3, [60, 60]))
+
+    def test_two_calls_in_one_process_share_one_deadline(self):
+        # Each call is rate limited with a reset 50 s out: the first sleeps, the second would pass 75 s in total.
+        text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 50"
+        fake, sleeps = FakeGh(fail(text), OK, fail(text), OK), []
+        github.reset_wait_budget()
+        with unittest.mock.patch.object(common, "run", fake), \
+                unittest.mock.patch.object(github, "sleep", sleeps.append), \
+                unittest.mock.patch.object(github, "clock", lambda: 1000.0), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            self.assertEqual(github.call("api", "x", cwd=self.dir.name), "done\n")
+            with self.assertRaises(github.GhError) as e:
+                github.call("api", "x", cwd=self.dir.name)
+        self.assertEqual((sleeps, e.exception.kind), ([50], github.RATELIMITED))
+        self.assertIn("rate limit until", e.exception.message)
+
+    def test_reset_wait_budget_gives_the_next_call_a_fresh_budget(self):
+        text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 50"
+        fake, sleeps = FakeGh(fail(text), OK, fail(text), OK), []
+        github.reset_wait_budget()
+        with unittest.mock.patch.object(common, "run", fake), \
+                unittest.mock.patch.object(github, "sleep", sleeps.append), \
+                unittest.mock.patch.object(github, "clock", lambda: 1000.0), \
+                unittest.mock.patch.object(sys, "stderr", unittest.mock.MagicMock()):
+            github.call("api", "x", cwd=self.dir.name)
+            self.state.unlink()  # the frozen clock keeps the first hit's recorded reset alive: drop it
+            github.reset_wait_budget()
+            github.call("api", "x", cwd=self.dir.name)
+        self.assertEqual(sleeps, [50, 50])
 
     def test_a_new_call_starts_with_a_fresh_budget_even_after_an_over_budget_one(self):
         text = "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 40"
@@ -356,7 +406,7 @@ class CallLogTest(unittest.TestCase):
             os.environ.pop(k, None)
         github._paths.clear()
         github._roots.clear()
-        github.waited = 0.0
+        github.reset_wait_budget()
         self.addCleanup(github._paths.clear)
         self.addCleanup(github._roots.clear)
 

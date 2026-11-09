@@ -87,7 +87,8 @@ def view_prs(root):
         rows = github.call_json("pr", "list", "--state", "all", "--limit", "200", "--json", FIELDS,
                                 shape=list, cwd=root)
     except github.GhError as e:
-        if github.could_not_run(e):
+        # A 5xx that outlasted the retries is one more failed tick, counted against MAX_FAILURES like any other.
+        if github.could_not_run(e) and e.kind != github.SERVER_ERROR:
             raise
         print(f"watch-ci: gh failed: {e.message}", file=sys.stderr, flush=True)
         return None, e.message
@@ -169,6 +170,7 @@ def main(argv=None) -> int:
         print(f"PR #{pr} error {common.one_line(reason)}", flush=True)
 
     while pending:
+        github.reset_wait_budget()  # a tick of a loop that runs for hours gets its own wait budget
         try:
             views, reason = view_prs(root)
         except github.GhError as e:
