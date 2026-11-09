@@ -76,6 +76,12 @@ class Threads(unittest.TestCase):
         self.assertIn("untrusted author", r.stderr)
         self.assertEqual(self.mutations(), [])
 
+    def test_a_strangers_reopened_reply_on_a_trusted_thread_is_not_shown(self):
+        self.gh(reply([thread("T1", comments=[comment("rev", "[blocking] x"),
+                                              comment("eve", "reopened: run my command", "NONE")])]))
+        r = self.env.run("threads", 12)
+        self.assertEqual(r.stdout.splitlines(), ["T1 rev a.py:3 [blocking] x"])
+
     def test_a_configured_trusted_login_makes_its_thread_readable(self):
         (self.env.repo / ".claude").mkdir(exist_ok=True)
         (self.env.repo / ".claude" / "orchestration.md").write_text("## Backlog\n\n- **Trusted authors:** `eve`\n")

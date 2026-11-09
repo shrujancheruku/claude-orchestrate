@@ -78,7 +78,7 @@ def listing(threads, show_all) -> list:
         lines.append(" ".join(head + [first_line(first["body"])]).rstrip())
         # A resolved thread shows its closing reply; an open one shows a trailing `reopened:` (what is still wrong).
         last = t["comments"][-1] if len(t["comments"]) > 1 else None
-        if last and first_line(last["body"]).startswith(REPLIES if t["resolved"] else ("reopened:",)):
+        if last and last.get("trusted", True) and first_line(last["body"]).startswith(REPLIES if t["resolved"] else ("reopened:",)):
             lines.append("  " + first_line(last["body"]))
     return lines
 

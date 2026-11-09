@@ -1018,6 +1018,8 @@ def review_threads(pr, cwd=None, trusted=None) -> list:
             comments += _connection(THREAD_COMMENTS_QUERY, {"id": tid}, ("node", "comments"),
                                     after=page["endCursor"], cwd=cwd)
         rows = [_comment(c) for c in comments if isinstance(c, dict)]
+        for r in rows:  # per comment too: a stranger's reply on a trusted thread is not read either (ADR-0015)
+            r["trusted"] = is_trusted(r["association"], r["author"], extra)
         out.append({"id": tid, "resolved": bool(n.get("isResolved")), "outdated": bool(n.get("isOutdated")),
                     "trusted": bool(rows) and is_trusted(rows[0]["association"], rows[0]["author"], extra),
                     "path": n.get("path") or "", "line": n.get("line") or n.get("originalLine"),
