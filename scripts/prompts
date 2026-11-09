@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""prompts [--repo DIR] [--session ID] [--since ISO | --watermark] : the permission prompts a run gave the developer.
+"""prompts [--repo DIR] [--session ID] [--since ISO | --watermark | --mark] : the permission prompts a run gave the developer.
 
 Reads `.claude/orchestrate-prompts.jsonl` in the main checkout, which hooks/prompt_log.py appends to on every
 PermissionRequest (#569). Prints, in this order:
@@ -9,15 +9,22 @@ PermissionRequest (#569). Prints, in this order:
     then one line per prompt, oldest first: `<time> <role> <tool> <first 200 characters of the command or path>`
 The list shows the newest 40 prompts, with a `... <n> earlier` line first when more matched; the counts cover all.
 --session ID keeps one session's prompts. --since ISO keeps prompts at or after that time.
---watermark means "since the last pass record": the newest entry of the pass log (`profile.py record`) for --session
-(any session without it); with no pass record yet it keeps everything. It is exclusive with --since.
+--watermark means "since the last mark": the newer of the newest line of `.claude/orchestrate-prompts.mark` (written
+by --mark) and the newest pass record (`profile.py record`, written only under --profile), for --session (any
+session without it). With neither yet it keeps everything and says so on the `prompts:` line
+(`prompts: <n> (no mark yet: counted from the start of the log)`), so a whole-log count is never read as per-pass.
+--mark appends the current time to the mark file for --session (or for no session), prints `mark: <time>`, and counts
+nothing: the lead runs it after posting a digest, the orchestrator after a pass table, so every run has a mark whether
+or not it uses --profile. --since, --watermark and --mark are exclusive.
 No log yet is not an error: it prints `prompts: 0`. Exit codes: 0 ran; 2 could not run (bad --repo, --since or
 no usable argument), one line on stderr. Stdlib only, Python 3.9+.
 """
 
 import argparse
+import json
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 import common
@@ -25,6 +32,7 @@ import repo as repolib
 import runlog
 
 LOG = Path(".claude") / "orchestrate-prompts.jsonl"
+MARK = Path(".claude") / "orchestrate-prompts.mark"
 LIST_LIMIT = 40
 DETAIL_WIDTH = 200
 
@@ -48,17 +56,28 @@ def detail(entry: dict) -> str:
 
 
 def watermark(root: Path, session) -> object:
-    """The time of the newest pass record (this session's, or any when no session), or None."""
+    """The newer of the newest mark and the newest pass record (this session's, or any when no session), or None."""
     if session:
         passes = runlog.read_passes(root, session)
     else:
         passes = list(common.read_jsonl(runlog.log_path(root, runlog.PASS_LOG)))
-    times = [t for t in (repolib.parse_ts(p.get("ts")) for p in passes) if t]
+    marks = [m for m in common.read_jsonl(repolib.main_checkout(root) / MARK) if not session or m.get("session") == session]
+    times = [t for t in (repolib.parse_ts(p.get("ts")) for p in passes + marks) if t]
     return max(times) if times else None
 
 
-def render(entries: list) -> list:
-    lines = [f"prompts: {len(entries)}"]
+def write_mark(root: Path, session) -> str:
+    """Append now as a mark (one line, so parallel runs stay whole) and return the time."""
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    path = repolib.main_checkout(root) / MARK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": ts, "session": session or None}, separators=(",", ":")) + "\n")
+    return ts
+
+
+def render(entries: list, note: str = "") -> list:
+    lines = [f"prompts: {len(entries)}{note}"]
     if not entries:
         return lines
     by_role = Counter(role(e) for e in entries)
@@ -79,18 +98,25 @@ def main(argv=None) -> int:
     ap.add_argument("--session", help="only this session's prompts")
     since = ap.add_mutually_exclusive_group()
     since.add_argument("--since", help="only prompts at or after this ISO time")
-    since.add_argument("--watermark", action="store_true", help="only prompts since the last pass record")
+    since.add_argument("--watermark", action="store_true", help="only prompts since the last mark or pass record")
+    since.add_argument("--mark", action="store_true", help="record now as the mark the next --watermark counts from")
     args = ap.parse_args(argv)
     root = Path(args.repo).resolve()
     if not root.is_dir():
         common.die(f"prompts: cannot run: {args.repo} is not a directory")
+    if args.mark:
+        print(f"mark: {write_mark(root, args.session)}")
+        return 0
     cutoff = None
+    note = ""
     if args.since is not None:
         cutoff = repolib.parse_ts(args.since)
         if cutoff is None:
             common.die(f"prompts: cannot run: --since {args.since!r} is not an ISO time")
     elif args.watermark:
         cutoff = watermark(root, args.session)
+        if cutoff is None:
+            note = " (no mark yet: counted from the start of the log)"
     entries = []
     for e in common.read_jsonl(repolib.main_checkout(root) / LOG):
         if args.session and e.get("session_id") != args.session:
@@ -100,7 +126,7 @@ def main(argv=None) -> int:
             if t is None or t < cutoff:
                 continue
         entries.append(e)
-    for line in render(entries):
+    for line in render(entries, note):
         print(line)
     return 0
 
