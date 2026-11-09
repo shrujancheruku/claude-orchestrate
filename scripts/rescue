@@ -161,6 +161,13 @@ def overlap(root, changed, ticket) -> int:
 
 
 def main(argv=None) -> int:
+    try:
+        return run(argv)
+    except Exception as e:  # unexpected (an OSError from a subprocess, say): put the lifted locks back like any exit 2
+        return fail(f"unexpected {type(e).__name__}: {e}")
+
+
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("branch", metavar="ticket|branch", help="the ticket number, or its branch `<number>-<slug>`")
     ap.add_argument("--title", help="the ticket title, for the wip commit message")
@@ -256,10 +263,9 @@ def main(argv=None) -> int:
             return fail(f"commit failed in {path}: {common.one_line(c.stderr or c.stdout)}")
         k = len(git(path, "show", "--name-only", "--format=", "HEAD").stdout.split())
         say(f"committed {k} paths {git(path, 'rev-parse', '--short', 'HEAD').stdout.strip()}")
-    else:
-        say("committed 0 paths: tree clean")
-
     left = git(path, "status", "--porcelain", "--untracked-files=all", "--", ".claude").stdout.splitlines()
+    if not status.stdout.strip():
+        say("nothing to commit outside .claude/" if left else "committed 0 paths: tree clean")
     if left:
         say(f"left behind (not committed): {len(left)} paths under .claude/: " + ", ".join(x[3:] for x in left))
 
