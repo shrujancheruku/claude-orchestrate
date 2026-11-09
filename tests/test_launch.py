@@ -19,6 +19,7 @@ CONFIG = """# Orchestration config
 
 | Role | Model | Effort |
 |---|---|---|
+| Lead | %s | |
 | Orchestrator | %s | |
 | Worker | sonnet | medium |
 """
@@ -41,9 +42,9 @@ class Launch(unittest.TestCase):
         self.set_model("opus (used when the lead launches it)")
         self.fake_claude()
 
-    def set_model(self, cell):
+    def set_model(self, cell, lead=""):
         (self.repo / ".claude").mkdir(exist_ok=True)
-        (self.repo / ".claude" / "orchestration.md").write_text(CONFIG % cell)
+        (self.repo / ".claude" / "orchestration.md").write_text(CONFIG % (lead, cell))
 
     def fake_claude(self):
         """A `claude` that answers `agents --json` with self.agents and otherwise echoes its arguments, one per line."""
@@ -164,8 +165,36 @@ class Launch(unittest.TestCase):
         self.live({"name": "lead", "pid": 2, "sessionId": "s2"})
         self.assertEqual(self.launch("--lead").returncode, 2)
 
+    def test_lead_names_its_model_from_the_lead_row_only(self):
+        self.assertNotIn("--model", self.launch("--print", "--lead").stdout)  # no Lead row value: nothing passed
+        self.set_model("sonnet", lead="opus (used when scripts/launch --lead starts it)")
+        out = self.launch("--print", "--lead").stdout.strip()
+        self.assertEqual(
+            out, "claude --name lead --settings '{\"crossSessionInbound\":\"accept\"}' --model opus "
+                 f"--plugin-dir {self.checkout} \"/orchestrate:lead\"")
+        self.set_model("sonnet", lead="--dangerously-skip-permissions")
+        self.assertEqual(self.launch("--print", "--lead").returncode, 2)
+
+    def test_lead_passes_greedy_a_ticket_and_profile_on(self):
+        for args, tail in ((["--greedy=4", "--profile"], '"/orchestrate:lead --greedy=4 --profile"'),
+                           (["--greedy"], '"/orchestrate:lead --greedy"'),
+                           (["403"], '"/orchestrate:lead 403"'),
+                           (["403", "--profile"], '"/orchestrate:lead 403 --profile"'),
+                           (["--profile"], '"/orchestrate:lead --profile"')):
+            with self.subTest(args):
+                r = self.launch("--print", "--lead", *args)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(r.stdout.strip().endswith(tail), r.stdout)
+        self.assertEqual(self.launch("--print", "--lead", "--greedy=4", "403").returncode, 2)
+
+    def test_profile_is_appended_to_the_run_prompt(self):
+        self.assertTrue(self.launch("--print", "--greedy=4", "--profile").stdout.strip()
+                        .endswith('"/orchestrate:run --greedy=4 --profile"'))
+        self.assertTrue(self.launch("--print", "403", "--profile").stdout.strip().endswith('"/orchestrate:run 403 --profile"'))
+        self.assertEqual(self.launch("--print", "--resume", "s1", "--profile").returncode, 2)
+
     def test_lead_refuses_flags_that_would_be_dropped(self):
-        for extra in (["--bg"], ["--resume", "s1"], ["403"], ["--greedy=2"], ["--no-model"]):
+        for extra in (["--bg"], ["--resume", "s1"], ["--resume-latest"], ["--no-model"]):
             with self.subTest(extra):
                 self.assertEqual(self.launch("--print", "--lead", *extra).returncode, 2)
 
@@ -198,6 +227,50 @@ class Launch(unittest.TestCase):
         r = self.launch("--bg")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("ARG:--bg\n", r.stdout)
+
+
+    def stopped(self, sid, cwd, started=None, **extra):
+        row = {"name": "orchestrator", "pid": None, "sessionId": sid, "cwd": str(cwd)}
+        if started is not None:
+            row["startedAt"] = started
+        return dict(row, **extra)
+
+    def test_resume_latest_picks_the_newest_stopped_row_of_this_repo(self):
+        other = self.tmp / "other"
+        self.live(self.stopped("old-here", self.repo, "2026-11-01T10:00:00Z"),
+                  self.stopped("newer-elsewhere", other, "2026-11-08T10:00:00Z"),
+                  self.stopped("new-here", self.repo, "2026-11-05T10:00:00Z"))
+        r = self.launch("--print", "--resume-latest")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("claude --resume new-here --name orchestrator", r.stdout)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertIn("new-here", r.stderr)
+        self.assertIn("newest startedAt", r.stderr)
+
+    def test_resume_latest_falls_back_to_the_row_listed_last(self):
+        self.live(self.stopped("a", self.repo, "2026-11-05T10:00:00Z"), self.stopped("b", self.repo, "2026-11-05T10:00:00Z"))
+        self.assertIn("--resume b ", self.launch("--print", "--resume-latest").stdout)
+        self.live(self.stopped("a", self.repo), self.stopped("b", self.repo))
+        self.assertIn("--resume b ", self.launch("--print", "--resume-latest").stdout)
+        self.live(self.stopped("a", self.repo, 1762000000000), self.stopped("b", self.repo))  # one undated row never wins
+        self.assertIn("--resume a ", self.launch("--print", "--resume-latest").stdout)
+
+    def test_resume_latest_refuses_a_live_orchestrator_and_no_candidate(self):
+        self.live(self.stopped("a", self.repo, "2026-11-05T10:00:00Z"),
+                  {"name": "orchestrator", "pid": 5, "sessionId": "live", "cwd": str(self.repo)})
+        r = self.launch("--print", "--resume-latest")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.live(self.stopped("x", self.tmp / "other", "2026-11-05T10:00:00Z"))
+        self.assertEqual(self.launch("--print", "--resume-latest").returncode, 2)
+        self.assertEqual(self.launch("--print", "--resume-latest", "--resume", "s1").returncode, 2)
+        self.assertEqual(self.launch("--print", "--resume-latest", "--greedy=2").returncode, 2)
+
+    def test_resume_latest_runs_the_chosen_session(self):
+        self.live(self.stopped("a", self.repo, "2026-11-05T10:00:00Z"))
+        r = self.launch("--resume-latest", "--bg")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ARG:--resume\nARG:a\n", r.stdout)
 
 
 if __name__ == "__main__":

@@ -26,9 +26,9 @@ class LeadSkill(unittest.TestCase):
 
     def test_launch_resume_and_live_branches(self):
         self.check(["claude agents --json --all", "SendMessage", "pid: null",
-                    "scripts/launch\" --resume <sessionId> --bg", "Never resume a live row",
-                    "scripts/launch\" --bg`", "picks the mode", "--settings '{\"disableAutoMode\":\"disable\"}'", "--plugin-dir", "crossSessionInbound",
-                    "scripts/launch --no-model", "**Orchestrator** row", "**Models**",
+                    "scripts/launch\" --resume-latest --bg", "Never resume a live row",
+                    "scripts/launch\" --bg [<accepted tokens>]`", "picks the mode", "--settings '{\"disableAutoMode\":\"disable\"}'", "--plugin-dir", "crossSessionInbound",
+                    "scripts/launch\" --no-model", "**Orchestrator** row", "**Models**",
                     "a live row wins"])
 
     def test_the_launch_line_is_not_restated(self):
@@ -40,7 +40,7 @@ class LeadSkill(unittest.TestCase):
     def test_start_skill_leaves_the_mode_to_launch_and_whitelists_arguments(self):
         start = (SKILL.parent.parent / "start" / "SKILL.md").read_text()
         self.assertNotIn("<your own permission mode>", start)
-        for needle in ("Pass none", "`acceptEdits` by default", "`--lead`", "`--permission-mode`", "Never paste the raw arguments"):
+        for needle in ("Pass none", "`acceptEdits` by default", "`--lead`", "`--permission-mode`", "Never paste the raw arguments", "`--profile`"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, start)
 
@@ -51,6 +51,32 @@ class LeadSkill(unittest.TestCase):
     def test_model_not_found_only_fallback(self):
         self.check(["model_not_found", 'state: "failed"', "`error` field", "exactly once",
                     "usage limit", "never triggers"])
+
+    def test_run_flags_go_through_the_lead(self):
+        self.check(["argument-hint", "`--greedy=<digits>`", "`--profile`", "Never paste the raw arguments",
+                    "the flags were not applied", "keeps its launch flags", "Never stop or relaunch",
+                    "**Lead** row", "a hand-started `/orchestrate:lead` keeps its session's model"])
+        self.assertNotIn("Fable is the recommended", self.text)
+        self.assertNotIn("Fable is recommended", self.text)
+
+    def test_fable_hint_sits_at_grooming_step_only(self):
+        head = self.text.split("## Start-up")[0]
+        self.assertNotIn("fable", head.lower())
+        self.check(["`/model fable` suits it", "when already on Fable"])
+
+    def test_resume_picks_the_newest_stopped_row_of_this_repo(self):
+        self.check(["--resume-latest", "newest `startedAt`", "`cwd` is this repo", "lists last",
+                    "which sessionId it chose"])
+
+    def test_the_no_model_relaunch_uses_the_skill_dir_path(self):
+        self.assertNotIn("`scripts/launch --no-model`", self.text)
+
+    def test_grooming_breakage_sweep_and_pass_digest(self):
+        self.check(["### Grooming", "### Breakage sweep", "### Pass digest",
+                    "## Also, folded from #<n>", "Agent Brief", "Never fold into a ticket that is claimed or in review",
+                    "ungated ticket into one gated on the permission layer", "`hooks/**`", "reread the absorbers",
+                    "Every 10 merges", "`NOT removed`", "`gh_call`", "closed without a merged PR",
+                    "After every pass table", "the developer's only view", "launched with `--bg`", "see Grooming"])
 
     def test_staying_current(self):
         self.check(["needs-lead", "watermark", "outcomes only"])

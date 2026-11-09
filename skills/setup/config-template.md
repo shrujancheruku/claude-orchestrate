@@ -65,6 +65,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 
 | Role | Model | Effort |
 |---|---|---|
+| Lead | opus (used when scripts/launch --lead starts it; a hand-started session keeps its own) | |
 | Orchestrator | opus (used when the lead launches it; a hand-started session keeps its own) | |
 | Worker | sonnet; haiku for S tickets (at most <3> files, the **Tiers** file limit) | medium |
 | Scout | haiku | low |
