@@ -274,6 +274,24 @@ class Rescue(unittest.TestCase):
         self.assertTrue(self.wt.exists())
         self.assertIn(reason, git(self.env.repo, "worktree", "list", "--porcelain"))
 
+    def test_a_multi_line_exception_message_still_gives_one_stderr_line_and_exit_2(self):
+        import contextlib
+        import io
+
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        for patched, raised in (("worktree_changes", OSError("first\nsecond\n  third")),
+                                ("worktree_changes", ValueError("cannot find\nthe merge-base"))):
+            with self.subTest(raised=type(raised).__name__):
+                mod = self.load_script()
+                err = io.StringIO()
+                with unittest.mock.patch.object(mod.repo, patched, side_effect=raised), \
+                        contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    code = mod.main([BRANCH, "--repo", str(self.env.repo)])
+                self.assertEqual(code, 2)
+                self.assertEqual(len(err.getvalue().splitlines()), 1, err.getvalue())
+                self.assertIn("first second third" if isinstance(raised, OSError) else "the merge-base", err.getvalue())
+
     def load_script(self):
         from importlib.machinery import SourceFileLoader
         from importlib.util import module_from_spec, spec_from_loader
