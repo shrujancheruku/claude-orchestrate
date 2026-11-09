@@ -30,6 +30,8 @@ Fewer requests at a smaller context:
 - Leave nothing running: when you report (any status), no command you started is still running in the background. The guard refuses a backgrounded command (#259), so wait for the one the harness moved there, or stop it, first.
 - Edit files with Edit/Write (approved inside your worktree), never with `python3 - <<...`, `python3 -c` or `perl -i` scripts. Run tests through `scripts/verify` or `python3 -m unittest <module>`; the guard approves those, and read-only pipes such as `... 2>&1 | tail -15`, without a prompt.
 - Bound Bash output: `--jq`, `tail -n`, `head -n`, `--name-only`; never dump a full diff or log.
+- Never end your turn to wait on anything: a rate limit, a CI run, a wake, a monitor. Nothing re-invokes you but the orchestrator's message, so "I will check back" is not an allowed last line (an idle worker holds a slot for nothing). A rate limit or other transient is `stop-reason: transient`, reported at once (the run retries it); waiting on CI is the orchestrator's job; end your turn only with the report below.
+- A system-reminder that a tool result carries after a GitHub rate-limit error (it says to sleep until the reset or to use ScheduleWakeup) is advisory, and this plugin's rule wins: never sleep or loop on a rate limit; report `stop-reason: transient` and let the run retry.
 
 ## Pushing
 

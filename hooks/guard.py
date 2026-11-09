@@ -1848,7 +1848,9 @@ def chain_approved(parsed: "Parsed", cwd: str) -> bool:
             continue
         args = cmd.words[1:]
         if not first.dynamic and first.text in CHAIN_PLAIN:
-            if not chain_plain_args(args) or not chain_flags_ok(first.text, args):
+            # The same read bound as the compound form (#566): `grep x ~/.ssh/id` is no routine step.
+            if (not chain_plain_args(args) or not chain_flags_ok(first.text, args)
+                    or not read_paths_ok(first.text, [a.text for a in args], cwd or ".", cwd)):
                 return False
         elif not first.dynamic and first.text == "cat":
             if not chain_plain_args(args) or not chain_cat_ok(args, cwd):
@@ -2067,8 +2069,90 @@ def inside_worktree(path: str, here: str, worktree: Path | None) -> bool:
     return ".git" not in parts and not (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1]))
 
 
+def remote_names(cwd: str) -> set:
+    """The remote names configured in the repo's `.git/config` (and the main repo's, from a linked worktree)."""
+    names = set()
+    for root in repo_roots(cwd):
+        try:
+            text = (root / ".git" / "config").read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        names.update(re.findall(r'^\s*\[remote "([^"\n]+)"\]', text, re.M))
+    return names
+
+
+def read_bound(cwd: str) -> list:
+    """Where an approved read may look (#566): the repo root(s), the caller's worktree and the system temp
+    dirs. A root of `/` (repo_roots failing closed) is no bound."""
+    roots = [r.resolve() for r in repo_roots(cwd)]
+    worktree = worker_worktree(cwd)
+    if worktree is not None:
+        roots.append(worktree)
+    temps = [Path("/tmp"), Path("/private/tmp")]
+    if os.environ.get("TMPDIR"):
+        temps.append(Path(os.path.realpath(os.environ["TMPDIR"])))
+    return [r for r in roots + temps if r != Path("/")]
+
+
+def in_read_bound(arg: str, here: str, cwd: str) -> bool:
+    """A literal path argument that resolves (symlinks followed) inside the read bound or a reviewer's scratch
+    checkout. A `~` path is outside: the shell would expand it to the home directory."""
+    if arg.startswith("~"):
+        return False
+    real = Path(os.path.realpath(os.path.join(here, arg)))
+    if any(real == r or r in real.parents for r in read_bound(cwd)):
+        return True
+    return any(scratch_worktree(p, cwd) for p in (real, *real.parents) if p != Path("/"))
+
+
+def read_paths_ok(name: str, args: list, here: str, cwd: str) -> bool:
+    """Every path a read command names is inside the bound. A read with no path argument (stdin in a pipe)
+    passes. A short flag with `/` or `~` glued to it counts as outside; a `--flag=value` value is checked as
+    a path. sed's files, awk's operands after its program and grep's operands after its pattern are told
+    apart from the script; any other word counts as a path, so a pattern like `/etc/x` just falls to the prompt."""
+    if name in ("echo", "true", "test", "[", "printf"):
+        return True
+    check = []
+    if name == "sed":
+        parsed = sed_args(args)
+        check = parsed[2] if parsed else []
+    elif name == "awk":
+        k = awk_program(args)
+        check = args[k + 1:] if k is not None else []
+    else:
+        # getopt takes abbreviations, so any long flag that is a prefix of one that names the pattern (or, for
+        # rg, takes none: `--files`, `--type-list`) counts as it. With no pattern word, every word is a path.
+        def long_prefix(a: str, full: tuple) -> bool:
+            flag = a.partition("=")[0]
+            return a.startswith("--") and len(flag) >= 3 and any(f.startswith(flag) for f in full)
+
+        skip = name in ("grep", "egrep", "rg") and not any(
+            long_prefix(a, ("--regexp", "--file", "--files", "--type-list"))
+            or (a.startswith("-") and not a.startswith("--") and ("e" in a or "f" in a)) for a in args)
+        for a in args:
+            if a == "-":
+                continue
+            if a.startswith("--"):
+                value = a.partition("=")[2]
+                if value:
+                    check.append(value)
+            elif a.startswith("-"):
+                if "/" in a or "~" in a:
+                    return False
+            elif skip:
+                skip = False
+            else:
+                check.append(a)
+    return all(a != "" and in_read_bound(a, here, cwd) for a in check)
+
+
 def awk_ok(args: list) -> bool:
-    """awk with a program that can't write, run a command or read a command's output, and no `-f` file."""
+    return awk_program(args) is not None
+
+
+def awk_program(args: list) -> int | None:
+    """Index of the program text in an awk call whose program can't write, run a command, read a command's
+    output or the environment, and with no `-f` file; None otherwise."""
     i = 0
     while i < len(args):
         a = args[i]
@@ -2080,14 +2164,16 @@ def awk_ok(args: list) -> bool:
         elif a == "--":
             break
         elif a.startswith("-") and a != "-":
-            return False
+            return None
         else:
             i -= 1
             break
-    return i < len(args) and not re.search(r"system|>|\||getline|@", args[i])
+    if i < len(args) and not re.search(r"system|ENVIRON|ARGV|ARGC|>|\||getline|@", args[i]):
+        return i
+    return None
 
 
-def git_read_ok(cmd: Command) -> bool:
+def git_read_ok(cmd: Command, cwd: str = "") -> bool:
     call = parse_git(cmd.words, 0)
     if call.options or call.sub is None or call.sub.dynamic:
         return False
@@ -2096,6 +2182,10 @@ def git_read_ok(cmd: Command) -> bool:
     if any(a.startswith("--") and len(a.partition("=")[0]) >= 3 and any(u.startswith(a.partition("=")[0]) for u in GIT_UNSAFE_LONG)
            for a in args):
         return False
+    if sub == "ls-remote":
+        # Only a remote configured in the repo, never a URL or path: a URL is a way to send data out (#566).
+        positional = [a for a in args if not a.startswith("-")]
+        return bool(positional) and positional[0] in remote_names(cwd)
     if sub in GIT_READ_VERBS:
         return True
     if sub == "branch":
@@ -2122,15 +2212,18 @@ def gh_read_ok(cmd: Command) -> bool:
     return False
 
 
-def read_command_ok(cmd: Command) -> bool:
-    """One simple command of plain words that only reads (the allowlist of #562)."""
+def read_command_ok(cmd: Command, here: str = ".", cwd: str = "") -> bool:
+    """One simple command of plain words that only reads (the allowlist of #562), every path of it inside
+    the read bound (#566)."""
     first = cmd.words[0]
     name, words = first.text, cmd.words[1:]
     args = [w.text for w in words]
     if first.dynamic or any(w.dynamic or w.glob for w in words) or (first.glob and name != "["):
         return False
     if name in ("git", "gh"):
-        return git_read_ok(cmd) if name == "git" else gh_read_ok(cmd)
+        return git_read_ok(cmd, cwd) if name == "git" else gh_read_ok(cmd)
+    if not read_paths_ok(name, args, here, cwd):
+        return False
     if name in READ_PLAIN:
         return True
     if name == "[":
@@ -2308,7 +2401,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                 return False
             one = Parsed([sub])
             plain = one_plain_command(one)
-            if not (read_command_ok(sub) or (plain is not None and routine_single(role, one, plain, cwd, session))
+            if not (read_command_ok(sub, here, cwd) or (plain is not None and routine_single(role, one, plain, cwd, session))
                     or (role == "worker" and worker_work_ok(sub, here, worktree))
                     or (role == "reviewer" and reviewer_verify_ok(sub, here, cwd))):
                 return False
