@@ -25,6 +25,8 @@ the state file and the worktrees); the stop comment is the newest comment whose 
     LEAD-PR #<n> <pr>        open `lead` ticket with its open PR: the PR joins the pipeline (CI, gate, review, merge)
     RESEND #<n> <pr>         live lead, a lead PR whose newest `> *Waiting on lead (not delivered).*` names its current
                              head and no `> *Resent to lead.*` names that head yet: send the failure again, once per head
+A claim `claims` reports as `waiting` (a permission-denied or exhausted stop: the developer must act) gets none of
+RESUME, ESCALATE or REDISPATCH, whatever its stop comment says.
 A narrowed or reworded ticket needs no verdict of its own: it is a RESUME. The ADR-conflict comment is the one
 whose first line is `> *ADR conflict held for the lead.*`; a needs-lead ticket whose newest such comment is newer
 than its newest stop comment is held by a conflict, and gets no FALLBACK or UNCAP.
@@ -186,6 +188,8 @@ def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
         if not issue["claimed"] or since is None:
             continue
         claim = found[n]
+        if claim.state == "waiting":
+            continue  # the developer must act (claims): never resumed, escalated or redispatched, even with a stop comment
         worker = claim.worker
         if not isinstance(worker, dict) or not worker.get("agent_id"):
             # Only `stalled` redispatches: a state file is per session, so an earlier session's finished worker is
@@ -232,8 +236,10 @@ def main(argv=None) -> int:
         prs, merged = snap.prs, snap.merged
         # The claims are read once here (the state file, the worktrees, the PRs); `changes` is a no-op because routing
         # never needs the dirty and unpushed counts, and a git failure there would stop a pass that never needed them.
-        # So Claim.changes is None here: route() must never read claim.changes.
-        found = claims.claims(root, state_path, issues, prs, merged, changes=lambda path, branch: None)
+        # So Claim.changes is None here: route() must never read claim.changes. The same goes for the commit time
+        # `idle` needs: no ticket is idle here, and a building one is still RESUME's.
+        found = claims.claims(root, state_path, issues, prs, merged, changes=lambda path, branch: None,
+                              commit_time=lambda path: None)
     except github.GhError as e:
         common.die(f"lead-route: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError) as e:

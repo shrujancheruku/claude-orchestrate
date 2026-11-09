@@ -6,12 +6,12 @@ rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a s
 read left to right as a ticket's life:
     Backlog          open, unclaimed `ready-for-agent` tickets that are not parents, `lead` or `wayfinder:`: the
                      takeable ones in `frontier` order, then the held ones by number (tracker.backlog)
-    Building         claimed, and `claims` says building, elsewhere, stalled or with-lead (a draft PR is building)
+    Building         claimed, and `claims` says building, idle, elsewhere, stalled or with-lead (a draft PR is building)
     In review        claimed, and `claims` says in-review (a ready PR)
     Needs lead       labelled `needs-lead`
-    Waiting on you   labelled `ready-for-human` or `needs-info`, or claimed with no PR while the newest
-                     `worker-report` in the run log for it is a `permission-denied` stop (the user must act)
-                     (it stays there after the user allows the command, until the PR exists)
+    Waiting on you   labelled `ready-for-human` or `needs-info`, or claimed and `claims` says waiting (a
+                     `permission-denied` stop or an exhausted transient one: the user must act; it stays there
+                     after the user allows the command, until the PR exists)
     Done             the ticket's PR merged; the card is archived a day after the merge
 A card is added when its ticket first qualifies for Backlog, is first claimed, or is a `lead` ticket (which is never
 assigned: no PR is Building, a ready PR In review, as `lead-route`'s LEAD-TICKET and LEAD-PR lines say). A Backlog card
@@ -48,7 +48,6 @@ import claims
 import common
 import config
 import github
-import runlog
 import tracker
 from repo import STATE, parse_ts, ticket_of_branch
 
@@ -63,25 +62,11 @@ PROJECT_URL = re.compile(r"^https://[^/]+/(?:orgs|users)/([^/]+)/projects/(\d+)/
 LEAD_LINE = re.compile(r"^LEAD-(TICKET|PR) #(\d+)(?: (\d+))?$")
 # The board is the coarse view: every claim state that is not in review or done is Building. Liveness and stalls
 # stay in the pass table (`claims`).
-CLAIM_STAGE = {"building": BUILDING, "elsewhere": BUILDING, "stalled": BUILDING, "with-lead": BUILDING,
+CLAIM_STAGE = {"building": BUILDING, "idle": BUILDING, "waiting": WAITING, "elsewhere": BUILDING, "stalled": BUILDING, "with-lead": BUILDING,
                "in-review": REVIEW, "done": DONE}
 
 
-def waits_on_developer(repo, found) -> set:
-    """The claimed tickets whose newest worker report is a permission-denied stop, or a transient stop whose retries
-    ran out (`exhausted`), and that have no PR yet: the work waits on the developer (the marker is the run log, so a
-    later session sees it too). A transient stop still being retried does not wait."""
-    out = set()
-    for t, claim in found.items():
-        if claim.state == "in-review":
-            continue
-        last = runlog.latest_event(repo, runlog.WORKER_REPORT, t, skip_outcomes=("duplicate",))
-        if last and (last.get("stop_reason") == "permission-denied" or last.get("exhausted") is True):
-            out.add(t)
-    return out
-
-
-def desired(issues, found, denied=(), backlog=(), lead=None):
+def desired(issues, found, backlog=(), lead=None):
     """{ticket: (stage, issue, addable)} for the open tickets that belong on the board. found: claims.claims' {ticket:
     Claim}, which holds every claimed open ticket. backlog: the Backlog tickets' numbers. lead: {ticket: stage} for the
     lead's tickets (lead_stages). addable: the ticket gets a card when it has none (it is claimed, a lead ticket, or
@@ -94,7 +79,7 @@ def desired(issues, found, denied=(), backlog=(), lead=None):
         claimed = issue["claimed"]
         if "needs-lead" in labels:
             stage, addable = NEEDS_LEAD, claimed
-        elif labels & {"ready-for-human", "needs-info"} or n in denied:
+        elif labels & {"ready-for-human", "needs-info"} or (claimed and found[n].state == "waiting"):
             stage, addable = WAITING, claimed
         elif n in lead:
             stage, addable = lead[n], True
@@ -425,7 +410,7 @@ def sync(owner, number, repo, writes=None):
             "archiveProjectV2Item(input: {projectId: " + json.dumps(project_id) + ", itemId: " + json.dumps(r(card_id))
             + "}) { clientMutationId }"), line=f"archive #{t}")
 
-    want = desired(issues, found, waits_on_developer(repo, found), {i["number"] for i in in_backlog}, lead)
+    want = desired(issues, found, {i["number"] for i in in_backlog}, lead)
     ids = {}  # ticket -> card id, for the Backlog ordering below
     for t, (stage, issue, addable) in sorted(want.items()):
         card = cards.get(t)

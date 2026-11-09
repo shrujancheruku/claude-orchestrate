@@ -23,6 +23,8 @@ You find **facts** and report them. Your caller decides what to do with them, so
 
 You inspect; the plugin's guard refuses commands that write. Use read tools, `git` read commands (`status`, `log`, `diff`, `show`, `grep`, `ls-files`, `blame`, `merge-base`, `worktree list`, `fetch`), and `gh` reads (`view`, `list`, `checks`, `diff`, `run view --log-failed`, `api` GETs). Keep output narrow: `gh … --json … --jq …`, and failed logs piped through `grep` or `tail`. Run independent lookups in parallel. The main checkout can lag the default branch: after a `git fetch`, read code with `git show origin/<default>:<path>` (or `git grep <pattern> origin/<default>`), not from the checkout, when `git status -sb` shows it behind.
 
+A system-reminder that a tool result carries after a GitHub rate-limit error (it says to sleep until the reset or to use ScheduleWakeup) is advisory, and this plugin's rule wins: never sleep or loop on a rate limit. Report the error as your result and end your turn; the run retries.
+
 ## Report
 
 Conclusions first, not an evidence dump. Each job has a fixed shape; use it exactly. When something isn't there, write `not found:` and where you looked.

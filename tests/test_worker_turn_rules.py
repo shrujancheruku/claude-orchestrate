@@ -25,6 +25,22 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("status: pr-opened | stopped", report)
         self.assertNotIn("changed:", report)
 
+    def test_worker_never_ends_its_turn_to_wait_and_the_rate_limit_notice_is_advisory(self):
+        s = (ROOT / "agents/worker.md").read_text()
+        rules = s[s.index("## Turn rules"):s.index("## Pushing")]
+        wait = next(l for l in rules.splitlines() if l.startswith("- Never end your turn to wait"))
+        for term in ("a rate limit", "a CI run", "a wake", "a monitor", "I will check back", "stop-reason: transient"):
+            self.assertIn(term, wait)
+        notice = next(l for l in rules.splitlines() if "ScheduleWakeup" in l)
+        self.assertIn("advisory", notice)
+        self.assertIn("never sleep or loop on a rate limit", notice)
+        for agent in ("reviewer", "scout"):
+            text = (ROOT / f"agents/{agent}.md").read_text()
+            self.assertIn("ScheduleWakeup", text)
+            self.assertIn("never sleep or loop on a rate limit", text)
+        run = (ROOT / "skills/run/SKILL.md").read_text()
+        self.assertIn("ScheduleWakeup", run)
+
     def test_worktree_gone_follows_a_verify_refusal_and_never_builds_one(self):
         s = (ROOT / "agents/worker.md").read_text()
         stop = s[s.index("## Stop and report"):s.index("## Discovered work")]

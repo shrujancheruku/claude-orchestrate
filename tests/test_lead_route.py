@@ -382,6 +382,14 @@ class RouteFromClaims(unittest.TestCase):
         self.assertEqual(self.mod.route(issues, found, "live", 2, T0 + timedelta(minutes=60)),
                          ["REDISPATCH #1", "counted: 1 of 2"])
 
+    def test_a_waiting_claim_is_never_resumed_or_redispatched_but_still_holds_its_slot(self):
+        issues = [{"number": 1, "claimed": True, "labels": set(), "blockers": [], "body_edits": [],
+                   "comments": [{"body": MARKER, "created": T0, "edits": []}]}]
+        for worker in (None, {"agent_id": "agent-a", "model": "m", "last_report": (T0 - timedelta(minutes=5)).isoformat()}):
+            found = {1: self.claim(1, "waiting", worker=worker, reason="permission-denied")}
+            self.assertEqual(self.mod.route(issues, found, "live", 2, T0 + timedelta(minutes=60)),
+                             ["counted: 1 of 2"])
+
     def test_elsewhere_claim_prints_pid_worktree_and_reason_when_unparsed(self):
         issues = [{"number": 1, "claimed": True, "labels": set(), "blockers": [], "body_edits": [],
                    "comments": [{"body": MARKER, "created": T0, "edits": []}]}]
