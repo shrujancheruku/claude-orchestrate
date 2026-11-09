@@ -48,13 +48,13 @@ class Holds(unittest.TestCase):
         self.wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.wt_dir.cleanup)
 
-    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=(), shas=None):
+    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=(), shas=None, forks=()):
         """prs: {number: [paths]}; branches: {number: head branch}; issues: {ticket: state}, where CLOSED leaves the
         ticket out of the open issues and OPEN lists it; merged: head branches of merged PRs; unclaimed: open tickets with
         no assignee; open_tickets: open tickets assigned to the user (as is every other open ticket listed here);
         lead: open tickets labelled `lead`."""
         prs, branches = prs or {}, branches or {}
-        listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": False,
+        listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": n in forks,
                     "isDraft": n in drafts, "headRefOid": (shas or {}).get(n)} for n in prs]
         open_nums = set(open_tickets) | set(unclaimed) | set(lead) | {n for n, st in (issues or {}).items() if st == "OPEN"}
         nodes = [{"number": n, "labels": {"nodes": [{"name": "lead"}] if n in lead else []},
@@ -202,6 +202,14 @@ class Holds(unittest.TestCase):
         r = self.holds("--touch-map", "a.py", "--ticket", "7")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(r.stdout.splitlines(), ["scripts/x (held by open PR #6)", "CHANGELOG.md (held by open PR #8)", "overlap: none"])
+
+    def test_a_fork_prs_files_are_not_held_and_its_diff_is_not_read(self):
+        # ADR-0015: an outsider's PR touching scripts/x holds nothing
+        self.gh({5: ["scripts/x"], 6: ["scripts/y"]}, branches={5: "9-fork", 6: "10-own"}, forks=(5,))
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), ["scripts/y (held by open PR #6)", "overlap: none"])
+        self.assertEqual(self.files_reads(), [c for c in self.files_reads() if "/pulls/6/" in c[1]])
 
     CACHE = ".claude/orchestrate-snapshot.json"
 

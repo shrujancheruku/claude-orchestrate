@@ -244,7 +244,7 @@ def run(argv=None) -> int:
             view = github.pr_view(own_pr, "headRefName", cwd=repo)
             own_ticket = ticket_of_branch(view.get("headRefName"))
             candidates = github.pr_files(own_pr, cwd=repo)
-        open_prs = [p for p in snap.prs if isinstance(p, dict) and p.get("baseRefName", base) == base]
+        open_prs = [p for p in github.own_prs(snap.prs) if isinstance(p, dict) and p.get("baseRefName", base) == base]
         # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
         # `changes` is a no-op: holds needs each worktree's changed paths, not the dirty and unpushed counts claims
         # would take, and a git failure there would stop a pass that never needed them.

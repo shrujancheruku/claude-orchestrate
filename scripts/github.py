@@ -26,6 +26,7 @@ import urllib.parse
 from pathlib import Path
 
 import common
+import config
 import runlog
 from repo import STATE
 
@@ -58,7 +59,7 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
         lastEditedAt
-        comments(last: 100) { nodes { body createdAt lastEditedAt } }
+        comments(last: 100) { nodes { body createdAt lastEditedAt authorAssociation author { login } } }
       }
     }
   }
@@ -114,7 +115,7 @@ THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!, $after:
           id isResolved isOutdated path line originalLine
           comments(first: 50) {
             pageInfo { hasNextPage endCursor }
-            nodes { author { login } body url }
+            nodes { author { login } authorAssociation body url }
           }
         }
       }
@@ -128,11 +129,34 @@ THREAD_COMMENTS_QUERY = """query($id: ID!, $after: String) {
     ... on PullRequestReviewThread {
       comments(first: 50, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { author { login } body url }
+        nodes { author { login } authorAssociation body url }
       }
     }
   }
 }"""
+
+
+# ADR-0015: the one rule for whose tracker text may steer a run. Every reader of a comment, review or review thread
+# asks `is_trusted`; nothing else in scripts/ compares an association or a login.
+TRUSTED_ASSOCIATIONS = frozenset(("OWNER", "MEMBER", "COLLABORATOR"))
+
+
+def is_trusted(association, login=None, extra=()) -> bool:
+    """True for a trusted author: an `author_association` of OWNER, MEMBER or COLLABORATOR, or a login in `extra` (the
+    config's `Trusted authors:` line, lowercase). A missing association is untrusted (fail closed)."""
+    if str(association or "").upper() in TRUSTED_ASSOCIATIONS:
+        return True
+    return bool(login) and str(login).lower() in extra
+
+
+def trusted_logins(cwd=None) -> tuple:
+    """The config's extra trusted logins (lowercase), read from `cwd`'s repository; none when there is no config."""
+    return config.Config.load(cwd or ".").trusted_authors
+
+
+def own_prs(prs) -> list:
+    """The PRs of the run: a fork PR (`isCrossRepository`) is never a ticket's PR and holds no path (ADR-0015)."""
+    return [p for p in prs if not (isinstance(p, dict) and p.get("isCrossRepository"))]
 
 
 class GhError(Exception):
@@ -965,13 +989,15 @@ def _connection(query, variables, path, after=None, cwd=None, what: str = "revie
 
 def _comment(c: dict) -> dict:
     return {"author": (c.get("author") or {}).get("login") or "ghost", "body": str(c.get("body") or ""),
-            "url": c.get("url")}
+            "url": c.get("url"), "association": c.get("authorAssociation") or ""}
 
 
-def review_threads(pr, cwd=None) -> list:
+def review_threads(pr, cwd=None, trusted=None) -> list:
     """Every review thread of a PR, past 100 threads and past 50 comments in a thread:
-    [{id, resolved, outdated, path, line (the diff line, else the original one for an outdated thread; None on a file-level thread), comments: [{author, body, url}]}].
-    The one home of the threads read (`threads` and `merge` both use it)."""
+    [{id, resolved, outdated, trusted, path, line (the diff line, else the original one for an outdated thread; None on a file-level thread), comments: [{author, association, body, url}]}].
+    A thread is `trusted` when its first comment's author is (ADR-0015); `trusted` is the extra logins, read from the
+    config when omitted. The one home of the threads read (`threads` and `merge` both use it)."""
+    extra = trusted_logins(cwd) if trusted is None else trusted
     info = repo_info(cwd=cwd)
     try:
         owner, name = info["owner"]["login"], info["name"]
@@ -991,9 +1017,11 @@ def review_threads(pr, cwd=None) -> list:
         if page.get("hasNextPage") and page.get("endCursor"):
             comments += _connection(THREAD_COMMENTS_QUERY, {"id": tid}, ("node", "comments"),
                                     after=page["endCursor"], cwd=cwd)
+        rows = [_comment(c) for c in comments if isinstance(c, dict)]
         out.append({"id": tid, "resolved": bool(n.get("isResolved")), "outdated": bool(n.get("isOutdated")),
+                    "trusted": bool(rows) and is_trusted(rows[0]["association"], rows[0]["author"], extra),
                     "path": n.get("path") or "", "line": n.get("line") or n.get("originalLine"),
-                    "comments": [_comment(c) for c in comments if isinstance(c, dict)]})
+                    "comments": rows})
     return out
 
 

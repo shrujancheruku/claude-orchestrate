@@ -42,6 +42,7 @@ class Config(NamedTuple):
     lead_model: str | None = None  # the Models table's Lead row, read the same way; None when blank or missing
     ci_wait_limit: int | None = None  # minutes: the optional `**CI wait limit:**` line; None when absent or not a number
     board: str | None = None  # the `- **Board:** <project URL>` line setup writes; None when absent
+    trusted_authors: tuple = ()  # logins on the optional `- **Trusted authors:**` line (Backlog): trusted besides OWNER, MEMBER, COLLABORATOR (ADR-0015)
     problems: tuple = ()  # Problem entries
 
     @classmethod
@@ -94,6 +95,7 @@ class Config(NamedTuple):
             lead_model=_model_row(common.section_of(text, "Models"), "lead"),
             ci_wait_limit=_ci_wait_limit(text),
             board=_board(text),
+            trusted_authors=_trusted_authors(common.section_of(text, "Backlog")),
             problems=tuple(problems),
         )
 
@@ -216,6 +218,18 @@ def _board(text):
     """The Projects board URL from the line `- **Board:** <url>` (a top-level bullet; setup writes it), or None."""
     m = _BOARD.search(text)
     return m.group(1).rstrip(".,;") if m else None
+
+
+_TRUSTED_LINE = re.compile(r"^[-*]\s+\*\*Trusted authors:?\*\*:?(.*)$", re.IGNORECASE | re.MULTILINE)
+_LOGIN = re.compile(r"@?([A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?)")
+
+
+def _trusted_authors(backlog):
+    """The logins named (backticked) on the `- **Trusted authors:**` line of the Backlog section, lowercased: GitHub
+    logins are case-insensitive. The template's `<login>` placeholder is not a login, so it names no one."""
+    m = _TRUSTED_LINE.search(backlog or "")
+    spans = re.findall(r"`([^`]+)`", m.group(1)) if m else []
+    return tuple(dict.fromkeys(g.group(1).lower() for g in (_LOGIN.fullmatch(x.strip()) for x in spans) if g))
 
 
 _OLD_ORCHESTRATOR ="the session's model"  # the template's wording before the lead layer: means no model

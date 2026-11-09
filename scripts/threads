@@ -18,6 +18,10 @@ whoever acts on it" lives here, not in the prompts).
                             `--left` refuses with neither flag, so a minor left behind is never lost unrecorded.
     threads <pr> reopen <thread>... --why <why>      replies `reopened: <why>`, then unresolves
 
+A thread whose first comment is from an untrusted author (ADR-0015: not OWNER, MEMBER or COLLABORATOR, and not on the
+config's `Trusted authors:` line) is listed as `<id> <author> <path>:<line> untrusted (text withheld)`, and `resolve` and
+`reopen` refuse it: a worker never reads or acts on it, and the developer resolves it. `merge` still counts it.
+
 Leave <pr> out and the PR is the one of the checked-out branch (one pulls lookup by head branch): `threads`,
 `threads resolve <thread>... --fixed <sha>`. That is the worker's form, so the guard can allow it without knowing which
 PR it names; the orchestrator, the reviewer and the lead give the number.
@@ -64,6 +68,11 @@ def listing(threads, show_all) -> list:
         if t["resolved"] and not show_all:
             continue
         first = t["comments"][0] if t["comments"] else {"author": "ghost", "body": ""}
+        if not t.get("trusted", True):
+            # ADR-0015: an untrusted author's text never reaches a worker; the developer resolves the thread.
+            lines.append(f"{t['id']} {first['author']} {t['path']}:{t['line'] if t['line'] else 'file'} untrusted"
+                         + (" resolved" if t["resolved"] else "") + " (text withheld)")
+            continue
         where = f"{t['path']}:{t['line'] if t['line'] else 'file'}"
         head = [t["id"], first["author"], where] + (["outdated"] if t["outdated"] else []) + (["resolved"] if t["resolved"] else [])
         lines.append(" ".join(head + [first_line(first["body"])]).rstrip())
@@ -170,6 +179,8 @@ def main(argv=None) -> int:
             thread = by_id.get(tid)
             if thread is None:
                 return refuse(f"PR #{pr} has no review thread {tid}")
+            if not thread.get("trusted", True):
+                return refuse(f"thread {tid} is from an untrusted author; the developer resolves it (ADR-0015)")
             if args.action == "resolve" and thread["resolved"]:
                 return refuse(f"thread {tid} is already resolved")
             if args.action == "reopen" and not thread["resolved"]:

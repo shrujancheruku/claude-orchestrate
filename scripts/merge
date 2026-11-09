@@ -253,7 +253,13 @@ def threads_rule(cwd, pr):
     say(f"PR #{pr} is not ready: {len(unresolved)} unresolved review thread(s)")
     for t in unresolved:
         first = t["comments"][0] if t["comments"] else {}
-        say(f"  {first.get('author') or 'ghost'} {first.get('url') or '?'}")
+        # ADR-0015: an untrusted thread blocks too (an outsider can only stall a merge); named so the developer resolves it.
+        mark = "" if t.get("trusted", True) else " (untrusted author: the developer resolves or dismisses it)"
+        say(f"  {first.get('author') or 'ghost'} {first.get('url') or '?'}{mark}")
+    if not any(t.get("trusted", True) for t in unresolved):
+        # A worker never addresses an untrusted thread, so sending it back would loop: the developer decides.
+        verdict(f"ask-user PR #{pr} has only untrusted unresolved review threads; resolve or dismiss them")
+        return 1
     verdict(f"send-back {pr}")
     return 1
 
