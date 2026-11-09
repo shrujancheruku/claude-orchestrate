@@ -69,7 +69,9 @@ def merged_prs(since_arg, root):
         return prs[:DEFAULT_PR_COUNT]
     if str(since_arg).lstrip("#").isdigit():
         n = common.pr_ref(since_arg)[1]
-        cut = parse_ts(github.pr_view(n, "mergedAt", cwd=root).get("mergedAt"))
+        # The listing already holds the PR's merge time; look the PR up only when it is older than the listing.
+        listed = next((p for p in prs if str(p["number"]) == str(n)), None)
+        cut = parse_ts(listed["mergedAt"]) if listed else parse_ts(github.pr_view(n, "mergedAt", cwd=root).get("mergedAt"))
         if cut is None:
             common.die(f"ci-times: PR #{n} is not merged")
         return [p for p in prs if parse_ts(p["mergedAt"]) > cut]
@@ -82,14 +84,19 @@ def merged_prs(since_arg, root):
 def measure(prs, root):
     """(push-to-green list, per-check {name: [(queued, running)]}, heads never green) over the PRs."""
     greens, per_check, never = [], {}, 0
+    fetched = {}  # oid -> check runs: a commit shared by stacked PRs is fetched once, and still counts per PR
     for pr in prs:
         commits = github.pr_commits(pr["number"], cwd=root)
         for c in commits:
             pushed = parse_ts(c.get("committedDate"))
-            data = github.call_json("api", f"repos/{{owner}}/{{repo}}/commits/{c['oid']}/check-runs?per_page=100",
-                                    cwd=root)
-            runs = data.get("check_runs") or []
-            if pushed is None or not runs:
+            if pushed is None:
+                continue  # no push time: not a pushed head, and no call needed to know it
+            if c["oid"] not in fetched:
+                data = github.call_json("api", f"repos/{{owner}}/{{repo}}/commits/{c['oid']}/check-runs?per_page=100",
+                                        cwd=root)
+                fetched[c["oid"]] = data.get("check_runs") or []
+            runs = fetched[c["oid"]]
+            if not runs:
                 continue  # not a pushed head: nothing ran on it
             got = head_times(pushed, runs)
             if got is None:
