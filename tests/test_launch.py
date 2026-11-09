@@ -252,8 +252,15 @@ class Launch(unittest.TestCase):
         self.assertIn("--resume b ", self.launch("--print", "--resume-latest").stdout)
         self.live(self.stopped("a", self.repo), self.stopped("b", self.repo))
         self.assertIn("--resume b ", self.launch("--print", "--resume-latest").stdout)
-        self.live(self.stopped("a", self.repo, 1762000000000), self.stopped("b", self.repo))  # one undated row never wins
-        self.assertIn("--resume a ", self.launch("--print", "--resume-latest").stdout)
+        # a mix of dated and undated rows: the undated one makes the order unknowable, so the last listed wins
+        self.live(self.stopped("a", self.repo, 1762000000000), self.stopped("b", self.repo))
+        self.assertIn("--resume b ", self.launch("--print", "--resume-latest").stdout)
+        self.live(self.stopped("a", self.repo), self.stopped("b", self.repo, 1762000000000),
+                  self.stopped("c", self.repo, 1762000001000))
+        self.assertIn("--resume c ", self.launch("--print", "--resume-latest").stdout)
+        self.live(self.stopped("a", self.repo, 1762000001000), self.stopped("b", self.repo, 1762000000000),
+                  self.stopped("c", self.repo))
+        self.assertIn("--resume c ", self.launch("--print", "--resume-latest").stdout)
 
     def test_resume_latest_refuses_a_live_orchestrator_and_no_candidate(self):
         self.live(self.stopped("a", self.repo, "2026-11-05T10:00:00Z"),

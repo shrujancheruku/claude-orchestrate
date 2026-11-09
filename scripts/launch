@@ -170,8 +170,8 @@ def started_at(row):
 def latest_stopped(rows: list, repo: Path):
     """(row, why) for the stopped `orchestrator` row of `repo` to resume, or (None, why not).
 
-    Rows from other repos (a different `cwd`) are ignored. Among the rest the newest `startedAt` wins; a tie, or no
-    row with a readable `startedAt`, falls back to the one listed last. A live orchestrator row means nothing is resumed.
+    Rows from other repos (a different `cwd`) are ignored. Among the rest the newest `startedAt` wins; a tie, or any
+    row without a readable `startedAt`, falls back to the one listed last. A live orchestrator row means nothing is resumed.
     """
     named = [r for r in rows if r.get("name") == NAME]
     live = [r for r in named if r.get("pid") is not None]
@@ -182,8 +182,8 @@ def latest_stopped(rows: list, repo: Path):
     if not mine:
         return None, f"no stopped {NAME} session of this repo to resume"
     dated = [r for r in mine if started_at(r) is not None]
-    if not dated:
-        return mine[-1], f"newest of {len(mine)} stopped {NAME} rows of this repo: none has a startedAt, so the one listed last"
+    if len(dated) < len(mine):  # a missing startedAt makes the order unknowable: the row listed last
+        return mine[-1], f"a stopped {NAME} row of this repo has no startedAt, so the one listed last of {len(mine)}"
     newest = max(started_at(r) for r in dated)
     tied = [r for r in dated if started_at(r) == newest]
     why = "newest startedAt" if len(tied) == 1 else "tied on startedAt, so the one listed last"
