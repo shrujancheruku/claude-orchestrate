@@ -2060,7 +2060,11 @@ def inside_worktree(path: str, here: str, worktree: Path | None) -> bool:
     if worktree is None or not path or path.startswith(("-", "/", "~")):
         return False
     resolved = Path(os.path.realpath(os.path.join(here, path)))
-    return worktree in resolved.parents and ".git" not in resolved.relative_to(worktree).parts
+    if worktree not in resolved.parents:
+        return False
+    parts = resolved.relative_to(worktree).parts
+    # The same files edit_decision keeps behind a prompt for the Edit tool: git internals and the settings files.
+    return ".git" not in parts and not (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1]))
 
 
 def awk_ok(args: list) -> bool:
@@ -2138,7 +2142,9 @@ def read_command_ok(cmd: Command) -> bool:
     if name == "head":
         return True
     if name == "tail":
-        return not any(re.fullmatch(r"-[A-Za-z0-9]*[fF][A-Za-z0-9]*", a) or a.startswith(("--follow", "--retry", "--pid"))
+        # getopt takes abbreviations (`--fol`), so a long option is allowed only by its full name.
+        return not any(re.fullmatch(r"-[A-Za-z0-9]*[fF][A-Za-z0-9]*", a)
+                       or (a.startswith("--") and a.partition("=")[0] not in ("--lines", "--bytes", "--quiet", "--silent"))
                        for a in args)
     if name == "uniq":
         return len([a for a in args if not a.startswith("-")]) <= 1
@@ -2277,13 +2283,15 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
             return False
         cmd = Command(cmd.words, [], [], cmd.depth, cmd.joiner, cmd.ends)
         if k == 0 and cmd.words[0].text == "cd" and not cmd.words[0].dynamic and loop is None:
-            # A leading `cd <dir>`: the repo root or the caller's own worktree, and nothing else.
+            # A leading `cd <dir>`: the repo root or the caller's own worktree, and nothing else. A worker's
+            # routine git steps are safe only in its worktree, so it may not cd to the repo root. The cd must
+            # take effect for what follows: `cd X | cmd` runs it in a subshell, `cd X || cmd` skips cmd on success.
             target = cmd.words[1] if len(cmd.words) == 2 else None
-            if target is None or target.dynamic or target.glob:
+            if target is None or target.dynamic or target.glob or cmd.ends not in (";", "&&", "\n"):
                 return False
             real = Path(os.path.realpath(os.path.join(here, target.text)))
-            if real not in [r.resolve() for r in repo_roots(cwd)] + ([worktree] if worktree else []) and not (
-                    role == "reviewer" and scratch_worktree(real, cwd)):
+            roots = [worktree] if role == "worker" else [r.resolve() for r in repo_roots(cwd)] + ([worktree] if worktree else [])
+            if real not in roots and not (role == "reviewer" and scratch_worktree(real, cwd)):
                 return False
             here = str(real)
             continue
@@ -2292,7 +2300,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                 if not chain_assignment_ok(cmd, env, cwd):
                     return False
                 continue
-            if chain_script_ok(cmd, env, cwd):
+            if chain_script_ok(cmd, env, here):  # relative paths resolve from the dir after a leading cd
                 continue
         for value in (loop[1] if loop else [None]):
             sub = substitute(cmd, {"?": "0", **({loop[0]: value} if loop else {})})

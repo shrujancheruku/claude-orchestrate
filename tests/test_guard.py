@@ -1469,6 +1469,36 @@ class ReadOnlyCompoundTest(unittest.TestCase):
         self.check("orchestrate:reviewer", self.main, yes=(f"cd {self.main} && gh pr view 5 --json title",),
                    no=(f"cd {self.plain} && ls", f"cd {self.main}/.claude && ls | head"))
 
+    def test_a_worker_cannot_commit_in_the_main_checkout_by_cd(self):
+        # The repo root is not the worker's worktree: git add/commit there would land on the main checkout.
+        self.check("orchestrate:worker", self.work, no=(
+            f"cd {self.main} && git add -A && git commit -m x", f"cd {self.main} && git commit --amend -m x",
+            f"cd {self.main} && ls"), yes=(f"cd {self.work} && git add a.py && git commit -m x",))
+
+    def test_a_cd_that_does_not_reach_the_next_command_is_not_approved(self):
+        verify = f"{SCRIPTS}/verify"
+        self.check("orchestrate:reviewer", self.main, no=(
+            f"cd {self.scratch} | {verify} --config --cwd .", f"cd {self.scratch} || {verify} --config --cwd .",
+            f"cd {self.scratch} & {verify} --config --cwd ."), yes=(
+            f"cd {self.scratch}; {verify} --config --cwd {self.scratch}", f"cd {self.scratch}\ngrep -n x a.py"))
+        self.check("orchestrate:worker", self.work, no=(f"cd {self.work} | sed -i 's/x/y/' a.py",))
+
+    def test_sed_i_leaves_the_workers_permission_files_to_the_permission_layer(self):
+        (self.work / ".claude").mkdir()
+        self.check("orchestrate:worker", self.work, no=(
+            "sed -i s/a/b/ .claude/settings.json", "sed -i s/a/b/ .claude/settings.local.json",
+            "sed -i s/a/b/ a.py .claude/settings.json"), yes=("sed -i s/a/b/ .claude/notes.md",))
+
+    def test_a_relative_gate_cwd_resolves_from_the_dir_after_the_cd(self):
+        sub = self.main / "sub"
+        sub.mkdir()
+        self.check(None, sub, no=(f"cd {self.main} && {SCRIPTS}/gate 5 --cwd sub/../..",),
+                   yes=(f"cd {self.main} && {SCRIPTS}/gate 5 --cwd .claude/worktrees/agent-abc",))
+
+    def test_tail_long_options_are_refused_unless_spelled_in_full(self):
+        self.check("orchestrate:scout", self.main, yes=("tail -n 5 a.py", "tail --lines=5 a.py"),
+                   no=("tail --fol a.py", "tail --follow a.py", "tail --re a.py", "tail --pid=1 a.py"))
+
     def test_the_orchestrators_plugin_script_chains_take_the_harmless_shell_too(self):
         self.check(None, self.main, yes=(
             f"cd {self.main} && {SCRIPTS}/snapshot --repo . 2>&1 | tail -n 40",
