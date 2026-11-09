@@ -229,6 +229,15 @@ class Rest(unittest.TestCase):
         self.gh({path: [pull(9, state="closed", merged_at="2026-01-01T00:00:00Z"), pull(3, state="closed")]})
         self.assertEqual(github.current_pr_number(), "9")  # the newest of the closed ones
 
+    def test_cross_repo_reads_a_mixed_list_and_a_deleted_fork(self):
+        mixed = [pull(1), pull(2, fork=True)]
+        self.assertEqual([github._cross_repo(p) for p in mixed], [False, True])
+        self.assertEqual([p["number"] for p in mixed if github._cross_repo(p)], [2])  # the fork alone is found
+        deleted = pull(3)
+        deleted["head"]["repo"] = None  # a deleted fork leaves no head repo
+        self.assertTrue(github._cross_repo(deleted))
+        self.assertEqual([p["number"] for p in [pull(1), deleted] if github._cross_repo(p)], [3])
+
     def test_current_pr_number_finds_a_fork_head_by_the_local_head_commit(self):
         by_head = f"{PULLS}?head={{owner}}:{{branch}}&state=all&per_page=100"
         newest = f"{PULLS}?state=all&sort=updated&direction=desc&per_page=100"

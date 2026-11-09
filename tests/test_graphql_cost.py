@@ -1,9 +1,11 @@
 """GraphQL points per read query (#498): GitHub bills (1 + the nodes asked under every connection) / 100, so a
 connection inside a 100-node page costs 100 requests and one inside those 10,000. Computed from the query text."""
 
+import ast
 import re
 import sys
 import unittest
+from unittest import mock
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -15,6 +17,9 @@ import github  # noqa: E402
 _loader = SourceFileLoader("lead_brief", str(SCRIPTS / "lead-brief"))
 lead_brief = module_from_spec(spec_from_loader("lead_brief", _loader))
 _loader.exec_module(lead_brief)
+_board_loader = SourceFileLoader("board_script", str(SCRIPTS / "board"))
+board = module_from_spec(spec_from_loader("board_script", _board_loader))
+_board_loader.exec_module(board)
 
 MAX_POINTS = 5
 OPEN = re.compile(r"(\w+)\(([^)]*)\)\s*\{|\{|\}")
@@ -95,6 +100,37 @@ class QueryCost(unittest.TestCase):
                 self.assertIsNone(literal.search(text), "a graphql call site builds its query outside `query={NAME}`")
         self.assertTrue(found)
         self.assertLessEqual(found, known, "a graphql call site sends a query outside the *_QUERY set")
+
+    def test_board_and_threads_hold_no_connection_size_outside_a_priced_constant(self):
+        """The two scripts build their queries by concatenation, which `query={NAME}` scanning cannot see: a `first:`
+        or `last:` in any string of theirs (a plain, an f-string or a concatenated piece) would go unpriced."""
+        for name in ("board", "threads"):
+            tree = ast.parse((SCRIPTS / name).read_text(encoding="utf-8"))
+            strings = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+            with self.subTest(name):
+                self.assertTrue(strings)
+                for text in strings:
+                    self.assertIsNone(re.search(r"\b(?:first|last):", text),
+                                      f"{name} sizes a connection in a string the cost guard cannot price: {text[:60]}")
+
+    def test_the_boards_content_id_lookup_is_priced_at_one_point(self):
+        sent = []
+
+        def fake(query, repo, idempotent=False):
+            sent.append(query)
+            return {"data": {"repository": {f"i{n}": {"id": f"C{n}"} for n in range(1, 41)}}}
+
+        writes = board.Writes()
+        for n in range(1, 41):  # more than one request's worth of adds: the lookup is still one query
+            writes.add("add", n)
+        with mock.patch.object(board, "graphql", fake):
+            try:
+                writes.flush("P", "acme/r", ".")
+            except Exception:  # the fake holds no card ids for the adds; only the lookup is under test
+                pass
+        lookup = sent[0]
+        self.assertTrue(lookup.startswith("query"))
+        self.assertEqual(points(lookup), 0.01)
 
     def test_the_merged_prs_query_costs_at_most_five_points(self):
         self.assertLessEqual(points(lead_brief.MERGED_QUERY, lead_brief.MERGED_LIMIT), MAX_POINTS)
