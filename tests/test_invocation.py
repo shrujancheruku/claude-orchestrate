@@ -4,6 +4,7 @@ CLIs (extensionless) run by path with no -I, reached through the skills' `${CLAU
 form, so a broken sibling import or a lost exec bit fails here. Standalone .py scripts run with `python3 -I`.
 """
 
+import importlib.util
 import os
 import re
 import shutil
@@ -67,6 +68,19 @@ class Invocation(unittest.TestCase):
                     argv.append("--help")
                 r = run(argv, input="", cwd=tempfile.gettempdir())
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_every_cli_the_guard_approves_by_flag_name_rejects_abbreviations(self):
+        # The guard spells flags in full (SAFE_SCRIPT_FLAGS, MERGE_VALUE_FLAGS, ...) and says it relies on the
+        # scripts not accepting an abbreviation such as `--meth` (#537). ci-times is on the chain list but is
+        # edited by another open PR (#448); it joins once that merges (tracked in #537's PR, Discovered work).
+        spec = importlib.util.spec_from_file_location("guard_names", ROOT / "hooks" / "guard.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        named = {"merge", "board", "threads"} | set(guard.CHAIN_SCRIPTS)
+        pending = {"ci-times"}
+        for name in sorted(named - pending):
+            with self.subTest(name):
+                self.assertIn("allow_abbrev=False", (SCRIPTS / name).read_text())
 
     def test_docs_follow_the_convention(self):
         # Every doc line that runs a script uses `python3 -I` for a standalone .py script and no interpreter otherwise.

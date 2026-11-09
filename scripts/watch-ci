@@ -195,7 +195,7 @@ def check_stuck(root, pr, run_id, first_seen, reported, stuck_after):
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("prs", nargs="+", help="PR numbers, each optionally followed by its head (merge's wait-ci hint)")
     ap.add_argument("--no-run-after", type=float, default=NO_RUN_AFTER,
                     help="seconds a ready PR may show no check before it ends as having no CI run (default 300)")

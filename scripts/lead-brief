@@ -277,7 +277,7 @@ def checkpoint(root, number) -> int:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--repo", default=".", help="repo root; gh runs there and the files are read under it")
     ap.add_argument("--now", default=None, help="the time now, as ISO 8601 (tests; default: the current time)")
     ap.add_argument("--checkpoint", type=int, metavar="PR", help="write the watermark: PR is the last one absorbed")

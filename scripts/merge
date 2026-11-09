@@ -411,7 +411,7 @@ def main(argv=None) -> int:
 
 
 def run_merge(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("pr", help="PR number")
     ap.add_argument("--method", default="squash", choices=["squash", "merge", "rebase"])
     ap.add_argument("--approved-head", help="the PR head the reviewer approved: decide readiness first (exit 5 behind and updated, 6 needs re-review)")

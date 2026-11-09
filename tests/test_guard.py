@@ -47,12 +47,14 @@ def reason_of(out):
     return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
 
 
-def decide(agent_type, command, cwd=None, background=None, timeout=None):
+def decide(agent_type, command, cwd=None, background=None, timeout=None, transcript=None):
     payload = {"tool_name": "Bash", "tool_input": {"command": command}}
     if background is not None:
         payload["tool_input"]["run_in_background"] = background
     if timeout is not None:
         payload["tool_input"]["timeout"] = timeout
+    if transcript is not None:
+        payload["transcript_path"] = str(transcript)
     if agent_type is not None:
         payload["agent_type"] = agent_type
     if cwd is not None:
@@ -507,6 +509,9 @@ THREADS_CASES = [
     ("reviewer", f"python3 {T} 12", "allow"),
     ("reviewer", f"{T} 12 resolve ID --fixed abc1234", "deny"),
     ("reviewer", f"{T} 12 resolve ID --left 'x'", "deny"),
+    ("reviewer", f"{T} 12 reopen ID1 ID2 --why x", "allow"),
+    ("reviewer", f"{T} 12 reopen --why x", "deny"),
+    ("reviewer", f"{T} 12 reopen ID1 --why", "deny"),
     ("reviewer", f"{T} 12 reopen ID", "deny"),
     ("reviewer", f"echo hi && {T} 12", "deny"),
     ("reviewer", f"{T} 12 && {T} 12 resolve ID --left x", "deny"),
@@ -626,6 +631,13 @@ class GuardTest(unittest.TestCase):
         reason = self.run_guard({"agent_type": "orchestrate:worker", "tool_input": {"command": quoted}})
         self.assertIn("timeout of 600000", reason)
 
+    def run_transcript(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "run.jsonl"
+        path.write_text(json.dumps({"message": {"role": "user", "content": "<command-name>/orchestrate:run</command-name>"}}) + "\n")
+        return path
+
     def test_any_worker_command_in_the_background_is_refused(self):
         # #259: a worker has no command that needs the background; a left-over job wakes it to hand back again.
         for command in ("scripts/watch-ci 12", "sleep 5", "python3 scripts/verify.py", "grep -n x scripts/verify",
@@ -637,7 +649,7 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
                 self.assertEqual(decide("orchestrate:scout", command, background=True), "allow")
                 # The orchestrator's own hand-made waits are refused (#407), whatever else it runs.
-                self.assertEqual(decide(None, command, background=True), "deny" if command == "sleep 5" else "allow")
+                self.assertEqual(decide(None, command, background=True, transcript=self.run_transcript()), "deny" if command == "sleep 5" else "allow")
 
     def test_other_worker_rules_still_apply_in_the_foreground_and_background(self):
         self.assertEqual(decide("orchestrate:worker", "gh pr merge 5", background=False), "deny")
@@ -804,7 +816,7 @@ class GuardTest(unittest.TestCase):
     def test_threads_refusal_names_the_allowed_forms(self):
         for role, command, text in [
             ("reviewer", f"{T} 12 resolve ID --left x", "never closes its own findings"),
-            ("reviewer", f"{T} 12 resolve ID --left x", "reopen <id> --why"),
+            ("reviewer", f"{T} 12 resolve ID --left x", "reopen <id>... --why"),
             ("scout", f"{T} 12 reopen ID --why x", "`threads <pr> --all`"),
         ]:
             payload = {"tool_input": {"command": command}, "agent_type": "orchestrate:" + role}
@@ -845,11 +857,13 @@ class GuardTest(unittest.TestCase):
 SCRIPTS = str(GUARD.parent.parent / "scripts")
 
 
-def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None, session_id=None):
+def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None, session_id=None, transcript=None):
     """The guard's decision JSON as a dict (None for silence)."""
     payload = {"tool_name": tool_name, "tool_input": tool_input if tool_input is not None else {"command": command}}
     if session_id is not None:
         payload["session_id"] = session_id
+    if transcript is not None:
+        payload["transcript_path"] = str(transcript)
     if agent_type is not None:
         payload["agent_type"] = agent_type
     if cwd is not None:
@@ -919,6 +933,96 @@ class RoutineApprovalTest(unittest.TestCase):
         (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** yes\n")
         (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
 
+    def session(self, command):
+        """A main session's transcript whose first command is /orchestrate:<command> (the orchestrator's
+        `run`, the lead's `lead`), as the hook input's `transcript_path` names it."""
+        path = self.root / f"{command}.jsonl"
+        content = f"<command-message>orchestrate:{command}</command-message>\n<command-name>/orchestrate:{command}</command-name>"
+        path.write_text(json.dumps({"type": "summary"}) + "\n" + json.dumps({"message": {"role": "user", "content": content}}) + "\n")
+        return path
+
+    def test_the_wait_refusal_is_the_orchestrators_alone(self):
+        # The lead's session, a developer's own, one with no transcript and one that cannot be read: no decision.
+        for command in ("sleep 20; claude agents --json", "until gh pr view 5 --json mergedAt; do :; done", "read -t 5 x"):
+            with self.subTest(command):
+                self.assertEqual(raw(None, command, self.main, transcript=self.session("run"))["permissionDecision"], "deny")
+                self.assertIsNone(raw(None, command, self.main, transcript=self.session("lead")))
+                self.assertIsNone(raw(None, command, self.main))
+                self.assertIsNone(raw(None, command, self.main, transcript=self.root / "missing.jsonl"))
+        other = self.root / "other.jsonl"
+        other.write_text(json.dumps({"message": {"role": "user", "content": "just a prompt"}}) + "\n")
+        self.assertIsNone(raw(None, "sleep 20", self.main, transcript=other))
+
+    def test_a_workers_reopen_is_left_to_the_permission_layer(self):
+        for command in (f"{SCRIPTS}/threads reopen PRRT_x --why nope", f"{SCRIPTS}/threads reopen PRRT_x PRRT_y --why nope"):
+            with self.subTest(command):
+                self.assertIsNone(raw("orchestrate:worker", command, self.work))  # neither approved nor refused
+        self.assertTrue(approved("orchestrate:worker", f"{SCRIPTS}/threads resolve PRRT_x --fixed abc1234", self.work))
+
+    def test_a_worker_chain_holding_an_external_write_is_denied_naming_the_split(self):
+        for command, writes in (
+            ("git add a.py && git commit -m x && git push origin 358-ticket", "git push"),
+            ("git push origin 358-ticket; gh pr edit --body-file b.md", "git push, gh pr edit"),
+            ("gh pr edit --body-file b.md\ngh pr ready", "gh pr edit, gh pr ready"),
+            ("git push origin 358-ticket || gh pr comment --body x", "git push, gh pr comment"),
+            ("gh pr create --draft --title t --body b && gh pr ready", "gh pr create, gh pr ready"),
+            (f"{SCRIPTS}/threads resolve PRRT_x --fixed abc && git push origin 358-ticket", "scripts/threads resolve, git push"),
+            (f"{SCRIPTS}/threads reopen PRRT_x --why x; echo done", "scripts/threads reopen"),
+        ):
+            with self.subTest(command):
+                out = raw("orchestrate:worker", command, self.work)
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn(f"Run each external write as its own Bash call: {writes}.", out["permissionDecisionReason"])
+
+    def test_a_worker_chain_without_an_external_write_stays_silent(self):
+        for command in ("git add a.py && git commit -m x", "git status; git log -n 3", "git push origin 358-ticket 2>&1 | tail -2",
+                        "echo git push && ls", "git fetch origin && git switch -C b origin/b"):
+            with self.subTest(command):
+                out = raw("orchestrate:worker", command, self.work)
+                self.assertTrue(out is None or out["permissionDecision"] == "allow")
+
+    def test_orchestrator_chains_may_end_in_a_line_filter_and_name_the_snapshot_file(self):
+        snap = "--snapshot .claude/orchestrate-snapshot.json"
+        for command in (
+                f'S="{SCRIPTS}"; "$S/snapshot" --repo . && "$S/rebuild-state" 5 --repo . ; "$S/claims" --repo . {snap} | tail -n 40',
+                f'S="{SCRIPTS}"; "$S/lead-route" --lead live --cap 4 --repo . {snap} | tail -n 20; "$S/frontier" --all --repo . {snap} | tail -n 40',
+                f"{SCRIPTS}/claims --repo . | head -20", f"{SCRIPTS}/claims --repo . | head -n 3", f"{SCRIPTS}/claims --repo . | tail"):
+            with self.subTest(command):
+                self.assertTrue(approved(None, command, self.main))
+        for command in (
+                f"{SCRIPTS}/claims --repo . | tail -n 40 > f", f"{SCRIPTS}/claims --repo . | sh",
+                f"{SCRIPTS}/claims --repo . | xargs rm", f"{SCRIPTS}/claims --repo . | tail -f",
+                f"{SCRIPTS}/claims --repo . | tail -n 40 /etc/passwd", f"{SCRIPTS}/claims --repo . | head -c 9",
+                f"{SCRIPTS}/claims --repo . --snapshot /tmp/x | tail -n 5",
+                f"{SCRIPTS}/snapshot --repo . --snapshot .claude/orchestrate-snapshot.json"):
+            with self.subTest(command):
+                self.assertFalse(approved(None, command, self.main))
+
+    def test_orchestrator_chains_in_the_shape_the_run_skill_emits_after_559(self):
+        # The skill passes `--session <id>` (the id substituted into the skill text) to claims, lead-route, holds and gate.
+        sid, snap = "0123abcd-4567-89ef-0123-456789abcdef", "--snapshot .claude/orchestrate-snapshot.json"
+        for command in (
+                f'S="{SCRIPTS}"; "$S/rebuild-state" {sid} --repo . ; "$S/claims" --session {sid} --repo . {snap} | tail -n 40',
+                f'S="{SCRIPTS}"; "$S/lead-route" --session {sid} --lead live --cap 4 --repo . {snap} | tail -n 20',
+                f'"{SCRIPTS}/holds" --session {sid} --touch-map "hooks/guard.py:1-9" --ticket 537 | tail -n 5',
+                f"{SCRIPTS}/claims --session {sid} 537 --repo . | head -n 5"):
+            with self.subTest(command):
+                self.assertTrue(approved(None, command, self.main))
+        self.assertFalse(approved(None, f"{SCRIPTS}/claims --sess {sid} --repo .", self.main))  # no abbreviations
+
+    def test_the_wait_refusal_finds_the_run_command_after_a_model_or_rename(self):
+        path = self.root / "renamed.jsonl"
+        lines = [f"<command-name>{c}</command-name>" for c in ("/model", "/rename", "/orchestrate:run")]
+        path.write_text("".join(json.dumps({"message": {"role": "user", "content": c}}) + "\n" for c in lines))
+        self.assertEqual(raw(None, "sleep 20", self.main, transcript=path)["permissionDecision"], "deny")
+        both = self.root / "both.jsonl"
+        both.write_text("".join(json.dumps({"message": {"role": "user", "content": f"<command-name>{c}</command-name>"}}) + "\n"
+                                for c in ("/orchestrate:run", "/orchestrate:lead")))
+        self.assertIsNone(raw(None, "sleep 20", self.main, transcript=both))
+
+    def test_the_wait_chain_of_lead_route_is_in_the_chain_list(self):
+        self.assertIn("lead-route", GUARD_MODULE.CHAIN_SCRIPTS)
+
     def test_the_allow_json_shape(self):
         out = raw("orchestrate:worker", "gh pr ready", self.work)
         self.assertEqual(out, {"hookEventName": "PreToolUse", "permissionDecision": "allow",
@@ -932,7 +1036,7 @@ class RoutineApprovalTest(unittest.TestCase):
             "git add hooks/guard.py", "git commit -m 'feat: x'",
             "gh pr create --draft --title 't' --body 'b'", "gh pr ready", "gh pr edit --body-file b.md",
             "gh pr edit --title 't' --body-file=b.md",
-            f"{SCRIPTS}/threads resolve PRRT_x --fixed abc1234", f"{SCRIPTS}/threads reopen PRRT_x --why nope",
+            f"{SCRIPTS}/threads resolve PRRT_x --fixed abc1234",
             f"{SCRIPTS}/threads",
         ):
             with self.subTest(command):
@@ -970,7 +1074,6 @@ class RoutineApprovalTest(unittest.TestCase):
     def test_worker_calls_outside_the_routine_shapes_stay_silent(self):
         for command in (
             "git push origin other-branch",  # not its ticket branch
-            "git push origin 358-ticket && gh pr edit 12 --body-file b.md",  # a chain is read as no routine step
             "git push",  # no explicit ref
             "git push origin HEAD:358-ticket",
             "git -c core.hooksPath=/x push origin 358-ticket",
@@ -1211,10 +1314,10 @@ class RoutineApprovalTest(unittest.TestCase):
         for command in ("sleep 300; gh api repos/o/r/pulls/5", "timeout 60 sleep 5", "read -t 5 x", "sh -c 'sleep 3'",
                         f"{SCRIPTS}/snapshot --repo . && sleep 1", "env sleep 3"):
             with self.subTest(command):
-                self.assertEqual(raw(None, command, self.main)["permissionDecision"], "deny")
+                self.assertEqual(raw(None, command, self.main, transcript=self.session("run"))["permissionDecision"], "deny")
                 self.assertEqual(decide("orchestrate:worker", command), "allow")
-        self.assertEqual(raw(None, "until gh pr view 5 --json mergedAt; do :; done", self.main)["permissionDecision"], "deny")
-        self.assertIsNone(raw(None, "sleep 2", self.root))  # a main session in a repo with no orchestrate config
+        self.assertEqual(raw(None, "until gh pr view 5 --json mergedAt; do :; done", self.main, transcript=self.session("run"))["permissionDecision"], "deny")
+        self.assertIsNone(raw(None, "sleep 2", self.root, transcript=self.session("run")))  # a main session in a repo with no orchestrate config
         for command in ("echo sleep 5", 'echo "sleep 5"', f"{SCRIPTS}/watch-ci 528 ebc323d", "grep sleep x",
                         "until true; do :; done"):
             with self.subTest(command):

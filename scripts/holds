@@ -204,7 +204,7 @@ def report(held: dict, candidates: list, cfg, own_pr=None, pr_tickets=None) -> i
 
 
 def run(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--touch-map", nargs="+", metavar="ENTRIES", help="the ticket's touch-map entries (`path:line` is fine); an argument may hold several, comma-separated")
     ap.add_argument("--literal", action="store_true", help="with --touch-map: each argument is one path, never split (a path may hold a comma)")
     ap.add_argument("--ticket", type=int, help="the ticket number, to leave out its own PR and touch map")

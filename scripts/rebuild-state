@@ -156,7 +156,7 @@ def write_state(out: Path, state: dict, known: set | None = None) -> None:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
     ap.add_argument("session", nargs="?", default=os.environ.get("CLAUDE_SESSION_ID"),
                     help="session id or transcript path (default: $CLAUDE_SESSION_ID)")
     ap.add_argument("--session", dest="session_flag", default=None, metavar="ID",
