@@ -28,7 +28,8 @@ fields and items in one GraphQL read (a further request per 100 cards) and write
 state (an add, a move, an archive or a delete per card that differs), so a board that already matches makes no write.
 The writes go out as aliased mutations, at most 20 to a request; the adds go first (they need a content-id read and
 return the new card ids the rest uses), so a sync with new cards makes up to three requests more, else one per 20 writes. `--dry-run` prints each write it would make (and each
-card left alone), then `<n> writes planned`, and makes none. `--verbose` prints `writes: <n>` on stderr: the writes
+card left alone), then `<n> writes planned`, and makes none. A real sync prints one line per change once its request
+succeeded (`add #462 → Done`, `#443 In review`, `delete #12`, `archive #330`); `--quiet` suppresses them. `--verbose` prints `writes: <n>` on stderr: the writes
 made (planned, with `--dry-run`).
 Exit codes: 0 synced or no board; 1 any failure, one line on stderr; 2 the owner lookup got no owner (`board: owner lookup
 failed: <gh message>`). `run` carries on: the board never fails a pass.
@@ -66,15 +67,16 @@ CLAIM_STAGE = {"building": BUILDING, "elsewhere": BUILDING, "stalled": BUILDING,
                "in-review": REVIEW, "done": DONE}
 
 
-def permission_denied(repo, found) -> set:
-    """The claimed tickets whose newest worker report is a permission-denied stop and that have no PR yet: the
-    worker's finished branch waits on the user (the marker is the run log, so a later session sees it too)."""
+def waits_on_developer(repo, found) -> set:
+    """The claimed tickets whose newest worker report is a permission-denied stop, or a transient stop whose retries
+    ran out (`exhausted`), and that have no PR yet: the work waits on the developer (the marker is the run log, so a
+    later session sees it too). A transient stop still being retried does not wait."""
     out = set()
     for t, claim in found.items():
         if claim.state == "in-review":
             continue
         last = runlog.latest_event(repo, runlog.WORKER_REPORT, t, skip_outcomes=("duplicate",))
-        if last and last.get("stop_reason") == "permission-denied":
+        if last and (last.get("stop_reason") == "permission-denied" or last.get("exhausted") is True):
             out.add(t)
     return out
 
@@ -160,12 +162,13 @@ class Writes:
     A new card has no item id until its add is made, so adds go first, in their own request(s), and the rest of the
     queue names the new cards by `new:<ticket>` and is resolved after them."""
 
-    def __init__(self, dry=False, size=BATCH_SIZE):
+    def __init__(self, dry=False, size=BATCH_SIZE, quiet=False):
         self.dry = dry
         self.size = size
+        self.quiet = quiet  # no per-change lines on a real sync
         self.count = 0  # the writes made, or in a dry run the writes planned
-        self.adds = []  # [(ticket, number)] of the cards to add
-        self.queue = []  # [(callable(resolve) -> mutation fragment, idempotent)]
+        self.adds = []  # [(ticket, summary line)] of the cards to add
+        self.queue = []  # [(callable(resolve) -> mutation fragment, idempotent, summary line or None)]
 
     def do(self, what, run, planned=None):
         """A write made at once (the field's create and upgrade: the reply's option ids are needed next)."""
@@ -175,22 +178,31 @@ class Writes:
             return planned
         return run()
 
-    def put(self, what, fragment, idempotent=False):
+    def report(self, lines):
+        """Print the changes a request made, one line each. Not in a dry run (it printed `would ...` already) and
+        not with --quiet."""
+        if not self.dry and not self.quiet:
+            for line in lines:
+                if line:
+                    print(line)
+
+    def put(self, what, fragment, idempotent=False, line=None):
         """Queue one card write. fragment: callable(resolve) -> the mutation field, resolve mapping a `new:` id.
         idempotent: repeating it leaves the same board (a plain overwrite); a request is retried on a 5xx only when
-        every write in it is, never one holding a delete or an archive."""
+        every write in it is, never one holding a delete or an archive. line: the change as printed once its request
+        succeeded (`#443 In review`, `archive #330`); None for a write that is no card change (a reorder)."""
         self.count += 1
         if self.dry:
             print(f"would {what}")
         else:
-            self.queue.append((fragment, idempotent))
+            self.queue.append((fragment, idempotent, line))
 
-    def add(self, what, ticket):
+    def add(self, what, ticket, line=None):
         self.count += 1
         if self.dry:
             print(f"would {what}")
         else:
-            self.adds.append(ticket)
+            self.adds.append((ticket, line))
 
     @staticmethod
     def send(fields, label, repo, idempotent=False):
@@ -206,11 +218,12 @@ class Writes:
         new = {}
         if self.adds:
             owner, name = slug.split("/", 1)
+            numbers = [n for n, _ in self.adds]
             lookup = ("query { repository(owner: " + json.dumps(owner) + ", name: " + json.dumps(name) + ") { "
-                      + " ".join(f"i{n}: issue(number: {n}) {{ id }}" for n in self.adds) + " } }")
+                      + " ".join(f"i{n}: issue(number: {n}) {{ id }}" for n in numbers) + " } }")
             repository = ((graphql(lookup, repo).get("data") or {}).get("repository")) or {}
-            for start in range(0, len(self.adds), self.size):
-                chunk = self.adds[start:start + self.size]
+            for start in range(0, len(numbers), self.size):
+                chunk = numbers[start:start + self.size]
                 fields = []
                 for k, n in enumerate(chunk):
                     content = (repository.get(f"i{n}") or {}).get("id")
@@ -218,20 +231,22 @@ class Writes:
                         raise github.GhError(github.MALFORMED, f"gh returned no id for issue #{n}")
                     fields.append(f"m{k}: addProjectV2ItemById(input: {{projectId: {json.dumps(project_id)}, "
                                   f"contentId: {json.dumps(content)}}}) {{ item {{ id }} }}")
-                data = self.send(fields, f"adds {start + 1}-{start + len(chunk)} of {len(self.adds)}", repo).get("data") or {}
+                data = self.send(fields, f"adds {start + 1}-{start + len(chunk)} of {len(numbers)}", repo).get("data") or {}
                 for k, n in enumerate(chunk):
                     item = ((data.get(f"m{k}") or {}).get("item") or {}).get("id")
                     if not item:
                         raise github.GhError(github.MALFORMED, f"gh returned no card for #{n}")
                     new[n] = item
+                self.report(line for _, line in self.adds[start:start + self.size])
 
         def resolve(item_id):
             return new[int(item_id[4:])] if item_id.startswith("new:") else item_id
         for start in range(0, len(self.queue), self.size):
             chunk = self.queue[start:start + self.size]
-            fields = [f"m{k}: {f(resolve)}" for k, (f, _) in enumerate(chunk)]
+            fields = [f"m{k}: {f(resolve)}" for k, (f, _, _) in enumerate(chunk)]
             self.send(fields, f"writes {start + 1}-{start + len(fields)} of {len(self.queue)}", repo,
-                      all(safe for _, safe in chunk))
+                      all(safe for _, safe, _ in chunk))
+            self.report(line for _, _, line in chunk)
         self.adds, self.queue = [], []
 
 
@@ -392,30 +407,32 @@ def sync(owner, number, repo, writes=None):
             print(f"left alone: {c.get('type') or 'card'} {repository_of(c) or ''}#{c.get('number', '')} "
                   f"{c.get('title') or i.get('title') or i.get('id')}".replace("  ", " "))
 
-    def set_stage(card_id, stage):
+    def set_stage(card_id, stage, t):
+        # A new card's add line already names its stage, so its move prints nothing.
         writes.put(f"move card {card_id} to {stage}", lambda r: (
             "updateProjectV2ItemFieldValue(input: {projectId: " + json.dumps(project_id) + ", itemId: "
             + json.dumps(r(card_id)) + ", fieldId: " + json.dumps(field["id"]) + ", value: {singleSelectOptionId: "
-            + json.dumps(options[stage]) + "}}) { clientMutationId }"), idempotent=True)
+            + json.dumps(options[stage]) + "}}) { clientMutationId }"), idempotent=True,
+            line=None if card_id.startswith("new:") else f"#{t} {stage}")
 
     def delete(card_id, t):
         writes.put(f"delete card {card_id} (#{t})", lambda r: (
             "deleteProjectV2Item(input: {projectId: " + json.dumps(project_id) + ", itemId: " + json.dumps(r(card_id))
-            + "}) { clientMutationId }"))
+            + "}) { clientMutationId }"), line=f"delete #{t}")
 
     def archive(card_id, t):
         writes.put(f"archive card {card_id} (#{t})", lambda r: (
             "archiveProjectV2Item(input: {projectId: " + json.dumps(project_id) + ", itemId: " + json.dumps(r(card_id))
-            + "}) { clientMutationId }"))
+            + "}) { clientMutationId }"), line=f"archive #{t}")
 
-    want = desired(issues, found, permission_denied(repo, found), {i["number"] for i in in_backlog}, lead)
+    want = desired(issues, found, waits_on_developer(repo, found), {i["number"] for i in in_backlog}, lead)
     ids = {}  # ticket -> card id, for the Backlog ordering below
     for t, (stage, issue, addable) in sorted(want.items()):
         card = cards.get(t)
         if card is None:
             if not addable:
                 continue
-            writes.add(f"add a card for #{t}", t)
+            writes.add(f"add a card for #{t}", t, f"add #{t} → {stage}")
             card = {"id": f"new:{t}"}  # the real item id arrives with the add; later writes name it by this
             cards[t] = card
         elif not addable and card.get(FIELD.lower()) == BACKLOG:
@@ -425,7 +442,7 @@ def sync(owner, number, repo, writes=None):
             continue
         ids[t] = card["id"]
         if card.get(FIELD.lower()) != stage:
-            set_stage(card["id"], stage)
+            set_stage(card["id"], stage, t)
     now = datetime.now(timezone.utc)
     for t, at in sorted(merged.items()):
         card = cards.get(t)
@@ -434,7 +451,7 @@ def sync(owner, number, repo, writes=None):
         if now - at > ARCHIVE_AFTER:
             archive(card["id"], t)
         elif card.get(FIELD.lower()) != DONE:
-            set_stage(card["id"], DONE)
+            set_stage(card["id"], DONE, t)
         cards.pop(t)
     open_numbers = {i["number"] for i in issues}
     for t, card in sorted(cards.items()):
@@ -464,6 +481,8 @@ def main(argv=None) -> int:
     ap.add_argument("--repo", default=".", help="repo root: the config is read and gh runs there")
     ap.add_argument("--dry-run", action="store_true",
                     help="read everything, print each write the sync would make (and each card left alone), make none")
+    ap.add_argument("--quiet", action="store_true",
+                    help="print no per-change lines on a real sync (for a caller that only wants the exit code)")
     ap.add_argument("--verbose", action="store_true", help="print `writes: <n>` (the writes made) on stderr")
     args = ap.parse_args(argv)
     url = config.Config.load(args.repo).board
@@ -474,7 +493,7 @@ def main(argv=None) -> int:
         print(f"board: cannot read the Board URL: {url}", file=sys.stderr)
         return 1
     try:
-        writes = Writes(args.dry_run)
+        writes = Writes(args.dry_run, quiet=args.quiet)
         try:
             sync(m.group(1), int(m.group(2)), args.repo, writes)
         finally:

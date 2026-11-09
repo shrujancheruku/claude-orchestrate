@@ -550,6 +550,70 @@ class Board(unittest.TestCase):
         self.assertEqual(r.stderr.strip(), "board: writes 21-25 of 25 failed, later requests not sent: gh: boom")
         self.assertEqual(len(self.mutations()), 2)
 
+    def test_a_sync_prints_one_line_per_change_in_the_order_it_made_them(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)], cards=[card(2, "Building")],
+                prs=[{"number": 12, "headRefName": "2-thing", "state": "OPEN", "mergedAt": None}])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        # The add goes out first (its own request), then the stage change; the new card's own move prints nothing.
+        self.assertEqual(r.stdout.splitlines(), ["add #1 → Building", "#2 In review"])
+
+    def test_a_delete_and_an_archive_print_their_lines(self):
+        self.config()
+        self.gh(tickets=[], cards=[card(3, "Backlog"), card(4, "Building")])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(r.stdout.splitlines(), ["delete #3", "archive #4"])
+
+    def test_quiet_prints_no_change_lines_and_a_synced_board_prints_none(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True)])
+        r = self.env.run("board", "--quiet", check=False)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertEqual(self.adds(), [1])
+        self.gh(tickets=[ticket(1, claimed=True)], cards=[card(1, "Building")])
+        self.assertEqual(self.env.run("board", check=False).stdout, "")
+
+    def test_a_failed_batch_prints_no_line_for_its_changes(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True)], cards=[card(1, "Done")],
+                extra=[{"args": ["api", "graphql", "-f", self.MUTATION_Q], "exit": 1, "stderr": "gh: boom"}])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stdout), (1, ""))
+
+    def test_an_exhausted_transient_stop_waits_on_you_and_a_retried_one_does_not(self):
+        import runlog
+        self.config()
+        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="1", status="stopped",
+                            stop_reason="transient", exhausted=True)
+        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="2", status="stopped",
+                            stop_reason="transient")
+        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)], cards=[card(1), card(2)])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(self.edits(), {"I1": "Waiting on you", "I2": "Building"})
+
+    def test_a_stage_set_batch_is_resent_after_a_502_and_a_delete_batch_is_not(self):
+        retry = {"ORCHESTRATE_GH_5XX_TRIES": "2", "ORCHESTRATE_GH_WAIT": "30"}
+        fail = {"exit": 1, "stderr": "gh: HTTP 502"}
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True)], cards=[card(1, "Done")],
+                extra=[{"args": ["api", "graphql", "-f", self.MUTATION_Q], "seq": [fail, out({"data": {}})]}])
+        r = self.env.run("board", check=False, extra_env=retry)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("HTTP 502, retrying", r.stderr)
+        self.assertEqual(len(self.mutations()), 2)  # sent twice, the same stage write both times
+        self.assertEqual(self.mutations()[0], self.mutations()[1])
+        self.assertEqual(r.stdout.splitlines(), ["#1 Building"])
+        before = len(self.mutations())
+        self.gh(tickets=[], cards=[card(3, "Backlog")],
+                extra=[{"args": ["api", "graphql", "-f", self.MUTATION_Q], "seq": [fail, out({"data": {}})]}])
+        r = self.env.run("board", check=False, extra_env=retry)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("HTTP 502", r.stderr)
+        self.assertEqual(len(self.mutations()) - before, 1)  # a delete is never repeated
+
     def test_a_stage_field_that_is_not_single_select_is_an_error_not_a_create(self):
         self.config()
         self.gh(tickets=[ticket(1, claimed=True)])
