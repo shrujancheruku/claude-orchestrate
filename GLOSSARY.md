@@ -43,7 +43,7 @@ A ticket assigned to the user; it holds a slot until it merges or is handed back
 _Avoid_: taken, locked, in progress
 
 **Claim**:
-A claimed ticket together with what decides its state: its branch, worktree and lock, its PR, and the worker the state file records for it. The state is one of **Building**, **Stalled**, **Elsewhere**, **In review**, with the lead, or done. `scripts/claims` is the one source: it reports each claim, and the pass table and every script that needs a claimed ticket's state read it. Source: `scripts/claims`, `skills/run/SKILL.md`.
+A claimed ticket together with what decides its state: its branch, worktree and lock, its PR, the worker the state file records for it, and its newest **Worker report** in the **Run log**. The state is one of **Building**, **Idle**, **Waiting**, **Stalled**, **Elsewhere**, **In review**, with the lead, or done; **Paused** is the orchestrator's own. `scripts/claims` is the one source: it reports each claim, and the pass table, the board, the lead and every script that needs a claimed ticket's state read its state word. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: ticket record, worker state, claim state
 
 **Building**:
@@ -75,15 +75,19 @@ The PR a worker opens as a draft at the end of its Orient, after an empty `chore
 _Avoid_: WIP PR, early PR
 
 **Waiting**:
-A claimed ticket blocked on the user: a gate, a question or a third review round. With a lead live it waits on the lead instead and carries `needs-lead`. Source: `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.
-_Avoid_: blocked, on hold
+A **Claim** state: a claimed ticket with no ready PR that only the user can move, reported with its reason (a `permission-denied` stop, an exhausted transient retry, a gate, a question, a third review round). It is never resumed, rescued or redispatched by a pass, and it does not expire. With a lead live it waits on the lead instead and carries `needs-lead`. Source: `scripts/claims`, `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.
+_Avoid_: blocked, on hold, stalled (a stalled ticket has nobody on it; a waiting one has the user)
+
+**Idle**:
+A **Claim** state: a building ticket whose worker is not live and has reported nothing since its last commit. A pass nudges it once, and hands it back if it is still idle after the nudge. Source: `scripts/claims`, `skills/run/SKILL.md`.
+_Avoid_: hung, stuck, stalled (stalled means no worker at all)
 
 **Snapshot**:
 The one read of the tracker a pass works from: the open issues with their blockers (native edges plus the body `Blocked by:` line), the open PRs with their draft state, the merged branches, and the closed `wontfix` tickets still assigned. `scripts/tracker.py` owns it and `scripts/snapshot` writes it to a file; `frontier`, `claims`, `holds`, `lead-route` and `gate` read it. Source: `scripts/tracker.py`, `scripts/snapshot`.
 _Avoid_: cache, issue list, tracker state
 
 **Scratch worktree**:
-A detached worktree a reviewer adds under its scratchpad (`pr-<n>`, `pr-<n>b`, `pr-<n>-r2`) to read or run a PR's head. `merge` removes the merged PR's scratch worktrees; nothing else does. Source: `agents/reviewer.md`, `scripts/merge`.
+A detached worktree under an agent's scratchpad (`pr-<n>`, `pr-<n>b`, `pr-<n>-r2`) in which a reviewer or the lead reads or runs a PR's head. `scripts/scratch` is the one way to add one and `merge` removes the merged PR's scratch worktrees; nothing else does either. Source: `agents/reviewer.md`, `scripts/scratch`, `scripts/merge`.
 _Avoid_: review worktree, temp checkout
 
 **State file**:
@@ -93,6 +97,10 @@ _Avoid_: status file, session file
 **Pass**:
 One run of `/orchestrate:run`: reconcile, resume, review, fill slots, report. Source: `skills/run/SKILL.md` (A pass).
 _Avoid_: iteration, cycle
+
+**Pass record**:
+The one line a pass leaves in the **Run log**'s pass log: its scope, slots, claims, idle reasons, dispatches, merges and nudges. `profile.py record` is its one writer and derives what the orchestrator need not say. Source: `scripts/profile.py`, `scripts/runlog.py`.
+_Avoid_: pass table (what the orchestrator prints to the user), pass event
 
 **Run log**:
 The events log (`events.jsonl`: one line per gate, CI, merge or replay, and per `gh` call or rate-limit wait: `gh_call`) plus the pass log (`passes.jsonl`), both in `.claude/orchestrate-profiles/` of the main checkout, whichever subdirectory or linked worktree a script or the profile runs from. Owned by `scripts/runlog.py`; the profile reads it. Logs that landed in a worktree before this are not migrated.
@@ -105,6 +113,14 @@ _Avoid_: prompt, spec (the ticket is the spec)
 **Worker report**:
 The text a worker's completion carries: `status: pr-opened | stopped`, the PR, branch, verify result and, on a stop, `stop-reason`. `scripts/worker-report` classifies it before the orchestrator acts, and logs each verdict as a `worker-report` event. Source: `agents/worker.md` (Report), `scripts/worker-report`.
 _Avoid_: hand-back (that is the sweep's `HANDBACK` line), result, completion (the harness's notice, which may carry no report)
+
+**Review event**:
+The **Run log** entry for one **Round**: the PR, round, head, verdict, suite result and whether the review was posted, written when `scripts/worker-report --reviewer` classifies the reviewer's report. Escalation and the profile read it instead of transcripts. Source: `scripts/worker-report`, `scripts/runlog.py`.
+_Avoid_: review log, reviewer report (the text; the event is its record)
+
+**Routing**:
+Which model a worker or reviewer runs on: the config's Models table applied to a ticket's labels, touch map and risk paths, and to a PR's **Tier**; `frontier` prints the worker model and `gate` the tier, and `claims` says when a building ticket's history calls for escalation. Source: `scripts/config.py`, `scripts/frontier`, `scripts/gate`, `scripts/claims`.
+_Avoid_: model selection, model choice, haiku rule
 
 ### Overlap
 
@@ -159,6 +175,14 @@ _Avoid_: pre-merge check, pre-flight, gate (bare, for the script)
 **Merge readiness**:
 Whether an approved PR may merge now, decided at merge time: CI green on the head, every dependency merged, branch up to date, every **Review thread** resolved, and nothing since the **Approved head** that needs re-review. Source: `scripts/merge`.
 _Avoid_: merge check, merge rule
+
+**Verdict line**:
+The last line of an orchestrator-facing script's output, `next: <word> [<args>]`, one word from one shared list, with one `also: <word> <pr> ...` line per other PR the run touched before it. The orchestrator applies the words; the exit codes stay for tests and the guard. A rate limit is the one word `retry-after <time>` everywhere. Source: `docs/adr/0014-libraries-raise-clis-decide.md`, `docs/guide.md` (Verdict line).
+_Avoid_: result line, status line, exit code (the number; the verdict is the word)
+
+**CI rerun**:
+Making GitHub run a ready PR's checks again when it did not: a close-and-reopen for a head with no run, or a rerun of one job left `in_progress` with every step done. `scripts/ci-rerun` is its one owner, fires at most once per head or job, and logs a `ci` event; `watch-ci` only names the need. Source: `scripts/ci-rerun`, `scripts/watch-ci`.
+_Avoid_: kick, retrigger, close-and-reopen (one of its two forms)
 
 **Tier**:
 The size class of a PR, S, M or L, from its diff and the config's thresholds (or a `size:` label); it sets the review depth and, with the ticket's size, the worker and reviewer models. Source: `agents/reviewer.md`, `skills/setup/config-template.md`.
