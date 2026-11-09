@@ -605,9 +605,13 @@ class Stages(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from importlib.machinery import SourceFileLoader
+        import importlib.machinery
+        import importlib.util
         sys.path.insert(0, str(ROOT / "scripts"))
-        cls.board = SourceFileLoader("board_script", str(ROOT / "scripts" / "board")).load_module()
+        loader = importlib.machinery.SourceFileLoader("board_script", str(ROOT / "scripts" / "board"))
+        spec = importlib.util.spec_from_loader("board_script", loader)
+        cls.board = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.board)
 
     def stage(self, state, labels=()):
         import claims
