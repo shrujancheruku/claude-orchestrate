@@ -2807,6 +2807,20 @@ def is_script_edit(parsed: "Parsed") -> bool:
     return False
 
 
+def unknown_long_option(cmd: Command) -> tuple | None:
+    """(command, option) for the first long option of a read command that LONG_OPTIONS doesn't spell in full."""
+    if not cmd.words or cmd.words[0].dynamic or cmd.words[0].text not in LONG_OPTIONS:
+        return None
+    name = cmd.words[0].text
+    allowed = LONG_OPTIONS[name] | _COMMON_LONG
+    for w in cmd.words[1:]:
+        if w.text == "--":
+            return None
+        if w.text.startswith("--") and w.text.partition("=")[0] not in allowed:
+            return name, w.text.partition("=")[0]
+    return None
+
+
 def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool: str = "Bash") -> str:
     """Why a background role's call got no approval, and what to do instead."""
     who = {"worker": "a worker", "reviewer": "a reviewer", "scout": "a scout"}.get(rules_role(role), "this role")
@@ -2815,6 +2829,11 @@ def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool:
         return head + MONITOR_REASON
     if is_script_edit(parsed):
         return head + EDIT_REASON
+    for cmd in parsed.cmds:
+        unknown = unknown_long_option(cmd)
+        if unknown:
+            return (f"{head}the guard doesn't know the option `{unknown[1]}` of `{unknown[0]}` (it is not spelled in full, or "
+                    f"is not on the approved list). Spell it in full, or drop it and filter the output with `head`/`grep`")
     if len(parsed.cmds) > 1:
         reads = [read_command_ok(c, os.path.realpath(cwd or "."), cwd) if c.words and not c.heredocs and not c.depth else False
                  for c in parsed.cmds]

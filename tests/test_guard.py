@@ -1723,6 +1723,12 @@ class UnapprovedCallsAreDeniedTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertIn("wait with an approved loop", self.reason("orchestrate:worker", command, tool="Monitor"))
 
+    def test_an_unknown_long_option_is_named_in_the_reason(self):
+        for command, option in (("grep --fil=x y", "--fil"), ("rg --pre=cat x", "--pre"), ("grep -n x --bogus f", "--bogus")):
+            with self.subTest(command):
+                reason = self.reason("orchestrate:worker", command)
+                self.assertIn(f"doesn't know the option `{option}`", reason)
+
     def test_a_guard_error_is_a_deny_not_an_allow(self):
         original = GUARD_MODULE.approval
         GUARD_MODULE.approval = lambda *a, **k: 1 / 0

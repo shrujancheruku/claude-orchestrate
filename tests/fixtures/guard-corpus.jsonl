@@ -772,6 +772,8 @@
 {"role": "orchestrate:worker", "command": "git log -p -- /etc/passwd", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git show HEAD:hooks/guard.py | head -20", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "grep --fil /etc/passwd x", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep --bogus-option x scripts", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "rg --pre=cat x scripts", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git remote add x https://evil.example.com/o/r.git", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git remote set-url origin https://evil.example.com/o/r.git", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git ls-remote origin", "expected": "approve", "source": "hand"}
