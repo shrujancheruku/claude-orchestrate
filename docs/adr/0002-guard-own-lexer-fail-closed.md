@@ -24,3 +24,7 @@
 - The lexer is code the plugin owns and tests.
 - Rejected: matching on the command string (misses quoting and expansion, refuses harmless text; inferred); `shlex` alone (no `$(...)`, heredocs or `sh -c`; inferred); failing open on a parse error (a crash would let the command run unchecked; `guard.py:968`); a third-party shell parser (a dependency on every install for a guardrail; inferred).
 - Reopen when the guard is relied on as a sandbox, or Claude Code hands hooks an already-parsed command (inferred).
+
+## Note, 2026-11-09 (#378)
+
+The guard assumes the orchestrator runs in `acceptEdits` or `bypassPermissions`. Auto mode is unsupported for the orchestrator session: workers inherit it, and the auto-mode classifier skips their file edits whatever the guard allows. `scripts/launch` passes the mode and a per-session `disableAutoMode`; see Permission mode in `docs/guide.md`.
