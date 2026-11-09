@@ -38,6 +38,26 @@ class PromptLog(unittest.TestCase):
         self.assertEqual(entry["matcher"], "*")
         self.assertIn("hooks/prompt_log.py", entry["hooks"][0]["command"])
 
+    def test_log_is_owner_only_and_an_older_0644_file_is_tightened(self):
+        import importlib.util
+        import stat
+        spec = importlib.util.spec_from_file_location("prompt_log_under_test", HOOK)
+        prompt_log = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prompt_log)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "log.jsonl"
+            path.write_text("old\n")
+            path.chmod(0o644)
+            prompt_log.append(path, "x\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            fresh = Path(tmp) / "new.jsonl"
+            prompt_log.append(fresh, "x\n")
+            self.assertEqual(stat.S_IMODE(fresh.stat().st_mode), 0o600)
+
+    def test_hooks_json_runs_the_guard_for_monitor(self):
+        entry = json.loads((ROOT / "hooks" / "hooks.json").read_text())["hooks"]["PreToolUse"][0]
+        self.assertIn("Monitor", entry["matcher"].split("|"))
+
     def test_gitignored(self):
         self.assertIn(".claude/orchestrate-prompts.jsonl", (ROOT / ".gitignore").read_text().splitlines())
 

