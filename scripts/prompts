@@ -56,12 +56,12 @@ def detail(entry: dict) -> str:
 
 
 def watermark(root: Path, session) -> object:
-    """The newer of the newest mark and the newest pass record (this session's, or any when no session), or None."""
-    if session:
-        passes = runlog.read_passes(root, session)
-    else:
-        passes = list(common.read_jsonl(runlog.log_path(root, runlog.PASS_LOG)))
-    marks = [m for m in common.read_jsonl(repolib.main_checkout(root) / MARK) if not session or m.get("session") == session]
+    """The newer of the newest mark and the newest pass record of this session, or None.
+
+    With no session only the sessionless marks count (the lead's own): an orchestrator's
+    pass table runs just before the lead's digest, and its marks must not move the lead's cutoff."""
+    passes = runlog.read_passes(root, session) if session else []
+    marks = [m for m in common.read_jsonl(repolib.main_checkout(root) / MARK) if (m.get("session") or None) == (session or None)]
     times = [t for t in (repolib.parse_ts(p.get("ts")) for p in passes + marks) if t]
     return max(times) if times else None
 

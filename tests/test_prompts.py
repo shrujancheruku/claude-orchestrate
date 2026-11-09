@@ -84,9 +84,19 @@ class Prompts(unittest.TestCase):
         self.assertFalse((self.repo / ".claude" / "orchestrate-profiles").exists())
         out = self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()
         self.assertEqual(out[0], "prompts: 1")  # only the entry after the mark, and no "no mark" note
-        # another session's mark does not move this one; no session reads any mark
+        # another session's mark does not move this one; no session reads only sessionless marks
         self.assertEqual(self.run_prompts("--session", "s2", "--watermark").stdout.splitlines()[0][:12], "prompts: 0 (")
-        self.assertEqual(self.run_prompts("--watermark").stdout.splitlines()[0], "prompts: 1")
+        self.assertEqual(self.run_prompts("--watermark").stdout.splitlines()[0][:12], "prompts: 2 (")
+
+    def test_session_mark_does_not_move_the_sessionless_watermark(self):
+        self.write([entry("2026-11-09T10:00:00Z"), entry("2026-11-09T12:00:00Z"), entry("2026-11-09T14:00:00Z")])
+        mark = self.repo / ".claude" / "orchestrate-prompts.mark"
+        mark.parent.mkdir(exist_ok=True)
+        mark.write_text(
+            json.dumps({"ts": "2026-11-09T11:00:00+00:00", "session": None}) + "\n"
+            + json.dumps({"ts": "2026-11-09T13:00:00+00:00", "session": "s1"}) + "\n")
+        self.assertEqual(self.run_prompts("--watermark").stdout.splitlines()[0], "prompts: 2")
+        self.assertEqual(self.run_prompts("--session", "s1", "--watermark").stdout.splitlines()[0], "prompts: 1")
 
     def test_mark_is_exclusive_with_since(self):
         self.assertEqual(self.run_prompts("--mark", "--since", "2026-11-09").returncode, 2)
