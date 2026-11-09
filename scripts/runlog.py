@@ -41,6 +41,7 @@ OUTCOMES = {
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"
+NUDGE_SCOPE = "nudge"  # the pass-log record `record --nudged <ticket>` writes: {"scope": "nudge", "nudged": [<ticket>]}
 
 
 def log_path(repo, name: str) -> Path:
@@ -148,7 +149,8 @@ def append_pass(repo, session: str, entry: dict) -> dict:
 
 
 def read_passes(repo, session: str) -> list:
-    """This session's passes, oldest first."""
+    """This session's passes, oldest first. A nudge record (`profile.py record --nudged`, which `claims` reads) is not a pass."""
     if not repo:
         return []
-    return [p for p in common.read_jsonl(log_path(repo, PASS_LOG)) if p.get("session") == session]
+    return [p for p in common.read_jsonl(log_path(repo, PASS_LOG))
+            if p.get("session") == session and p.get("scope") != NUDGE_SCOPE]

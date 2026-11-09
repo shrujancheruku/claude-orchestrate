@@ -201,6 +201,108 @@ class Decide(unittest.TestCase):
             self.decide([issue(1)])
 
 
+class WaitingAndIdle(unittest.TestCase):
+    """`waiting` and `idle` (#501), from run-log and pass-log fixtures written under the repo the claims are read for."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name) / "state.json"
+
+    def pr(self, n, branch):
+        return {"number": 100 + n, "headRefName": branch, "headRefOid": "a" * 40}
+
+    def report(self, n, outcome="valid", ts=None, **extra):
+        import runlog
+        e = runlog.append_event(self.tmp.name, runlog.WORKER_REPORT, outcome, ref=str(n), session="s", **extra)
+        if ts:  # rewrite the stamped time so a test can order events
+            path = runlog.log_path(self.tmp.name, runlog.EVENTS_LOG)
+            lines = path.read_text().splitlines()
+            lines[-1] = json.dumps(dict(e, ts=ts), separators=(",", ":"))
+            path.write_text("\n".join(lines) + "\n")
+
+    def nudge(self, n, ts):
+        import runlog
+        runlog.append_pass(self.tmp.name, "s", {"scope": runlog.NUDGE_SCOPE, "nudged": [n]})
+        path = runlog.log_path(self.tmp.name, runlog.PASS_LOG)
+        lines = path.read_text().splitlines()
+        lines[-1] = json.dumps(dict(json.loads(lines[-1]), ts=ts), separators=(",", ":"))
+        path.write_text("\n".join(lines) + "\n")
+
+    def commit(self, iso):
+        from repo import parse_ts
+        return lambda path: parse_ts(iso)
+
+    def one(self, n, commit_iso=None, state=None, prs=(), locked=None):
+        wt = {"path": f"/wt/{n}", "branch": f"{n}-x", "locked": locked}
+        if state is not None:
+            self.state.write_text(json.dumps({"tickets": state}))
+        return claims.claims(self.tmp.name, self.state, [issue(n)], list(prs), [], [wt], lambda p, b: (0, 0),
+                             commit_time=self.commit(commit_iso) if commit_iso else (lambda p: None))[n]
+
+    def test_w_permission_denied_replaces_building(self):
+        self.report(1, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
+        c = self.one(1, state={"1": WORKER})
+        self.assertEqual((c.state, c.reason), ("waiting", "permission-denied"))
+        self.assertTrue(c.since.endswith("Z"))
+
+    def test_w_permission_denied_beats_stalled(self):
+        self.report(2, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
+        c = self.one(2)  # no record, no lock: stalled without the report
+        self.assertEqual((c.state, c.reason), ("waiting", "permission-denied"))
+
+    def test_w_an_exhausted_transient_stop_waits_and_a_retried_one_does_not(self):
+        self.report(3, status="stopped", stop_reason="transient", exhausted=True)
+        self.report(4, status="stopped", stop_reason="transient")
+        self.assertEqual((self.one(3).state, self.one(3).reason), ("waiting", "exhausted"))
+        self.assertEqual(self.one(4).state, "stalled")
+
+    def test_w_a_ready_pr_beats_waiting_and_a_draft_does_not(self):
+        self.report(5, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
+        self.assertEqual(self.one(5, prs=[self.pr(5, "5-x")]).state, "in-review")
+        draft = dict(self.pr(5, "5-x"), isDraft=True)
+        self.assertEqual(self.one(5, prs=[draft]).state, "waiting")
+
+    def test_w_a_newer_report_ends_waiting_and_a_duplicate_does_not(self):
+        self.report(6, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
+        self.report(6, "duplicate", status="stopped", stop_reason="permission-denied")
+        self.assertEqual(self.one(6).state, "waiting")
+        self.report(6, status="pr-opened")
+        self.assertEqual(self.one(6).state, "stalled")
+
+    def test_w_waiting_beats_idle(self):
+        self.report(7, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
+        self.assertEqual(self.one(7, "2026-01-01T10:00:00Z", state={"7": WORKER}).state, "waiting")
+
+    def test_i_a_building_claim_with_no_live_worker_is_idle_since_its_last_commit(self):
+        c = self.one(8, "2026-01-01T10:00:00+00:00", state={"8": WORKER})
+        self.assertEqual((c.state, c.since, c.nudged), ("idle", "2026-01-01T10:00:00Z", None))
+
+    def test_i_a_live_worker_is_never_idle(self):
+        c = self.one(9, "2026-01-01T10:00:00Z", state={"9": WORKER}, locked=own_start_reason())
+        self.assertEqual(c.state, "building")
+
+    def test_i_a_report_after_the_last_commit_means_not_idle(self):
+        self.report(10, "interim", ts="2026-01-01T10:05:00+00:00")
+        self.assertEqual(self.one(10, "2026-01-01T10:00:00Z", state={"10": WORKER}).state, "building")
+        self.report(11, "interim", ts="2026-01-01T09:55:00+00:00")
+        self.assertEqual(self.one(11, "2026-01-01T10:00:00Z", state={"11": WORKER}).state, "idle")
+
+    def test_i_no_commit_time_means_building(self):
+        self.assertEqual(self.one(12, None, state={"12": WORKER}).state, "building")
+
+    def test_i_the_pass_logs_nudge_shows_when_it_is_not_older_than_the_commit(self):
+        self.nudge(13, "2026-01-01T10:30:00+00:00")
+        c = self.one(13, "2026-01-01T10:00:00Z", state={"13": WORKER})
+        self.assertEqual((c.state, c.nudged), ("idle", "2026-01-01T10:30:00Z"))
+        self.nudge(14, "2026-01-01T09:00:00+00:00")  # an older nudge: the worker has committed since
+        self.assertIsNone(self.one(14, "2026-01-01T10:00:00Z", state={"14": WORKER}).nudged)
+
+    def test_i_a_ticket_with_a_ready_pr_is_never_idle(self):
+        self.assertEqual(self.one(15, "2026-01-01T10:00:00Z", state={"15": WORKER}, prs=[self.pr(15, "15-x")]).state,
+                         "in-review")
+
+
 class Liveness(unittest.TestCase):
     """common.worker_liveness, the one reader of a lock (ADR 0009): lock text and pid state -> the four states."""
 
@@ -377,8 +479,20 @@ class Cli(unittest.TestCase):
         path = self.harness_worktree("x1")
         (path / "a.txt").write_text("a")
         self.record(7, "x1")
-        self.assertEqual(self.line("7"), f"#7 building none-yet pr none worker x1 claude-sonnet-4-6 worktree {path} "
-                                         f"lock none dirty 1")
+        # No lock: the worker is not live, and it has committed (the worktree's start) and reported nothing: idle (#501).
+        line = self.line("7")
+        self.assertRegex(line, r"^#7 idle since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ none-yet pr none ")
+        self.assertTrue(line.endswith(f" worker x1 claude-sonnet-4-6 worktree {path} lock none dirty 1"), line)
+
+    def test_a_waiting_ticket_prints_its_reason_and_time(self):
+        self.nodes = [(7, True)]
+        path = self.harness_worktree("x1")
+        self.record(7, "x1")
+        import runlog
+        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="7", status="stopped",
+                            stop_reason="permission-denied", denied_command="gh pr create", session="s")
+        self.assertRegex(self.line("7"), r"^#7 waiting permission-denied since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ none-yet pr none ")
+        self.assertIn(f"worktree {path} ", self.line("7"))
 
     def test_an_agent_id_with_the_agent_prefix_finds_it_too(self):
         self.nodes = [(7, True)]

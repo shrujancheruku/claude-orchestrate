@@ -892,7 +892,9 @@ def limit_events(main: Transcript, agents: list, passes: list) -> list:
 
 
 def idle_reasons(passes: list, end: datetime) -> dict:
-    """Idle slot-seconds by the reason each pass gave, held until the next pass."""
+    """Idle slot-seconds by the reason each pass gave, held until the next pass. A claimed ticket the pass's `claimed`
+    map shows as `idle` (its worker not live, nothing reported since its last commit: #501) holds a slot doing nothing:
+    its seconds count under `worker-idle`."""
     out = {}
     for p, nxt in zip(passes, passes[1:] + [None]):
         s = parse_ts(p.get("ts"))
@@ -901,6 +903,10 @@ def idle_reasons(passes: list, end: datetime) -> dict:
             continue
         for reason, count in (p.get("idle") or {}).items():
             out[reason] = out.get(reason, 0) + count * (e - s).total_seconds()
+        claimed = p.get("claimed")
+        stale = sum(1 for state in claimed.values() if state == "idle") if isinstance(claimed, dict) else 0
+        if stale:
+            out["worker-idle"] = out.get("worker-idle", 0) + stale * (e - s).total_seconds()
     return out
 
 
@@ -1164,8 +1170,18 @@ def cmd_record(argv: list) -> None:
     ap = argparse.ArgumentParser(prog="profile.py record")
     ap.add_argument("--repo", type=Path, required=True)
     ap.add_argument("--session", required=True)
-    ap.add_argument("pass_json", help="the pass as JSON (see skills/run/SKILL.md, Profiling)")
+    ap.add_argument("pass_json", nargs="?", help="the pass as JSON (see skills/run/SKILL.md, Profiling)")
+    ap.add_argument("--nudged", type=int, metavar="TICKET",
+                    help="record that the pass nudged this idle ticket's worker (`claims` then prints `nudged <ts>`)")
     args = ap.parse_args(argv)
+    if args.nudged is not None:
+        if args.pass_json:
+            common.die("profile record: --nudged takes no pass JSON")
+        # Not a pass the profile counts for slots (no `slots`); it is the one record `claims` reads for a nudge.
+        runlog.append_pass(args.repo, args.session, {"scope": runlog.NUDGE_SCOPE, "nudged": [args.nudged]})
+        return
+    if not args.pass_json:
+        common.die("profile record: expected the pass as JSON, or --nudged <ticket>")
     try:
         entry = json.loads(args.pass_json)
     except ValueError as e:
