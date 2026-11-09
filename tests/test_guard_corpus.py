@@ -51,6 +51,9 @@ LEAKS = re.compile(
 
 
 ORCHESTRATOR = "orchestrate:orchestrator"
+# The lead's own session: a main session like the orchestrator's (no agent type), started by /orchestrate:lead.
+LEAD_SESSION = "orchestrate:lead-session"
+MAIN_SESSIONS = (ORCHESTRATOR, LEAD_SESSION)
 
 
 def load_extract():
@@ -80,19 +83,29 @@ class Decider:
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
         self.cwd, self.worker_cwd = cwd, worker_cwd or cwd
+        # The hook input names the main session's transcript, whose first command tells the orchestrator
+        # (/orchestrate:run) from the lead (/orchestrate:lead).
+        self.transcripts = {}
+        for role, command in ((ORCHESTRATOR, "/orchestrate:run"), (LEAD_SESSION, "/orchestrate:lead")):
+            path = Path(cwd) / f"{command.rsplit(':', 1)[1]}-transcript.jsonl"
+            content = f"<command-message>x</command-message>\n<command-name>{command}</command-name>"
+            path.write_text(json.dumps({"message": {"role": "user", "content": content}}) + "\n")
+            self.transcripts[role] = str(path)
 
     def __call__(self, role, command, background=False, timeout=None):
         # `orchestrate:orchestrator` is the main session, which has no agent type. An orchestrator row names the
         # plugin's scripts under the placeholder prefix every row uses; it is pointed at the real directory here,
         # because only the plugin's own script is approved.
-        if role == ORCHESTRATOR:
+        if role in MAIN_SESSIONS:
             command = command.replace("/p/orchestrate/0.7.0/scripts/", f"{ROOT / 'scripts'}/")
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" else self.cwd, "session_id": SESSION}
         if background:
             payload["tool_input"]["run_in_background"] = True
         if timeout is not None:
             payload["tool_input"]["timeout"] = timeout
-        if role and role != ORCHESTRATOR:
+        if role in self.transcripts:
+            payload["transcript_path"] = self.transcripts[role]
+        else:
             payload["agent_type"] = role
         stdin, stdout = sys.stdin, sys.stdout
         sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()

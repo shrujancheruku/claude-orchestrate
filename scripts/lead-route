@@ -208,7 +208,7 @@ def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--lead", required=True, choices=["live", "none"], help="whether a live lead session exists")
     ap.add_argument("--cap", required=True, type=int, help="the slot cap in force (config slots, or the greedy cap)")
     ap.add_argument("--repo", default=".", help="repo root; gh runs there and the state file is read under it")

@@ -1227,7 +1227,7 @@ def runs_verify(parsed: "Parsed") -> bool:
 # reviewer reads them and reopens one, but never closes a finding of its own; a scout only reads.
 THREADS_SCRIPT = re.compile(r"(?:^|/)scripts/threads$")
 THREADS_FORMS = {
-    "reviewer": "`threads <pr>`, `threads <pr> --all` and `threads <pr> reopen <id> --why <why>`",
+    "reviewer": "`threads <pr>`, `threads <pr> --all` and `threads <pr> reopen <id>... --why <why>`",
     "scout": "`threads <pr>` and `threads <pr> --all`",
 }
 
@@ -1241,7 +1241,9 @@ def threads_form(args: list) -> str | None:
     rest = words[1:]
     if rest in ([], ["--all"]):
         return "list"
-    if len(rest) == 4 and rest[0] == "reopen" and rest[2] == "--why":
+    # `reopen <id>... --why <why>`: one or more thread ids (scripts/threads takes several), then the reason.
+    if (len(rest) >= 4 and rest[0] == "reopen" and rest[-2] == "--why"
+            and not any(w.startswith("-") for w in rest[1:-2] + rest[-1:])):
         return "reopen"
     if rest[:1] == ["resolve"]:
         return "resolve"
@@ -1249,13 +1251,14 @@ def threads_form(args: list) -> str | None:
 
 
 # The only flags a worker's number-less threads call may carry, spelled in full: `--repo DIR` (and an
-# abbreviation of it, which argparse would accept) aims the call at another repository.
-THREADS_WORKER_FLAGS = ("--all", "--fixed", "--left", "--followup", "--no-followup", "--why", "--verbose")
+# abbreviation of it, which argparse would accept) aims the call at another repository. `--why` is not
+# here: a worker closes its own threads, and reopening a reviewer's is left to the permission layer.
+THREADS_WORKER_FLAGS = ("--all", "--fixed", "--left", "--followup", "--no-followup", "--verbose")
 
 
 def numberless_threads_form(cmd: Command, args: list) -> str | None:
-    """The worker's current-branch form of a threads call, with no PR number: "list", "resolve" or "reopen",
-    or None. The script is the first word (no env prefix such as `GH_REPO=` and no wrapper), and every
+    """The worker's current-branch form of a threads call, with no PR number: "list" or "resolve", or None
+    (`reopen` is a reviewer's move, so a worker's is neither approved nor refused here). The script is the first word (no env prefix such as `GH_REPO=` and no wrapper), and every
     flag is exactly one of THREADS_WORKER_FLAGS."""
     words = [w.text for w in args]
     if len(cmd.words) - len(args) != 1 or not words:
@@ -1264,7 +1267,7 @@ def numberless_threads_form(cmd: Command, args: list) -> str | None:
         return None
     if words == ["--all"]:
         return "list"
-    return words[0] if words[0] in ("resolve", "reopen") else None
+    return "resolve" if words[0] == "resolve" else None
 
 
 # The only flags the orchestrator's threads call may carry, spelled in full and each once (#389).
@@ -1368,7 +1371,53 @@ def verdict(role: str, command: str, cwd: str, background: bool = False, timeout
         what = rule(parsed, cwd)
         if what:
             return f"{who} can't run a command that {what}. {NEXT_STEP[role]}"
+    if role == "worker":
+        writes = chained_external_writes(parsed)
+        if writes:
+            return (f"{who} can't chain an external write with other commands: the permission layer refuses a chain "
+                    f"as a whole. Run each external write as its own Bash call: {', '.join(writes)}.")
     return None
+
+
+# --- A worker's chain that holds an external write (#537). ---
+#
+# agents/worker.md says each external write is its own Bash call, because the guard approves one simple
+# command and a chain falls to the permission layer, which refuses it with no hint a background worker can read.
+# A pipe is not a chain (`git push 2>&1 | tail -2` is one write); `&&`, `||`, `;` and a newline are. Local-only
+# chains (`git add && git commit`, a verify chain) stay silent.
+
+CHAIN_BREAKS = ("&&", "||", ";", "\n")
+
+
+def external_write(cmd: Command) -> str | None:
+    """What external write this simple command is, named for the denial, or None: `git push`, `gh pr create`,
+    `gh pr edit`, `gh pr ready`, `gh pr comment`, or `scripts/threads resolve` / `reopen`."""
+    words = cmd.words
+    k = command_index(words)
+    if k >= len(words) or words[k].dynamic:
+        return None
+    head = basename(words[k])
+    if head == "git":
+        return "git push" if parse_git(words, k).is_sub("push") else None
+    if head == "gh":
+        call = parse_gh(words, k)
+        if call.is_sub("pr") and call.is_verb("create", "edit", "ready", "comment"):
+            return f"gh pr {call.verb.text}"
+        return None
+    found = script_call(Parsed([cmd]), THREADS_SCRIPT, dynamic_ok=True)
+    if found is not None:
+        for w in found[1]:
+            if not w.dynamic and w.text in ("resolve", "reopen"):
+                return f"scripts/threads {w.text}"
+    return None
+
+
+def chained_external_writes(parsed: "Parsed") -> list:
+    """The external writes of a line that chains commands, in order; none for a single command, a pipe, or a
+    chain with no external write."""
+    if not any(c.joiner in CHAIN_BREAKS for c in parsed.cmds):
+        return []
+    return [w for w in (external_write(c) for c in parsed.cmds) if w]
 
 
 # --- Routine steps the guard approves outright (#358). ---
@@ -1676,7 +1725,14 @@ def chain_plain_args(args: list) -> bool:
 CHAIN_SORT_FLAG = re.compile(r"-[nrufbdMV]+|-k\d+(?:,\d+)?")
 
 
+CHAIN_LINES = re.compile(r"(?:-n\s*\d+|-\d+)?")
+
+
 def chain_flags_ok(name: str, args: list) -> bool:
+    if name in ("tail", "head"):
+        # A read-only output filter: `-n <digits>` or `-<digits>` and nothing else, so no `-f` (which never
+        # returns), no `-c`, and no file argument.
+        return CHAIN_LINES.fullmatch(" ".join(a.text for a in args)) is not None
     if name == "sort":
         return all(not a.text.startswith("-") or a.text == "-" or CHAIN_SORT_FLAG.fullmatch(a.text) for a in args)
     if name == "printf":
@@ -1707,12 +1763,14 @@ def chain_script_args_ok(name: str, args: list) -> bool:
         if not arg.startswith("--"):
             continue
         flag, eq, value = arg.partition("=")
-        if flag in ("--repo", "--out") and not eq:
+        if flag in ("--repo", "--out", "--snapshot") and not eq:
             value, i = (texts[i] if i < len(texts) else None), i + 1
         if flag == "--repo" and value == ".":
             continue
         if flag == "--out" and name == "snapshot" and value == SNAPSHOT_FILE:
             continue
+        if flag == "--snapshot" and name != "snapshot" and value == SNAPSHOT_FILE:
+            continue  # the pass's own snapshot file, read by claims, frontier and lead-route
         if flag not in SAFE_SCRIPT_FLAGS:
             return False
     return True
@@ -1819,6 +1877,32 @@ WAIT_REFUSAL = ("the orchestrator doesn't wait with `sleep`, `read -t` or an `un
                 "wait runs past the moment CI finishes and delays the merge. Waits go through watch-ci as a Monitor.")
 
 
+def is_orchestrator_session(transcript_path: object) -> bool:
+    """True when the main session was started by `/orchestrate:run`: its transcript's first command is that
+    one. The hook input carries no session name, so this is the signal that tells the orchestrator from the
+    lead (`/orchestrate:lead`) or a developer's own session in the same repo (#537). Unreadable or missing
+    transcript: False, so the refusal stays off rather than hitting a session it was not written for."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return False
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            for _ in range(50):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    message = json.loads(line).get("message")
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                content = message.get("content") if isinstance(message, dict) and message.get("role") == "user" else None
+                if isinstance(content, str) and "<command-name>" in content:
+                    m = re.search(r"<command-name>([^<]*)</command-name>", content)
+                    return bool(m) and m.group(1).strip() == "/orchestrate:run"
+    except (OSError, UnicodeDecodeError):
+        return False
+    return False
+
+
 def orchestrator_waits(parsed: "Parsed") -> bool:
     """True when a command of the orchestrator's line waits by hand (#542): `sleep` (alone, behind `timeout`
     or another wrapper, or inside `sh -c`), `read -t`, or an `until` loop whose test runs `gh`. Judged on
@@ -1859,12 +1943,13 @@ def main() -> None:
             (deny if decision[0] == "deny" else allow)(decision[1])
         return
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    orchestrator = role is None and not agent_type  # the main session: approved, refused only for a hand-made wait
+    orchestrator = role is None and not agent_type  # the main session: approved, and the orchestrator's refused for a hand-made wait
     if (role is None and not orchestrator) or command is None or command == "":
         return
     if orchestrator:
         try:
-            if isinstance(command, str) and config_path(cwd) and orchestrator_waits(Parsed(parse(command))):
+            if (isinstance(command, str) and config_path(cwd) and is_orchestrator_session(data.get("transcript_path"))
+                    and orchestrator_waits(Parsed(parse(command)))):
                 deny(WAIT_REFUSAL)
                 return
         except Exception:

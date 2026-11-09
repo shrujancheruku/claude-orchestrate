@@ -65,7 +65,7 @@ def fix_drift(issues, scope, root) -> None:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     which = ap.add_mutually_exclusive_group()
     which.add_argument("--parent", type=int, help="only this parent's sub-issues")
     which.add_argument("--ticket", type=int, help="only this ticket")

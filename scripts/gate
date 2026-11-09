@@ -247,7 +247,7 @@ def main(argv=None) -> int:
 
 
 def run_gate(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("pr", help="PR number")
     ap.add_argument("--cwd", default=".", help="directory holding the PR's code and the config")
     ap.add_argument("--base", help="base branch (default: the PR's)")

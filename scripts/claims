@@ -41,7 +41,7 @@ def line(c) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("ticket", nargs="?", type=int, help="print only this ticket")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     ap.add_argument("--state", default=None, help="state file (default: <repo>/.claude/orchestrate-state.json)")

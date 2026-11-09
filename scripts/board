@@ -460,7 +460,7 @@ def sync(owner, number, repo, writes=None):
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--repo", default=".", help="repo root: the config is read and gh runs there")
     ap.add_argument("--dry-run", action="store_true",
                     help="read everything, print each write the sync would make (and each card left alone), make none")

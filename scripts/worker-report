@@ -163,7 +163,7 @@ def classify_reviewer(text: str) -> tuple:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("ticket", help="the ticket number")
     ap.add_argument("--branch", help="the ticket's branch (required unless --reviewer)")
     ap.add_argument("--reviewer", action="store_true", help="classify a reviewer's report by its `suite:` line")

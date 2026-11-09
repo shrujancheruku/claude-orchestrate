@@ -21,7 +21,7 @@ SNAPSHOT = ".claude/orchestrate-snapshot.json"
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     ap.add_argument("--out", default=None, help=f"the file to write (default: <repo>/{SNAPSHOT})")
     args = ap.parse_args(argv)
