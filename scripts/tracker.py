@@ -37,6 +37,24 @@ RELEASE_PLEASE_PREFIX = "release-please--"
 SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
 
 
+def write_json_atomic(path, data) -> None:
+    """Write `data` as JSON to `path` through a temp file in the same directory and a rename, so a concurrent reader
+    sees the old file or the new one, never a truncated one. The temp file is removed on any failure."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".snapshot-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def label_strings(root: Path) -> dict:
     """The repo's label strings: the mapping table's second column, by role (first column); a default for a missing row.
     ValueError when the table exists but cannot be read (the label strings would be a guess)."""
@@ -192,6 +210,8 @@ class Snapshot:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
         except OSError as e:
             raise ValueError(f"cannot read snapshot {path}: {e.strerror or e}") from None
+        except ValueError as e:  # a truncated or partly written file
+            raise ValueError(f"cannot read snapshot {path}: {e}") from None
         if not isinstance(data, dict) or not all(k in data for k in cls.PARTS):
             raise ValueError(f"{path} is not a snapshot")
         for i in data["issues"]:
@@ -202,8 +222,7 @@ class Snapshot:
         data = {k: getattr(self, k) for k in self.PARTS}
         data["pr_files"] = self._open_entries(self._pr_files)
         data["issues"] = [dict(i, labels=sorted(i["labels"])) for i in data["issues"]]
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(data), encoding="utf-8")
+        write_json_atomic(path, data)
 
     def _part(self, name, fetch):
         if name not in self._parts:
@@ -292,18 +311,7 @@ class Snapshot:
             data = data if isinstance(data, dict) else {}
             # Entries another process wrote since we read stay; ours win for the same PR.
             data["pr_files"] = self._open_entries({**self._cached_files(path), **self._pr_files})
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".snapshot-", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f)
-                os.replace(tmp, path)
-            except BaseException:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+            write_json_atomic(path, data)
             self._dirty = False
         except OSError:
             pass

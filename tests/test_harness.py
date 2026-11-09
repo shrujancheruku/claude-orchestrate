@@ -96,13 +96,14 @@ class HarnessSmoke(unittest.TestCase):
         e.run(cli, "A")
         self.assertEqual([x["session"] for x in e.events()], ["test-session"])
 
-    def test_no_state_file_and_no_session_is_refused_in_one_line(self):
+    def test_no_state_file_and_no_session_raises_nosession_and_writes_nothing(self):
+        # The library raises (ADR-0014); this bare CLI does not catch it, so Python reports it and exits 1.
         e = self.env
         (e.repo / ".claude" / "orchestrate-state.json").unlink()
         cli = self.cli("section.py", SECTION_CLI)
         res = e.run(cli, "A", check=False)
-        self.assertEqual(res.returncode, 2)
-        self.assertEqual(len(res.stderr.strip().splitlines()), 1, res.stderr)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("runlog.NoSession: runlog: no session, gate event not written", res.stderr)
         self.assertEqual(e.events(), [])
 
     def test_gh_calls_are_not_logged_by_default_so_event_counts_hold(self):

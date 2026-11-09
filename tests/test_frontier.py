@@ -45,6 +45,13 @@ class Frontier(unittest.TestCase):
         self.assertEqual(r.stdout, "#3 title 3\n#9 title 9\n")
         self.assertEqual(r.stderr, "")
 
+    def test_no_session_keeps_the_answer_and_exit_code_and_says_so_on_stderr(self):
+        (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
+        self.serve(page([node(3)]))
+        r = self.frontier()
+        self.assertEqual((r.returncode, r.stdout), (0, "#3 title 3\n"))
+        self.assertEqual(r.stderr, "runlog: no session, frontier event not written\n")
+
     def test_two_pages_are_read_to_exhaustion_once_each(self):
         self.serve(page([node(2), node(4)], cursor="CUR1"), page([node(1), node(3)]))
         self.assertEqual(self.frontier().stdout, "#1 title 1\n#2 title 2\n#3 title 3\n#4 title 4\n")
