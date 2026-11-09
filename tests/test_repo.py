@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -138,6 +139,50 @@ class WorktreeHelpers(unittest.TestCase):
         (self.wt / "u.txt").write_text("u\n")
         self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
         self.assertTrue(self.wt.exists())
+
+    def test_git_text_that_is_parsed_is_asked_for_in_english_whatever_the_locale(self):
+        # remove_worktree reads "untracked", "not a working tree" and "locked" out of git's messages
+        (self.wt / "u.txt").write_text("u\n")
+        seen = []
+        real = repo.common.run
+
+        def spy(*cmd, **kw):
+            seen.append((cmd, kw.get("env")))
+            return real(*cmd, **kw)
+
+        with unittest.mock.patch.dict("os.environ", {"LANG": "de_DE.UTF-8", "LC_ALL": "de_DE.UTF-8", "LC_MESSAGES": "de_DE.UTF-8"}), \
+                unittest.mock.patch.object(repo.common, "run", spy):
+            repo.remove_worktree(str(self.wt), self.root)
+        removes = [env for cmd, env in seen if cmd[:3] == ("git", "worktree", "remove")]
+        self.assertTrue(removes)
+        for env in removes:
+            self.assertEqual(env["LC_ALL"], "C")
+
+    def test_head_in_fetches_a_head_the_repo_does_not_have_yet(self):
+        origin = self.root.parent / "origin.git"
+        _vcs(self.root, "init", "-q", "--bare", str(origin))
+        _vcs(self.root, "remote", "add", "origin", str(origin))
+        _vcs(self.root, "push", "-q", "origin", "main")
+        other = self.root.parent / "other"
+        _vcs(self.root.parent, "clone", "-q", "-b", "main", str(origin), str(other))
+        for k, v in (("user.name", "T"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            _vcs(other, "config", k, v)
+        (other / "n.txt").write_text("n\n")
+        _vcs(other, "add", "n.txt")
+        _vcs(other, "commit", "-q", "-m", "ahead")
+        _vcs(other, "push", "-q", "origin", "HEAD:refs/heads/pr-branch")
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=other, capture_output=True, text=True).stdout.strip()
+        tree = self.root.parent / "detached"
+        _vcs(self.root, "worktree", "add", "-q", "--detach", str(tree))
+        # the tree sits at an ancestor of the PR head, a commit this repo has never fetched
+        self.assertTrue(repo.head_in(str(tree), head, self.root, exact=False))
+        self.assertFalse(repo.head_in(str(tree), head, self.root, exact=True))
+
+    def test_worktree_gone_is_true_only_for_a_path_nothing_registers(self):
+        self.assertFalse(repo.worktree_gone(str(self.wt), self.root))
+        self.assertTrue(repo.worktree_gone(str(self.root.parent / "never"), self.root))
+        repo.remove_worktree(str(self.wt), self.root)
+        self.assertTrue(repo.worktree_gone(str(self.wt), self.root))
 
     def test_another_untracked_file_under_claude_still_blocks_removal(self):
         (self.wt / ".claude").mkdir()

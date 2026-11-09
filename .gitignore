@@ -1,6 +1,7 @@
 .claude/worktrees/
 __pycache__/
 .claude/orchestrate-state.json
+.claude/orchestrate-update-branch.json
 .claude/orchestrate-profiles/
 .claude/orchestrate-lead.json
 .claude/orchestrate-snapshot.json
