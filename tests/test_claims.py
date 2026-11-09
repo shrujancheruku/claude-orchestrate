@@ -163,6 +163,14 @@ class Decide(unittest.TestCase):
         self.assertEqual(found[2].state, "stalled")  # another session's record is not this session's worker
         self.assertIsNone(found[2].worker)
 
+    def test_a_session_argument_names_the_current_session_not_the_last_rebuilder(self):
+        rec = lambda a: {"agent_id": a, "worktree": None, "model": "m", "last_report": "t", "touch_map": "none"}  # noqa: E731
+        self.state.write_text(json.dumps({"session": "other", "sessions": {
+            "mine": {"tickets": {"1": rec("a1")}}, "other": {"tickets": {"2": rec("a2")}}}}))
+        self.assertEqual(claims.read_state(self.state, "mine"), {"1": rec("a1")})
+        self.assertEqual(claims.read_other_state(self.state, "mine"), {"2": rec("a2")})
+        self.assertEqual(claims.read_state(self.state, "unknown"), {})  # a session with no entry has no workers
+
     def test_another_sessions_record_with_a_live_foreign_lock_is_elsewhere(self):
         other = subprocess.Popen(["sleep", "30"])
         self.addCleanup(other.kill)

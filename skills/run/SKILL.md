@@ -52,7 +52,7 @@ Arguments narrow a pass: `status` reconciles and reports without dispatching or 
    ```sh
    "${CLAUDE_SKILL_DIR}/../../scripts/snapshot" --repo .
    "${CLAUDE_SKILL_DIR}/../../scripts/rebuild-state" ${CLAUDE_SESSION_ID} --repo .
-   "${CLAUDE_SKILL_DIR}/../../scripts/claims" --repo . --snapshot .claude/orchestrate-snapshot.json
+   "${CLAUDE_SKILL_DIR}/../../scripts/claims" --session ${CLAUDE_SESSION_ID} --repo . --snapshot .claude/orchestrate-snapshot.json
    ```
    If `snapshot` fails, say so in one line and run `claims`, `frontier` and `lead-route` below without `--snapshot`: each then reads the tracker itself. If the rebuild fails, say so in one line and carry on without it: `claims` then reads no worker records, so a ticket this session's worker is on shows as stalled. One scout call, within the pass's scope, and only for what `claims` can't see: the check states of the in-review tickets (pass it their `#<n> <PR>` pairs from the `claims` lines). Don't ask it for the takeable tickets, `ready-for-human` tickets or parents: `frontier` lists them. Don't ask it for a claim's state, worktree, change or merged-but-open tickets: the `claims` lines carry them. Done when every claimed ticket has a state.
    Then run `"${CLAUDE_SKILL_DIR}/../../scripts/frontier" --all --repo . --snapshot .claude/orchestrate-snapshot.json` once per pass (add `--parent <n>` or `--ticket <n>` on a narrowed pass): its takeable lines feed step 4, and its `ready-for-human:`, `parents-closed:` and `drift:` sections go in the report word for word.

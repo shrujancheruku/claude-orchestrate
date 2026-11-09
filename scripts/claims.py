@@ -70,15 +70,17 @@ def _sessions(path) -> tuple:
     raise ValueError(f"state file {path} has no tickets object")
 
 
-def read_state(path) -> dict:
-    """{ticket as str: worker record} of the current session; a missing file is no workers."""
+def read_state(path, session=None) -> dict:
+    """{ticket as str: worker record} of the current session; a missing file is no workers. `session` (the caller's own
+    id, from `--session`) names the current session; without it the one that rebuilt last is (#532)."""
     current, sessions = _sessions(path)
-    return sessions.get(current, {})
+    return sessions.get(session if session else current, {})
 
 
-def read_other_state(path) -> dict:
+def read_other_state(path, session=None) -> dict:
     """{ticket as str: worker record} under any other session: candidates for Elsewhere, never for Building."""
     current, sessions = _sessions(path)
+    current = session if session else current
     out = {}
     for sid, tickets in sessions.items():
         if sid != current:
@@ -133,14 +135,15 @@ def _lock(wt) -> tuple | None:
     return (state, pid)
 
 
-def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state) -> dict:
+def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None) -> dict:
     """{ticket: Claim} for each claimed open issue and each state-file ticket that is no longer open (done).
 
     issues: [{"number", "claimed", "labels"}] open issues. prs: [{"number", "headRefName", ...}] open PRs.
     merged: [{"headRefName", ...}] merged PRs. worktrees: `git worktree list`'s (default: asked of `repo`); changes:
-    (path, branch) -> (dirty, unpushed), swappable so a pure test needs no repository."""
-    state = read_state(state_file)
-    other = read_other_state(state_file)
+    (path, branch) -> (dirty, unpushed), swappable so a pure test needs no repository. session: this caller's own id
+    (`--session`); without it the session that rebuilt last is the current one."""
+    state = read_state(state_file, session)
+    other = read_other_state(state_file, session)
     # A worktree git still lists but whose directory is gone (prunable) is gone: git commands in it can't run.
     wts = [w for w in common.worktrees(repo) if Path(w["path"]).is_dir()] if worktrees is None else worktrees
     open_issues = {int(i["number"]): i for i in issues}

@@ -11,6 +11,7 @@ resolves, whichever subdirectory or linked worktree the caller stands in.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,8 +48,11 @@ def log_path(repo, name: str) -> Path:
     return main_checkout(repo) / PROFILES / name
 
 
+SESSION_ENV = "ORCHESTRATE_SESSION"  # a script run with `--session <id>` sets it, so its events carry that id (#532)
+
+
 def current_session(repo) -> str | None:
-    """The session the state file is stamped with (rebuild-state writes it), or None when there is no
+    """The session named by $ORCHESTRATE_SESSION (`--session`), else the session the state file is stamped with (rebuild-state writes it), or None when there is no
     usable state file. Read from the main checkout, like the log, so a linked worktree's script finds it.
 
     Not $CLAUDE_SESSION_ID: the run skill templates that variable into the commands it names only, so the
@@ -57,6 +61,8 @@ def current_session(repo) -> str | None:
     The file keeps one entry per session; its `session` field names the one that rebuilt last, in the old shape and the
     new alike, so no migration is needed here. No lock is taken: rebuild-state renames a temp file over the state
     file, so a read sees the old file or the new."""
+    if os.environ.get(SESSION_ENV):
+        return os.environ[SESSION_ENV]
     try:
         state = json.loads((main_checkout(repo) / STATE).read_text(encoding="utf-8"))
     except (OSError, ValueError):

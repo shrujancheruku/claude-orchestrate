@@ -1,9 +1,12 @@
 import json
 import threading
+from pathlib import Path
 import unittest
 
 from harness import ScriptEnv, git
 from transcripts import completion, dispatch, main_path, reply, write_session
+
+import claims  # noqa: E402 - harness puts scripts/ on sys.path
 
 
 class RebuildState(unittest.TestCase):
@@ -178,6 +181,51 @@ class RebuildState(unittest.TestCase):
         self.main_records = [dispatch("t1", "Build #6")]
         self.rebuild()
         self.assertEqual(self.tickets_by_session(), {"sess-1": ["6"], "sess-2": ["9"]})
+
+    def test_a_rebuild_prunes_sessions_that_are_not_agent_rows_and_keeps_live_and_stopped_ones(self):
+        self.main_records += [dispatch("t1", "Build #5")]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5")])
+        self.rebuild()
+        self.env.run("rebuild-state", self.second_session("sess-live", 9))
+        self.env.run("rebuild-state", self.second_session("sess-stopped", 10))
+        self.env.run("rebuild-state", self.second_session("sess-unknown", 11))
+        self.assertEqual(set(self.tickets_by_session()), {"sess-1", "sess-live", "sess-stopped", "sess-unknown"})
+        # The stopped row counts as a row (`--all`); sess-1 is the one rebuilding, so it stays even unlisted.
+        self.env.set_agents("sess-live", "sess-stopped")
+        self.rebuild()
+        self.assertEqual(set(self.tickets_by_session()), {"sess-1", "sess-live", "sess-stopped"})
+
+    def test_nothing_is_pruned_when_the_agent_rows_cannot_be_read(self):
+        self.main_records += [dispatch("t1", "Build #5")]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5")])
+        self.rebuild()
+        self.env.run("rebuild-state", self.second_session("sess-2", 9))
+        self.rebuild()  # the fake `claude` fails: no rows were set
+        self.assertEqual(set(self.tickets_by_session()), {"sess-1", "sess-2"})
+
+    def test_with_session_each_of_two_alternating_sessions_reads_its_own_workers(self):
+        self.main_records += [dispatch("t1", "Build #5")]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5")])
+        self.rebuild()
+        self.env.run("rebuild-state", "--session", self.second_session("sess-2", 9))
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        self.assertEqual(self.raw()["session"], "sess-2")  # sess-2 rebuilt last
+        self.assertEqual(list(claims.read_state(state, "sess-1")), ["5"])
+        self.assertEqual(list(claims.read_other_state(state, "sess-1")), ["9"])
+        self.assertEqual(list(claims.read_state(state, "sess-2")), ["9"])
+        self.assertEqual(list(claims.read_other_state(state, "sess-2")), ["5"])
+        self.assertEqual(list(claims.read_state(state)), ["9"])  # without the flag: the last rebuilder, as before
+
+    def test_a_rebuild_leaves_the_working_tree_clean(self):
+        self.main_records += [dispatch("t1", "Build #5")]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5")])
+        # The test repo is a fresh one: give it this repo's own .gitignore, which is what lists the state and lock files.
+        (self.env.repo / ".gitignore").write_text((Path(__file__).resolve().parent.parent / ".gitignore").read_text())
+        git(self.env.repo, "add", ".gitignore")
+        git(self.env.repo, "commit", "-m", "chore: gitignore")
+        self.rebuild()
+        self.assertTrue((self.env.repo / ".claude" / "orchestrate-state.json.lock").exists())
+        self.assertEqual(git(self.env.repo, "status", "--porcelain"), "")
 
     def test_an_old_shape_file_is_one_session_and_is_rewritten_in_the_new_shape(self):
         state = self.env.repo / ".claude" / "orchestrate-state.json"

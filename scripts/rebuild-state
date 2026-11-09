@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""rebuild-state [<session id | transcript.jsonl>] [--repo PATH] : rebuild .claude/orchestrate-state.json.
+"""rebuild-state [<session id | transcript.jsonl> | --session ID] [--repo PATH] : rebuild .claude/orchestrate-state.json.
 
 The orchestrator never writes the state file; this does, from the session's transcripts, so it
 can't drift from what actually ran. The file keeps one entry per session, `{"session": <the session that last
 rebuilt>, "sessions": {<id>: {"tickets": {...}}}}`; a rebuild replaces only its own session's entry, under an
-exclusive lock, so a second session's rebuild never replaces another's records. A file in the old
+exclusive lock, so a second session's rebuild never replaces another's records. Entries of sessions that are
+not a row of `claude agents --json --all` are dropped on each rebuild (the session being rebuilt never is); when
+`claude` is missing or unreadable nothing is dropped. The lock file `.claude/orchestrate-state.json.lock` is left in
+place (it is git-ignored). A file in the old
 `{"session", "tickets"}` shape is read as one session's entry and rewritten in the new shape. A worker is joined to its ticket by its dispatch
 description, whose first `#<n>` must be its ticket (the run skill recommends `Build #<ticket>`); a
 dispatch of any other agent type, or without a `#<n>`, is ignored. Per ticket
@@ -25,6 +28,7 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -120,11 +124,31 @@ def sessions_of(out: Path) -> dict:
     return {}
 
 
-def write_state(out: Path, state: dict) -> None:
-    """Replace this session's entry and keep the others', under the lock."""
+def known_sessions() -> set | None:
+    """The session ids of `claude agents --json --all` (live or stopped), or None when they can't be read: then
+    nothing is pruned, since a session we can't see may still be running."""
+    if not shutil.which("claude"):
+        return None
+    code, out, _ = common.run("claude", "agents", "--json", "--all")
+    if code != 0:
+        return None
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    return {r["sessionId"] for r in rows if isinstance(r, dict) and isinstance(r.get("sessionId"), str)}
+
+
+def write_state(out: Path, state: dict, known: set | None = None) -> None:
+    """Replace this session's entry and keep the others', under the lock. With `known`, an entry whose session is not
+    in it is dropped (a dead session's records only accumulate); this session's own entry is never dropped."""
     out.parent.mkdir(parents=True, exist_ok=True)
     with state_lock(out):
         sessions = sessions_of(out)
+        if known is not None:
+            sessions = {k: v for k, v in sessions.items() if k in known}
         sessions[state["session"]] = {"tickets": state["tickets"]}
         tmp = out.with_name(f"{out.name}.tmp.{os.getpid()}")  # unique per process: two rebuilds never share a temp
         tmp.write_text(json.dumps({"session": state["session"], "sessions": sessions}, indent=2) + "\n")
@@ -135,14 +159,17 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("session", nargs="?", default=os.environ.get("CLAUDE_SESSION_ID"),
                     help="session id or transcript path (default: $CLAUDE_SESSION_ID)")
+    ap.add_argument("--session", dest="session_flag", default=None, metavar="ID",
+                    help="the session id, as the positional (the run skill passes its own)")
     ap.add_argument("--repo", default=".", help="repo root; the state file goes in its main checkout")
     args = ap.parse_args(argv)
+    args.session = args.session_flag or args.session
     if not args.session:
         common.die("rebuild-state: no session id (pass one or set CLAUDE_SESSION_ID)")
     repo = Path(args.repo).resolve()
     state = rebuild(find_transcript(args.session), repo)
     out = main_checkout(repo) / STATE  # the main checkout's: runlog reads the session from there (#341)
-    write_state(out, state)
+    write_state(out, state, known_sessions())
     for n, t in state["tickets"].items():
         print(common.one_line(f"#{n} {t['agent_id']} {t['model']} {t['worktree']} last report {t['last_report']}"))
     print(f"rebuilt {STATE} ({len(state['tickets'])} tickets)")
