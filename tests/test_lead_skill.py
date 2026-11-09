@@ -75,8 +75,11 @@ class RunSkillLeftThreads(unittest.TestCase):
 
     def test_left_threads_get_one_followup_and_a_left_for_line(self):
         for text in (self.run, self.worker):
-            for needle in ("--followup <n>", "--no-followup", "`Left for #<n>`", "needs-triage", "`lead`"):
+            for needle in ("--followup <n>", "--no-followup", "`Left for #<n>`", "followup-needed:"):
                 self.assertIn(needle, text)
+        for needle in ("needs-triage", "`lead`", "a worker never runs `gh issue create`"):
+            self.assertIn(needle, self.run)
+        self.assertNotIn("gh issue create", self.worker)
 
     def test_send_back_exception_is_limited_to_lines_naming_only_threads(self):
         self.assertIn("name only unresolved review threads", self.run)

@@ -25,7 +25,7 @@ no-primary-source, worktree-gone, transient (a host failure nobody decides: the 
 `failed_command`; a `permission-denied` or `human-only` report whose text names a rate limit or a wait-until time is
 reclassified `transient`), permission-denied (which also needs the exact denied command in `denied-command:`; the event
 carries it). A report's `refused:` lines (one per tool call the harness or guard refused) ride in the event as
-`refused: [...]` (`refused: none` is `[]`, no line leaves the field out); the verdict never depends on them. Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
+`refused: [...]` (`refused: none` is `[]`, no line leaves the field out); the verdict never depends on them. A `followup-needed: <gist>` line (the worker's request for the one follow-up ticket of the threads it left) rides in the event as `followup_needed`, and never changes the verdict. Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
 run log): one line on stderr, run it again on the next wake. Stdlib only, Python 3.9+.
 """
 
@@ -53,6 +53,7 @@ STATUS = re.compile(r"^[ \t>*-]*status:[ \t]*(pr-opened|stopped)\b", re.I | re.M
 STOP_REASON = re.compile(r"^[ \t>*-]*stop-reason:[ \t]*`?([\w-]+)", re.I | re.M)
 DENIED_COMMAND = re.compile(r"^[ \t>*-]*denied-command:[ \t]*`*([^\s`].*?)`*[ \t]*$", re.I | re.M)
 REFUSED = re.compile(r"^[ \t>*-]*refused:[ \t]*`*(.*?)`*[ \t]*$", re.I | re.M)
+FOLLOWUP_NEEDED = re.compile(r"^[ \t>*-]*followup-needed:[ \t]*`*([^\s`].*?)`*[ \t]*$", re.I | re.M)
 REPORT_PR = re.compile(r"^[ \t>*-]*pr:[ \t]*\S*?/pull/(\d+)", re.I | re.M)
 # The harness's own wrapper elements say nothing about the worker's work: a completion with only these is bare.
 NOTICE = re.compile(r"<(task-id|tool-use-id|output-file|worktreePath|worktreeBranch|status|summary|usage)>.*?</\1>", re.S)
@@ -93,6 +94,10 @@ def classify(text: str, branch: str, lookup) -> tuple:
     refused = refused_calls(text) if STATUS.search(text) else None
     if refused is not None:
         fields = dict(fields, refused=refused)
+    # The worker asks for the one follow-up ticket of its left threads (#442); the orchestrator files it.
+    followup = FOLLOWUP_NEEDED.findall(text) if STATUS.search(text) else []
+    if followup:
+        fields = dict(fields, followup_needed=followup[-1])
     return words, fields
 
 

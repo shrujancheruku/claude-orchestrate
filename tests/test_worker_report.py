@@ -172,6 +172,12 @@ class WorkerReport(unittest.TestCase):
     def test_refused_lines_do_not_change_the_verdict(self):
         self.assertEqual(self.verdict("status: pr-opened\nrefused: Bash — x — y\n"), "valid pr-opened 12 " + HEAD)
 
+    def test_followup_needed_rides_in_the_event_and_does_not_change_the_verdict(self):
+        text = "status: pr-opened\nfollowup-needed: 2 minors left on a.py:3 and b.py:9\n"
+        self.assertEqual(self.verdict(text), "valid pr-opened 12 " + HEAD)
+        ev = [e for e in self.env.events() if e["kind"] == "worker-report"][-1]
+        self.assertEqual(ev["followup_needed"], "2 minors left on a.py:3 and b.py:9")
+
     def test_a_repeat_is_a_duplicate_and_a_new_head_is_valid(self):
         text = "status: pr-opened\n"
         self.assertEqual(self.verdict(text), f"valid pr-opened 12 {HEAD}")
