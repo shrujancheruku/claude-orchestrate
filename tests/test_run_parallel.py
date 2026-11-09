@@ -1,10 +1,14 @@
 """Tests for tests/run_parallel.py, the parallel module runner."""
 
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import run_parallel  # noqa: E402
 
 RUNNER = Path(__file__).resolve().parent / "run_parallel.py"
 PASSING = "class T(unittest.TestCase):\n    def test_x(self): pass\n"
@@ -68,6 +72,45 @@ class RunParallelTest(unittest.TestCase):
         r = self.run_runner()
         self.assertLess(len(r.stdout.splitlines()), 60)
         self.assertNotIn("line0\n", r.stdout)
+
+    def test_a_deprecated_call_fails_the_run(self):
+        # PYTHONWARNINGS=error::DeprecationWarning: what this Python deprecates, a newer one removes (#506).
+        self.module("test_dep.py", "import warnings\nclass T(unittest.TestCase):\n    def test_x(self):\n"
+                                   "        warnings.warn('old api', DeprecationWarning)\n")
+        r = self.run_runner()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("FAIL test_dep", r.stdout)
+        self.assertIn("DeprecationWarning", r.stdout)
+
+    def test_caller_pythonpath_does_not_reach_the_modules(self):
+        self.module("test_env.py", "import os\nclass T(unittest.TestCase):\n    def test_x(self):\n"
+                                   "        self.assertNotIn('elsewhere', os.environ['PYTHONPATH'])\n")
+        env = dict(os.environ, PYTHONPATH="elsewhere")
+        r = subprocess.run([sys.executable, str(RUNNER), "-j", "1", str(self.dir)], env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+
+class DefaultJobsTest(unittest.TestCase):
+    PS = ("  101 /usr/bin/python3 /x/tests/run_parallel.py\n"
+          "  102 python3 /y/tests/run_parallel.py -j 2 /y/tests\n"
+          "  103 /bin/sh -c python3 /z/tests/run_parallel.py\n"
+          "  104 vim tests/run_parallel.py\n"
+          "  105 python3 /y/tests/test_run_parallel.py\n"
+          "  106 python3 -u /w/tests/run_parallel.py\n"
+          "  107 /Library/Frameworks/Python.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python "
+          "/v/tests/run_parallel.py\n")
+
+    def test_other_runs_are_counted_without_this_one_or_lookalikes(self):
+        self.assertEqual(run_parallel.count_other_runners(self.PS, me=101), 3)
+        self.assertEqual(run_parallel.count_other_runners(self.PS, me=999), 4)
+        self.assertEqual(run_parallel.count_other_runners("", me=1), 0)
+
+    def test_jobs_drop_with_the_other_live_runs_and_never_below_one(self):
+        self.assertEqual(run_parallel.default_jobs(8, 0), 8)
+        self.assertEqual(run_parallel.default_jobs(8, 1), 4)
+        self.assertEqual(run_parallel.default_jobs(8, 3), 2)
+        self.assertEqual(run_parallel.default_jobs(2, 5), 1)
 
 
 if __name__ == "__main__":

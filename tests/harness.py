@@ -13,7 +13,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+# The scripts of the tree this file sits in, never another checkout's: a test run from a scratch worktree at an
+# older commit must meet that commit's scripts (#480). ScriptEnv.run also drops the variables that could point
+# elsewhere (PYTHONPATH, CLAUDE_PLUGIN_ROOT).
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+LEAKY_ENV = ("PYTHONPATH", "CLAUDE_PLUGIN_ROOT")
 sys.path.insert(0, str(SCRIPTS))
 import runlog  # noqa: E402
 
@@ -253,7 +257,7 @@ class ScriptEnv:
         # no_gh: a PATH that holds no `gh` at all (not even a real one), to test a missing tool.
         search_path = str(self._tmp_empty()) if no_gh else f"{self.bin}{os.pathsep}{os.environ['PATH']}"
         env = dict(
-            os.environ,
+            {k: v for k, v in os.environ.items() if k not in LEAKY_ENV},
             PATH=search_path,
             FAKE_GH_STATE=str(self.gh_state),
             ORCHESTRATE_GH_5XX_TRIES="1",  # a fake gh's 5xx is a plain failure here; github.call's retry is tested in test_github_retry
