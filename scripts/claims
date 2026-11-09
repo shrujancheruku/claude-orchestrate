@@ -2,15 +2,18 @@
 """claims [<ticket>] [--repo DIR] [--state FILE] [--session ID] : what state is each claimed ticket in?
 
 One line per claimed ticket in ascending ticket order, or the one named (the rules are in scripts/claims.py):
-    #<n> <state> <branch | none-yet | no-branch> pr <num | none> worker <agent-id> <model> | unknown | none worktree <path | gone> lock <lock> [<changes>]
+    #<n> <state word> <branch | none-yet | no-branch> pr <num | none> worker <agent-id> <model> | unknown | none worktree <path | gone> lock <lock> [<changes>]
 branch `none-yet`: the worktree is on the harness's `worktree-agent-*` branch, so the worker stopped before it created the ticket branch (`rescue <n>` saves it).
 worker `unknown`: a building claim with no state record, this session's own live worker that the state file couldn't join.
-state: with-lead | in-review | done | building | elsewhere | stalled (`paused` and `waiting` are the orchestrator's own).
+state: with-lead | in-review | done | building | idle | waiting | elsewhere | stalled (`paused` is the orchestrator's own).
+       `waiting <permission-denied | exhausted> since <ts>`: the newest worker-report needs the developer; it never expires.
+       `idle since <ts> [nudged <ts>]`: a building claim whose worker is not live and has reported nothing since its last commit;
+       `nudged` is the pass log's `record --nudged` time. Both timestamps are UTC, `YYYY-MM-DDTHH:MM:SSZ`.
 lock:  `ours <pid>` (this session's own worker); `foreign-live <pid>`; `foreign-live ?` (the line then ends ` (lock: <reason>)`: the reason doesn't parse, which counts as live;
        unlock the worktree if it is stale); `dead <pid>` (unlock it, then rescue it); `none` (no lock or no worktree).
 changes (only with a worktree and no PR): `clean`, `dirty <k>`, `unpushed <k>` or `dirty <k> unpushed <j>`.
 `claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line.
-Reads the tracker as one Snapshot (scripts/tracker.py; `--snapshot FILE` reads a file `snapshot` wrote instead of fetching), the state file (a missing one means no workers) and
+Reads the run log and the pass log (a missing one is no events), the tracker as one Snapshot (scripts/tracker.py; `--snapshot FILE` reads a file `snapshot` wrote instead of fetching), the state file (a missing one means no workers) and
 `git worktree list`. Exit codes: 0 printed; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository, an
 unreadable state file), one line on stderr. Stdlib only, Python 3.9+.
 """
@@ -29,9 +32,14 @@ from repo import STATE
 
 
 def line(c) -> str:
-    worker = ("unknown" if c.state == "building" else "none") if not c.worker else f"{c.worker.get('agent_id') or '?'} {c.worker.get('model') or '?'}"
+    worker = ("unknown" if c.state in ("building", "idle") else "none") if not c.worker else f"{c.worker.get('agent_id') or '?'} {c.worker.get('model') or '?'}"
     lock = "none" if c.lock is None else f"{c.lock[0]} {c.lock[1] if c.lock[1] is not None else '?'}"
-    out = (f"#{c.ticket} {c.state} {c.branch or ('none-yet' if c.pending_branch else 'no-branch')} pr {c.pr if c.pr is not None else 'none'}{' draft' if c.draft else ''} "
+    state = c.state
+    if c.state == "waiting":
+        state += f" {c.reason} since {c.since or '?'}"
+    elif c.state == "idle":
+        state += f" since {c.since or '?'}" + (f" nudged {c.nudged}" if c.nudged else "")
+    out = (f"#{c.ticket} {state} {c.branch or ('none-yet' if c.pending_branch else 'no-branch')} pr {c.pr if c.pr is not None else 'none'}{' draft' if c.draft else ''} "
            f"worker {worker} worktree {c.worktree or 'gone'} lock {lock}")
     if c.changes is not None:
         dirty, unpushed = c.changes

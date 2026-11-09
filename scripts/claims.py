@@ -12,12 +12,19 @@ The state, decided in this order:
   done        the ticket's branch has a merged PR, or the ticket is in the state file but not among the open issues
   building    a worker record from this session in the state file, or no record but the worktree's lock is this
               session's own live worker (`worker unknown`: a dispatch the state file couldn't join)
+  idle        a building claim whose worker is not live (the lock is not `ours <live pid>`) and has made no
+              worker-report since its last commit. `since` is that commit's time; `nudged` is the time of the pass log's
+              `record --nudged` for it, when that is not older than `since`. A pass nudges it once, then hands it back
+  waiting     replaces building and stalled (never a ready PR): the ticket's newest worker-report event is a
+              `permission-denied` stop or an `exhausted` transient one. The developer must act; it never expires, and
+              only a newer report ends it. `reason` is `permission-denied` or `exhausted`, `since` the report's time
   elsewhere   no record, and the worktree on its branch is locked by another live session (ADR 0009)
   stalled     otherwise: no PR, no record, no live lock (dead lock, no lock, no worktree, no branch)
 A ticket's worktree is found first from its worker's record (the harness path `.claude/worktrees/agent-<id>`, or the
 checkout on `worktree-agent-<id>`), then by the ticket branch. A worker that stopped before Orient's branch step has
 only the harness branch: its claim has `branch None` and `pending_branch` set, and its worktree is never "gone".
-`paused` and `waiting` are not here: they are the orchestrator's own overlay.
+`paused` is not here: it is the orchestrator's own overlay (as are a gate, a question and a third review round).
+The run log and the pass log are read from the main checkout (runlog.py); a missing log is no events.
 """
 
 from __future__ import annotations
@@ -25,12 +32,13 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import timezone
 from pathlib import Path
 
 import common
 import github
 import runlog
-from repo import ticket_of_branch
+from repo import parse_ts, ticket_of_branch
 
 LEAD_LABEL = "lead"  # a ticket the lead owns: no worker is dispatched for it
 
@@ -47,6 +55,9 @@ class Claim:
     changes: tuple | None = None   # (dirty paths, unpushed commits) for a claim with a worktree and no PR
     draft: bool = False            # `pr` is a draft: the ticket is building, not in review
     pending_branch: bool = False   # the worktree is on a `worktree-agent-*` branch: the worker never made the ticket branch
+    reason: str | None = None      # waiting only: `permission-denied` | `exhausted`
+    since: str | None = None       # waiting and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report, or of the last commit
+    nudged: str | None = None      # idle only: the same, of the pass's nudge, when it is not older than `since`
 
 
 def _sessions(path) -> tuple:
@@ -155,13 +166,46 @@ def _lock(wt) -> tuple | None:
     return (state, pid)
 
 
-def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None) -> dict:
+def fmt_ts(dt) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def last_commit_time(path):
+    """The committer time of HEAD in the worktree at `path`, or None when git can't say (no commits, no directory)."""
+    r = common.run("git", "log", "-1", "--format=%cI", cwd=path)
+    return parse_ts(r.stdout.strip()) if r.code == 0 else None
+
+
+def _reports(repo) -> dict:
+    """{ticket as text: its newest worker-report event}, a duplicate passed over, from the run log."""
+    out = {}
+    for e in common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG)):
+        if e.get("kind") == runlog.WORKER_REPORT and e.get("outcome") != "duplicate":
+            out[str(e.get("ref"))] = e
+    return out
+
+
+def _nudges(repo) -> dict:
+    """{ticket: time of its newest nudge} from the pass log (`profile.py record --nudged <n>`), any session's."""
+    out = {}
+    for p in common.read_jsonl(runlog.log_path(repo, runlog.PASS_LOG)):
+        ts = parse_ts(p.get("ts"))
+        nudged = p.get("nudged")
+        for n in nudged if isinstance(nudged, list) else ():
+            if ts and isinstance(n, int) and (n not in out or ts > out[n]):
+                out[n] = ts
+    return out
+
+
+def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None,
+           commit_time=last_commit_time) -> dict:
     """{ticket: Claim} for each claimed open issue and each state-file ticket that is no longer open (done).
 
     issues: [{"number", "claimed", "labels"}] open issues. prs: [{"number", "headRefName", ...}] open PRs.
     merged: [{"headRefName", ...}] merged PRs. worktrees: `git worktree list`'s (default: asked of `repo`); changes:
     (path, branch) -> (dirty, unpushed), swappable so a pure test needs no repository. session: this caller's own id
-    (`--session`); without it the session that rebuilt last is the current one."""
+    (`--session`); without it the session that rebuilt last is the current one. commit_time: path -> the HEAD commit's
+    datetime | None, swappable like `changes`; a caller whose answer is always None never sees an idle claim."""
     state = read_state(state_file, session)
     other = read_other_state(state_file, session)
     # A worktree git still lists but whose directory is gone (prunable) is gone: git commands in it can't run.
@@ -181,6 +225,7 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     records = {int(k): v for k, v in state.items() if str(k).isdigit()}
     foreign = {int(k): v for k, v in other.items() if str(k).isdigit() and int(k) not in records}
     tickets = sorted({n for n, i in open_issues.items() if i.get("claimed")} | (set(records) - set(open_issues)))
+    reports, nudges = _reports(repo), _nudges(repo)
     out = {}
     for n in tickets:
         record = records.get(n) if isinstance(records.get(n), dict) else None
@@ -207,7 +252,21 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.state = "elsewhere"
         else:
             claim.state = "stalled"
-        if wt and pr is None and claim.state in ("building", "stalled", "elsewhere"):
+        report = reports.get(str(n))
+        reported = parse_ts((report or {}).get("ts"))
+        if pr is None and claim.state in ("building", "stalled") and report and (
+                report.get("stop_reason") == "permission-denied" or report.get("exhausted") is True):
+            # The developer must act: never rescued, resumed or redispatched; only a newer report ends it.
+            claim.reason = "permission-denied" if report.get("stop_reason") == "permission-denied" else "exhausted"
+            claim.since = fmt_ts(reported) if reported else None
+            claim.state = "waiting"
+        elif claim.state == "building" and wt and not (claim.lock and claim.lock[0] == "ours"):
+            committed = commit_time(wt["path"])
+            if committed and not (reported and reported > committed):
+                claim.state, claim.since = "idle", fmt_ts(committed)
+                if n in nudges and nudges[n] >= committed:
+                    claim.nudged = fmt_ts(nudges[n])
+        if wt and pr is None and claim.state in ("building", "idle", "stalled", "waiting", "elsewhere"):
             claim.changes = changes(wt["path"], wt["branch"])
         out[n] = claim
     return out

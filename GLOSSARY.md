@@ -145,7 +145,7 @@ A config rule that, while a ticket is open, nothing else touches a path. Source:
 _Avoid_: lock, freeze
 
 **Shared file**:
-A file many PRs edit, listed in the config with the only change each PR may make; the merge sweep resolves collisions in it by replaying the PR's lines onto main. Source: `skills/setup/config-template.md`.
+A file many PRs edit, listed in the config with the only change each PR may make; the merge sweep resolves collisions in it by replaying the PR's lines onto main. Paths match the listed globs case-sensitively, on every platform. Source: `skills/setup/config-template.md`.
 _Avoid_: hot file, common file
 
 ### Merging

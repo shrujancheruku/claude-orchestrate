@@ -147,6 +147,23 @@ class ProfileTest(unittest.TestCase):
         idle = self.fx.run()["metrics"]["idle_s"]
         self.assertEqual((idle["overlap"], idle["empty"]), (600, 600))
 
+    def test_an_idle_claimed_ticket_counts_its_slot_seconds_as_worker_idle(self):
+        self.fx.passes([
+            {"ts": at(1), "slots": 2, "free": 1, "claimed": {"1": "building", "2": "idle"}, "idle": {"empty": 1}},
+            {"ts": at(31), "slots": 2, "free": 2, "claimed": {}, "idle": {"empty": 2}},
+        ])
+        idle = self.fx.run()["metrics"]["idle_s"]
+        self.assertEqual(idle["worker-idle"], 1800)
+
+    def test_a_nudge_record_is_not_a_pass(self):
+        import subprocess
+        self.fx.passes([{"ts": at(1), "slots": 2, "free": 0, "idle": {}}])
+        subprocess.run([sys.executable, str(SCRIPTS / "profile.py"), "record", "--repo", str(self.fx.repo),
+                        "--session", SESSION, "--nudged", "7"], check=True)
+        self.assertEqual(len(runlog.read_passes(self.fx.repo, SESSION)), 1)
+        raw = [json.loads(l) for l in runlog.log_path(self.fx.repo, runlog.PASS_LOG).read_text().splitlines()]
+        self.assertEqual((raw[-1]["scope"], raw[-1]["nudged"]), ("nudge", [7]))
+
     def test_an_unchecked_idle_reason_round_trips_through_record_and_shows_in_the_summary(self):
         # A slot left empty because holds exited 2 is `unchecked`, not `limit` (which means a usage limit only).
         for ts, idle in ((at(1), {}), (at(31), {"unchecked": 1, "empty": 1})):
