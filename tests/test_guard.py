@@ -47,6 +47,12 @@ def reason_of(out):
     return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
 
 
+def is_unapproved(out):
+    """The guard denied only because no rule approves the call (#567), not because a rule refuses it."""
+    return bool(out) and json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"].startswith(
+        "orchestrate guard: " + GUARD_MODULE.UNAPPROVED_MARK)
+
+
 def decide(agent_type, command, cwd=None, background=None, timeout=None, transcript=None):
     payload = {"tool_name": "Bash", "tool_input": {"command": command}}
     if background is not None:
@@ -60,7 +66,9 @@ def decide(agent_type, command, cwd=None, background=None, timeout=None, transcr
     if cwd is not None:
         payload["cwd"] = str(cwd)
     out = run_hook(payload)
-    return "deny" if out and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" else "allow"
+    # The table cases below are about the rules: "allow" is "no rule refuses it". A background role's call that
+    # no rule approves is also denied now (#567); the tests of that behaviour use decide_full.
+    return "deny" if out and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" and not is_unapproved(out) else "allow"
 
 
 CASES = [
@@ -857,8 +865,9 @@ class GuardTest(unittest.TestCase):
 SCRIPTS = str(GUARD.parent.parent / "scripts")
 
 
-def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None, session_id=None, transcript=None):
-    """The guard's decision JSON as a dict (None for silence)."""
+def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None, session_id=None, transcript=None, full=False):
+    """The guard's decision JSON as a dict (None for silence). A deny that only says no rule approves the call
+    (#567) reads as None here ("not approved, not refused by a rule"); `full=True` returns it."""
     payload = {"tool_name": tool_name, "tool_input": tool_input if tool_input is not None else {"command": command}}
     if session_id is not None:
         payload["session_id"] = session_id
@@ -869,6 +878,8 @@ def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None, sessio
     if cwd is not None:
         payload["cwd"] = str(cwd)
     out = run_hook(payload)
+    if is_unapproved(out) and not full:
+        return None
     return json.loads(out)["hookSpecificOutput"] if out else None
 
 
@@ -1334,10 +1345,13 @@ class RoutineApprovalTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertIsNone(raw(None, command, self.main))
 
-    def test_edits_to_permission_settings_and_git_internals_keep_their_prompt(self):
+    def test_edits_to_permission_settings_and_git_internals_are_denied(self):
+        # A worker never gets the prompt these used to keep (#567): it is told to change only its ticket's files.
         for rel in (".claude/settings.json", ".claude/settings.local.json", ".git", ".git/hooks/pre-push"):
             with self.subTest(rel):
-                self.assertIsNone(raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)}))
+                out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("git internals or a settings file", out["permissionDecisionReason"])
         for rel in (".claude/pr-body.md", "settings.json", ".claude/agents/x.md"):
             with self.subTest(rel):
                 out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
@@ -1372,8 +1386,14 @@ class RoutineApprovalTest(unittest.TestCase):
         out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / "link")})
         self.assertEqual(out["permissionDecision"], "deny")
 
-    def test_worker_edit_in_scratch_space_outside_every_checkout_stays_silent(self):
-        self.assertIsNone(raw("orchestrate:worker", None, self.work, "Write", {"file_path": "/private/tmp/scratch/body.md"}))
+    def test_worker_edit_in_scratch_space_outside_its_worktree_is_denied_with_the_way_out(self):
+        # acceptEdits covers only the session's own dirs, so a Write to /tmp prompted (#567).
+        for path in ("/private/tmp/scratch/body.md", "/tmp/c566/cmp.py", "/private/tmp/c566/edit_tests.py"):
+            with self.subTest(path):
+                out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": path})
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("Write scratch files inside your worktree", out["permissionDecisionReason"])
+                self.assertIn("--body-file -", out["permissionDecisionReason"])
 
     def test_other_roles_and_other_cwds_are_silent_for_edits(self):
         path = {"file_path": str(self.main / "README.md")}
@@ -1628,8 +1648,14 @@ class GuardEntryPoint(unittest.TestCase):
         self.assertTrue(out["hookSpecificOutput"]["permissionDecisionReason"].startswith("orchestrate guard: "))
 
     def test_allow_prints_nothing(self):
-        payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "curl -s example.com"}}
+        # Another plugin's agent is never touched.
+        payload = {"agent_type": "other-plugin:scout", "tool_input": {"command": "curl -s example.com"}}
         self.assertEqual(self.run_entry(json.dumps(payload)), "")
+
+    def test_an_unapproved_background_call_is_denied_with_a_reason(self):
+        payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "curl -s example.com"}}
+        reason = json.loads(self.run_entry(json.dumps(payload)))["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("not approved for a scout", reason)
 
     def test_malformed_input_is_allowed_silently(self):
         self.assertEqual(self.run_entry("{not json"), "")

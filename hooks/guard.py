@@ -1475,20 +1475,21 @@ def edit_decision(tool_name: str, tool_input: object, cwd: str) -> tuple | None:
         return None  # not in an agent worktree, or no path to judge: the permission layer decides
     target = Path(os.path.realpath(path if os.path.isabs(path) else os.path.join(cwd, path)))
     if target == worktree or worktree in target.parents:
-        # Writes that change the worker's own permissions or git internals keep their prompt.
+        # Writes that change the worker's own permissions or git internals are refused: a background worker
+        # has nobody to answer the prompt they would get (#567).
         parts = target.relative_to(worktree).parts if target != worktree else ()
         if parts[:1] == (".git",) or (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
-            return None
+            return "deny", (f"the worker role can't edit {path}: it is git internals or a settings file. "
+                            "Change only your ticket's files.")
         # Only `default` mode reaches this allow (an Edit there would prompt). `acceptEdits` and `bypassPermissions`
         # pass the edit anyway, and under `auto` the classifier skips a subagent's edit before a hook allow
         # matters (#378, #407). Kept: it costs nothing and covers a worker run in `default`.
         return "allow", "routine worker step"
-    in_temp = any(str(target) == t or str(target).startswith(t + "/") for t in TEMP_ROOTS)
-    in_repo = any(root == target or root in target.parents for root in repo_roots(cwd))
-    if in_temp and not in_repo:
-        return None  # scratch space outside every checkout
+    # Outside the worktree is a deny even in a temp dir: `acceptEdits` covers only the session's own dirs, so
+    # a Write to /tmp/... prompted (#567).
     return "deny", (f"the worker role can't edit {path}: it is outside your worktree ({worktree}). "
-                    "Make every change inside your own worktree.")
+                    "Write scratch files inside your worktree (stage by explicit path so they never ship), "
+                    "or pass a PR body with `--body-file -`.")
 
 
 def one_plain_command(parsed: "Parsed") -> Command | None:
@@ -1497,6 +1498,23 @@ def one_plain_command(parsed: "Parsed") -> Command | None:
         return None
     cmd = parsed.cmds[0]
     return cmd if cmd.depth == 0 and only_plain_words(cmd) and not cmd.heredocs and cmd.words else None
+
+
+def one_body_heredoc_command(parsed: "Parsed") -> Command | None:
+    """A worker's `gh pr create|edit ... --body-file - <<'EOF' ... EOF` (#567): the only command of the line, plain
+    words, and one quoted heredoc, which is data the shell never runs (an unquoted delimiter would expand
+    `$(...)` in the body). Returned without the heredoc, so the usual gh checks judge the rest."""
+    if len(parsed.cmds) != 1:
+        return None
+    cmd = parsed.cmds[0]
+    if (cmd.depth or not cmd.words or len(cmd.heredocs) != 1 or not cmd.heredocs[0].quoted or not cmd.heredocs[0].closed
+            or cmd.redirects or not only_plain_words(cmd) or cmd.words[0].text != "gh"):
+        return None
+    args = [w.text for w in cmd.words]
+    if args[:2] != ["gh", "pr"] or not any(a == "--body-file=-" or (a == "-" and args[i - 1] in ("--body-file", "-F"))
+                                             for i, a in enumerate(args)):
+        return None
+    return Command(cmd.words, cmd.redirects, [], cmd.depth, cmd.joiner, cmd.ends)
 
 
 def github_slug(url: str) -> str | None:
@@ -1567,6 +1585,27 @@ def orchestrator_board_form(cmd: Command, args: list) -> bool:
     return len(cmd.words) - len(args) == 1 and len(set(words)) == len(words) and all(w in BOARD_FLAGS for w in words)
 
 
+# The brief's branch name, `<n>-<slug>` (the config's `Branch:` convention), as a worker's first git step makes it.
+BRANCH_NAME = re.compile(r"\d+-[a-z0-9][a-z0-9-]*")
+
+
+def branch_step_ok(args: list, cwd: str) -> bool:
+    """A worker's `git switch -c <n>-<slug> origin/<default>` or `git switch -C <n>-<slug> origin/<that branch>`
+    (agents/worker.md, Orient), with `-q` allowed. Another name form, another start point, or a branch
+    that is a default branch is not the step (#567). It only moves the worker's own worktree."""
+    if any(a.dynamic or a.glob for a in args):
+        return False
+    rest = [a.text for a in args if a.text not in ("-q", "--quiet")]
+    if len(rest) != 3:
+        return False
+    flag, name, start = rest
+    if flag not in ("-c", "-C") or not BRANCH_NAME.fullmatch(name) or name in default_branches(cwd):
+        return False
+    if flag == "-c":
+        return start in {f"origin/{d}" for d in default_branches(cwd)}
+    return start == f"origin/{name}"
+
+
 def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
     """A worker's `git add`, `git commit` or push of its own ticket branch, from inside its worktree."""
     worktree = worker_worktree(cwd)
@@ -1575,6 +1614,8 @@ def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
     call = parsed.calls[0]
     if call.is_sub("add", "commit"):
         return not call.options
+    if call.is_sub("switch"):
+        return not call.options and branch_step_ok(call.args, cwd)
     if not call.is_sub("push"):
         return False
     if [(n, v.text if v else None) for n, v in call.options] not in ([], [("-c", CREDENTIAL_OPTION)]):
@@ -2418,7 +2459,7 @@ def approval(role: str | None, command: str, cwd: str, session: str = "") -> boo
     elif role is None and config_path(cwd) and chain_approved(parsed, cwd):
         return True
     else:
-        cmd = one_plain_command(parsed)
+        cmd = one_plain_command(parsed) or (one_body_heredoc_command(parsed) if role == "worker" else None)
         if cmd is not None and routine_single(role, parsed, cmd, cwd, session):
             return True
     return compound_approved(role, parsed, cwd, session)
@@ -2498,6 +2539,64 @@ def orchestrator_waits(parsed: "Parsed") -> bool:
     return False
 
 
+# --- A background role never prompts (#567). ---
+#
+# A worker, reviewer or scout runs with nobody to answer a permission prompt, and a Sonnet worker given a prompt
+# retried with ever stranger scripts. So a call the guard can't approve is denied with the reason and the approved
+# way to do it, and a call the agent really needs becomes a stop it reports. Fail closed (ADR 0002): a crash while
+# deciding is a deny too. The orchestrator's own session keeps the fall-through to the prompt (the developer is there).
+
+# Every refusal of an unapproved call starts with this, so a reader (and the tests) can tell it from a rule's refusal.
+UNAPPROVED_MARK = "not approved for"
+INTERPRETERS = frozenset(("python", "python3", "perl", "ruby", "node", "php", "osascript", "lua", "tclsh"))
+EDIT_REASON = ("edit files with the Edit or Write tool, never a heredoc script, `python3 -c`, `perl -i` or similar "
+               "(the guard approves those two inside your worktree)")
+MIXED_REASON = "run the write on its own, as a separate Bash call: a write chained with other commands is not approved"
+GENERIC_REASON = "find an approved form, or stop and report what you need"
+MONITOR_REASON = "run the tests in the foreground, or wait with an approved loop (`until <read-only test>; do sleep N; done`)"
+SCRIPT_EDIT_FLAGS = re.compile(r"-[A-Za-z]*[ceEi][A-Za-z]*|--eval|--command")
+
+
+def is_script_edit(parsed: "Parsed") -> bool:
+    """A heredoc, an interpreter's inline program, `perl -i`/`sed -i`, or a redirect that writes a file: how a
+    worker edits files when it should use Edit/Write."""
+    for cmd in parsed.cmds:
+        if cmd.heredocs or any(op in WRITE_REDIRECTS and t.text not in ("/dev/null", "1", "2") for op, t in cmd.redirects):
+            return True
+        k = command_index(cmd.words)
+        if k >= len(cmd.words) or cmd.words[k].dynamic:
+            continue
+        head, rest = basename(cmd.words[k]), [w.text for w in cmd.words[k + 1:]]
+        if head in INTERPRETERS and (not rest or rest[0] == "-" or any(SCRIPT_EDIT_FLAGS.fullmatch(a) for a in rest if a.startswith("-"))):
+            return True
+        if head in ("sed", "perl") and any(re.fullmatch(r"-[A-Za-z]*i.*|--in-place.*", a) for a in rest):
+            return True
+    return False
+
+
+def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool: str = "Bash") -> str:
+    """Why a background role's call got no approval, and what to do instead."""
+    who = {"worker": "a worker", "reviewer": "a reviewer", "scout": "a scout"}.get(rules_role(role), "this role")
+    head = f"{UNAPPROVED_MARK} {who}: "
+    if tool == "Monitor":
+        return head + MONITOR_REASON
+    if is_script_edit(parsed):
+        return head + EDIT_REASON
+    if len(parsed.cmds) > 1:
+        reads = [read_command_ok(c, os.path.realpath(cwd or "."), cwd) if c.words and not c.heredocs and not c.depth else False
+                 for c in parsed.cmds]
+        for cmd, is_read in zip(parsed.cmds, reads):
+            if is_read or not cmd.words or cmd.depth or cmd.heredocs:
+                continue
+            alone = Command(cmd.words, cmd.redirects, cmd.heredocs, cmd.depth, None, None)
+            try:
+                if compound_approved(role, Parsed([alone]), cwd, session):
+                    return head + MIXED_REASON
+            except Exception:
+                pass
+    return head + GENERIC_REASON
+
+
 def allow(reason: str) -> None:
     json.dump({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                       "permissionDecisionReason": f"orchestrate guard: {reason}"}}, sys.stdout)
@@ -2538,22 +2637,30 @@ def main() -> None:
         except Exception:
             pass  # silence: the permission layer decides
         return
+    tool = "Monitor" if data.get("tool_name") == "Monitor" else "Bash"
     try:
         if not isinstance(command, str):
             raise TypeError("command is not a string")
-        reason = verdict(role, command, cwd, tool_input.get("run_in_background") is True,
-                         tool_input.get("timeout"))
+        reason = verdict(role, command, cwd, tool == "Bash" and tool_input.get("run_in_background") is True,
+                         tool_input.get("timeout") if tool == "Bash" else None)
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
                   f"Rewrite it more simply. {NEXT_STEP[rules_role(role)]}")
     if reason:
         deny(reason)
         return
+    # No rule refused it. A background role never gets the permission prompt (#567): a call that is not a routine
+    # step is denied with the approved way to do it, and a crash while deciding is a deny too (ADR 0002).
     try:
         if approval(role, command, cwd, session):
             allow(f"routine {role} step")
+            return
     except Exception:
-        pass  # silence: the permission layer decides
+        pass
+    try:
+        deny(unapproved_reason(role, Parsed(parse(command)), cwd, session, tool))
+    except Exception:
+        deny(f"{UNAPPROVED_MARK} this role: {GENERIC_REASON}")
 
 
 if __name__ == "__main__":
