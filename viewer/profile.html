@@ -285,6 +285,7 @@ function timeline(p) {
   }
   card.append(chart(s));
   const idle = Object.entries(p.metrics.idle_s).filter(([, v]) => v >= 60);
+  card.append(el("p", { class: "note" }, "Idle reasons: overlap (touch map held), gate (start gate), empty (nothing takeable), unchecked (holds, frontier or claims could not run), limit (usage limit)."));
   card.append(el("p", { class: "note" }, "Idle slot time: " + (idle.length ? idle.map(([k, v]) => `${k} ${fmtDur(v)}`).join(" · ") : "none") +
     (p.sources.pass_log ? "" : ". No pass log for this session, so idle reasons are unknown.")));
   const det = el("details");
