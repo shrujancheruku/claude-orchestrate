@@ -10,8 +10,8 @@ PermissionRequest (#569). Prints, in this order:
 The list shows the newest 40 prompts, with a `... <n> earlier` line first when more matched; the counts cover all.
 --session ID keeps one session's prompts. --since ISO keeps prompts at or after that time.
 --watermark means "since the last mark": the newer of the newest line of `.claude/orchestrate-prompts.mark` (written
-by --mark) and the newest pass record (`profile.py record`, written only under --profile), for --session (any
-session without it). With neither yet it keeps everything and says so on the `prompts:` line
+by --mark) and the newest pass record (`profile.py record`, written only under --profile), both for --session only; with no
+session only the sessionless marks (the lead's own) count, and no pass records. With neither yet it keeps everything and says so on the `prompts:` line
 (`prompts: <n> (no mark yet: counted from the start of the log)`), so a whole-log count is never read as per-pass.
 --mark appends the current time to the mark file for --session (or for no session), prints `mark: <time>`, and counts
 nothing: the lead runs it after posting a digest, the orchestrator after a pass table, so every run has a mark whether
