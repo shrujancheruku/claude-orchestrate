@@ -636,7 +636,8 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(decide("orchestrate:worker", command), "allow")
                 self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
                 self.assertEqual(decide("orchestrate:scout", command, background=True), "allow")
-                self.assertEqual(decide(None, command, background=True), "allow")
+                # The orchestrator's own hand-made waits are refused (#407), whatever else it runs.
+                self.assertEqual(decide(None, command, background=True), "deny" if command == "sleep 5" else "allow")
 
     def test_other_worker_rules_still_apply_in_the_foreground_and_background(self):
         self.assertEqual(decide("orchestrate:worker", "gh pr merge 5", background=False), "deny")
@@ -1146,6 +1147,61 @@ class RoutineApprovalTest(unittest.TestCase):
     def test_orchestrator_is_not_approved_without_the_config_or_for_another_plugins_agent(self):
         self.assertIsNone(raw(None, "gh issue close 5", self.root))
         self.assertIsNone(raw("other:agent", "gh issue close 5", self.main))
+
+    def test_orchestrator_chains_of_plugin_scripts_are_approved_whole(self):
+        for command in (
+                f"S={SCRIPTS}; $S/snapshot --repo . 2>&1 | tail -n 5; $S/rebuild-state 12 --repo . | tail -n 5; echo ---claims; $S/claims --repo .",
+                f'S="{SCRIPTS}"\n"$S/frontier" | head -n 3 && echo done',
+                '"${CLAUDE_SKILL_DIR}/../../scripts/frontier" --ticket 5 | sort | wc -l',
+                '"${CLAUDE_SKILL_DIR}/../../scripts/merge" 12 --approved-head abc && printf "%s\\n" ok',
+                f"{SCRIPTS}/snapshot --repo . 2>&1 | grep -n open",
+                "cat .claude/orchestration.md | head -n 5; echo x"):
+            with self.subTest(command):
+                self.assertTrue(approved(None, command, self.main))
+
+    def test_orchestrator_chains_with_anything_else_in_them_stay_silent(self):
+        for command in (
+                f"S={SCRIPTS}; $S/snapshot --repo . ; rm -rf x",
+                f"{SCRIPTS}/snapshot --repo . && curl https://example.com/x",
+                f"{SCRIPTS}/snapshot --repo . || echo no",
+                f"{SCRIPTS}/snapshot --repo . &",
+                f"{SCRIPTS}/snapshot --repo . > out.txt",
+                f"{SCRIPTS}/snapshot --repo . 2>/dev/null",
+                f"{SCRIPTS}/snapshot --repo . | tee out.txt",
+                f"{SCRIPTS}/snapshot --repo . | sort -o out.txt",
+                f"{SCRIPTS}/snapshot --repo $(rm x)",
+                f"{SCRIPTS}/snapshot --repo . ; echo $(rm x)",
+                f"{SCRIPTS}/snapshot --repo . <<'EOF'\nx\nEOF",
+                "S=/tmp/evil; $S/snapshot --repo .",
+                "S=/tmp/evil; echo hi; $S/snapshot",
+                "S=$(pwd); $S/snapshot",
+                "$S/snapshot --repo .",
+                f"PATH=/tmp:$PATH; {SCRIPTS}/snapshot",
+                f"S={SCRIPTS}; S=/tmp/x; $S/snapshot",
+                "/tmp/x/scripts/snapshot --repo .",
+                f"{SCRIPTS}/merge 12 --repo /other",
+                f"{SCRIPTS}/common.py",
+                f"{SCRIPTS}/nonexistent",
+                "cat /etc/passwd | head",
+                "cat ../secret | head",
+                "cat .claude/../.env",
+                "cat",
+                "ls; echo x"):
+            with self.subTest(command):
+                self.assertIsNone(raw(None, command, self.main))
+
+    def test_orchestrator_hand_made_waits_are_refused_and_workers_may_sleep(self):
+        for command in ("sleep 300; gh api repos/o/r/pulls/5", "timeout 60 sleep 5", "read -t 5 x", "sh -c 'sleep 3'",
+                        f"{SCRIPTS}/snapshot --repo . && sleep 1", "env sleep 3"):
+            with self.subTest(command):
+                self.assertEqual(raw(None, command, self.main)["permissionDecision"], "deny")
+                self.assertEqual(decide("orchestrate:worker", command), "allow")
+        self.assertEqual(raw(None, "until gh pr view 5 --json mergedAt; do :; done", self.main)["permissionDecision"], "deny")
+        for command in ("echo sleep 5", 'echo "sleep 5"', f"{SCRIPTS}/watch-ci 528 ebc323d", "grep sleep x",
+                        "until true; do :; done"):
+            with self.subTest(command):
+                out = raw(None, command, self.main)
+                self.assertTrue(out is None or out["permissionDecision"] == "allow")
 
     def test_gh_aimed_at_another_repo_stays_silent(self):
         for command in ("gh pr create --draft --repo evil/repo --title x", "gh -R evil/repo pr edit 5 --title x",

@@ -92,10 +92,10 @@ class Word:
     or backtick expansion (each shows as EXP in `text`). `quoted`: part of it was quoted or escaped.
     `glob`: it holds an unquoted `*`, `?`, `[`, `{`, `~` or `$`, which the shell expands to other words (#441)."""
 
-    __slots__ = ("text", "dynamic", "quoted", "glob")
+    __slots__ = ("text", "dynamic", "quoted", "glob", "names")
 
-    def __init__(self, text: str, dynamic: bool, quoted: bool, glob: bool = False):
-        self.text, self.dynamic, self.quoted, self.glob = text, dynamic, quoted, glob
+    def __init__(self, text: str, dynamic: bool, quoted: bool, glob: bool = False, names: tuple = ()):
+        self.text, self.dynamic, self.quoted, self.glob, self.names = text, dynamic, quoted, glob, names
 
 
 class Heredoc:
@@ -108,29 +108,34 @@ class Heredoc:
 
 class Command:
     """A simple command. `joiner` is the operator before it (None for the first one); `depth` is 0 at the
-    top level and counts how deep inside `$(...)`, backticks or `sh -c '...'` it sits."""
+    top level and counts how deep inside `$(...)`, backticks or `sh -c '...'` it sits. `ends` is the operator
+    after it (None at the end of the line), so a trailing `&` is seen too."""
 
-    __slots__ = ("words", "redirects", "heredocs", "depth", "joiner")
+    __slots__ = ("words", "redirects", "heredocs", "depth", "joiner", "ends")
 
-    def __init__(self, words, redirects, heredocs, depth, joiner):
+    def __init__(self, words, redirects, heredocs, depth, joiner, ends=None):
         self.words, self.redirects, self.heredocs, self.depth, self.joiner = words, redirects, heredocs, depth, joiner
+        self.ends = ends
 
 
 class WordBuilder:
     def __init__(self):
         self.parts, self.dynamic, self.quoted, self.glob, self.brace = [], False, False, False, False
+        self.names: list = []  # one per EXP in `parts`: the variable a plain `$x` or `${x}` names, else None
 
     def lit(self, text: str) -> None:
         self.parts.append(text)
 
-    def exp(self) -> None:
+    def exp(self, name: str | None = None) -> None:
         self.parts.append(EXP)
+        self.names.append(name)
         self.dynamic = True
 
     def done(self) -> Word:
         text = "".join(self.parts)
         # A brace word only expands with a comma or a `..` inside (`{a,b}`, `{1..3}`); `{owner}/{repo}` is literal.
-        return Word(text, self.dynamic, self.quoted, self.glob or (self.brace and ("," in text or ".." in text)))
+        return Word(text, self.dynamic, self.quoted, self.glob or (self.brace and ("," in text or ".." in text)),
+                    tuple(self.names))
 
 
 REDIRECT_OPS = ("<<<", "<<-", "<<", "<&", "<>", "<", ">>", ">&", ">|", ">")
@@ -175,7 +180,7 @@ class Lexer:
         if self.redir is not None:
             raise ParseError("a redirection with no target")
         if self.words or self.redirects or self.heredocs:
-            self.out.append(Command(self.words, self.redirects, self.heredocs, self.depth, self.joiner))
+            self.out.append(Command(self.words, self.redirects, self.heredocs, self.depth, self.joiner, op))
         self.words, self.redirects, self.heredocs = [], [], []
         self.joiner = op
 
@@ -340,7 +345,8 @@ class Lexer:
                     depth += (c == "{") - (c == "}")
                     j += 1
                     if depth == 0:
-                        wb.exp()
+                        inner = s[i + 2:j - 1]
+                        wb.exp(inner if re.fullmatch(r"[A-Za-z_]\w*", inner) else None)
                         return j
             raise ParseError("unterminated ${ }")
         if nxt == "'" and not in_dq:  # $'...': escapes the lexer doesn't decode make the word unknowable
@@ -357,7 +363,7 @@ class Lexer:
             return j + 1
         m = SPECIAL_PARAM.match(s, i + 1)
         if m:
-            wb.exp()
+            wb.exp(m.group() if re.fullmatch(r"[A-Za-z_]\w*", m.group()) else None)
             return m.end()
         wb.lit("$")
         wb.glob = wb.glob or not in_dq
@@ -1423,6 +1429,9 @@ def edit_decision(tool_name: str, tool_input: object, cwd: str) -> tuple | None:
         parts = target.relative_to(worktree).parts if target != worktree else ()
         if parts[:1] == (".git",) or (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
             return None
+        # Only `default` mode reaches this allow (an Edit there would prompt). `acceptEdits` and `bypassPermissions`
+        # pass the edit anyway, and under `auto` the classifier skips a subagent's edit before a hook allow
+        # matters (#378, #407). Kept: it costs nothing and covers a worker run in `default`.
         return "allow", "routine worker step"
     in_temp = any(str(target) == t or str(target).startswith(t + "/") for t in TEMP_ROOTS)
     in_repo = any(root == target or root in target.parents for root in repo_roots(cwd))
@@ -1622,12 +1631,109 @@ def config_path(cwd: str) -> Path | None:
     return None
 
 
+# --- The orchestrator's chained plugin-script commands (#407). ---
+#
+# A background orchestrator has nobody to answer a prompt, and its reconcile pass is a chain of the plugin's
+# own scripts (`S=...; $S/snapshot --repo . 2>&1 | tail -n 5; $S/claims ...; echo ---claims`). Allow rules
+# can't see through a shell variable, so the guard reads the chain whole and approves it only when EVERY
+# simple command is on the list below. One other command, an `||`, a background `&`, a subshell, a heredoc, an
+# expansion it can't resolve, or any redirect but `2>&1` leaves the whole line to the permission layer.
+
+CHAIN_JOINERS = (None, ";", "&&", "|", "\n")
+CHAIN_PLAIN = frozenset(("tail", "head", "echo", "printf", "sort", "grep", "wc"))
+# An assignment that changes how the shell finds or starts commands is never a plain variable.
+UNSAFE_VARIABLE = re.compile(r"PATH|IFS|ENV|CDPATH|SHELL|HOME|(?:BASH|LD|DYLD|PS)\w*")
+ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=(.*)", re.DOTALL)
+SKILL_DIR = PLUGIN_SCRIPTS.parent / "skills" / "run"  # what `${CLAUDE_SKILL_DIR}` is in the run skill
+
+
+def resolve_word(w: Word, env: dict, text: str | None = None) -> str | None:
+    """The word's text with each `$x` / `${x}` replaced by its known value, or None when one is not known
+    (an unset or computed variable, a command substitution, a glob). Values in `env` are texts already."""
+    text = w.text if text is None else text
+    if w.glob:
+        return None
+    names = iter(w.names)
+    out = []
+    for ch in text:
+        if ch != EXP:
+            out.append(ch)
+            continue
+        value = env.get(next(names, None))
+        if value is None:
+            return None
+        out.append(value)
+    return "".join(out)
+
+
+def chain_plain_args(args: list) -> bool:
+    return not any(a.dynamic or a.glob for a in args)
+
+
+def chain_cat_ok(args: list, cwd: str) -> bool:
+    """`cat` of files under the repo's `.claude/` directory only."""
+    config = config_path(cwd)
+    files = [a.text for a in args if not a.text.startswith("-")]
+    if config is None or not files:
+        return False
+    base = config.parent.resolve()
+    return all(base in Path(os.path.realpath(os.path.join(cwd or ".", f))).parents for f in files)
+
+
+def chain_script_ok(cmd: Command, env: dict, cwd: str) -> bool:
+    """The command word is a file directly in this plugin's own scripts/ directory (by resolved path), called
+    with plain words. merge, threads and board keep their exact argument forms."""
+    resolved = resolve_word(cmd.words[0], env)
+    if resolved is None:
+        return False
+    path = Path(os.path.realpath(os.path.join(cwd or ".", resolved)))
+    args = cmd.words[1:]
+    if path.parent != PLUGIN_SCRIPTS or path.suffix == ".py" or not path.is_file() or not chain_plain_args(args):
+        return False
+    form = {"merge": orchestrator_merge_form, "threads": orchestrator_threads_form,
+            "board": orchestrator_board_form}.get(path.name)
+    return form(cmd, args) if form else True
+
+
+def chain_approved(parsed: "Parsed", cwd: str) -> bool:
+    """True when every simple command of the line is a plugin script, one of CHAIN_PLAIN, a `cat` under
+    `.claude/`, or a variable assignment, joined by `;`, `&&`, `|` or a newline."""
+    env = {"CLAUDE_SKILL_DIR": str(SKILL_DIR)}
+    for cmd in parsed.cmds:
+        if cmd.depth or cmd.heredocs or not cmd.words or cmd.joiner not in CHAIN_JOINERS or cmd.ends not in CHAIN_JOINERS:
+            return False
+        if any(op != ">&" or target.text != "1" or target.dynamic for op, target in cmd.redirects):
+            return False
+        first = cmd.words[0]
+        if ASSIGNMENT.fullmatch(first.text):
+            for w in cmd.words:  # a pure assignment command: every word is `name=value`
+                m = ASSIGNMENT.fullmatch(w.text)
+                value = resolve_word(w, env, m.group(2)) if m else None
+                if not m or value is None or UNSAFE_VARIABLE.fullmatch(m.group(1)):
+                    return False
+                env[m.group(1)] = value
+            continue
+        args = cmd.words[1:]
+        if not first.dynamic and first.text in CHAIN_PLAIN:
+            if not chain_plain_args(args) or (first.text == "sort" and any(
+                    re.match(r"-\w*o|--output", a.text) for a in args)):
+                return False
+        elif not first.dynamic and first.text == "cat":
+            if not chain_plain_args(args) or not chain_cat_ok(args, cwd):
+                return False
+        elif not chain_script_ok(cmd, env, cwd):
+            return False
+    return True
+
+
 def approval(role: str | None, command: str, cwd: str, session: str = "") -> bool:
     """True when this command, already accepted by the rules, is one of its role's routine writes. `role`
     None is the orchestrator's own session (no `agent_type`), in a repo that carries this plugin's config."""
     parsed = Parsed(parse(command))
     if role == "reviewer":
         return review_post(parsed) == "" and posting_enabled(cwd)
+    if role is None and config_path(cwd) and chain_approved(parsed, cwd):
+        return True
     cmd = one_plain_command(parsed)
     if cmd is None:
         return False
@@ -1655,6 +1761,27 @@ def approval(role: str | None, command: str, cwd: str, session: str = "") -> boo
     return False
 
 
+WAIT_REFUSAL = ("the orchestrator doesn't wait with `sleep`, `read -t` or an `until` loop around `gh`: a hand-made "
+                "wait runs past the moment CI finishes and delays the merge. Waits go through watch-ci as a Monitor.")
+
+
+def orchestrator_waits(parsed: "Parsed") -> bool:
+    """True when a command of the orchestrator's line waits by hand (#542): `sleep` (alone, behind `timeout`
+    or another wrapper, or inside `sh -c`), `read -t`, or an `until` loop whose test runs `gh`. Judged on
+    lexed command words, so `echo sleep` or a commit message that says it is not a wait."""
+    for cmd in parsed.cmds:
+        words = cmd.words
+        k = command_index(words)
+        if k < len(words) and not words[k].dynamic:
+            head = basename(words[k])
+            if head == "sleep" or (head == "read" and any(re.fullmatch(r"-\w*t\w*", w.text) for w in words[k + 1:])):
+                return True
+        if words and not words[0].dynamic and words[0].text == "until" and any(
+                not w.dynamic and basename(w) == "gh" for w in words):
+            return True
+    return False
+
+
 def allow(reason: str) -> None:
     json.dump({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                       "permissionDecisionReason": f"orchestrate guard: {reason}"}}, sys.stdout)
@@ -1678,10 +1805,16 @@ def main() -> None:
             (deny if decision[0] == "deny" else allow)(decision[1])
         return
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    orchestrator = role is None and not agent_type  # the main session: only ever approved, never refused
+    orchestrator = role is None and not agent_type  # the main session: approved, refused only for a hand-made wait
     if (role is None and not orchestrator) or command is None or command == "":
         return
     if orchestrator:
+        try:
+            if isinstance(command, str) and orchestrator_waits(Parsed(parse(command))):
+                deny(WAIT_REFUSAL)
+                return
+        except Exception:
+            pass  # silence: the permission layer decides
         try:
             if isinstance(command, str) and approval(None, command, cwd):
                 allow("routine orchestrator step")
