@@ -126,7 +126,9 @@ class MergeTest(MergeMixin, unittest.TestCase):
                  ("Head branch was modified. Review and try the merge again. (HTTP 409)", False, False),
                  ("Base branch was modified. Review and try the merge again. (HTTP 405)", False, True),
                  ("Merge already in progress (HTTP 405)", True, False),
-                 ("Server Error (HTTP 502)", False, True)]
+                 ("Server Error (HTTP 502)", False, True),
+                 ("PR 512 is not mergeable", False, False),
+                 ("Pull request #509 cannot be merged: 5 files, abc500d", False, False)]
         for text, progress, transient in cases:
             with self.subTest(text=text):
                 self.assertEqual(bool(ns["IN_PROGRESS"].search(text)), progress)
