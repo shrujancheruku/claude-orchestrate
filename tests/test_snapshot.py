@@ -78,7 +78,8 @@ class SnapshotTest(unittest.TestCase):
     def test_a_failed_write_leaves_the_old_file_and_no_temp_file(self):
         target = self.env.repo / FILE
         target.write_text("old", encoding="utf-8")
-        snap = tracker.Snapshot(None, issues=[], pr_files={})
+        # Every part given, so `write` reads nothing from gh (the real gh has no token in CI).
+        snap = tracker.Snapshot(None, repo={}, issues=[], prs=[], merged=[], abandoned=[], pr_files={})
         with unittest.mock.patch("os.replace", side_effect=OSError("boom")):
             with self.assertRaises(OSError):
                 snap.write(target)
