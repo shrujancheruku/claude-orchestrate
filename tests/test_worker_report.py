@@ -65,6 +65,10 @@ class WorkerReport(unittest.TestCase):
     def test_reviewer_report_with_another_suite_value_is_incomplete(self):
         self.assertEqual(self.reviewer("suite: probably fine\n"), "incomplete suite-unrecognised")
 
+    def test_reviewer_report_with_an_empty_suite_value_is_unrecognised(self):
+        self.assertEqual(self.reviewer("suite:\n"), "incomplete suite-unrecognised")
+        self.assertEqual(self.reviewer("suite:   \n"), "incomplete suite-unrecognised")
+
     def test_reviewer_mode_needs_no_branch_and_writes_no_event(self):
         self.reviewer("suite: pass\n")
         self.assertEqual(self.env.events(), [])

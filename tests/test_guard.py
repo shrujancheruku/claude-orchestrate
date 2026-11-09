@@ -497,6 +497,8 @@ THREADS_CASES = [
     ("worker", f"{T} 12 --all", "allow"),
     ("worker", f"{T} 12 resolve ID --fixed abc1234", "allow"),
     ("worker", f"{T} 12 resolve ID --left 'why'", "allow"),
+    ("worker", f"{T} 12 resolve ID --left 'why' --followup 7", "allow"),
+    ("worker", f"{T} 12 resolve ID --left 'why' --no-followup", "allow"),
     ("worker", f"{T} 12 reopen ID --why 'x'", "allow"),
     ("reviewer", f"{T} 12", "allow"),
     ("reviewer", f"{T} 12 --all", "allow"),
@@ -1027,6 +1029,8 @@ class RoutineApprovalTest(unittest.TestCase):
                         f"{SCRIPTS}/threads 12 resolve PRRT_x --left 'the worker finished; left for a follow-up'",
                         f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --verbose",
                         f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y --left x",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --followup 7 --verbose",
+                        f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y --left x --no-followup",
                         f"{SCRIPTS}/threads 12 resolve PRRT_x PRRT_y PRRT_z --fixed abc1234",
                         f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed abc1234"):
             with self.subTest(command):
@@ -1039,6 +1043,8 @@ class RoutineApprovalTest(unittest.TestCase):
             f"{SCRIPTS}/threads 12 resolve PRRT_x --lef x", f"{SCRIPTS}/threads 12 resolve PRRT_x --left=x",
             f"{SCRIPTS}/threads 12 resolve PRRT_x --left", f"{SCRIPTS}/threads 12 resolve PRRT_x",
             f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --fixed y",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed y --no-followup",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --followup $N",
             f"{SCRIPTS}/threads 12 resolve --left x --fixed y",
             f"{SCRIPTS}/threads 12 resolve --left x",  # no thread id
             f"{SCRIPTS}/threads 12 resolve PRRT_x -y --left x",  # an id starting with a dash

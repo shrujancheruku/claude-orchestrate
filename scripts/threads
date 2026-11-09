@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""threads [<pr>] [--all] | resolve <thread>... (--fixed <sha> | --left <why>) | reopen <thread>... --why <why> [--verbose] [--repo DIR]
+"""threads [<pr>] [--all] | resolve <thread>... (--fixed <sha> | --left <why> (--followup <issue> | --no-followup)) | reopen <thread>... --why <why> [--verbose] [--repo DIR]
 
 The one place a review thread is read, closed or reopened (ADR-0006; the rule "a review thread is closed with a reply by
 whoever acts on it" lives here, not in the prompts).
@@ -10,7 +10,12 @@ whoever acts on it" lives here, not in the prompts).
                             (the `fixed in` / `left:` / `reopened:` comment, indented). Nothing printed when none.
     threads <pr> resolve <thread>... --fixed <sha>   replies `fixed in <sha>`, then resolves; <sha> must be a commit
                                                      on the PR's branch at the remote
-    threads <pr> resolve <thread>... --left <why>    replies `left: <why>`, then resolves
+    threads <pr> resolve <thread>... --left <why> --followup <issue>
+                                                     replies `left: <why> (follow-up #<issue>)`, then resolves
+    threads <pr> resolve <thread>... --left <why> --no-followup
+                                                     replies `left: <why> (no follow-up)`, then resolves
+                            A left thread names the ticket that carries it, or says outright that none does (#442):
+                            `--left` refuses with neither flag, so a minor left behind is never lost unrecorded.
     threads <pr> reopen <thread>... --why <why>      replies `reopened: <why>`, then unresolves
 
 Leave <pr> out and the PR is the one of the checked-out branch (one pulls lookup by head branch): `threads`,
@@ -111,6 +116,8 @@ def main(argv=None) -> int:
     ap.add_argument("--all", action="store_true", help="list resolved threads too, with their closing reply")
     ap.add_argument("--fixed", metavar="SHA", help="resolve: the pushed commit that fixed it")
     ap.add_argument("--left", metavar="WHY", help="resolve: why a minor was left")
+    ap.add_argument("--followup", metavar="ISSUE", help="resolve --left: the follow-up ticket that carries the left thread")
+    ap.add_argument("--no-followup", action="store_true", help="resolve --left: no ticket carries it (recorded in the reply)")
     ap.add_argument("--why", metavar="WHY", help="reopen: what is still wrong")
     ap.add_argument("--verbose", action="store_true", help="print `writes: <n>` (mutation requests sent) on stderr")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
@@ -128,12 +135,19 @@ def main(argv=None) -> int:
             ap.error("--all lists; it takes no action")
         if args.action == "resolve" and (args.fixed is None) == (args.left is None):
             ap.error("resolve needs exactly one of --fixed <sha> and --left <why>")
+        if args.action == "resolve" and args.left is not None:
+            if (args.followup is None) == (not args.no_followup):
+                ap.error("--left needs exactly one of --followup <issue> and --no-followup")
+            if args.followup is not None and not args.followup.lstrip("#").isdigit():
+                ap.error("--followup needs an issue number")
+        elif args.followup is not None or args.no_followup:
+            ap.error("--followup and --no-followup go with resolve --left")
         if args.action == "reopen" and not args.why:
             ap.error("reopen needs --why <why>")
         if args.action == "resolve" and not (args.fixed or args.left):
             ap.error("--fixed and --left need a value")
-    elif args.thread or args.fixed or args.left or args.why:
-        ap.error("--fixed, --left, --why and a thread id go with resolve or reopen")
+    elif args.thread or args.fixed or args.left or args.why or args.followup is not None or args.no_followup:
+        ap.error("--fixed, --left, --followup, --no-followup, --why and a thread id go with resolve or reopen")
 
     cwd = args.repo
     sent = 0
@@ -164,7 +178,10 @@ def main(argv=None) -> int:
         if args.fixed and not on_branch(args.fixed, github.pr_commit_shas(pr, cwd=cwd)):
             return refuse(f"{args.fixed} is not a commit on PR #{pr}'s branch at the remote (push first)")
         if args.action == "resolve":
-            reply = f"fixed in {args.fixed}" if args.fixed else f"left: {args.left}"
+            if args.fixed:
+                reply = f"fixed in {args.fixed}"
+            else:
+                reply = f"left: {args.left} (follow-up #{args.followup.lstrip('#')})" if args.followup else f"left: {args.left} (no follow-up)"
             outcome, field = "resolved", RESOLVE_FIELD
         else:
             reply, outcome, field = f"reopened: {args.why}", "reopened", UNRESOLVE_FIELD
