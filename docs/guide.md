@@ -53,7 +53,7 @@ Run the orchestrator in `acceptEdits` or `bypassPermissions`, never in `auto`. W
 `scripts/launch` and `/orchestrate:start` already start the orchestrator the working way, so use them:
 
 - `--permission-mode <mode>` (default `acceptEdits`). In `acceptEdits`, workers' edits inside their worktrees pass without a prompt, and the guard's `allow` covers the routine `git` and `gh` steps. `bypassPermissions` also works and is wider.
-- `--settings '{"disableAutoMode":"disable"}'`, for this one session only. It removes auto mode from the session, so subagents take the parent's mode instead of falling into the classifier. Your own sessions keep auto mode.
+- `--settings '{"disableAutoMode":"disable"}'`, for this one session only. It removes auto mode from the session, so subagents take the parent's mode instead of falling into the classifier. With `--bg` (and with `bypassPermissions`) `scripts/launch` adds `crossSessionInbound` to the same JSON, so a background orchestrator can hear the lead. Your own sessions keep auto mode.
 
 If you start the orchestrator by hand, pass both flags: `claude --name orchestrator --permission-mode acceptEdits --settings '{"disableAutoMode":"disable"}' "/orchestrate:run --greedy"` (add `--plugin-dir <path>` when the plugin runs from a checkout). A developer who never uses auto mode can set `"disableAutoMode": "disable"` in `~/.claude/settings.json` instead; setup never edits it. If you see the "gave no verdict" text on a worker's edit, the session is in auto mode: restart it with the two flags above.
 
