@@ -22,7 +22,7 @@ You need `git` 2.38+, `gh` (signed in) and `python3` 3.9+.
 /orchestrate:setup                     # once per repo: scouts the codebase, asks you a few questions
 /orchestrate:run                       # works the backlog until nothing is left to take
 /orchestrate:run --greedy --profile    # as many tickets at once as don't collide, with a cost profile
-/orchestrate:start --greedy=4          # starts the orchestrator in the background from any session (a terminal: scripts/launch)
+/orchestrate:start --greedy=4          # starts the orchestrator in the background in acceptEdits, never auto mode (a terminal: scripts/launch)
 scripts/launch --lead                  # optional: a lead session that starts and supervises the orchestrator
 ```
 
