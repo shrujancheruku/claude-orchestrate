@@ -789,7 +789,8 @@ def peak_per_minute(times: list) -> int:
 def gh_block(events: list) -> dict:
     """The counts for one stretch of `gh_call` events: attempts (a retry is its own attempt), writes, GraphQL,
     attempts by script, retries (attempts after the first), rate-limited replies, the lowest `remaining` seen,
-    the busiest minute of writes, and the seconds slept (of which `shared` waits for another process's hit)."""
+    the busiest minute of writes, the seconds slept (of which `shared` waits for another process's hit), and the
+    GraphQL points spent (the `cost` the helper records on a GraphQL call; a call without one adds nothing)."""
     calls = [e for e in events if e.get("outcome") != "wait"]
     waits = [e for e in events if e.get("outcome") == "wait"]
     by_script = {}
@@ -803,6 +804,7 @@ def gh_block(events: list) -> dict:
         "calls": len(calls),
         "writes": sum(1 for e in calls if e.get("write")),
         "graphql": sum(1 for e in calls if e.get("graphql")),
+        "graphql_points": sum(e["cost"] for e in calls if e.get("graphql") and isinstance(e.get("cost"), int) and not isinstance(e["cost"], bool)),
         "by_script": dict(sorted(by_script.items(), key=lambda kv: (-kv[1], kv[0]))),
         "retries": sum(1 for e in calls if (e.get("attempt") or 1) > 1),
         "rate_limited": sum(1 for e in calls if e.get("outcome") == "ratelimited"),
@@ -828,7 +830,7 @@ def gh_metrics(events: list | None, passes: list) -> dict:
     rows = [{"pass": n, **gh_block(b)} for (n, _), b in zip(bounds, buckets) if b]
     if buckets[-1]:
         rows.append({"pass": None, **gh_block(buckets[-1])})  # outside any recorded pass
-    return {"available": True, "total": gh_block(calls), "passes": rows}
+    return {"available": True, "total": gh_block(calls), "passes": rows, "pass_records": len(bounds)}
 
 
 def gh_lines(g: dict) -> list:
@@ -843,7 +845,16 @@ def gh_lines(g: dict) -> list:
     t = g["total"]
     top = ", ".join(f"{k} {v}" for k, v in list(t["by_script"].items())[:4])
     # One line however long the run: the per-pass blocks live in the saved JSON (metrics.gh_calls.passes).
-    return [f"GitHub calls: {line(t)}" + (f" · top: {top}" if top else "")]
+    out = [f"GitHub calls: {line(t)}" + (f" · top: {top}" if top else "")]
+    # Points per pass: each row's sum of GraphQL `cost` (calls outside any record form a row of their own).
+    # Shown only when the log carries costs, so a log from before #490 keeps the old summary.
+    # N is the pass records (a pass with no calls counts, the row for calls outside any pass does not).
+    records = g.get("pass_records") or 0
+    points = [r.get("graphql_points", 0) for r in g.get("passes") or [] if r.get("pass") is not None]
+    if t.get("graphql_points") and records:
+        out.append(f"graphql points per pass: avg {sum(points) / records:.0f}, max {max(points, default=0)} "
+                   f"(total {sum(points)} over {records} pass{'es' if records != 1 else ''})")
+    return out
 
 
 def windows(usage: list, passes: list, threshold: float, now: datetime) -> list:
@@ -902,6 +913,10 @@ def recommend(slots: int, occupancy: float, wins: list, limits: list) -> str | N
 
 
 # How long after the transcript's last record a pass record still belongs to the same wake.
+# Fixed on purpose: nothing in the plugin sets a wake interval to read it from (a wake is an event, a worker or
+# reviewer completion or a `watch-ci` line, not a timer), so the bound is only how far `record` and the merge
+# script's event can trail the transcript's last line within one wake. Five minutes covers a `gh` retry with its
+# backoff; a record later than that belongs to another wake. The edge is inclusive.
 WAKE_GRACE = timedelta(minutes=5)
 
 

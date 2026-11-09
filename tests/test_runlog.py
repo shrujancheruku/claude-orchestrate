@@ -54,6 +54,11 @@ class RunLogTest(unittest.TestCase):
             self.assertEqual([p["slots"] for p in runlog.read_passes(where, "s")], [2])
             self.assertEqual([e["ref"] for e in runlog.read_events(where, "s", *self.span)], [2])
 
+    def test_a_wake_pass_keeps_its_scope_and_an_unchecked_idle_reason(self):
+        runlog.append_pass(self.repo, "s", {"scope": "wake", "free": 1, "idle": {"unchecked": 1}})
+        (p,) = runlog.read_passes(self.repo, "s")
+        self.assertEqual((p["scope"], p["idle"]), ("wake", {"unchecked": 1}))
+
     def test_a_removed_worktree_still_resolves_to_the_main_checkout(self):
         # The harness removes a worktree when its agent ends, but a transcript still names its path.
         wt = self.worktree()
