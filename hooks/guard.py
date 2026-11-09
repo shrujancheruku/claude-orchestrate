@@ -2120,8 +2120,14 @@ def read_paths_ok(name: str, args: list, here: str, cwd: str) -> bool:
         k = awk_program(args)
         check = args[k + 1:] if k is not None else []
     else:
+        # getopt takes abbreviations, so any long flag that is a prefix of one that names the pattern (or, for
+        # rg, takes none: `--files`, `--type-list`) counts as it. With no pattern word, every word is a path.
+        def long_prefix(a: str, full: tuple) -> bool:
+            flag = a.partition("=")[0]
+            return a.startswith("--") and len(flag) >= 3 and any(f.startswith(flag) for f in full)
+
         skip = name in ("grep", "egrep", "rg") and not any(
-            a in ("--regexp", "--file") or a.startswith(("--regexp=", "--file="))
+            long_prefix(a, ("--regexp", "--file", "--files", "--type-list"))
             or (a.startswith("-") and not a.startswith("--") and ("e" in a or "f" in a)) for a in args)
         for a in args:
             if a == "-":
@@ -2162,7 +2168,7 @@ def awk_program(args: list) -> int | None:
         else:
             i -= 1
             break
-    if i < len(args) and not re.search(r"system|ENVIRON|>|\||getline|@", args[i]):
+    if i < len(args) and not re.search(r"system|ENVIRON|ARGV|ARGC|>|\||getline|@", args[i]):
         return i
     return None
 

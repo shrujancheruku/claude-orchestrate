@@ -1600,7 +1600,8 @@ class ReadBoundTest(unittest.TestCase):
         (self.main / "out").symlink_to("/etc")
         no = ("cat ~/.ssh/KEY", "grep -r pattern ~/.config", "cat /etc/passwd", "find / -name '*.pem'", "cat ../../../../../../../../etc/hosts",
               "cat out/hosts", "grep -rn x /etc", "head -n 3 /etc/hosts", "cat a.py /etc/hosts", "sed -n 1p /etc/hosts",
-              "awk '{print}' /etc/hosts", "awk 'BEGIN{print ENVIRON[\"GH_TOKEN\"]}'", "ls /etc", "sort /etc/hosts",
+              "awk '{print}' /etc/hosts", "awk 'BEGIN{ARGV[1]=\"/etc/hosts\";ARGC=2} {print}'", "rg --files /etc",
+              "rg --type-list /etc", "grep --fil /etc/hosts x", "rg --fi /etc", "awk 'BEGIN{print ENVIRON[\"GH_TOKEN\"]}'", "ls /etc", "sort /etc/hosts",
               "find . /etc -name x", "grep -f /etc/hosts a.py", "grep -e x /etc/hosts", "cat --foo=/etc/hosts", "tail -n3 -f/etc/hosts",
               "cat ~", "cat '~/x'", "git ls-remote https://example.com/x", "git ls-remote user@example.com:o/r.git",
               "git ls-remote /etc", "git ls-remote", "git ls-remote upstream", "git ls-remote --heads ../x")

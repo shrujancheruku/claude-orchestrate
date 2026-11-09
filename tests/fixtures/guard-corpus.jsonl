@@ -748,4 +748,7 @@
 {"role": "orchestrate:reviewer", "command": "cat ../../../../../../../../../../../../etc/hosts", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "awk 'BEGIN{print ENVIRON[\"GH_TOKEN\"]}'", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git ls-remote https://example.com/x", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "awk 'BEGIN{ARGV[1]=\"/etc/hosts\";ARGC=2} {print}'", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "rg --files /etc", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "rg --files hooks | head", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git ls-remote user@example.com:o/r.git", "expected": "silent", "source": "hand"}
