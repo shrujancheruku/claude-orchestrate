@@ -24,7 +24,7 @@ import re
 import statistics
 import sys
 from bisect import bisect_right
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # `python3 -I` leaves the script's directory off sys.path. Append it (never insert): this file is named
@@ -901,13 +901,23 @@ def recommend(slots: int, occupancy: float, wins: list, limits: list) -> str | N
     return None
 
 
+# How long after the transcript's last record a pass record still belongs to the same wake.
+WAKE_GRACE = timedelta(minutes=5)
+
+
 def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: float, now: datetime) -> dict:
     main = Transcript(transcript)
     sid = transcript.stem
     repo = repo or repo_of(main)
     passes = runlog.read_passes(repo, sid)
     agents = collect_agents(main)
+    # The window ends at the later of the transcript's last record and the last pass record, when that record is from
+    # the transcript's own wake (WAKE_GRACE): `record` runs in the wake of the merge it reports, so the pass record and
+    # the merge event land a moment before or after the transcript's last line. A pass logged much later was written
+    # by another wake and is not part of this transcript's window.
     end = main.times[-1] if main.times else now
+    pass_ts = [t for t in (parse_ts(p.get("ts")) for p in passes) if t]
+    end = max([end] + [t for t in pass_ts if t - end <= WAKE_GRACE])
     starts = [a["dispatched"] for a in agents if a["dispatched"]] + [parse_ts(p.get("ts")) for p in passes]
     starts = [s for s in starts if s]
     start = min(starts) if starts else (main.times[0] if main.times else now)

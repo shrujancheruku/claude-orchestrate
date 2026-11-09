@@ -75,6 +75,19 @@ class Rescue(unittest.TestCase):
         self.assertEqual(self.remote_log().splitlines()[0], "chore(wip): Fix the thing")
         self.assertIn(BRANCH, git(self.env.repo, "branch", "--list", BRANCH))  # the local branch is kept
 
+    def test_nothing_under_claude_is_committed_and_it_is_reported_as_left_behind(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        (self.wt / ".claude").mkdir()
+        (self.wt / ".claude" / "pr-body.md").write_text("body\n")
+        r = self.rescue("--title", "Fix the thing")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"committed 1 paths [0-9a-f]+")
+        self.assertIn("left behind (not committed): 1 paths under .claude/: .claude/pr-body.md", r.stdout)
+        files = git(self.env.origin, "diff", "--name-only", f"main..{BRANCH}").split()
+        self.assertEqual(files, ["a.txt"])
+        self.assertFalse(self.wt.exists())  # a lone pr-body.md goes with the tree
+
     def test_without_title_the_message_names_the_ticket(self):
         self.worktree()
         (self.wt / "a.txt").write_text("a\n")

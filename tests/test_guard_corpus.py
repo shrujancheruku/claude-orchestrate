@@ -68,6 +68,10 @@ def rows():
     return [json.loads(line) for line in CORPUS.read_text().splitlines() if line.strip()]
 
 
+# The session the corpus scratchpad paths belong to (the hook input carries it as `session_id`).
+SESSION = "00000000-0000-0000-0000-000000000000"
+
+
 class Decider:
     """Runs the guard's main() in-process on the hook's JSON input, so 500 calls take a second."""
 
@@ -83,7 +87,7 @@ class Decider:
         # because only the plugin's own script is approved.
         if role == ORCHESTRATOR:
             command = command.replace("/p/orchestrate/0.7.0/scripts/", f"{ROOT / 'scripts'}/")
-        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" else self.cwd}
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" else self.cwd, "session_id": SESSION}
         if background:
             payload["tool_input"]["run_in_background"] = True
         if timeout is not None:
