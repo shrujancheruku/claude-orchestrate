@@ -11,8 +11,13 @@ script (ADR-0006). The flags cannot live in settings: the session-only auto-mode
                                 crossSessionInbound is added with --bg or bypassPermissions: without it a
                                 background orchestrator holds every message from the lead behind a dialog
     --model <m>                 only when the config's Models table names one in its Orchestrator row
-    --plugin-dir <root>         only when the plugin is a checkout: ${CLAUDE_PLUGIN_ROOT}, else this script's
-                                parent; a root under <claude dir>/plugins/ is a marketplace install and gets no flag
+    --plugin-dir <snapshot>     only when the plugin is a checkout (${CLAUDE_PLUGIN_ROOT}, else this script's parent;
+                                a root under <claude dir>/plugins/ is a marketplace install and gets no flag). The
+                                flag names a snapshot of the plugin at origin/<default> under
+                                $XDG_CACHE_HOME (else ~/.cache)/orchestrate/plugin/<sha>/, never the checkout: Claude
+                                Code makes every file under an inline plugin's root sensitive, worktrees included
+                                (#581). The newest 3 snapshots are kept; one stderr line names the sha. A plugin
+                                change reaches a run only through a relaunch or resume via launch.
     "/orchestrate:run --greedy" the prompt: `--greedy=N` or a ticket number is passed through, and `--profile`
                                 is appended; none with --resume
 --resume-latest resumes for the caller: with no live `orchestrator` row, the stopped row of this repo (its `cwd`)
@@ -34,7 +39,10 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
+import tarfile
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,6 +56,8 @@ TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")  # a session id or model name
 DIGITS = re.compile(r"[0-9]+")  # ASCII only: str.isdigit() accepts other scripts
 SETTINGS = {"disableAutoMode": "disable"}
 INBOUND = {"crossSessionInbound": "accept"}
+SNAPSHOT_DIRS = (".claude-plugin", "hooks", "agents", "skills", "scripts")  # what the plugin loads
+KEEP = 3  # snapshots kept after a launch, the one in use included
 
 
 def plugin_root() -> Path:
@@ -62,8 +72,64 @@ def is_marketplace(root: Path) -> bool:
     return resolved == plugins or plugins in resolved.parents
 
 
-def build(args, root: Path, model) -> list:
-    """The argv of the launch, `claude` first, from parsed arguments, the plugin root and the Orchestrator model."""
+def cache_base() -> Path:
+    """Where snapshots live: $XDG_CACHE_HOME/orchestrate/plugin, else ~/.cache/orchestrate/plugin."""
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".cache") / "orchestrate" / "plugin"
+
+
+def snapshot(root: Path, fetch: bool = True):
+    """(path, sha): the plugin tree at origin/<default>, exported once per sha under the cache and reused after.
+
+    Why not `--plugin-dir <checkout>`: Claude Code treats every file under an inline plugin's root as sensitive,
+    and the worktrees sit inside the checkout, so each worker edit prompted (#581). The export lives outside the
+    repo (never under ~/.claude either). At most KEEP snapshots stay; older ones are removed.
+    """
+    git = ["git", "-C", str(root)]
+    code, top, _ = common.run(*git, "rev-parse", "--show-toplevel")
+    if code != 0:
+        common.die(f"launch: cannot run: the plugin root {root} is not a git checkout, so it cannot be snapshotted "
+                   "(a marketplace install needs no snapshot)")
+    code, head, _ = common.run(*git, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    ref = head.strip() if code == 0 and head.strip().startswith("origin/") else "origin/main"
+    if fetch:
+        common.run(*git, "fetch", "--quiet", "origin", ref[len("origin/"):])  # best effort: offline keeps the last fetch
+    code, sha, err = common.run(*git, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    sha = sha.strip()
+    if code != 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        common.die(f"launch: cannot run: {ref} does not exist in {top.strip()}; fetch origin first")
+    base = cache_base()
+    dest = base / sha
+    inside = [Path(top.strip()).resolve(), common.claude_dir().resolve()]
+    if any(p == base.resolve() or p in base.resolve().parents for p in inside):
+        common.die(f"launch: cannot run: the snapshot cache {base} is inside the repo or the claude dir; set XDG_CACHE_HOME")
+    if dest.is_dir():
+        os.utime(dest)  # newest use wins the pruning
+    else:
+        base.mkdir(parents=True, exist_ok=True)
+        tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=base))
+        try:
+            proc = subprocess.Popen([*git, "archive", sha, *SNAPSHOT_DIRS], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            with tarfile.open(fileobj=proc.stdout, mode="r|") as tar:
+                tar.extractall(tmp, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+            if proc.wait() != 0:
+                common.die(f"launch: cannot run: git archive of {sha} failed: {proc.stderr.read().decode(errors='replace').strip()}")
+            try:
+                tmp.rename(dest)
+            except OSError:
+                if not dest.is_dir():  # a concurrent launch winning the rename is fine
+                    raise
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    old = sorted((p for p in base.iterdir() if p.is_dir() and re.fullmatch(r"[0-9a-f]{40}", p.name) and p != dest),
+                 key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in old[KEEP - 1:]:
+        shutil.rmtree(p, ignore_errors=True)
+    return dest, sha
+
+
+def build(args, plugin_dir, model) -> list:
+    """The argv of the launch, `claude` first, from parsed arguments, the plugin snapshot (None: none) and the Orchestrator model."""
     argv = ["claude"]
     if args.lead:
         argv += ["--name", "lead", "--settings", json.dumps(INBOUND, separators=(",", ":"))]
@@ -71,8 +137,8 @@ def build(args, root: Path, model) -> list:
             argv += ["--permission-mode", args.permission_mode]
         if model:
             argv += ["--model", model]
-        if not is_marketplace(root):
-            argv += ["--plugin-dir", str(root)]
+        if plugin_dir:
+            argv += ["--plugin-dir", str(plugin_dir)]
         return argv + [prompt(args, "/orchestrate:lead")]
     if args.resume:
         argv += ["--resume", args.resume]
@@ -86,8 +152,8 @@ def build(args, root: Path, model) -> list:
              "--settings", json.dumps(settings, separators=(",", ":"))]
     if model:
         argv += ["--model", model]
-    if not is_marketplace(root):
-        argv += ["--plugin-dir", str(root)]
+    if plugin_dir:
+        argv += ["--plugin-dir", str(plugin_dir)]
     if not args.resume:
         argv.append(prompt(args))
     return argv
@@ -240,18 +306,24 @@ def main(argv=None) -> int:
         if not isinstance(args.resume, str) or not TOKEN.fullmatch(args.resume):
             common.die(f"launch: cannot run: the chosen {NAME} row has no usable sessionId")
         print(f"launch: resuming {args.resume}: {why}", file=sys.stderr)
-    cmd = build(args, plugin_root(), model)
+    root = plugin_root()
+    if not args.print:  # refuse before exporting a snapshot a refused launch would not use
+        live = live_sessions()
+        name = "lead" if args.lead else NAME
+        clash = [r for r in live if r.get("name") == name or (args.resume and r.get("sessionId") == args.resume)]
+        if clash:
+            common.die(f"launch: cannot run: a live session named {clash[0].get('name')} already exists "
+                       f"({clash[0].get('sessionId')}); message it instead of starting another")
+        if not shutil.which("claude"):
+            common.die("launch: cannot run: `claude` is not on PATH")
+    plugin_dir = None
+    if not is_marketplace(root):
+        plugin_dir, sha = snapshot(root, fetch=not args.print)
+        print(f"launch: plugin snapshot {sha[:12]} at {plugin_dir}", file=sys.stderr)
+    cmd = build(args, plugin_dir, model)
     if args.print:
         print(render(cmd))
         return 0
-    live = live_sessions()
-    name = "lead" if args.lead else NAME
-    clash = [r for r in live if r.get("name") == name or (args.resume and r.get("sessionId") == args.resume)]
-    if clash:
-        common.die(f"launch: cannot run: a live session named {clash[0].get('name')} already exists "
-                   f"({clash[0].get('sessionId')}); message it instead of starting another")
-    if not shutil.which("claude"):
-        common.die("launch: cannot run: `claude` is not on PATH")
     if args.bg:
         code, out, err = common.run(*cmd)
         sys.stdout.write(out)
