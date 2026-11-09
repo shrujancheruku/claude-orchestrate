@@ -158,6 +158,22 @@ def scoped(issues, parent=None, ticket=None) -> list:
     return list(issues)
 
 
+def _atomic_write_json(path, data: dict) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".snapshot-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 class Snapshot:
     """What the tracker says right now: open issues, open PRs, merged PRs of the default branch, and the closed `wontfix`
     tickets still assigned. Each part is read through `github` on first use and kept, so one process reads each once and
@@ -184,8 +200,9 @@ class Snapshot:
     def read(cls, path, cwd=None):
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
-        except OSError as e:
-            raise ValueError(f"cannot read snapshot {path}: {e.strerror or e}") from None
+        except (OSError, ValueError) as e:
+            msg = getattr(e, "strerror", None) or e
+            raise ValueError(f"cannot read snapshot {path}: {msg}") from None
         if not isinstance(data, dict) or not all(k in data for k in cls.PARTS):
             raise ValueError(f"{path} is not a snapshot")
         for i in data["issues"]:
@@ -196,8 +213,7 @@ class Snapshot:
         data = {k: getattr(self, k) for k in self.PARTS}
         data["pr_files"] = self._open_entries(self._pr_files)
         data["issues"] = [dict(i, labels=sorted(i["labels"])) for i in data["issues"]]
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(data), encoding="utf-8")
+        _atomic_write_json(path, data)
 
     def _part(self, name, fetch):
         if name not in self._parts:
@@ -284,18 +300,7 @@ class Snapshot:
             data = data if isinstance(data, dict) else {}
             # Entries another process wrote since we read stay; ours win for the same PR.
             data["pr_files"] = self._open_entries({**self._cached_files(path), **self._pr_files})
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".snapshot-", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f)
-                os.replace(tmp, path)
-            except BaseException:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+            _atomic_write_json(path, data)
             self._dirty = False
         except OSError:
             pass

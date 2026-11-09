@@ -133,5 +133,16 @@ class FromNodes(unittest.TestCase):
         self.assertIsNone(tracker.from_nodes([{"number": 1}])[0]["parent"])
 
 
+class SnapshotReadWrite(unittest.TestCase):
+    def test_snapshot_read_bad_json_names_the_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            bad = Path(d) / "bad.json"
+            bad.write_text("{broken json")
+            with self.assertRaises(ValueError) as ctx:
+                tracker.Snapshot.read(bad)
+            self.assertIn(f"cannot read snapshot {bad}", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

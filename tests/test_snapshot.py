@@ -105,6 +105,27 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")
 
+    def test_a_truncated_snapshot_file_gives_one_line_error_naming_the_path(self):
+        truncated = self.env.repo / "truncated.json"
+        truncated.write_text('{"issues": [')
+        for script in ("claims", "frontier"):
+            r = self.env.run(script, "--snapshot", str(truncated), check=False)
+            self.assertEqual(r.returncode, 2)
+            self.assertEqual(r.stdout, "")
+            lines = r.stderr.strip().splitlines()
+            self.assertEqual(len(lines), 1, f"expected one line on stderr for {script}, got {lines}")
+            self.assertIn(str(truncated), lines[0], f"stderr for {script} should name the path")
+
+    def test_atomic_write_leaves_no_partial_file_on_failure(self):
+        target = self.env.repo / "atomic_snap.json"
+        snap = tracker.Snapshot(None, repo={}, issues=[], prs=[], merged=[], abandoned=[])
+        with unittest.mock.patch("os.replace", side_effect=OSError("simulated disk error")):
+            with self.assertRaises(OSError):
+                snap.write(target)
+        self.assertFalse(target.exists(), "target file should not exist on failed write")
+        tmps = list(target.parent.glob(".snapshot-*.tmp"))
+        self.assertEqual(tmps, [], "temp file should be cleaned up on failure")
+
     def test_a_body_only_blocker_is_held_by_frontier_and_handed_back_by_lead_route(self):
         self.serve([node(1), node(5, claimed=True, body="Blocked by: #1")])
         self.env.run("snapshot", "--repo", ".")

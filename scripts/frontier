@@ -88,7 +88,7 @@ def main(argv=None) -> int:
     except github.GhError as e:
         common.die(f"frontier: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError, AttributeError) as e:
-        common.die(f"frontier: cannot run: malformed reply from gh ({e!r})")
+        common.die(f"frontier: cannot run: {e}" if args.snapshot else f"frontier: cannot run: malformed reply from gh ({e!r})")
     try:
         scope = tracker.scoped(issues, args.parent, args.ticket)
         if args.fix_drift:
