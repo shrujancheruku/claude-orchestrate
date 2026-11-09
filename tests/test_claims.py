@@ -163,6 +163,14 @@ class Decide(unittest.TestCase):
         self.assertEqual(found[2].state, "stalled")  # another session's record is not this session's worker
         self.assertIsNone(found[2].worker)
 
+    def test_a_session_argument_names_the_current_session_not_the_last_rebuilder(self):
+        rec = lambda a: {"agent_id": a, "worktree": None, "model": "m", "last_report": "t", "touch_map": "none"}  # noqa: E731
+        self.state.write_text(json.dumps({"session": "other", "sessions": {
+            "mine": {"tickets": {"1": rec("a1")}}, "other": {"tickets": {"2": rec("a2")}}}}))
+        self.assertEqual(claims.read_state(self.state, "mine"), {"1": rec("a1")})
+        self.assertEqual(claims.read_other_state(self.state, "mine"), {"2": rec("a2")})
+        self.assertEqual(claims.read_state(self.state, "unknown"), {})  # a session with no entry has no workers
+
     def test_another_sessions_record_with_a_live_foreign_lock_is_elsewhere(self):
         other = subprocess.Popen(["sleep", "30"])
         self.addCleanup(other.kill)
@@ -311,6 +319,40 @@ class Cli(unittest.TestCase):
         out = self.line().splitlines()
         self.assertEqual(out[0], "#3 building no-branch pr none worker agent-q claude-haiku-4-5 worktree gone lock none")
         self.assertTrue(out[1].startswith("#9 stalled no-branch pr none worker none worktree gone"), out[1])
+
+    def two_session_state(self):
+        """A state file whose `session` (the last rebuilder) is "other"; "mine" has ticket 3, "other" has ticket 9."""
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(exist_ok=True)
+        rec = lambda a: {"agent_id": a, "model": "m"}  # noqa: E731
+        state.write_text(json.dumps({"session": "other", "sessions": {
+            "mine": {"tickets": {"3": rec("agent-q")}}, "other": {"tickets": {"9": rec("agent-z")}}}}))
+
+    def test_session_flag_makes_that_session_current_not_the_last_rebuilder(self):
+        self.nodes = [(9, True), (3, True)]
+        self.two_session_state()
+        out = self.line("--session", "mine").splitlines()
+        self.assertEqual(out[0], "#3 building no-branch pr none worker agent-q m worktree gone lock none")
+        self.assertTrue(out[1].startswith("#9 stalled no-branch pr none worker none"), out[1])
+        out = self.line().splitlines()  # no flag: the last rebuilder ("other") is current, as before
+        self.assertTrue(out[0].startswith("#3 stalled"), out[0])
+        self.assertTrue(out[1].startswith("#9 building"), out[1])
+
+    def test_session_flag_with_no_entry_reads_no_workers(self):
+        self.nodes = [(3, True)]
+        self.two_session_state()
+        self.assertTrue(self.line("--session", "unknown").startswith("#3 stalled no-branch pr none worker none"))
+
+    def test_session_flag_labels_gh_call_events_with_that_session_not_the_state_files(self):
+        env = ScriptEnv(gh_log=True)
+        self.addCleanup(env.close)
+        self.env = env
+        self.nodes = [(3, True)]
+        self.two_session_state()
+        self.serve()
+        self.assertEqual(self.cli("--session", "mine").returncode, 0)
+        sessions = {e["session"] for e in env.events(profiling=True) if e["kind"] == "gh_call"}
+        self.assertEqual(sessions, {"mine"})
 
     def harness_worktree(self, agent="x1"):
         """A worktree where the harness puts it (`agent-<id>`), on its branch `worktree-agent-<id>`."""

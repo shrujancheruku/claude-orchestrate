@@ -215,7 +215,9 @@ def main(argv=None) -> int:
     ap.add_argument("--state", default=None, help="state file (default: <repo>/.claude/orchestrate-state.json)")
     ap.add_argument("--snapshot", default=None, help="read the tracker from this file (scripts/snapshot) instead of fetching")
     ap.add_argument("--now", default=None, help="the time now, as ISO 8601 (tests; default: the current time)")
+    claims.add_session_arg(ap)
     args = ap.parse_args(argv)
+    claims.use_session(args.session)
     if args.cap < 1:
         ap.error("--cap must be at least 1")
     now = datetime.now(timezone.utc) if args.now is None else parse_ts(args.now)

@@ -416,7 +416,7 @@ def _log(event: dict, cwd=None, args=None) -> None:
         root = _log_root(cwd)
         if root is None:
             return
-        session = json.loads((root / STATE).read_text(encoding="utf-8")).get("session")
+        session = os.environ.get(runlog.SESSION_ENV) or json.loads((root / STATE).read_text(encoding="utf-8")).get("session")
         if not isinstance(session, str) or not session:
             return
         record = {"ts": runlog._now(), "session": session, "kind": runlog.GH_CALL, "ref": None,

@@ -109,6 +109,28 @@ class CiTimes(unittest.TestCase):
         viewed = {c[1].split("/")[4] for c in self.env.gh_calls() if c[0] == "api" and c[1].endswith("/commits?per_page=100&page=1")}
         self.assertEqual(viewed, {str(n) for n in range(3, 13)})
 
+    def test_call_count_is_one_listing_plus_two_per_pr(self):
+        prs = {n: (n, [(f"s{n}", n, [check("test", 0, 1, push=n)])]) for n in range(1, 11)}
+        self.serve(prs)
+        self.times()
+        self.assertEqual(len(self.env.gh_calls()), 1 + 2 * 10)
+
+    def test_since_a_pr_in_the_listing_costs_no_lookup_of_that_pr(self):
+        prs = {n: (n * 10, [(f"s{n}", n * 10, [check("test", 0, 1, push=n * 10)])]) for n in range(1, 6)}
+        self.serve(prs)
+        self.times("--since", "3")
+        calls = [c[1] for c in self.env.gh_calls()]
+        self.assertFalse([c for c in calls if c.endswith("/pulls/3")], calls)
+        self.assertEqual(len(calls), 1 + 2 * 2)
+
+    def test_a_head_shared_by_two_prs_is_fetched_once_and_counted_per_pr(self):
+        shared = [("same", 5, [check("test", 0, 2, push=5)])]
+        self.serve({1: (5, shared), 2: (6, shared)})
+        out = self.times()
+        self.assertEqual(out[0], "heads: 2 green over 2 PRs (0 never green)")
+        fetches = [c for c in self.env.gh_calls() if "/commits/same/check-runs" in c[1]]
+        self.assertEqual(len(fetches), 1)
+
     def test_since_a_time_takes_every_pr_merged_from_then(self):
         prs = {n: (n * 10, [(f"s{n}", n * 10, [check("test", 0, 1, push=n * 10)])]) for n in range(1, 13)}
         self.serve(prs)
