@@ -86,6 +86,14 @@ _Avoid_: hung, stuck, stalled (stalled means no worker at all)
 The one read of the tracker a pass works from: the open issues with their blockers (native edges plus the body `Blocked by:` line), the open PRs with their draft state, the merged branches, and the closed `wontfix` tickets still assigned. `scripts/tracker.py` owns it and `scripts/snapshot` writes it to a file; `frontier`, `claims`, `holds`, `lead-route` and `gate` read it. Source: `scripts/tracker.py`, `scripts/snapshot`.
 _Avoid_: cache, issue list, tracker state
 
+**Trusted author**:
+A GitHub user whose tracker text may steer the run: `author_association` `OWNER`, `MEMBER` or `COLLABORATOR` on the repo, or a login on the config's `Trusted authors:` line. Only a trusted author's comments, reviews and review threads are parsed for markers, read as a brief or addressed by a worker; anyone else's are counted, not read. Source: `docs/adr/0015-act-only-on-trusted-tracker-text.md`.
+_Avoid_: maintainer, contributor (GitHub's `CONTRIBUTOR` is not trusted), allowed user
+
+**Fork PR**:
+A pull request whose head branch lives in another repository (`isCrossRepository`). It is never a ticket's PR, holds no path and is never merged by the orchestrator. Source: `docs/adr/0015-act-only-on-trusted-tracker-text.md`, `scripts/merge`.
+_Avoid_: external PR, outside PR, contribution
+
 **Scratch worktree**:
 A detached worktree under an agent's scratchpad (`pr-<n>`, `pr-<n>b`, `pr-<n>-r2`) in which a reviewer or the lead reads or runs a PR's head. `scripts/scratch` is the one way to add one and `merge` removes the merged PR's scratch worktrees; nothing else does either. Source: `agents/reviewer.md`, `scripts/scratch`, `scripts/merge`.
 _Avoid_: review worktree, temp checkout
