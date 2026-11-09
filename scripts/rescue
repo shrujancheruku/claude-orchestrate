@@ -166,7 +166,7 @@ def main(argv=None) -> int:
     try:
         return run(argv)
     except Exception as e:  # unexpected (an OSError from a subprocess, say): put the lifted locks back like any exit 2
-        return fail(f"unexpected {type(e).__name__}: {e}")
+        return fail(f"unexpected {type(e).__name__}: {common.one_line(e)}")
 
 
 def run(argv=None) -> int:
@@ -186,7 +186,7 @@ def run(argv=None) -> int:
         try:
             record = claims.read_state(root / repo.STATE).get(str(ticket))
         except ValueError as e:
-            return fail(str(e))
+            return fail(common.one_line(e))
         wts = [w for w in common.worktrees(root) if Path(w["path"]).is_dir()]
         wt = claims.find_worktree(ticket, wts, record)
     else:
@@ -249,7 +249,7 @@ def run(argv=None) -> int:
     try:
         changed = repo.worktree_changes(path, base)
     except ValueError as e:
-        return fail(str(e))
+        return fail(common.one_line(e))
     say(f"changed {len(changed)} paths")
 
     # Nothing under .claude/ belongs in a PR (#413): a leaked pr-body.md or agent file is left behind, not staged.
