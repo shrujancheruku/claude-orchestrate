@@ -251,6 +251,96 @@ class Rescue(unittest.TestCase):
         self.assertTrue(self.wt.exists())
         self.assertIn(reason, git(self.env.repo, "worktree", "list", "--porcelain"))
 
+    def test_an_uncaught_exception_after_the_unlock_puts_the_lock_back_and_exits_2(self):
+        import contextlib
+        import io
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import module_from_spec, spec_from_loader
+
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        reason = f"claude agent agent-abc (pid {dead_pid()} start Sat Nov  7 06:14:20 2026)"
+        self.lock(reason)
+        loader = SourceFileLoader("rescue_under_test", str(SCRIPT))
+        mod = module_from_spec(spec_from_loader("rescue_under_test", loader))
+        loader.exec_module(mod)
+        err = io.StringIO()
+        with unittest.mock.patch.object(mod.repo, "worktree_changes", side_effect=OSError("boom")), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = mod.main([BRANCH, "--repo", str(self.env.repo)])
+        self.assertEqual(code, 2)
+        self.assertIn("boom", err.getvalue())
+        self.assertEqual(mod.LIFTED, [])
+        self.assertTrue(self.wt.exists())
+        self.assertIn(reason, git(self.env.repo, "worktree", "list", "--porcelain"))
+
+    def load_script(self):
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("rescue_under_test", str(SCRIPT))
+        mod = module_from_spec(spec_from_loader("rescue_under_test", loader))
+        loader.exec_module(mod)
+        return mod
+
+    def run_main(self, mod, *args):
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = mod.main([BRANCH, "--repo", str(self.env.repo), *args])
+        return code, err.getvalue()
+
+    def test_an_exception_after_the_removal_leaves_it_removed_and_does_not_relock(self):
+        self.worktree()
+        reason = f"claude agent agent-abc (pid {dead_pid()} start Sat Nov  7 06:14:20 2026)"
+        self.lock(reason)
+        mod = self.load_script()
+        real = mod.common.run
+        locks = []
+
+        def spy(*a, **k):
+            if a[:3] == ("git", "worktree", "lock"):
+                locks.append(a)
+            return real(*a, **k)
+
+        with unittest.mock.patch.object(mod.common, "run", spy), \
+                unittest.mock.patch.object(mod.repo, "remove_scratch", side_effect=OSError("late")):
+            code, err = self.run_main(mod, "--pr", "9")
+        self.assertEqual(code, 2)
+        self.assertIn("late", err)
+        self.assertFalse(self.wt.exists())
+        self.assertEqual(locks, [])
+        self.assertEqual(mod.LIFTED, [])
+
+    def test_a_lock_that_cannot_be_put_back_is_reported(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        reason = f"claude agent agent-abc (pid {dead_pid()} start Sat Nov  7 06:14:20 2026)"
+        self.lock(reason)
+        mod = self.load_script()
+        real = mod.common.run
+
+        def run(*a, **k):
+            if a[:3] == ("git", "worktree", "lock"):
+                return unittest.mock.Mock(code=1, stdout="", stderr="no lock for you")
+            return real(*a, **k)
+
+        with unittest.mock.patch.object(mod.common, "run", run), \
+                unittest.mock.patch.object(mod.repo, "worktree_changes", side_effect=OSError("boom")):
+            code, err = self.run_main(mod)
+        self.assertEqual(code, 2)
+        self.assertIn("boom", err)
+        self.assertIn(f"could not put the lock back on {self.wt}: no lock for you", err)
+
+    def test_a_tree_dirty_only_under_claude_says_nothing_to_commit_outside_it(self):
+        self.worktree(push=True)
+        (self.wt / ".claude").mkdir()
+        (self.wt / ".claude" / "pr-body.md").write_text("x\n")
+        r = self.rescue()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("nothing to commit outside .claude/", r.stdout)
+        self.assertNotIn("tree clean", r.stdout)
+
     def test_a_branch_without_a_ticket_number_is_exit_2(self):
         git(self.env.repo, "worktree", "add", "-b", "scratch", str(self.wt), "main")
         r = self.env.run("rescue", "scratch", check=False)
