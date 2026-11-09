@@ -2,11 +2,14 @@
 
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import harness  # noqa: E402
 from harness import SCRIPTS, ScriptEnv, gh_pr_view, git # noqa: E402
 
 # One gh call through scripts/github.py (which logs a `gh_call` row), then one event of its own.
@@ -132,6 +135,39 @@ class ScriptEnvCopyRace(unittest.TestCase):
         for d in (env.repo, env.origin):
             self.assertEqual(git(d, "config", "maintenance.auto"), "false")
             self.assertEqual(git(d, "config", "gc.auto"), "0")
+
+    def test_a_copy_succeeds_while_a_maintenance_lock_is_held(self):
+        # On the old code a `git maintenance` holding objects/maintenance.lock raced the copy (#415). Hold one in
+        # the template, then copy: the copy works and the template keeps maintenance and gc off.
+        template = harness._template()
+        lock = template / "repo" / ".git" / "objects" / "maintenance.lock"
+        lock.write_text("")
+        self.addCleanup(lock.unlink)
+        env = ScriptEnv()
+        self.addCleanup(env.close)
+        self.assertEqual(git(template / "repo", "config", "maintenance.auto"), "false")
+        self.assertEqual(git(template / "repo", "config", "gc.auto"), "0")
+        self.assertEqual(git(env.repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+
+    def test_scripts_and_env_come_from_the_tests_own_tree(self):
+        # A copy of tests/ with its own scripts/ (a scratch worktree at an older commit) must run those scripts,
+        # whatever PYTHONPATH or CLAUDE_PLUGIN_ROOT point at (#480).
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tests").mkdir()
+            (root / "scripts").mkdir()
+            shutil.copy(Path(harness.__file__), root / "tests" / "harness.py")
+            for name in ("runlog.py", "common.py"):
+                shutil.copy(SCRIPTS / name, root / "scripts" / name)
+            (root / "scripts" / "probe").write_text(
+                "import os\nprint(os.environ.get('PYTHONPATH'), os.environ.get('CLAUDE_PLUGIN_ROOT'))\n")
+            code = ("import harness; e = harness.ScriptEnv(); print(harness.SCRIPTS);"
+                    " print(e.run('probe').stdout.strip()); e.close()")
+            env = dict(os.environ, PYTHONPATH=str(SCRIPTS), CLAUDE_PLUGIN_ROOT=str(SCRIPTS.parent))
+            r = subprocess.run([sys.executable, "-c", code], cwd=str(root / "tests"), env=env,
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.splitlines(), [str((root / "scripts").resolve()), "None None"])
 
     def test_no_transient_lock_files_in_a_copy(self):
         env = ScriptEnv()
