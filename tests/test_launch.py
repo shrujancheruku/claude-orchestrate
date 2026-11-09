@@ -32,8 +32,13 @@ class Launch(unittest.TestCase):
         self.tmp = Path(self._tmp.name)
         self.claude_dir = self.tmp / "dot-claude"
         (self.claude_dir / "plugins" / "market").mkdir(parents=True)
+        self.cache = self.tmp / "cache"
+        self.origin = self.tmp / "origin.git"
+        self.git(self.tmp, "init", "--bare", "-b", "main", str(self.origin))
         self.checkout = self.tmp / "checkout"
-        self.checkout.mkdir()
+        self.git(self.tmp, "clone", "-q", str(self.origin), str(self.checkout))
+        self.sha = self.commit_plugin("v1")
+        self.snap = self.cache / "orchestrate" / "plugin" / self.sha
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         self.bin = self.tmp / "bin"
@@ -41,6 +46,24 @@ class Launch(unittest.TestCase):
         self.agents = []
         self.set_model("opus (used when the lead launches it)")
         self.fake_claude()
+
+    def git(self, cwd, *args):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        return subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit_plugin(self, text):
+        """Commit the plugin dirs (and a file outside them) with `text` in each, push to origin/main; return the sha."""
+        for d in (".claude-plugin", "hooks", "agents", "skills", "scripts"):
+            (self.checkout / d).mkdir(exist_ok=True)
+            (self.checkout / d / "f.txt").write_text(text)
+        (self.checkout / "README.md").write_text(text)
+        self.git(self.checkout, "add", "-A")
+        self.git(self.checkout, "commit", "-q", "-m", text)
+        self.git(self.checkout, "push", "-q", "origin", "HEAD:main")
+        self.git(self.checkout, "fetch", "-q", "origin")
+        self.git(self.checkout, "remote", "set-head", "origin", "main")
+        return self.git(self.checkout, "rev-parse", "origin/main")
 
     def set_model(self, cell, lead=""):
         (self.repo / ".claude").mkdir(exist_ok=True)
@@ -62,7 +85,7 @@ class Launch(unittest.TestCase):
 
     def launch(self, *args, root=None):
         env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
-                   CLAUDE_CONFIG_DIR=str(self.claude_dir),
+                   CLAUDE_CONFIG_DIR=str(self.claude_dir), XDG_CACHE_HOME=str(self.cache),
                    CLAUDE_PLUGIN_ROOT=str(root or self.checkout))
         return subprocess.run([str(LAUNCH), "--repo", str(self.repo), *args], capture_output=True, text=True,
                               env=env, timeout=60)
@@ -73,7 +96,66 @@ class Launch(unittest.TestCase):
         self.assertEqual(
             r.stdout.strip(),
             f"claude --name orchestrator --permission-mode acceptEdits --settings {SETTINGS} --model opus "
-            f"--plugin-dir {self.checkout} \"/orchestrate:run --greedy\"")
+            f"--plugin-dir {self.snap} \"/orchestrate:run --greedy\"")
+
+    def test_plugin_dir_is_never_inside_the_repo_in_any_mode(self):
+        modes = [(), ("--bg",), ("--lead",), ("--resume", "abc"), ("--permission-mode", "bypassPermissions")]
+        for mode in modes:
+            r = self.launch("--print", *mode)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.count("--plugin-dir"), 1, mode)
+            path = Path(r.stdout.split("--plugin-dir ")[1].split()[0]).resolve()
+            for forbidden in (self.checkout.resolve(), self.repo.resolve(), self.claude_dir.resolve()):
+                self.assertNotIn(forbidden, [path, *path.parents], mode)
+
+    def test_snapshot_holds_the_plugin_dirs_at_origin_default_and_is_reused(self):
+        r = self.launch("--print")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"plugin snapshot {self.sha[:12]}", r.stderr)
+        for d in (".claude-plugin", "hooks", "agents", "skills", "scripts"):
+            self.assertEqual((self.snap / d / "f.txt").read_text(), "v1")
+        self.assertFalse((self.snap / "README.md").exists())
+        marker = self.snap / "marker"
+        marker.write_text("kept")
+        self.assertEqual(self.launch("--print").returncode, 0)
+        self.assertTrue(marker.exists())  # reused, not rebuilt
+
+    def test_unpushed_local_commits_are_not_in_the_snapshot(self):
+        (self.checkout / "hooks" / "f.txt").write_text("local")
+        self.git(self.checkout, "commit", "-qam", "local")
+        self.launch("--print")
+        self.assertEqual((self.snap / "hooks" / "f.txt").read_text(), "v1")
+
+    def test_only_the_three_newest_snapshots_are_kept(self):
+        shas = [self.sha]
+        for n in range(2, 6):
+            shas.append(self.commit_plugin(f"v{n}"))
+            self.assertEqual(self.launch().returncode, 0)
+            base = self.cache / "orchestrate" / "plugin"
+            os.utime(base / shas[-1], (n * 1000, n * 1000))  # long ago, in a deterministic age order
+        base = self.cache / "orchestrate" / "plugin"
+        self.assertEqual(sorted(p.name for p in base.iterdir()), sorted(shas[-3:]))
+
+    def test_a_snapshot_used_within_a_day_and_a_print_are_never_pruned(self):
+        base = self.cache / "orchestrate" / "plugin"
+        shas = [self.sha]
+        self.assertEqual(self.launch().returncode, 0)
+        for n in range(2, 5):  # all recent: a live session may be loading any of them
+            shas.append(self.commit_plugin(f"v{n}"))
+            self.assertEqual(self.launch().returncode, 0)
+        self.assertEqual(sorted(p.name for p in base.iterdir()), sorted(shas))
+        for sha in shas:
+            os.utime(base / sha, (1000, 1000))
+        shas.append(self.commit_plugin("v5"))
+        self.assertEqual(self.launch("--print").returncode, 0)  # --print prunes nothing
+        self.assertEqual(len(list(base.iterdir())), 5)
+        self.assertEqual(self.launch().returncode, 0)  # a real launch prunes the old ones
+        self.assertEqual(len(list(base.iterdir())), 3)
+
+    def test_a_plugin_root_that_is_not_a_checkout_is_refused(self):
+        r = self.launch("--print", root=self.tmp / "bin")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not a git checkout", r.stderr)
 
     def test_marketplace_root_has_no_plugin_dir(self):
         r = self.launch("--print", root=self.claude_dir / "plugins" / "market")
@@ -112,14 +194,14 @@ class Launch(unittest.TestCase):
         self.assertEqual(
             out,
             f"claude --resume abc-123 --name orchestrator --permission-mode acceptEdits --settings {SETTINGS} "
-            f"--model opus --plugin-dir {self.checkout}")
+            f"--model opus --plugin-dir {self.snap}")
         self.assertEqual(self.launch("--print", "--resume", "abc", "--greedy=2").returncode, 2)
 
     def test_lead_line_accepts_inbound_messages(self):
         out = self.launch("--print", "--lead").stdout.strip()
         self.assertEqual(
             out, "claude --name lead --settings '{\"crossSessionInbound\":\"accept\"}' "
-                 f"--plugin-dir {self.checkout} \"/orchestrate:lead\"")
+                 f"--plugin-dir {self.snap} \"/orchestrate:lead\"")
 
     def test_live_orchestrator_refuses_a_plain_launch(self):
         self.live({"name": "orchestrator", "pid": 4242, "sessionId": "s1"})
@@ -171,7 +253,7 @@ class Launch(unittest.TestCase):
         out = self.launch("--print", "--lead").stdout.strip()
         self.assertEqual(
             out, "claude --name lead --settings '{\"crossSessionInbound\":\"accept\"}' --model opus "
-                 f"--plugin-dir {self.checkout} \"/orchestrate:lead\"")
+                 f"--plugin-dir {self.snap} \"/orchestrate:lead\"")
         self.set_model("sonnet", lead="--dangerously-skip-permissions")
         self.assertEqual(self.launch("--print", "--lead").returncode, 2)
 
@@ -243,7 +325,7 @@ class Launch(unittest.TestCase):
         r = self.launch("--print", "--resume-latest")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("claude --resume new-here --name orchestrator", r.stdout)
-        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 2, r.stderr)  # the choice, then the snapshot line
         self.assertIn("new-here", r.stderr)
         self.assertIn("newest startedAt", r.stderr)
 
