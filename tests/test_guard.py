@@ -1574,6 +1574,43 @@ class ReadOnlyCompoundTest(unittest.TestCase):
         self.check(None, self.main, no=(f"{verify} --config --cwd {self.scratch}",))
 
 
+class ReadBoundTest(unittest.TestCase):
+    """An approved read names only paths inside the repo, the caller's worktree, a scratch checkout or the
+    system temp dirs; `git ls-remote` takes a configured remote name only (#566)."""
+
+    setUp = ReadOnlyCompoundTest.setUp
+    approves = ReadOnlyCompoundTest.approves
+    check = ReadOnlyCompoundTest.check
+
+    def roles(self):
+        return (("orchestrate:worker", self.work), ("orchestrate:reviewer", self.main),
+                ("orchestrate:scout", self.main), (None, self.main))
+
+    def test_reads_inside_the_bound_are_approved(self):
+        (self.work / "link").symlink_to(self.work / "a.py")
+        yes = ("cat a.py", "cat ./a.py | head -3", "grep -rn x .", "grep -n x a.py .claude/orchestration.md", "find . -name '*.py'",
+               "cat /tmp/x.txt", "cat /private/tmp/x | wc -l", "sed -n 1,5p /tmp/x", "grep -n '/etc/x' a.py",
+               "awk '{print $1}' a.py", "cat link", "ls -la", "git ls-remote --heads origin 566-x",
+               f"cat {self.main}/.claude/orchestration.md", f"cat {self.scratch}/a.py", f"ls {self.scratch}")
+        for role, cwd in self.roles():
+            self.check(role, cwd, yes=yes)
+
+    def test_reads_outside_the_bound_are_left_to_the_prompt(self):
+        (self.work / "out").symlink_to("/etc")  # a link inside the repo that leaves it
+        (self.main / "out").symlink_to("/etc")
+        no = ("cat ~/.ssh/KEY", "grep -r pattern ~/.config", "cat /etc/passwd", "find / -name '*.pem'", "cat ../../../../../../../../etc/hosts",
+              "cat out/hosts", "grep -rn x /etc", "head -n 3 /etc/hosts", "cat a.py /etc/hosts", "sed -n 1p /etc/hosts",
+              "awk '{print}' /etc/hosts", "awk 'BEGIN{print ENVIRON[\"GH_TOKEN\"]}'", "ls /etc", "sort /etc/hosts",
+              "find . /etc -name x", "grep -f /etc/hosts a.py", "grep -e x /etc/hosts", "cat --foo=/etc/hosts", "tail -n3 -f/etc/hosts",
+              "cat ~", "cat '~/x'", "git ls-remote https://example.com/x", "git ls-remote user@example.com:o/r.git",
+              "git ls-remote /etc", "git ls-remote", "git ls-remote upstream", "git ls-remote --heads ../x")
+        for role, cwd in self.roles():
+            self.check(role, cwd, no=no)
+
+    def test_a_leaked_secret_cannot_leave_through_a_pipe_either(self):
+        self.check("orchestrate:worker", self.work, no=("cat ~/.aws/credentials | head", "grep x a.py; cat /etc/hosts"))
+
+
 class GuardEntryPoint(unittest.TestCase):
     """The real hook: `python3 -I hooks/guard.py`, JSON on stdin, JSON (or nothing) on stdout."""
 
