@@ -35,11 +35,13 @@ import time
 from pathlib import Path
 
 import checks
+import claims
 import common
 import config
 import github
 import repo
 import runlog
+import touchmap
 import tracker
 
 WAIT = "wait"  # a Result status: not a failure and not a pass; the PR waits for an older one (exit 3)
@@ -159,6 +161,21 @@ def overlap_check(pr, cwd, snap):
     return f"holds could not run (exit {p.code}): {common.one_line(p.stderr or p.stdout)}"
 
 
+def outside_map(branch, changed, cwd) -> int:
+    """How many of the PR's changed files lie outside its ticket's touch map (the worker record in the state file); 0
+    when there is no record or no map, or the state cannot be read."""
+    try:
+        ticket = repo.ticket_of_branch(branch)
+        state = claims.read_state(Path(repo.main_checkout(cwd)) / repo.STATE)
+        record = state.get(str(ticket)) if ticket is not None else None
+        mapped = touchmap.parse(record.get("touch_map")) if isinstance(record, dict) and isinstance(record.get("touch_map"), str) else []
+    except (ValueError, OSError, github.GhError):  # touchmap.TouchMapError is a ValueError
+        return 0
+    if not mapped:
+        return 0
+    return len({p for p in changed if not any(touchmap.overlaps(m, touchmap.Entry(p)) for m in mapped)})
+
+
 def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
     """The built-in checks: title, mergeability (conflicts; behind_by is informational), overlap, dependencies,
     secrets and lockfiles. Returns (results, (behind, unknown, head)) or (None, why) when a check could not run."""
@@ -209,6 +226,9 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
     results.append(check("no secrets added", not found, "\n".join(found)))
     bad = lockfiles_without_manifest(changed)
     results.append(check("lockfile changes have a manifest change", not bad, "\n".join(bad)))
+    outside = outside_map(view.get("headRefName"), changed, cwd)
+    if outside:  # information, not a failure: the drift shows at gate time (#398)
+        results.append(check(f"touch map: +{outside} files outside the map", True))
     return results, (behind, mergeable == "UNKNOWN", view.get("headRefOid"))
 
 

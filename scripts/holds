@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """holds (--touch-map ENTRIES... --ticket N | --pr N) [--repo DIR] [--state FILE] : what is held, and does this overlap it.
 
-The one place the overlap rule lives. A path is held by an open PR (its diff: the file list `snapshot` cached, else one `gh` read per PR), by a
+The one place the overlap rule lives. A path is held by an open PR (its diff plus its ticket's touch map, #398: the file list `snapshot` cached, else one `gh` read per PR), by a
 building ticket (its touch map in the state file, or its worktree's changes when this session's own worker has no record), by an Elsewhere ticket (a live worker in another session:
 the changes in its worktree, ADR 0009) or by an exclusive hold (the config). The ticket states come from the
 claims module (scripts/claims.py): one tracker Snapshot per run (`--snapshot FILE` reads one `snapshot` wrote), never a `gh` call per ticket. Paths are compared
@@ -91,7 +91,8 @@ def claimed_paths(found: dict, own, base: str) -> tuple:
     A Building claim holds its touch map (the state-file entries, through `plain`); a Building claim with no record
     (this session's own worker, `worker unknown`) has no touch map, so it holds its worktree's changes and is labelled
     building. An Elsewhere claim holds its worktree's changes, the ones a live worker has made so far (ADR 0009). An
-    open PR is a different claim state, so a ticket with a PR is held only through the PR's diff."""
+    open PR is a different claim state, so a ticket with a PR is held through the PR (`pr_paths`), not here. A Building
+    claim with a record and a worktree holds its touch map plus the worktree's changes (#398)."""
     tickets, others = {}, {}
     for n, c in sorted(found.items()):
         if n == own:
@@ -103,6 +104,9 @@ def claimed_paths(found: dict, own, base: str) -> tuple:
                 paths = state_paths(c.worker.get("touch_map"))
                 if touchmap.HOLDS_ALL in paths:
                     print(f"holds: building #{n} has an unparsed touch map, so it holds every path until its state is fixed or it finishes", file=sys.stderr)
+                elif c.worktree:
+                    # The map is a prediction: an edit outside it, committed or not, is held too (#398).
+                    paths = paths + [p for p in worktree_changes(c.worktree, base) if p not in paths]
             if paths:
                 tickets[n] = paths
         elif c.state == "elsewhere" or (c.state == "with-lead" and c.lock and c.lock[0] in ("ours", "foreign-live") and c.worktree):
@@ -122,13 +126,26 @@ def covers(held: str, path: str) -> bool:
     return touchmap.overlaps(touchmap.Entry(held), touchmap.Entry(path))
 
 
-def held_paths(cfg, prs: dict, tickets: dict, others: dict) -> dict:
+def pr_paths(files: list, record) -> tuple:
+    """(paths, off_map) for an open PR: its changed files joined with its ticket's touch map from the worker record (#398),
+    so a PR that opened with an empty commit still holds its declared map. `off_map` is the set of PR files outside a
+    non-empty map, which the output names `open PR #n file`."""
+    mapped = state_paths(record.get("touch_map")) if isinstance(record, dict) else []
+    if touchmap.HOLDS_ALL in mapped:
+        mapped = []  # an unparsed map is reported for the building claim; the PR still holds its diff
+    paths = list(files) + [p for p in mapped if p not in files]
+    off = {p for p in files if mapped and not any(covers(m, p) for m in mapped)}
+    return paths, off
+
+
+def held_paths(cfg, prs: dict, tickets: dict, others: dict, off_map: dict = None) -> dict:
     """{path: [holder, ...]} in a stable order. `tickets` is {ticket: [paths]} for the Building tickets, `others` for the
-    Elsewhere ones."""
+    Elsewhere ones; `off_map` is {pr: {paths}} the PR changed outside its ticket's touch map (named `open PR #n file`)."""
     held: dict = {}
+    off_map = off_map or {}
     for n, paths in sorted(prs.items()):
         for p in paths:
-            held.setdefault(p, []).append(f"open PR #{n}")
+            held.setdefault(p, []).append(f"open PR #{n} file" if p in off_map.get(n, ()) else f"open PR #{n}")
     for n, paths in sorted(tickets.items()):
         for p in paths:
             held.setdefault(p, []).append(f"building #{n}")
@@ -144,7 +161,7 @@ def is_shared(cfg, path: str) -> bool:
     return any(fnmatch.fnmatch(path, g) or path == g for g in cfg.shared_files)
 
 
-PR_HOLDER = re.compile(r"open PR #(\d+)$")
+PR_HOLDER = re.compile(r"open PR #(\d+)(?: file)?$")
 
 
 def report(held: dict, candidates: list, cfg, own_pr=None, pr_tickets=None) -> int:
@@ -226,7 +243,11 @@ def run(argv=None) -> int:
             own_ticket = ticket_of_branch(view.get("headRefName"))
             candidates = github.pr_files(own_pr, cwd=repo)
         open_prs = [p for p in snap.prs if isinstance(p, dict) and p.get("baseRefName", base) == base]
-        prs, pr_tickets = {}, {}
+        # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
+        # `changes` is a no-op: holds needs each worktree's changed paths, not the dirty and unpushed counts claims
+        # would take, and a git failure there would stop a pass that never needed them.
+        found = claims.claims(repo, state_file, snap.issues, snap.prs, snap.merged, changes=lambda path, branch: None)
+        prs, pr_tickets, off_map = {}, {}, {}
         for pr in open_prs:
             if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
                 raise github.GhError(github.MALFORMED, "gh returned a PR list entry without a number")
@@ -235,12 +256,11 @@ def run(argv=None) -> int:
             if str(pr.get("headRefName") or "").startswith(RELEASE_PLEASE_PREFIX):
                 continue  # the release PR's files are never a real overlap, and its diff is not fetched
             pr_tickets[pr["number"]] = ticket_of_branch(pr.get("headRefName"))
-            prs[pr["number"]] = snap.pr_files(pr)  # cached in the snapshot, keyed by head SHA (#446)
+            claim = found.get(pr_tickets[pr["number"]])
+            # cached in the snapshot, keyed by head SHA (#446), joined with the ticket's touch map (#398)
+            record = claim.worker if claim else None  # a draft is open work too: it joins the map like any open PR
+            prs[pr["number"]], off_map[pr["number"]] = pr_paths(snap.pr_files(pr), record)
         snap.save_cache()
-        # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
-        # `changes` is a no-op: holds needs each worktree's changed paths, not the dirty and unpushed counts claims
-        # would take, and a git failure there would stop a pass that never needed them.
-        found = claims.claims(repo, state_file, snap.issues, snap.prs, snap.merged, changes=lambda path, branch: None)
         tickets, others = claimed_paths(found, own_ticket, base)
     except github.GhError as e:
         print(f"holds: gh: {e.message}", file=sys.stderr)
@@ -248,7 +268,7 @@ def run(argv=None) -> int:
     except (KeyError, TypeError, ValueError) as e:
         print(f"holds: {e}", file=sys.stderr)
         return 2
-    return report(held_paths(cfg, prs, tickets, others), candidates, cfg,
+    return report(held_paths(cfg, prs, tickets, others, off_map), candidates, cfg,
                   own_pr=int(own_pr) if own_pr is not None else None, pr_tickets=pr_tickets)
 
 
