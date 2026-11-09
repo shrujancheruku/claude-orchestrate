@@ -283,6 +283,46 @@ class Rest(unittest.TestCase):
         self.assertEqual(e.exception.kind, github.FAILED)
         self.assertIn("Head branch was modified", e.exception.message)
 
+    def merge_405(self, reread):
+        """merge_pr with a PUT that answers 405, and `reread` as the GET of the pull (a dict, or None for a failed read)."""
+        reads = []
+
+        def fake(*cmd, **kw):
+            if "PUT" in cmd:
+                return common.Run(1, "", "gh: Pull Request is not mergeable (HTTP 405)")
+            reads.append(list(cmd))
+            return common.Run(0, json.dumps(reread), "") if reread is not None else common.Run(1, "", "gh: boom (HTTP 404)")
+
+        with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.dict("os.environ", {"ORCHESTRATE_GH_LOG": "off"}):
+            try:
+                github.merge_pr(7, "squash", "abc")
+                return "ok", reads
+            except github.GhError as e:
+                return e, reads
+
+    def test_a_405_is_success_only_after_the_pr_reads_as_merged(self):
+        done, reads = self.merge_405(pull(7, state="closed", merged_at="2026-01-01T00:00:00Z"))
+        self.assertEqual(done, "ok")
+        self.assertEqual(len(reads), 1)  # the re-read happened
+        for reread in (pull(7), pull(7, state="closed"), None):  # open, closed unmerged, unreadable
+            with self.subTest(reread=reread and reread["state"]):
+                err, reads = self.merge_405(reread)
+                self.assertIsInstance(err, github.GhError)
+                self.assertIn("405", err.message)
+                self.assertEqual(len(reads), 1)
+
+    def test_a_409_is_never_reread_as_landed(self):
+        reads = []
+
+        def fake(*cmd, **kw):
+            reads.append(cmd)
+            return common.Run(1, "", "gh: Head branch was modified. (HTTP 409)")
+
+        with unittest.mock.patch.object(common, "run", fake), unittest.mock.patch.dict("os.environ", {"ORCHESTRATE_GH_LOG": "off"}):
+            with self.assertRaises(github.GhError):
+                github.merge_pr(7, "squash", "abc")
+        self.assertEqual(len(reads), 1)
+
     def test_update_branch_puts_update_branch(self):
         calls = self.gh({"*": "{}"})
         github.update_branch("#7")

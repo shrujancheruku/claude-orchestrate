@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv, git  # noqa: E402
 import common  # noqa: E402
 from test_holds import live_reason  # noqa: E402
+from harness import rest_pull  # noqa: E402
 from merge_support import (CLOSED_ISSUE, ISSUE_CLOSE, ISSUE_VIEW, MergeMixin, OK, OPEN_ISSUE, PR_MERGE,  # noqa: E402
                            PR_VIEW, REF_GET, REPO_VIEW, pr)  # noqa: E402
 
@@ -96,6 +97,40 @@ class MergeTest(MergeMixin, unittest.TestCase):
                   ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
         p = self.merge()
         self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_405_after_the_merge_landed_is_success(self):
+        # a retry after a 5xx that landed: REST answers 405, the PR's own state says merged
+        self.seq({PR_VIEW: [pr("OPEN"), pr("MERGED")], PR_MERGE: [{"exit": 1, "stderr": "Pull Request is not mergeable (HTTP 405)"}],
+                  ("api", "repos/{owner}/{repo}/pulls/7"): [{"stdout": json.dumps(rest_pull(merged=True))}],
+                  ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        p = self.merge()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+
+    def test_405_on_an_open_pr_is_a_refusal(self):
+        self.seq({PR_VIEW: [pr("OPEN")], PR_MERGE: [{"exit": 1, "stderr": "Pull Request is not mergeable (HTTP 405)"}],
+                  ("api", "repos/{owner}/{repo}/pulls/7"): [{"stdout": json.dumps(rest_pull())}]})
+        p = self.merge()
+        self.assertEqual(p.returncode, 1)
+        self.assertRegex(p.stdout.splitlines()[-1], r"^next: ask-user merge refused for PR #7: ")
+
+    def test_rest_error_texts_against_the_retry_patterns(self):
+        # GitHub's docs give only the statuses (405 cannot be performed, 409 sha mismatch); these texts are what the API sends.
+        merge_script = (Path(common.__file__).parent / "merge").read_text()
+        ns = {}
+        import re as _re
+        for name in ("IN_PROGRESS", "TRANSIENT"):
+            line = merge_script[merge_script.index(name + " = "):]
+            exec("import re\n" + line[: line.index("\n\n")], ns)
+        cases = [("Pull Request is not mergeable (HTTP 405)", False, False),
+                 ("Head branch was modified. Review and try the merge again. (HTTP 409)", False, False),
+                 ("Base branch was modified. Review and try the merge again. (HTTP 405)", False, True),
+                 ("Merge already in progress (HTTP 405)", True, False),
+                 ("Server Error (HTTP 502)", False, True)]
+        for text, progress, transient in cases:
+            with self.subTest(text=text):
+                self.assertEqual(bool(ns["IN_PROGRESS"].search(text)), progress)
+                self.assertEqual(bool(ns["TRANSIENT"].search(text)), transient)
 
     def test_bare_in_progress_text_is_not_transient(self):
         self.seq({PR_VIEW: [pr("OPEN")], PR_MERGE: [{"exit": 1, "stderr": "check run in progress"}]})
@@ -188,9 +223,32 @@ class MergeTest(MergeMixin, unittest.TestCase):
     def test_closed_unmerged(self):
         self.seq({PR_VIEW: [pr("CLOSED")]})
         p = self.merge()
-        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.returncode, 0)  # a clean end: ABANDON reads the verdict instead of ignoring an error
         self.assertEqual(self.env.events()[0]["outcome"], "closed")
-        self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user PR #7 closed without merging")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: cleaned 7")
+
+    def test_an_exception_still_ends_with_a_next_line(self):
+        # merge is loaded in-process so run_merge can be made to raise after the merge would have landed
+        import importlib.machinery
+        import importlib.util
+        import io
+        import contextlib
+        from unittest import mock
+        loader = importlib.machinery.SourceFileLoader("merge_under_test", str(Path(common.__file__).parent / "merge"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        out, err = io.StringIO(), io.StringIO()
+
+        def boom(argv=None):
+            mod.VERDICT["pr"] = "7"
+            raise ValueError("headRefOid\nsecond line")
+
+        with mock.patch.object(mod, "run_merge", boom), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = mod.main(["7"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue().splitlines()[-1], "next: ask-user 7 ValueError: headRefOid second line")
+        self.assertIn("Traceback", err.getvalue())
 
     def test_unreadable_pr(self):
         self.seq({PR_VIEW: [{"exit": 1, "stderr": "boom"}]})
@@ -408,6 +466,24 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertIn("NOT removed", p.stdout)
         self.assertTrue(wt.exists())
 
+    def test_a_worktree_that_no_longer_exists_is_already_gone(self):
+        gone = self.env.repo.parent / "gone-tree"
+        self.seq({PR_VIEW: [self.pr_at("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        p = self.merge("--worktree", str(gone))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn(f"worktree {gone} already gone\n", p.stdout)
+        self.assertNotIn("NOT removed", p.stdout)
+
+    def test_a_detached_tree_behind_the_pr_head_is_removed(self):
+        # a lead tree a commit behind the head after an exit-5 update-branch still counts as the PR's tree
+        wt = self.scratch("lead-tree", "--detach")
+        self.env.commit("later.txt", "x", "feat: later")
+        head = git(self.env.repo, "rev-parse", "HEAD")
+        self.seq({PR_VIEW: [self.pr_at("MERGED", head)], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        p = self.merge("--worktree", str(wt))
+        self.assertIn(f"worktree {wt} removed", p.stdout)
+        self.assertFalse(wt.exists())
+
     def closed(self):
         self.seq({PR_VIEW: [self.pr_at("CLOSED")]})
         return self.merge()
@@ -416,12 +492,12 @@ class MergeTest(MergeMixin, unittest.TestCase):
         mine = [self.scratch(n, "--detach") for n in ("pr-7", "pr-7-r2")]
         other = self.scratch("pr-8", "--detach")
         p = self.closed()
-        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(p.stdout.count("scratch worktree"), 2)
         for wt in mine:
             self.assertFalse(wt.exists(), wt)
         self.assertTrue(other.exists())
-        self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user PR #7 closed without merging")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: cleaned 7")
 
     def test_a_dirty_scratch_worktree_of_a_closed_pr_is_kept_with_the_line(self):
         wt = self.scratch("pr-7", "--detach")

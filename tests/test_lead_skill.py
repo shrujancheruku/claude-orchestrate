@@ -27,7 +27,7 @@ class LeadSkill(unittest.TestCase):
     def test_launch_resume_and_live_branches(self):
         self.check(["claude agents --json --all", "SendMessage", "pid: null",
                     "scripts/launch\" --resume <sessionId> --bg", "Never resume a live row",
-                    "scripts/launch\" --bg --permission-mode", "--plugin-dir", "crossSessionInbound",
+                    "scripts/launch\" --bg`", "picks the mode", "--settings '{\"disableAutoMode\":\"disable\"}'", "--plugin-dir", "crossSessionInbound",
                     "scripts/launch --no-model", "**Orchestrator** row", "**Models**",
                     "a live row wins"])
 
@@ -37,9 +37,10 @@ class LeadSkill(unittest.TestCase):
         self.assertNotIn("claude --name lead", self.text)
         self.assertIn("scripts/launch --lead", self.text)
 
-    def test_start_skill_passes_the_callers_mode_and_whitelists_arguments(self):
+    def test_start_skill_leaves_the_mode_to_launch_and_whitelists_arguments(self):
         start = (SKILL.parent.parent / "start" / "SKILL.md").read_text()
-        for needle in ("<your own permission mode>", "`default`", "`--lead`", "`--permission-mode`", "Never paste the raw arguments"):
+        self.assertNotIn("<your own permission mode>", start)
+        for needle in ("Pass none", "`acceptEdits` by default", "`--lead`", "`--permission-mode`", "Never paste the raw arguments"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, start)
 
