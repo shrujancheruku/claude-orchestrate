@@ -394,7 +394,7 @@ def main(argv=None) -> int:
             start = saved_prompt or (prompt(args) if tokens else None)
             if start is None:
                 print(f"launch: {args.resume} has no saved start prompt and none was given; once it is resumed run "
-                      f"`claude attach {args.resume}` and type: /orchestrate:run --greedy", file=sys.stderr)
+                      f"`claude attach {args.resume}` and type: /orchestrate:run --greedy{' --profile' if args.profile else ''}", file=sys.stderr)
         elif tokens or args.profile:
             common.die("launch: cannot run: --resume takes no prompt for a session that is not a background one")
     root = plugin_root()

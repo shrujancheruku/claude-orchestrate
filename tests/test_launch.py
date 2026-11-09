@@ -401,6 +401,9 @@ class Launch(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "claude --resume b1 --bg")
         self.assertIn("claude attach b1", r.stderr)
         self.assertIn("/orchestrate:run", r.stderr)
+        self.assertNotIn("--profile", r.stderr)
+        r = self.launch("--print", "--resume", "b1", "--profile")
+        self.assertIn("/orchestrate:run --greedy --profile", r.stderr)
 
     def test_background_resume_refuses_a_permission_mode_that_differs_or_is_unreadable(self):
         self.live(self.bg_row())
