@@ -171,6 +171,20 @@ class GateTest(unittest.TestCase):
         self.assertIn("conflict", r.stdout)
         self.assertEqual(self.event()["outcome"], "fail")
 
+    def test_files_outside_the_touch_map_print_an_information_line(self):
+        self.prime(head="270-thing", diff=CLEAN_DIFF + added_file("src/b.py"))
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"session": "test-session", "tickets": {"270": {"touch_map": "src/a.py"}}}))
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("touch map: +1 files outside the map", r.stdout)
+
+    def test_no_touch_map_record_prints_no_outside_the_map_line(self):
+        self.prime(head="270-thing", diff=CLEAN_DIFF + added_file("src/b.py"))
+        r = self.gate()
+        self.assertNotIn("outside the map", r.stdout)
+
     def test_behind_but_mergeable_passes_and_reports_behind_by(self):
         self.prime(behind=3)
         r = self.gate()

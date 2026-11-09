@@ -88,6 +88,96 @@ class WatchCi(unittest.TestCase):
         self.seq({"7": [empty, view("SUCCESS", head="abc1234")]})
         self.assertEqual(self.watch("7").stdout.splitlines(), ["PR #7 pass CLEAN abc1234"])
 
+    def load(self):
+        loader = importlib.machinery.SourceFileLoader("watch_ci_parse", str(SCRIPTS / "watch-ci"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)
+        return mod
+
+    def test_parse_targets_takes_merges_hint_shape(self):
+        parse = self.load().parse_targets
+        sha = "5ba15c1" + "a" * 33
+        self.assertEqual(parse(["504", sha]), (["504"], {"504": sha}))
+        self.assertEqual(parse(["#7", "?", "8", "ABCDEF1"]), (["7", "8"], {"8": "abcdef1"}))
+        self.assertEqual(parse(["1", "2", "3"]), (["1", "2", "3"], {}))
+        for bad in (["zzz"], [sha], ["7", "not-a-head"], []):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                parse(bad)
+
+    def test_a_head_is_never_read_as_a_pr_number(self):
+        sha = "5ba15c1" + "a" * 33
+        self.seq({"504": [view("SUCCESS", head=sha)]})
+        r = self.watch_any("504", sha)
+        self.assertEqual((r.stdout.splitlines(), r.returncode), ([f"PR #504 pass CLEAN {sha[:7]}"], 0))
+        self.assertNotIn("error", r.stdout)
+
+    def test_a_bad_argument_is_could_not_run(self):
+        r = self.watch_any("504", "nonsense")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("neither a PR number nor the head", r.stderr)
+
+    def test_a_pinned_head_waits_for_the_pr_to_move_to_it(self):
+        new = "5ba15c1" + "b" * 33
+        old_green = view("SUCCESS", head="0000000aaa")
+        self.seq({"504": [old_green, old_green, view("SUCCESS", head=new)]})
+        r = self.watch_any("504", new)
+        self.assertEqual(r.stdout.splitlines(), ["PR #504 pass CLEAN 5ba15c1"])
+        self.assertGreaterEqual(len(self.env.gh_calls()), 3)  # the old head's green was not taken for the new one
+
+    def test_a_question_mark_head_pins_nothing(self):
+        self.seq({"504": [view("SUCCESS", head="1111111aaa")]})
+        r = self.watch_any("504", "?")
+        self.assertEqual(r.stdout.splitlines(), ["PR #504 pass CLEAN 1111111"])
+        self.assertEqual(len(self.env.gh_calls()), 1)
+
+    WF = ["api", "~repos/{owner}/{repo}/contents/.github/workflows?ref="]
+
+    def seq_with_workflows(self, steps, listing):
+        """seq, plus the contents call that lists the head's workflow files (`listing`: a gh reply)."""
+        self.seq(steps)
+        state = json.loads(self.env.gh_state.read_text())
+        state["responses"].append({"args": self.WF, **listing})
+        self.env.gh_state.write_text(json.dumps(state))
+
+    def test_a_head_with_no_check_run_ends_as_no_ci_run(self):
+        empty = {"statusCheckRollup": [], "mergeStateStatus": "UNKNOWN", "headRefOid": "5ba15c1" + "c" * 33, "state": "OPEN"}
+        self.seq_with_workflows({"504": [empty]}, {"stdout": '[{"name": "ci.yml"}]'})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "504", check=False)
+        self.assertEqual(r.stdout.splitlines(), ["PR #504 error no CI run for 5ba15c1, close-and-reopen fires one"])
+        self.assertEqual(r.returncode, 3)
+
+    def test_a_head_without_workflow_files_is_not_a_missing_run(self):
+        # ADR-0012: no workflow files means no run is expected; the watch keeps waiting and settles once checks appear
+        empty = {"statusCheckRollup": [], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
+        self.seq_with_workflows({"7": [empty, empty, view("SUCCESS", head="abc1234")]},
+                                {"exit": 1, "stderr": "gh: Not Found (HTTP 404)"})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "7", check=False)
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #7 pass CLEAN abc1234"], 0))
+        wf = [c for c in self.env.gh_calls() if c[:2] == ["api", self.WF[1][1:].split("?")[0] + "?ref=abc1234"]]
+        self.assertEqual(len(wf), 1)  # asked once for the head, then cached
+
+    def test_an_unreadable_workflow_listing_keeps_the_watch_waiting(self):
+        empty = {"statusCheckRollup": [], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
+        self.seq_with_workflows({"7": [empty, empty, view("SUCCESS", head="abc1234")]},
+                                {"exit": 1, "stderr": "gh: Server Error (HTTP 500)"})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "7", check=False)
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #7 pass CLEAN abc1234"], 0))
+
+    def test_a_pinned_head_the_pr_never_reaches_ends_the_watch(self):
+        stuck = view("SUCCESS", head="0000000aaa")
+        self.seq({"504": [stuck]})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "504", "5ba15c1" + "d" * 33, check=False)
+        self.assertEqual(r.stdout.splitlines(), ["PR #504 error head 5ba15c1 never reached; the PR is at 0000000"])
+        self.assertEqual(r.returncode, 3)
+
+    def test_a_draft_with_no_check_is_not_a_missing_run(self):
+        empty = {"statusCheckRollup": [], "mergeStateStatus": "UNKNOWN", "headRefOid": "abc1234", "state": "OPEN", "isDraft": True}
+        ready = view("SUCCESS", head="abc1234")
+        self.seq({"7": [empty, empty, ready]})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "7", check=False)
+        self.assertEqual(r.stdout.splitlines(), ["PR #7 pass CLEAN abc1234"])
+
     def test_status_context_failure(self):
         v = {"statusCheckRollup": [{"state": "ERROR"}], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
         self.seq({"8": [v]})
@@ -166,7 +256,8 @@ class WatchCi(unittest.TestCase):
         self.seq({"6": ["MISSING"], "7": [view(None), view(None), view("SUCCESS", head="7777777ccc")]})
         r = self.watch_any("6", "7")
         self.assertIn("PR #6 error not in gh's pr list", r.stdout)
-        self.assertIn("PR #7 pass CLEAN 7777777", r.stdout)
+        self.assertNotIn("PR #7 pass", r.stdout)  # a pass after an error in the same run is never printed
+        self.assertIn("PR #7 error pass withheld", r.stdout)
         self.assertEqual(r.returncode, 3)
 
     def test_three_watched_prs_cost_one_gh_call_per_tick(self):

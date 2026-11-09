@@ -1,4 +1,5 @@
 import json
+import threading
 import unittest
 
 from harness import ScriptEnv, git
@@ -19,7 +20,20 @@ class RebuildState(unittest.TestCase):
     def rebuild(self):
         write_session(self.main, self.main_records, self.agents)
         res = self.env.run("rebuild-state", self.main)
-        return res, json.loads((self.env.repo / ".claude" / "orchestrate-state.json").read_text())
+        raw = self.raw()
+        # The session's own entry, flattened: the tests below read {"session", "tickets"}.
+        return res, {"session": raw["session"], "tickets": raw["sessions"][raw["session"]]["tickets"]}
+
+    def raw(self):
+        return json.loads((self.env.repo / ".claude" / "orchestrate-state.json").read_text())
+
+    def second_session(self, sid, ticket):
+        """Write another session's transcript, which dispatched one worker for `ticket`, and return its path."""
+        path = main_path(self.env.repo.parent / "projects", sid)
+        tool = f"t-{sid}"
+        write_session(path, [dispatch(tool, f"Build #{ticket}", sid=sid)],
+                      [{"id": f"ag-{sid}", "tool_use": tool, "records": [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5")], "meta": {}}])
+        return path
 
     def harness_worktree(self, agent_id):
         """A directory standing in for the harness's worktree of an agent, outside the repo."""
@@ -149,6 +163,54 @@ class RebuildState(unittest.TestCase):
     def test_empty_session_writes_empty_state(self):
         _, state = self.rebuild()
         self.assertEqual(state["tickets"], {})
+
+    def tickets_by_session(self):
+        # The harness seeds a "test-session" entry (old shape, migrated on the first rebuild); it is kept like any other.
+        return {k: list(v["tickets"]) for k, v in self.raw()["sessions"].items() if k != "test-session"}
+
+    def test_two_sessions_keep_both_entries_and_the_same_session_replaces_only_its_own(self):
+        self.main_records += [dispatch("t1", "Build #5")]
+        self.agent("a1", "t1", [reply("2026-11-04T09:01:00Z", "claude-sonnet-5-5")])
+        self.rebuild()
+        self.env.run("rebuild-state", self.second_session("sess-2", 9))
+        self.assertEqual(self.tickets_by_session(), {"sess-1": ["5"], "sess-2": ["9"]})
+        self.assertEqual(self.raw()["session"], "sess-2")  # the one that rebuilt last is the current session
+        self.main_records = [dispatch("t1", "Build #6")]
+        self.rebuild()
+        self.assertEqual(self.tickets_by_session(), {"sess-1": ["6"], "sess-2": ["9"]})
+
+    def test_an_old_shape_file_is_one_session_and_is_rewritten_in_the_new_shape(self):
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(exist_ok=True)
+        state.write_text(json.dumps({"session": "old", "tickets": {"3": {"agent_id": "x"}}}))
+        self.rebuild()
+        raw = self.raw()
+        self.assertEqual(raw["sessions"]["old"], {"tickets": {"3": {"agent_id": "x"}}})
+        self.assertIn("sess-1", raw["sessions"])
+        self.assertNotIn("tickets", raw)
+
+    def test_an_entry_without_a_tickets_object_is_dropped_on_rebuild(self):
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(exist_ok=True)
+        state.write_text(json.dumps({"session": "x", "sessions": {
+            "x": {"tickets": {"3": {}}}, "bad": {"tickets": None}, "worse": {}, "str": "no"}}))
+        self.rebuild()
+        self.assertEqual(self.tickets_by_session(), {"x": ["3"], "sess-1": []})
+
+    def test_concurrent_rebuilds_for_two_sessions_lose_no_entry(self):
+        # Many rounds, so an unlocked read-modify-write would lose an entry.
+        for rnd in range(5):
+            paths = [self.second_session(f"s{rnd}-{i}", 10 + i) for i in range(6)]
+            codes = []
+            threads = [threading.Thread(target=lambda p=p: codes.append(self.env.run("rebuild-state", p, check=False).returncode))
+                       for p in paths]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(codes, [0] * len(paths))
+            self.assertTrue({f"s{rnd}-{i}" for i in range(6)} <= set(self.raw()["sessions"]))
+        self.assertEqual(len(self.raw()["sessions"]), 31)  # 30 and the seeded "test-session", kept
 
 
 if __name__ == "__main__":
