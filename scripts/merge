@@ -34,9 +34,10 @@ wait for CI` line each. A PR that is behind and DIRTY is not updated: its line s
 unapproved PR, or one pushed to since its approval, is left alone. None of this changes the exit code.
 Exit codes: 0 merged and cleaned up; 4 the same, but a swept branch was handed back (resume its worker
 with the printed conflict list); 5 behind the default branch, branch updated: wait for CI, then run
-again; 6 the change since --approved-head needs re-review (nothing merged); 1 the merge was refused, or the PR was closed unmerged (or the branch update for exit 5 failed; the output says why);
+again; 6 the change since --approved-head needs re-review (nothing merged); 1 the merge was refused (or the branch update for exit 5 failed; the output says why);
 2 the script could not run (`gh` is missing or cannot read the PR, or with --approved-head readiness could not be decided, e.g. a failed compare call or review-threads read: run it again; the error goes to stderr); 3 still not MERGED at the timeout (run it
-again later; nothing was closed or deleted). A merge failure that looks transient (5xx, timeout,
+again later; nothing was closed or deleted). A PR found closed unmerged is cleaned up (scratch trees) and ends
+`next: cleaned <pr>`, exit 0. A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
 Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word: `merged` |
 `wait-ci <pr> <head>` | `re-review <pr>` | `send-back <pr>` (the lines above it are what the PR's owner gets) |
@@ -53,11 +54,13 @@ Stdlib only, Python 3.9+.
 
 import argparse
 import difflib
+import json
 import os
 from pathlib import Path
 import re
 import sys
 import time
+import traceback
 
 import common
 import config
@@ -66,13 +69,13 @@ import replay
 import repo
 import runlog
 import tracker
-from repo import remove_scratch, remove_worktree, worktree_refusal
+from repo import remove_scratch, remove_worktree, worktree_gone, worktree_refusal
 
 # "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
 IN_PROGRESS = re.compile(r"already in progress|already merged", re.I)
 PROTECTED = ("main", "master")
 TRANSIENT = re.compile(r"\b5\d\d\b|bad gateway|service unavailable|gateway time-?out|timed? ?out|"
-                       r"connection (?:reset|refused)|try again", re.I)
+                       r"connection (?:reset|refused)|try again|base branch was modified", re.I)
 
 
 run = common.run  # (code, stdout, stderr); a missing gh or git is code 127, not a traceback
@@ -117,7 +120,7 @@ def say(msg):
 
 
 # The run's verdict, printed by main() as the `also:` lines and then the one `next:` line.
-VERDICT = {"next": None, "also": []}
+VERDICT = {"next": None, "also": [], "pr": "?"}
 
 
 def verdict(text):
@@ -255,18 +258,65 @@ def threads_rule(cwd, pr):
     return 1
 
 
-def new_head(cwd, pr, old):
-    """The PR's head after a branch update (what the CI to wait for runs on). `?` when gh can't say or the head
-    is still `old`: the host may apply the update after `gh pr update-branch` returns, and the old head's green
-    CI must not be waited on (the run skill says `?` means `watch-ci <pr>`, whatever head it reports)."""
+HEAD_POLLS = 3  # reads of the PR head after an update-branch before giving up on seeing it move
+HEAD_GAP = 2.0  # seconds between those reads
+UPDATE_WINDOW = 120  # seconds in which a second update-branch of the same PR is refused while the first may be in flight
+UPDATES_FILE = ".claude/orchestrate-update-branch.json"  # {pr: {"from": head, "at": epoch seconds}}, beside the state file
+
+
+def new_head(cwd, pr, old, gap=HEAD_GAP):
+    """The PR's head after a branch update (what the CI to wait for runs on): read up to HEAD_POLLS times, `gap`
+    seconds apart, until it differs from `old`. `?` when gh can't say or the head never moved: the host may apply the
+    update after the call returns, and the old head's green CI must not be waited on (`watch-ci <pr> ?` pins no head,
+    and a rerun then refuses a second update-branch, see `update_in_flight`)."""
+    for i in range(HEAD_POLLS):
+        if i:
+            time.sleep(gap)
+        try:
+            head = github.pr_view(pr, "headRefOid", cwd).get("headRefOid")
+        except github.GhError:
+            continue
+        if head and head != old:
+            return head
+    return "?"
+
+
+def _updates_path(cwd):
+    return repo.main_checkout(cwd) / UPDATES_FILE
+
+
+def _read_updates(cwd):
     try:
-        head = github.pr_view(pr, "headRefOid", cwd).get("headRefOid")
-    except github.GhError:
-        return "?"
-    return head if head and head != old else "?"
+        data = json.loads(_updates_path(cwd).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
-def readiness(cwd, pr, v, approved):
+def record_update(cwd, pr, head):
+    """Remember that update-branch ran on `pr` at `head`, so a rerun does not issue a second one while it is in flight.
+    Best effort: an unwritable file only loses the guard."""
+    data = _read_updates(cwd)
+    data[str(pr)] = {"from": head, "at": time.time()}
+    try:
+        path = _updates_path(cwd)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def update_in_flight(cwd, pr, head):
+    """Seconds since the last update-branch of `pr` when it ran within UPDATE_WINDOW and the head is still the one it
+    started from (the host has not applied it yet), else None."""
+    rec = _read_updates(cwd).get(str(pr))
+    if not isinstance(rec, dict) or rec.get("from") != head or not isinstance(rec.get("at"), (int, float)):
+        return None
+    age = time.time() - rec["at"]
+    return age if 0 <= age < UPDATE_WINDOW else None
+
+
+def readiness(cwd, pr, v, approved, gap=HEAD_GAP):
     """Exit code 1, 2, 5 or 6 when the PR is not ready to merge against `approved`, else None (ready)."""
     default = default_branch(cwd)
     head = v.get("headRefOid") or ""
@@ -285,6 +335,12 @@ def readiness(cwd, pr, v, approved):
         say(f"merge: could not read behind_by for PR #{pr}: {e.message}")
         return 2
     if behind:
+        age = update_in_flight(cwd, pr, head)
+        if age is not None:
+            say(f"PR #{pr} is behind {default} by {behind}, but update-branch ran {age:.0f}s ago and the head has not moved; "
+                f"not asking again within {UPDATE_WINDOW}s; wait for CI, then run merge again")
+            verdict(f"wait-ci {pr} ?")
+            return 5
         try:
             github.update_branch(pr, cwd)
         except github.GhError as e:
@@ -293,8 +349,9 @@ def readiness(cwd, pr, v, approved):
             verdict(f"ask-user PR #{pr} is a fork; its branch can't be updated" if v.get("isCrossRepository")
                     else f"send-back {pr}")
             return 1
+        record_update(cwd, pr, head)
         say(f"PR #{pr} was behind {default} by {behind}; branch updated; wait for CI, then run merge again")
-        verdict(f"wait-ci {pr} {new_head(cwd, pr, head)}")
+        verdict(f"wait-ci {pr} {new_head(cwd, pr, head, gap)}")
         return 5
     changes = own_changes(cwd, approved, head, default)
     if changes is None:
@@ -318,9 +375,13 @@ def readiness(cwd, pr, v, approved):
 
 def main(argv=None) -> int:
     """Run the merge, then print the `also:` lines and the one `next:` line (see the module docstring)."""
-    VERDICT["next"], VERDICT["also"] = None, []
+    VERDICT["next"], VERDICT["also"], VERDICT["pr"] = None, [], "?"
     try:
         code = run_merge(argv)
+    except Exception as e:  # a verdict line must always exist, even when the merge had landed (the traceback is on stderr)
+        traceback.print_exc()
+        verdict(f"ask-user {VERDICT['pr']} {type(e).__name__}: {why_of(str(e))}")
+        code = 1
     except SystemExit as e:  # common.die (2) or an argparse usage error (2); --help (0) prints no verdict
         if e.code in (0, None):
             raise
@@ -347,6 +408,7 @@ def run_merge(argv=None) -> int:
     ap.add_argument("--interval", type=float, default=5, help="seconds between state checks")
     args = ap.parse_args(argv)
     pr, ref = common.pr_ref(args.pr)
+    VERDICT["pr"] = pr
     cwd = args.cwd
     # Before the irreversible step: the merged event is written after the merge, and a missing session
     # would otherwise exit 2 on a merge that happened, before the sweep ran (#341).
@@ -362,7 +424,7 @@ def run_merge(argv=None) -> int:
     state = v.get("state")
     head_oid = v.get("headRefOid") or ""
     if args.approved_head and state == "OPEN":
-        code = readiness(cwd, pr, v, args.approved_head)
+        code = readiness(cwd, pr, v, args.approved_head, min(HEAD_GAP, args.interval))
         if code is not None:
             return code
     deadline = time.monotonic() + args.timeout
@@ -400,8 +462,8 @@ def run_merge(argv=None) -> int:
             for line in remove_scratch(pr, head_oid, cwd):
                 say(f"scratch {line}")
             runlog.append_event(cwd, "merge", "closed", ref=ref, branch=branch)
-            verdict(f"ask-user PR #{pr} closed without merging")
-            return 1
+            verdict(f"cleaned {pr}")  # a clean end, not an error: the skill's ABANDON reads the verdict
+            return 0
         if refused:
             say(f"merge refused for PR #{pr}: {refused}")
             verdict(f"ask-user {why_of(f'merge refused for PR #{pr}: {refused}')}")
@@ -448,8 +510,11 @@ def run_merge(argv=None) -> int:
             say(f"ticket #{t} NOT closed: {e.message}")
 
     if args.worktree:
-        refusal = worktree_refusal(args.worktree, branch, head_oid, cwd)
-        say(f"worktree {args.worktree} NOT removed: {refusal}" if refusal else remove_worktree(args.worktree, cwd))
+        if worktree_gone(args.worktree, cwd):
+            say(f"worktree {args.worktree} already gone")
+        else:
+            refusal = worktree_refusal(args.worktree, branch, head_oid, cwd)
+            say(f"worktree {args.worktree} NOT removed: {refusal}" if refusal else remove_worktree(args.worktree, cwd))
     # The reviewer's pr-<n> scratch trees: the guard refuses it `git worktree remove`, so the merge does (ADR-0004).
     for line in remove_scratch(pr, head_oid, cwd):
         say(f"scratch {line}")
@@ -462,7 +527,7 @@ def run_merge(argv=None) -> int:
                         tickets=[int(t) for t in tickets if t.isdigit()])
     say(fast_forward_main(cwd, default))
     handed = sweep(cwd, pr, branch, default, args.method)
-    update_approved(cwd, pr, default, args.also_approved)
+    update_approved(cwd, pr, default, args.also_approved, min(HEAD_GAP, args.interval))
     verdict("merged")
     return 4 if handed else 0
 
@@ -505,7 +570,7 @@ def fast_forward_main(cwd, default):
     return f"main checkout fast-forwarded to {r.stdout.strip()}"
 
 
-def update_approved(cwd, merged_pr, default, specs):
+def update_approved(cwd, merged_pr, default, specs, gap=HEAD_GAP):
     """Update each approved PR (`PR=SHA` in `specs`) that is behind `default`, so their CI runs together.
 
     Only a PR still open, in this repo and still at its approved head is touched: a push since the
@@ -541,7 +606,8 @@ def update_approved(cwd, merged_pr, default, specs):
                 continue
             github.update_branch(n, cwd)
             say(f"PR #{n} updated (behind by {behind}); wait for CI")
-            also(f"wait-ci {n} {new_head(cwd, n, v.get('headRefOid'))}")
+            record_update(cwd, n, v.get("headRefOid"))
+            also(f"wait-ci {n} {new_head(cwd, n, v.get('headRefOid'), gap)}")
         except github.GhError as e:
             say(f"PR #{n} not updated: {e.message}")
             also(f"left {n} not updated: {why_of(e.message)}")

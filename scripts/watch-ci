@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""watch-ci <pr>... : wait for each ready (non-draft) PR's checks to settle; one line per PR as it settles.
+"""watch-ci <pr> [<head>]... : wait for each ready (non-draft) PR's checks to settle; one line per PR as it settles.
+
+Each PR may be followed by the head to wait for, exactly as `merge` prints its `next: wait-ci <pr> <head>` hint:
+`watch-ci 7 5ba15c1 8 ?`. A head (7 to 40 hex digits, or `?` for none) pins the PR: its checks are read only once the PR's
+head is that commit, so the old head's green CI after an update-branch is never taken for the new one. `?` pins nothing.
+A merged or closed PR settles at once either way.
 
 Run it as a Monitor command so the orchestrator never sleeps or polls. Each line:
     PR #<n> <pass|fail> <merge state> <head commit>
@@ -15,6 +20,13 @@ and the watch carries on. Nothing is rerun; the orchestrator decides. A failed j
 Each tick is one `gh pr list` request for every PR still watched, so the read load does not grow with the
 number of PRs. The default interval is 30 seconds with one or two PRs and 60 with three or more
 (`--interval` overrides it).
+A ready PR whose head has no check at all for 5 minutes (`--no-run-after` overrides) did not get a workflow run (GitHub
+sometimes starts none after an update-branch): it ends with
+    PR #<n> error no CI run for <head>, close-and-reopen fires one
+and is no longer watched; the run skill closes and reopens the PR once, then watches again.
+A run that ended any PR with an `error` line never prints a `pass` afterwards: a PR that would pass then ends
+    PR #<n> error pass withheld: an earlier error in this run
+so a verdict read after a failure is never trusted; run watch-ci again.
 A `gh` failure is retried; when `gh` fails 5 ticks in a row (a success resets the count) every watched PR
 ends with the line
     PR #<n> error <one-line reason>
@@ -23,8 +35,8 @@ and is no longer watched. A PR missing from the reply is retried on the next tic
 working directory) ends the watch at once as could-not-run.
 The repository is resolved once at startup (the main checkout) and every `gh` call runs there, so a
 later change to the shell's directory, such as a removed worktree, cannot break the watch.
-Exit codes: 0 every PR settled; 2 could not run (no `gh`, no repository, a reply that is not a PR),
-one line on stderr; 3 every PR ended but at least one with an `error` line.
+Exit codes: 0 every PR settled; 2 could not run (no `gh`, no repository, a reply that is not a PR, an argument that
+is neither a PR number nor the head after one), one line on stderr; 3 every PR ended but at least one with an `error` line.
 Stdlib only, Python 3.9+.
 """
 
@@ -42,6 +54,8 @@ MAX_FAILURES = 5  # consecutive failed `gh` ticks before every watched PR ends i
 MAX_MISSES = 3  # consecutive replies without a PR before it ends in an error line
 FEW, FEW_INTERVAL, MANY_INTERVAL = 2, 30.0, 60.0  # up to FEW PRs poll every FEW_INTERVAL seconds, more every MANY_INTERVAL
 EXIT_ERROR = 3
+NO_RUN_AFTER = 300.0  # seconds a ready PR may show no check at all before it is reported as having no CI run
+HEAD_ARG = re.compile(r"\?|[0-9a-fA-F]{7,40}")  # the head half of merge's `wait-ci <pr> <head>` hint
 STUCK_AFTER = 300.0  # seconds a job with every step completed may stay in_progress before it is reported as stuck
 RUN_URL = re.compile(r"/actions/runs/(\d+)/")  # a check's detailsUrl names its workflow run
 FIELDS = "number,statusCheckRollup,mergeStateStatus,headRefOid,state,isDraft"
@@ -68,6 +82,25 @@ def judge(view: dict):
             return None
         results.append(r)
     return "fail" if any(r in BAD for r in results) else "pass"
+
+
+def parse_targets(tokens):
+    """([pr...], {pr: head}) from the positional arguments: PR numbers (`7`, `#7`), each optionally followed by its head
+    (hex, or `?`), the shape of `merge`'s `wait-ci <pr> <head>` hint. ValueError names a token that is neither."""
+    prs, heads = [], {}
+    for tok in tokens:
+        if HEAD_ARG.fullmatch(tok) and prs and common.pr_ref(prs[-1])[0] not in heads and (not tok.isdigit() or len(tok) >= 7):
+            if tok != "?":
+                heads[prs[-1]] = tok.lower()
+            else:
+                heads[prs[-1]] = None
+        elif tok.lstrip("#").isdigit():
+            prs.append(common.pr_ref(tok)[0])
+        else:
+            raise ValueError(f"{tok!r} is neither a PR number nor the head after one")
+    if not prs:
+        raise ValueError("no PR number given")
+    return prs, {pr: h for pr, h in heads.items() if h}
 
 
 def interval_for(count: int, given=None) -> float:
@@ -145,13 +178,21 @@ def check_stuck(root, pr, run_id, first_seen, reported, stuck_after):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("prs", nargs="+", help="PR numbers")
+    ap.add_argument("prs", nargs="+", help="PR numbers, each optionally followed by its head (merge's wait-ci hint)")
+    ap.add_argument("--no-run-after", type=float, default=NO_RUN_AFTER,
+                    help="seconds a ready PR may show no check before it ends as having no CI run (default 300)")
     ap.add_argument("--interval", type=float, default=None,
                     help="seconds between checks (default 30 with one or two PRs, 60 with three or more)")
     ap.add_argument("--stuck-after", type=float, default=STUCK_AFTER,
                     help="seconds a job with every step done may stay in_progress before it is reported (default 300)")
     args = ap.parse_args(argv)
-    pending = [common.pr_ref(p)[0] for p in args.prs]
+    try:
+        pending, pinned = parse_targets(args.prs)
+    except ValueError as e:
+        print(f"watch-ci: cannot run: {e}", file=sys.stderr, flush=True)
+        return 2
+    pending = list(dict.fromkeys(pending))
+    empty_since = {}  # pr -> (head, monotonic time its head was first seen with no check)
     code, _, _ = common.run("git", "rev-parse", "--show-toplevel")
     if code != 0:
         print("watch-ci: cannot run: not inside a git repository", file=sys.stderr, flush=True)
@@ -191,7 +232,23 @@ def main(argv=None) -> int:
                         give_up(pr, "not in gh's pr list")
                     continue
                 misses[pr] = 0
+                head_now = (view.get("headRefOid") or "")
+                want = pinned.get(pr)
+                if want and view.get("state") == "OPEN" and not head_now.lower().startswith(want):
+                    continue  # the update has not moved the PR to the head being waited for: its checks are the old head's
                 result = judge(view)
+                if result is None and not view.get("isDraft") and not view.get("statusCheckRollup"):
+                    seen = empty_since.get(pr)
+                    if seen is None or seen[0] != head_now:
+                        seen = empty_since[pr] = (head_now, time.monotonic())
+                    if time.monotonic() - seen[1] >= args.no_run_after:
+                        give_up(pr, f"no CI run for {head_now[:7]}, close-and-reopen fires one")
+                        continue
+                else:
+                    empty_since.pop(pr, None)
+                if result == "pass" and errored:
+                    give_up(pr, "pass withheld: an earlier error in this run")
+                    continue
                 if result is None:
                     if not view.get("isDraft"):
                         for run_id, urls in in_progress_runs(view).items():

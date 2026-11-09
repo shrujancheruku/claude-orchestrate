@@ -74,7 +74,8 @@ class ReadinessTest(unittest.TestCase):
         self.env.set_gh([
             {"args": PR_GRAPHQL, "seq": [view, merged]},
             *([{"args": ["api", "repos/{owner}/{repo}/pulls/7"],
-               "stdout": json.dumps(rest_pull(headRefOid=after_head))}] if after_head else []),
+                "seq": [{"stdout": json.dumps(rest_pull(headRefOid=h))}
+                        for h in ([after_head] if isinstance(after_head, str) else after_head)]}] if after_head else []),
             gh_repo_view(),
             {"args": ["api", WF + head],
              **(workflows or {"exit": 1, "stderr": "gh: Not Found (HTTP 404)"})},
@@ -147,6 +148,55 @@ class ReadinessTest(unittest.TestCase):
         p = self.merge(head, behind="2", after_head="f" * 40)
         self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
         self.assertEqual(p.stdout.splitlines()[-1], "next: wait-ci 7 " + "f" * 40)
+
+    def test_behind_reads_the_moved_head_on_the_second_poll(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, behind="2", after_head=[head, "e" * 40])
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: wait-ci 7 " + "e" * 40)
+        self.assertEqual(len(self.called(["api", "repos/{owner}/{repo}/pulls/7"])), 2)
+
+    def test_a_second_update_branch_is_refused_while_the_first_is_in_flight(self):
+        head = self.push({"b.txt": "x\n"})
+        first = self.merge(head, behind="2")  # the head never moves: the update is still in flight
+        self.assertEqual(first.stdout.splitlines()[-1], "next: wait-ci 7 ?")
+        second = self.merge(head, behind="2")
+        self.assertEqual(second.returncode, 5, second.stdout + second.stderr)
+        self.assertEqual(second.stdout.splitlines()[-1], "next: wait-ci 7 ?")
+        self.assertIn("not asking again", second.stdout)
+        self.assertEqual(len(self.called(UPDATE)), 1)  # the call log spans both runs
+
+    def test_a_second_update_branch_goes_ahead_once_the_window_has_passed(self):
+        head = self.push({"b.txt": "x\n"})
+        self.merge(head, behind="2")
+        state = self.repo / ".claude" / "orchestrate-update-branch.json"
+        rec = json.loads(state.read_text())
+        rec["7"]["at"] -= 600
+        state.write_text(json.dumps(rec))
+        self.merge(head, behind="2")
+        self.assertEqual(len(self.called(UPDATE)), 2)
+
+    def test_a_second_update_branch_goes_ahead_when_the_head_moved(self):
+        head = self.push({"b.txt": "x\n"})
+        self.merge(head, behind="2")
+        newer = self.push({"c.txt": "y\n"})
+        self.merge(newer, behind="2")
+        self.assertEqual(len(self.called(UPDATE)), 2)
+
+    def test_the_printed_wait_ci_hint_runs_through_watch_cis_parser(self):
+        import importlib.machinery
+        import importlib.util
+        head = self.push({"b.txt": "x\n"})
+        for after in ("f" * 40, None):  # a moved head, and the `?` hint
+            hint = self.merge(head, behind="2", after_head=after).stdout.splitlines()[-1]
+            self.assertTrue(hint.startswith("next: wait-ci 7 "), hint)
+            loader = importlib.machinery.SourceFileLoader("watch_ci_for_hint", str(Path(__file__).resolve().parent.parent / "scripts" / "watch-ci"))
+            mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(mod)
+            prs, heads = mod.parse_targets(hint.split()[2:])
+            self.assertEqual(prs, ["7"])
+            self.assertEqual(heads, {"7": after} if after else {})
+            (self.repo / ".claude" / "orchestrate-update-branch.json").unlink(missing_ok=True)
 
     def test_failing_update_of_a_fork_pr_asks_the_user(self):
         head = self.push({"b.txt": "x\n"})
