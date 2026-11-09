@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""prompts [--repo DIR] [--session ID] [--since ISO | --watermark] : the permission prompts a run gave the developer.
+
+Reads `.claude/orchestrate-prompts.jsonl` in the main checkout, which hooks/prompt_log.py appends to on every
+PermissionRequest (#569). Prints, in this order:
+    prompts: <n>                    always, so a count of 0 shows
+    by role: <role> <n>, ...        only with prompts; roles are orchestrator (agent_type null), worker, reviewer, scout...
+    by tool: <tool> <n>, ...        only with prompts, most frequent first
+    then one line per prompt, oldest first: `<time> <role> <tool> <first 200 characters of the command or path>`
+The list shows the newest 40 prompts, with a `... <n> earlier` line first when more matched; the counts cover all.
+--session ID keeps one session's prompts. --since ISO keeps prompts at or after that time.
+--watermark means "since the last pass record": the newest entry of the pass log (`profile.py record`) for --session
+(any session without it); with no pass record yet it keeps everything. It is exclusive with --since.
+No log yet is not an error: it prints `prompts: 0`. Exit codes: 0 ran; 2 could not run (bad --repo, --since or
+no usable argument), one line on stderr. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import sys
+from collections import Counter
+from pathlib import Path
+
+import common
+import repo as repolib
+import runlog
+
+LOG = Path(".claude") / "orchestrate-prompts.jsonl"
+LIST_LIMIT = 40
+DETAIL_WIDTH = 200
+
+
+def role(entry: dict) -> str:
+    agent = entry.get("agent_type")
+    if not isinstance(agent, str) or not agent:
+        return "orchestrator"
+    return agent.split(":", 1)[-1]
+
+
+def detail(entry: dict) -> str:
+    tool_input = entry.get("tool_input")
+    if isinstance(tool_input, dict):
+        for key in ("command", "file_path"):
+            if tool_input.get(key):
+                return common.one_line(tool_input[key], DETAIL_WIDTH)
+    if isinstance(tool_input, list) and tool_input:
+        return common.one_line("(" + ", ".join(map(str, tool_input)) + ")", DETAIL_WIDTH)
+    return ""
+
+
+def watermark(root: Path, session) -> object:
+    """The time of the newest pass record (this session's, or any when no session), or None."""
+    if session:
+        passes = runlog.read_passes(root, session)
+    else:
+        passes = list(common.read_jsonl(runlog.log_path(root, runlog.PASS_LOG)))
+    times = [t for t in (repolib.parse_ts(p.get("ts")) for p in passes) if t]
+    return max(times) if times else None
+
+
+def render(entries: list) -> list:
+    lines = [f"prompts: {len(entries)}"]
+    if not entries:
+        return lines
+    by_role = Counter(role(e) for e in entries)
+    by_tool = Counter(str(e.get("tool_name") or "?") for e in entries)
+    lines.append("by role: " + ", ".join(f"{k} {n}" for k, n in sorted(by_role.items(), key=lambda kv: (-kv[1], kv[0]))))
+    lines.append("by tool: " + ", ".join(f"{k} {n}" for k, n in sorted(by_tool.items(), key=lambda kv: (-kv[1], kv[0]))))
+    shown = entries[-LIST_LIMIT:]
+    if len(entries) > len(shown):
+        lines.append(f"... {len(entries) - len(shown)} earlier")
+    for e in shown:
+        lines.append(" ".join(p for p in (str(e.get("time") or "?"), role(e), str(e.get("tool_name") or "?"), detail(e)) if p))
+    return lines
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    ap.add_argument("--session", help="only this session's prompts")
+    since = ap.add_mutually_exclusive_group()
+    since.add_argument("--since", help="only prompts at or after this ISO time")
+    since.add_argument("--watermark", action="store_true", help="only prompts since the last pass record")
+    args = ap.parse_args(argv)
+    root = Path(args.repo).resolve()
+    if not root.is_dir():
+        common.die(f"prompts: cannot run: {args.repo} is not a directory")
+    cutoff = None
+    if args.since is not None:
+        cutoff = repolib.parse_ts(args.since)
+        if cutoff is None:
+            common.die(f"prompts: cannot run: --since {args.since!r} is not an ISO time")
+    elif args.watermark:
+        cutoff = watermark(root, args.session)
+    entries = []
+    for e in common.read_jsonl(repolib.main_checkout(root) / LOG):
+        if args.session and e.get("session_id") != args.session:
+            continue
+        if cutoff is not None:
+            t = repolib.parse_ts(e.get("time"))
+            if t is None or t < cutoff:
+                continue
+        entries.append(e)
+    for line in render(entries):
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

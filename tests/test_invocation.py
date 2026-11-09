@@ -69,6 +69,15 @@ class Invocation(unittest.TestCase):
                 r = run(argv, input="", cwd=tempfile.gettempdir())
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_hook_scripts_are_standalone_and_run_isolated_alone(self):
+        # hooks/*.py are standalone (ADR-0003): hooks.json runs them with `python3 -I` and they import nothing from
+        # the plugin. prompt_log.py runs from a copy of itself, on an empty payload, and prints nothing (#569).
+        self.assertEqual(sorted(p.name for p in (ROOT / "hooks").glob("*.py")), ["guard.py", "prompt_log.py"])
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copy(ROOT / "hooks" / "prompt_log.py", d)
+            r = run([sys.executable, "-I", str(Path(d) / "prompt_log.py")], input="", cwd=tempfile.gettempdir())
+            self.assertEqual((r.returncode, r.stdout), (0, ""))
+
     def test_every_cli_the_guard_approves_by_flag_name_rejects_abbreviations(self):
         # The guard spells flags in full (SAFE_SCRIPT_FLAGS, MERGE_VALUE_FLAGS, ...) and says it relies on the
         # scripts not accepting an abbreviation such as `--meth` (#537). ci-times is on the chain list but is
