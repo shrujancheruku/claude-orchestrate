@@ -129,6 +129,11 @@ def only_pr_body_untracked(path) -> bool:
     return st.code == 0 and [e for e in st.stdout.split("\0") if e] == [f"?? {PR_BODY_FILE}"]
 
 
+def c_locale():
+    """The environment for a git call whose message text is parsed: English, whatever LANG or LC_ALL the user has."""
+    return dict(os.environ, LC_ALL="C", LANGUAGE="C")
+
+
 def remove_worktree(path, cwd):
     """Remove the merged PR's worktree and say what happened; never raises, and forces only past an untracked
     `.claude/pr-body.md` that is the tree's one change (`only_pr_body_untracked`): it goes with the tree.
@@ -136,9 +141,10 @@ def remove_worktree(path, cwd):
     A harness-locked tree is unlocked first, then removed plainly, so a dirty tree is still refused;
     if that refusal comes after the unlock, the lock is put back so the tree is left as found."""
     def attempt():
-        w = common.run("git", "worktree", "remove", path, cwd=cwd)
+        # LC_ALL=C: the refusal texts below are English, whatever the user's locale.
+        w = common.run("git", "worktree", "remove", path, cwd=cwd, env=c_locale())
         if w.code != 0 and "untracked" in w.stderr and only_pr_body_untracked(path):
-            w = common.run("git", "worktree", "remove", "--force", path, cwd=cwd)
+            w = common.run("git", "worktree", "remove", "--force", path, cwd=cwd, env=c_locale())
         return w
 
     w = attempt()
@@ -150,7 +156,7 @@ def remove_worktree(path, cwd):
     reason = harness_lock(path, cwd) if "locked" in err else None
     if reason is None:
         return f"worktree {path} NOT removed: {err}"
-    u = common.run("git", "worktree", "unlock", path, cwd=cwd)
+    u = common.run("git", "worktree", "unlock", path, cwd=cwd, env=c_locale())
     if u.code != 0:
         return f"worktree {path} NOT removed: could not unlock: {common.one_line(u.stderr)}"
     w = attempt()
@@ -201,7 +207,19 @@ def head_in(tree, head_oid, cwd, exact):
         return False
     if h.stdout.strip() == head_oid:
         return True
-    return not exact and common.run("git", "merge-base", "--is-ancestor", h.stdout.strip(), head_oid, cwd=cwd).code == 0
+    if exact:
+        return False
+    if common.run("git", "cat-file", "-e", f"{head_oid}^{{commit}}", cwd=cwd).code != 0:
+        # The PR head is not in this repo yet (a rerun that starts with the PR already merged): fetch it once.
+        common.run("git", "fetch", "--quiet", "origin", head_oid, cwd=cwd)
+    return common.run("git", "merge-base", "--is-ancestor", h.stdout.strip(), head_oid, cwd=cwd).code == 0
+
+
+def worktree_gone(path, cwd):
+    """True when `path` is no longer there and no worktree of this repo is registered at it: nothing left to remove."""
+    full = Path(cwd) / path
+    trees = common.worktrees(cwd)
+    return bool(trees) and not full.exists() and not any(same_path(full, t["path"]) for t in trees)
 
 
 def worktree_refusal(path, branch, head_oid, cwd, scratch=False):
@@ -209,8 +227,8 @@ def worktree_refusal(path, branch, head_oid, cwd, scratch=False):
 
     Removed only: a linked worktree of this repo (matched with samefile; a path no worktree matches is refused),
     never the main checkout, never one whose lock is held by another live session, and either on the PR's branch,
-    or on the harness's `worktree-agent-<id>` branch of the `agent-<id>` directory with HEAD at the PR head or
-    an ancestor of it, or detached at the PR head (a lead-PR worktree). With `scratch` (a reviewer's `pr-<n>` tree,
+    or on the harness's `worktree-agent-<id>` branch of the `agent-<id>` directory, or detached (a lead-PR
+    worktree), with HEAD at the PR head or an ancestor of it (a tree a commit behind after an update-branch counts). With `scratch` (a reviewer's `pr-<n>` tree,
     which `scratch_worktrees` matched) the branch rules do not apply: it must be detached, with HEAD at the PR head or
     an ancestor of it. A refusal is a skip, not a failure: the PR is already merged, closed, abandoned or rescued."""
     full = Path(cwd) / path
@@ -236,6 +254,6 @@ def worktree_refusal(path, branch, head_oid, cwd, scratch=False):
         if head_in(wt["path"], head_oid, cwd, exact=False):
             return None
         return f"its HEAD is not the PR head or an ancestor of it"
-    if wt["detached"] and head_in(wt["path"], head_oid, cwd, exact=True):
+    if wt["detached"] and head_in(wt["path"], head_oid, cwd, exact=False):
         return None
     return f"it is on {wt['branch'] or 'a detached HEAD'}, not {branch or 'the PR branch'} or its worker branch at the PR head"

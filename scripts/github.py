@@ -734,8 +734,19 @@ def default_branch(cwd=None) -> str:
 def merge_pr(pr, method: str, head_oid: str = "", cwd=None) -> None:
     """Merge the PR (`PUT pulls/{n}/merge`). `sha` makes a push after review a refusal (409), not a merge."""
     guard = ["-f", f"sha={head_oid}"] if head_oid else []
-    call("api", "-X", "PUT", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/merge", "-f", f"merge_method={method}",
-         *guard, cwd=cwd)
+    try:
+        call("api", "-X", "PUT", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/merge", "-f", f"merge_method={method}",
+             *guard, cwd=cwd)
+    except GhError as e:
+        # `gh pr merge` used to pre-check this. A retry after a 5xx that landed gets 405 "not mergeable" from REST:
+        # the PR's own state is the truth, and MERGED is success.
+        if e.kind == FAILED and re.search(r"\b405\b", e.message):
+            try:
+                if pr_view(pr, "state", cwd).get("state") == "MERGED":
+                    return
+            except GhError:
+                pass
+        raise
 
 
 def update_branch(pr, cwd=None) -> None:

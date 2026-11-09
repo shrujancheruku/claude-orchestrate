@@ -152,6 +152,31 @@ class Decide(unittest.TestCase):
     def test_missing_state_file_means_no_workers(self):
         self.assertIsNone(self.decide([issue(1)])[1].worker)
 
+    def test_only_the_current_sessions_records_are_building(self):
+        rec = lambda a: {"agent_id": a, "worktree": None, "model": "m", "last_report": "t", "touch_map": "none"}  # noqa: E731
+        self.state.write_text(json.dumps({"session": "mine", "sessions": {
+            "mine": {"tickets": {"1": rec("a1")}}, "other": {"tickets": {"2": rec("a2")}}}}))
+        self.assertEqual(claims.read_state(self.state), {"1": rec("a1")})
+        self.assertEqual(claims.read_other_state(self.state), {"2": rec("a2")})
+        found = self.decide([issue(1, claimed=True), issue(2, claimed=True)])
+        self.assertEqual(found[1].state, "building")
+        self.assertEqual(found[2].state, "stalled")  # another session's record is not this session's worker
+        self.assertIsNone(found[2].worker)
+
+    def test_another_sessions_record_with_a_live_foreign_lock_is_elsewhere(self):
+        other = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(other.kill)
+        self.state.write_text(json.dumps({"session": "mine", "sessions": {
+            "mine": {"tickets": {}}, "other": {"tickets": {"2": {"worktree": "/wt/2"}}}}}))
+        wt = {"path": "/wt/2", "branch": "worktree-agent-zz", "locked": own_start_reason(other.pid)}
+        c = self.decide([issue(2, claimed=True)], worktrees=[wt])[2]
+        self.assertEqual((c.state, c.lock, c.worker), ("elsewhere", ("foreign-live", other.pid), None))
+
+    def test_an_old_shape_file_is_the_current_sessions(self):
+        self.state.write_text(json.dumps({"session": "s", "tickets": {"1": {"agent_id": "a"}}}))
+        self.assertEqual(claims.read_state(self.state), {"1": {"agent_id": "a"}})
+        self.assertEqual(claims.read_other_state(self.state), {})
+
     def test_unreadable_state_file_raises(self):
         self.state.write_text("{nope")
         with self.assertRaises(ValueError):

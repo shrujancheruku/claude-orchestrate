@@ -84,8 +84,8 @@ class Threads(unittest.TestCase):
                          ["T1 rev a.py:3 [blocking] x", "  reopened: still broken"])
 
     def test_retry_does_not_post_the_same_reply_twice(self):
-        self.gh(reply([thread("T1", comments=[comment("rev", "[blocking] x"), comment("w", "left: later")])]))
-        self.assertEqual(self.env.run("threads", 12, "resolve", "T1", "--left", "later").returncode, 0)
+        self.gh(reply([thread("T1", comments=[comment("rev", "[blocking] x"), comment("w", "left: later (follow-up #9)")])]))
+        self.assertEqual(self.env.run("threads", 12, "resolve", "T1", "--left", "later", "--followup", "9").returncode, 0)
         m = self.mutations()
         self.assertEqual(len(m), 1)
         self.assertIn("resolveReviewThread", m[0][3])
@@ -155,7 +155,7 @@ class Threads(unittest.TestCase):
         self.gh(reply([thread("T1"), thread("T2"), thread("T3")]),
                 extra=[{"args": ["api", "graphql", "-f", "query=" + aliased(f, 3, body)], "stdout": "{}"}
                        for f, body in ((threads_script.REPLY_FIELD, True), (threads_script.RESOLVE_FIELD, False))])
-        r = self.env.run("threads", 12, "resolve", "T1", "T2", "T3", "--left", "later", "--verbose")
+        r = self.env.run("threads", 12, "resolve", "T1", "T2", "T3", "--left", "later", "--no-followup", "--verbose")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stderr.strip(), "writes: 2")
         m = self.mutations()
@@ -165,25 +165,47 @@ class Threads(unittest.TestCase):
             self.assertIn(f"m{i}: resolveReviewThread(input: {{threadId: $id{i}}})", m[1][3])
         self.assertEqual([a for a in m[1] if a.startswith("id")], ["id0=T1", "id1=T2", "id2=T3"])
         self.assertEqual(m[0][3].count("addPullRequestReviewThreadReply"), 3)
-        self.assertEqual(sum(a == "body2=left: later" for a in m[0]), 1)
+        self.assertEqual(sum(a == "body2=left: later (no follow-up)" for a in m[0]), 1)
         self.assertEqual([e["thread"] for e in self.env.events() if e["kind"] == "threads"], ["T1", "T2", "T3"])
-        self.assertEqual(r.stdout.splitlines()[0], "resolved T1: left: later")
+        self.assertEqual(r.stdout.splitlines()[0], "resolved T1: left: later (no follow-up)")
 
     def test_one_unknown_id_among_several_changes_nothing(self):
         self.gh(reply([thread("T1")]))
-        self.refused("resolve", "T1", "NOPE", "--left", "x")
+        self.refused("resolve", "T1", "NOPE", "--left", "x", "--no-followup")
 
     def test_a_single_id_sends_the_plain_mutations(self):
         self.gh(reply([thread("T1")]))
-        self.env.run("threads", 12, "resolve", "T1", "--left", "x")
+        self.env.run("threads", 12, "resolve", "T1", "--left", "x", "--no-followup")
         self.assertEqual([m[3] for m in self.mutations()], ["query=" + threads_script.REPLY, "query=" + threads_script.RESOLVE_THREAD])
 
     def test_resolve_left_needs_no_sha_check(self):
         self.gh(reply([thread("T1")]))
-        r = self.env.run("threads", 12, "resolve", "T1", "--left", "not worth it")
+        r = self.env.run("threads", 12, "resolve", "T1", "--left", "not worth it", "--no-followup")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("body=left: not worth it", self.mutations()[0])
+        self.assertIn("body=left: not worth it (no follow-up)", self.mutations()[0])
         self.assertFalse(any(c[:2] == ["api", "--paginate"] for c in self.env.gh_calls()))
+
+    def test_left_with_a_followup_records_the_ticket_in_the_reply(self):
+        self.gh(reply([thread("T1")]))
+        r = self.env.run("threads", 12, "resolve", "T1", "--left", "later", "--followup", "#77")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[0], "resolved T1: left: later (follow-up #77)")
+        self.assertIn("body=left: later (follow-up #77)", self.mutations()[0])
+
+    def test_left_without_followup_or_no_followup_is_a_usage_error(self):
+        self.gh(reply([thread("T1")]))
+        r = self.env.run("threads", 12, "resolve", "T1", "--left", "later", check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--followup", r.stderr)
+        self.assertEqual(self.mutations(), [])
+
+    def test_the_followup_flags_are_a_pair_that_goes_only_with_left(self):
+        self.gh(reply([thread("T1")]))
+        for args in (["--left", "x", "--followup", "5", "--no-followup"], ["--left", "x", "--followup", "soon"],
+                     ["--fixed", SHA, "--followup", "5"], ["--fixed", SHA, "--no-followup"]):
+            with self.subTest(args=args):
+                self.assertEqual(self.env.run("threads", 12, "resolve", "T1", *args, check=False).returncode, 2)
+        self.assertEqual(self.env.run("threads", 12, "--followup", "5", check=False).returncode, 2)
 
     def test_reopen_replies_then_unresolves_and_logs(self):
         self.gh(reply([thread("T1", resolved=True)]))
@@ -203,11 +225,11 @@ class Threads(unittest.TestCase):
 
     def test_unknown_thread_is_refused(self):
         self.gh(reply([thread("T1")]))
-        self.refused("resolve", "NOPE", "--left", "x")
+        self.refused("resolve", "NOPE", "--left", "x", "--no-followup")
 
     def test_resolving_a_resolved_thread_is_refused(self):
         self.gh(reply([thread("T1", resolved=True)]))
-        self.refused("resolve", "T1", "--left", "x")
+        self.refused("resolve", "T1", "--left", "x", "--no-followup")
 
     def test_reopening_an_open_thread_is_refused(self):
         self.gh(reply([thread("T1")]))

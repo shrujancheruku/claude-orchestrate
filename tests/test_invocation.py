@@ -46,8 +46,7 @@ class Invocation(unittest.TestCase):
             with self.subTest(name):
                 # The path form skills use: skills/<skill>/../../scripts/<name>.
                 path = ROOT / "skills" / "run" / ".." / ".." / "scripts" / name
-                args = ["--cwd", str(ROOT), "true"] if name == "verify" else ["--help"]
-                r = run([str(path), *args], cwd=tempfile.gettempdir(), env=env)
+                r = run([str(path), "--help"], cwd=tempfile.gettempdir(), env=env)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertNotIn("Traceback", r.stderr)
 

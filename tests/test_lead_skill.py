@@ -64,5 +64,44 @@ class LeadSkill(unittest.TestCase):
                     "Answering asks", "Never by relay"])
 
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+class RunSkillLeftThreads(unittest.TestCase):
+    """The run skill and the worker prompt keep the --left follow-up rule (#442) and the pass-record lines folded in."""
+
+    def setUp(self):
+        self.run = (ROOT / "skills/run/SKILL.md").read_text()
+        self.worker = (ROOT / "agents/worker.md").read_text()
+
+    def test_left_threads_get_one_followup_and_a_left_for_line(self):
+        for text in (self.run, self.worker):
+            for needle in ("--followup <n>", "--no-followup", "`Left for #<n>`", "followup-needed:"):
+                self.assertIn(needle, text)
+        for needle in ("needs-triage", "`lead`", "a worker never runs `gh issue create`"):
+            self.assertIn(needle, self.run)
+        self.assertNotIn("gh issue create", self.worker)
+
+    def test_send_back_exception_is_limited_to_lines_naming_only_threads(self):
+        self.assertIn("name only unresolved review threads", self.run)
+        self.assertIn("any other refusal keeps the worker's path", self.run)
+
+    def test_every_rescue_call_with_a_title_carries_pr(self):
+        calls = self.run.split("scripts/rescue")[1:]
+        titled = [tail[:400] for tail in calls if "--title" in tail[:400]]
+        self.assertGreaterEqual(len(titled), 3)
+        for head in titled:
+            self.assertIn("--pr <num>", head)
+
+    def test_lead_pr_worktree_has_one_named_form_and_the_not_removed_reasons(self):
+        self.assertIn("worktree add <scratchpad>/pr-<n> <head>", self.run)
+        for reason in ("not on the PR's branch", "detached at another sha", "foreign-live", "not a registered worktree"):
+            self.assertIn(reason, self.run)
+
+    def test_a_rejected_touch_map_fails_closed_and_shared_files_are_never_counted(self):
+        self.assertIn("**fails closed**", self.run)
+        self.assertIn("never counted as an overlap", self.run)
+
+
 if __name__ == "__main__":
     unittest.main()
