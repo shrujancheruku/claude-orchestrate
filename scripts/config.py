@@ -9,6 +9,7 @@ Stdlib only, Python 3.9+. A library: imported, never run.
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from pathlib import Path
 from typing import NamedTuple
@@ -99,8 +100,16 @@ class Config(NamedTuple):
             problems=tuple(problems),
         )
 
+    def is_shared(self, path: str) -> bool:
+        return shared_match(path, self.shared_files)
+
     def problems_of(self, kind: str) -> list:
         return [p for p in self.problems if p.kind == kind]
+
+
+def shared_match(path: str, patterns) -> bool:
+    """The one Shared files rule: a path equals a pattern or matches it as a glob, case-sensitively (not fnmatch.fnmatch, which folds case on macOS and Windows)."""
+    return any(path == p or fnmatch.fnmatchcase(path, p) for p in patterns)
 
 
 _SHARED_ITEM = re.compile(r"-\s+\*\*Shared files:?\*\*")

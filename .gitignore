@@ -7,3 +7,4 @@ __pycache__/
 .claude/orchestrate-lead.json
 .claude/orchestrate-snapshot.json
 .claude/orchestrate-prompts.jsonl
+.claude/orchestrate-prompts.mark

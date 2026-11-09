@@ -122,7 +122,7 @@ It splits the command into shell words (quotes, escapes, `$(...)`, heredocs, `sh
 
 The file holds commands of up to 2000 characters in clear text, so it is created with mode 0600 (an existing 0644 file is chmod-ed on the next write).
 
-`scripts/prompts --repo . [--session <id>] [--since <iso> | --watermark]` counts the prompts by role and tool and lists the newest 40, one line each. `--watermark` means since the last pass record. The run skill's pass table takes its **Approvals** line from it, so the count is exact (0 shows as 0) and does not depend on anyone's memory.
+`scripts/prompts --repo . [--session <id>] [--since <iso> | --watermark]` counts the prompts by role and tool and lists the newest 40, one line each. `--watermark` means since the last mark: the newer of the last `--mark` (a line in `.claude/orchestrate-prompts.mark`, written with or without `--profile`) and the last pass record. With neither yet it counts the whole log and says so on the `prompts:` line. The run skill's pass table and the lead's pass digest take their **Approvals** lines from it (the digest also names any new kind of prompt, to be filed or folded like a breakage), so the count is exact (0 shows as 0) and does not depend on anyone's memory.
 
 ## Push and fetch under the sandbox
 
