@@ -310,7 +310,7 @@ The opt-in behavioural tier, which runs real headless agents against a temp repo
 
 ## Contributing
 
-Issues are welcome. Pull requests from outside the maintainer are closed unmerged; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Issues are welcome. Pull requests from anyone other than the repo's owners, members and collaborators are closed unmerged; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
