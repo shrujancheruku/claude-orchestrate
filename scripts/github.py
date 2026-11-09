@@ -58,10 +58,10 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         labels(first: 30) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
-        lastEditedAt
         editor { login }
         author { login }
         authorAssociation
+        lastEditedAt
         comments(last: 100) { nodes { body createdAt lastEditedAt authorAssociation author { login } } }
       }
     }
