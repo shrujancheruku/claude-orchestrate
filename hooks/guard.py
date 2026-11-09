@@ -1283,7 +1283,7 @@ def orchestrator_threads_form(cmd: Command, args: list) -> bool:
     left_only = False
     if rest[-1:] == ["--no-followup"]:
         rest, left_only = rest[:-1], True
-    elif len(rest) >= 2 and rest[-2] == "--followup" and rest[-1].isdigit():
+    elif len(rest) >= 2 and rest[-2] == "--followup" and rest[-1].isascii() and rest[-1].isdigit():
         rest, left_only = rest[:-2], True
     # `resolve` takes one or more thread ids, then exactly one of --fixed/--left with its value (scripts/threads).
     return (len(rest) >= 4 and rest[0] == "resolve" and rest[-2] in (("--left",) if left_only else ("--fixed", "--left"))

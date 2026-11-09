@@ -138,7 +138,7 @@ def main(argv=None) -> int:
         if args.action == "resolve" and args.left is not None:
             if (args.followup is None) == (not args.no_followup):
                 ap.error("--left needs exactly one of --followup <issue> and --no-followup")
-            if args.followup is not None and not args.followup.lstrip("#").isdigit():
+            if args.followup is not None and not (args.followup.lstrip("#").isascii() and args.followup.lstrip("#").isdigit()):
                 ap.error("--followup needs an issue number")
         elif args.followup is not None or args.no_followup:
             ap.error("--followup and --no-followup go with resolve --left")

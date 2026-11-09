@@ -1045,6 +1045,7 @@ class RoutineApprovalTest(unittest.TestCase):
             f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --fixed y",
             f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed y --no-followup",
             f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --followup $N",
+            f"{SCRIPTS}/threads 12 resolve PRRT_x --left x --followup ²",  # not an ASCII digit
             f"{SCRIPTS}/threads 12 resolve --left x --fixed y",
             f"{SCRIPTS}/threads 12 resolve --left x",  # no thread id
             f"{SCRIPTS}/threads 12 resolve PRRT_x -y --left x",  # an id starting with a dash
