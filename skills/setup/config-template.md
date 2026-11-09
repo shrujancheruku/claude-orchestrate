@@ -13,6 +13,10 @@
 - **Tracker:** <host; how blocking is expressed; claim = assign to the user; the label that marks a ticket ready>
 -->
 
+<!-- Optional extra trusted authors. Only text from an OWNER, MEMBER or COLLABORATOR of the repo steers the run (comments, reviews, review threads: ADR-0015); list other GitHub logins you want heard, backticked, on one line:
+- **Trusted authors:** `<login>`, `<login>`
+-->
+
 <!-- Optional Projects board. Setup writes the line itself when you opt in; `scripts/board` syncs it every pass and does nothing without it:
 - **Board:** <project URL>
 -->

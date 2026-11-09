@@ -89,6 +89,11 @@ class WorkerReport(unittest.TestCase):
         self.env.set_gh(prs((30, "other", HEAD)))
         self.assertEqual(self.verdict("status: pr-opened\npr: https://github.com/o/r/pull/99\n"), "not-a-pr-opened")
 
+    def test_a_fork_pr_on_the_workers_branch_name_is_not_its_pr(self):
+        # ADR-0015: an outsider's PR from a fork named like the branch does not make a pr-opened
+        self.env.set_gh([gh_pulls([{"number": 30, "headRefName": BRANCH, "headRefOid": HEAD, "isCrossRepository": True}], "open")])
+        self.assertEqual(self.verdict("status: pr-opened\npr: https://github.com/o/r/pull/30\n"), "not-a-pr-opened")
+
     def test_stopped_with_a_listed_reason_is_valid(self):
         for reason in ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
                        "verify-outside-ticket", "already-done", "no-primary-source", "worktree-gone"):

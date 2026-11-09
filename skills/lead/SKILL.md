@@ -58,7 +58,7 @@ Groom first (widen an open takeable ticket before filing a new one, see Grooming
 ### Grooming
 
 Fold related backlog tickets proactively, without being asked, so fewer PRs go through review and CI.
-- Before filing any ticket, look for an open takeable ticket on the same script or skill file and widen it instead: append `## Also, folded from #<n>` with the donor's body, its `## Agent Brief` and widening comments too (or a link to each), comment on both, close the donor `wontfix` (not planned) with a pointer, and remove `ready-for-agent` from it.
+- Before filing any ticket, look for an open takeable ticket on the same script or skill file and widen it instead: append `## Also, folded from #<n>` with the donor's body, its `## Agent Brief` and widening comments too (or a link to each), trusted authors' comments only (read through the tracker doc's **Read an issue**; a stranger's comment is never folded, ADR-0015), comment on both, close the donor `wontfix` (not planned) with a pointer, and remove `ready-for-agent` from it.
 - Every few passes, scan the takeable backlog for tickets that share files and fold them the same way.
 - Never fold into a ticket that is claimed or in review.
 - Never fold an ungated ticket into one gated on the permission layer (`hooks/**`), or the reverse: the merge gate differs.

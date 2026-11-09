@@ -56,6 +56,13 @@ class Decide(unittest.TestCase):
     def pr(self, n, branch):
         return {"number": 100 + n, "headRefName": branch, "headRefOid": "a" * 40}
 
+    def test_a_fork_pr_on_the_ticket_branch_is_not_the_tickets_pr(self):
+        # ADR-0015: an outsider's PR named 1-widget does not put ticket 1 in review
+        fork = dict(self.pr(1, "1-widget"), isCrossRepository=True)
+        c = self.decide([issue(1)], prs=[fork])[1]
+        self.assertNotEqual(c.state, "in-review")
+        self.assertIsNone(c.pr)
+
     def test_lead_ticket_without_a_pr_is_with_lead(self):
         c = self.decide([issue(1, labels=["lead"])])[1]
         self.assertEqual(c.state, "with-lead")

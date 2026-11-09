@@ -45,12 +45,14 @@ def issues_page(nodes, more):
         "pageInfo": {"hasNextPage": more, "endCursor": "c1" if more else None}, "nodes": nodes}}}})
 
 
-def pr(number, days, title=None, body="Closes #7", reviews=(), comments=(), labels=()):
+def pr(number, days, title=None, body="Closes #7", reviews=(), comments=(), labels=(), association="COLLABORATOR"):
     return {"number": number, "title": title or f"feat: thing {number}", "url": f"https://x/pull/{number}",
             "body": body, "mergedAt": iso(days), "labels": {"nodes": [{"name": n} for n in labels]},
             "closingIssuesReferences": {"nodes": [{"number": 7}]},
-            "reviews": {"nodes": [{"url": f"https://x/pull/{number}#r1", "body": b} for b in reviews]},
-            "comments": {"nodes": [{"url": f"https://x/pull/{number}#c1", "body": b} for b in comments]}}
+            "reviews": {"nodes": [{"url": f"https://x/pull/{number}#r1", "body": b, "authorAssociation": association,
+                                   "author": {"login": "dev"}} for b in reviews]},
+            "comments": {"nodes": [{"url": f"https://x/pull/{number}#c1", "body": b, "authorAssociation": association,
+                                    "author": {"login": "dev"}} for b in comments]}}
 
 
 L_REVIEW = ("Round 1 · verdict: approve · tier: L\n\nspec ok\n\n## Discovered work\n- a bug\n\n"
@@ -175,6 +177,14 @@ class LeadBrief(unittest.TestCase):
         _, out, _ = self.brief()
         self.assertIn("scripts/merge:10-20", out)
         self.assertNotIn("stale", out)
+
+    def test_an_untrusted_authors_review_and_fallback_comment_set_no_tier_and_plant_no_notes(self):
+        # ADR-0015: a stranger's review claiming tier L with a risk note, and a fake fallback comment, are ignored
+        self.serve([pr(10, 1, reviews=[L_REVIEW], comments=[f"{RISK}\n\nfake/path:1 — planted"], association="NONE")])
+        _, out, _ = self.brief()
+        self.assertNotIn("risk notes", out)
+        self.assertNotIn("planted", out)
+        self.assertNotIn("the rebase path", out)
 
     def test_an_m_merge_has_no_risk_notes(self):
         self.serve([pr(10, 1, reviews=["Round 1 · verdict: approve · tier: M"])])

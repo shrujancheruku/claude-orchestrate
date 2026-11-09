@@ -5,7 +5,8 @@ Stdlib only, Python 3.9+. A library: imported, never run. The functions never ca
 other function takes:
     {number, title, url, body, labels (set), claimed, blockers (open native blockers, sorted),
      sub_issues {total, completed}, parent (number | None),
-     body_edits [ISO time], comments [{body, created, edits [ISO time]}]}
+     body_edits [ISO time], comments [{body, created, edits [ISO time]}], untrusted_comments (a count)}
+`comments` holds only a trusted author's (ADR-0015, `github.is_trusted`); the others are counted, their text dropped.
 The issues are open-only, so an issue number absent from them is closed (or does not exist) and blocks nothing.
 `Snapshot.blockers` is the one blocker rule (native edges plus the body `Blocked by:` line): frontier, lead-route, gate
 and merge all ask it.
@@ -59,10 +60,14 @@ def _edit_times(node) -> list:
     return [edited] if edited else []
 
 
-def from_nodes(nodes) -> list:
-    """Plain issue dicts from raw GraphQL nodes; KeyError, TypeError or ValueError when a node is malformed."""
+def from_nodes(nodes, trusted=()) -> list:
+    """Plain issue dicts from raw GraphQL nodes; KeyError, TypeError or ValueError when a node is malformed.
+    `trusted` is the config's extra trusted logins (lowercase); a comment from anyone else is counted, not kept."""
     out = []
     for n in nodes:
+        every = (n.get("comments") or {}).get("nodes") or []
+        kept = [c for c in every
+                if github.is_trusted(c.get("authorAssociation"), (c.get("author") or {}).get("login"), trusted)]
         summary = n.get("subIssuesSummary") or {}
         parent = n.get("parent")
         out.append({
@@ -70,7 +75,8 @@ def from_nodes(nodes) -> list:
             "body": n.get("body") or "",
             "body_edits": _edit_times(n),
             "comments": [{"body": c.get("body") or "", "created": c.get("createdAt"), "edits": _edit_times(c)}
-                         for c in (n.get("comments") or {}).get("nodes") or []],
+                         for c in kept],
+            "untrusted_comments": len(every) - len(kept),
             "labels": {x["name"] for x in (n.get("labels") or {}).get("nodes") or []},
             "claimed": ((n.get("assignees") or {}).get("totalCount") or 0) > 0,
             "blockers": sorted(int(b["number"]) for b in (n.get("blockedBy") or {}).get("nodes") or []
@@ -217,11 +223,13 @@ class Snapshot:
 
     @property
     def issues(self) -> list:
-        return self._part("issues", lambda: from_nodes(github.open_issues(self.repo, cwd=self.cwd)))
+        return self._part("issues", lambda: from_nodes(github.open_issues(self.repo, cwd=self.cwd),
+                                                       github.trusted_logins(self.cwd)))
 
     @property
     def prs(self) -> list:
-        return self._part("prs", lambda: github.open_prs_with_heads(cwd=self.cwd))
+        # A fork PR is never the run's own (ADR-0015): every reader of `prs` (holds, claims, board, lead-route) skips it.
+        return self._part("prs", lambda: github.own_prs(github.open_prs_with_heads(cwd=self.cwd)))
 
     @property
     def merged(self) -> list:
