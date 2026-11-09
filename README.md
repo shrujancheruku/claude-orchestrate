@@ -308,6 +308,10 @@ python3 tests/run_parallel.py   # one process per test module, in parallel
 
 The opt-in behavioural tier, which runs real headless agents against a temp repo, the guard's regression corpus and the exit-code convention are in [Development](docs/guide.md#development) in the guide.
 
+## Contributing
+
+Issues are welcome. Pull requests from outside the maintainer are closed unmerged; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
 [MIT](LICENSE)
