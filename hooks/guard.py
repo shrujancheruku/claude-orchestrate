@@ -363,7 +363,8 @@ class Lexer:
             return j + 1
         m = SPECIAL_PARAM.match(s, i + 1)
         if m:
-            wb.exp(m.group() if re.fullmatch(r"[A-Za-z_]\w*", m.group()) else None)
+            # `$?` is named too: the exit status is a digit string, so a read-only echo may print it (#562).
+            wb.exp(m.group() if re.fullmatch(r"[A-Za-z_]\w*|\?", m.group()) else None)
             return m.end()
         wb.lit("$")
         wb.glob = wb.glob or not in_dq
@@ -1752,7 +1753,16 @@ SAFE_SCRIPT_FLAGS = frozenset(("--parent", "--ticket", "--all", "--pr", "--base"
 SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
 
 
-def chain_script_args_ok(name: str, args: list) -> bool:
+def gate_cwd_ok(value: str | None, cwd: str) -> bool:
+    """gate's `--cwd` (#562): a literal directory that resolves under `<repo>/.claude/worktrees/`, the worktree
+    of a PR's branch. Any other value aims the gate's checks at a place the run didn't make."""
+    if not value or value.startswith("-"):
+        return False
+    real = Path(os.path.realpath(os.path.join(cwd or ".", value)))
+    return any((root.resolve() / ".claude" / "worktrees") in real.parents for root in repo_roots(cwd))
+
+
+def chain_script_args_ok(name: str, args: list, cwd: str = "") -> bool:
     texts = [a.text for a in args]
     i = 0
     while i < len(texts):
@@ -1763,8 +1773,10 @@ def chain_script_args_ok(name: str, args: list) -> bool:
         if not arg.startswith("--"):
             continue
         flag, eq, value = arg.partition("=")
-        if flag in ("--repo", "--out", "--snapshot") and not eq:
+        if flag in ("--repo", "--out", "--snapshot", "--cwd") and not eq:
             value, i = (texts[i] if i < len(texts) else None), i + 1
+        if flag == "--cwd" and name == "gate" and gate_cwd_ok(value, cwd):
+            continue
         if flag == "--repo" and value == ".":
             continue
         if flag == "--out" and name == "snapshot" and value == SNAPSHOT_FILE:
@@ -1800,7 +1812,24 @@ def chain_script_ok(cmd: Command, env: dict, cwd: str) -> bool:
             "board": orchestrator_board_form}.get(path.name)
     if form:
         return form(cmd, args)
-    return path.name in CHAIN_SCRIPTS and chain_script_args_ok(path.name, args)
+    return path.name in CHAIN_SCRIPTS and chain_script_args_ok(path.name, args, cwd)
+
+
+def chain_assignment_ok(cmd: Command, env: dict, cwd: str) -> bool:
+    """A pure assignment command (every word `name=value`) whose values name a place inside the plugin; it
+    records them in `env`."""
+    for w in cmd.words:
+        m = ASSIGNMENT.fullmatch(w.text)
+        value = resolve_word(w, env, m.group(2)) if m else None
+        if not m or value is None or UNSAFE_VARIABLE.fullmatch(m.group(1)):
+            return False
+        # A variable may only name a place inside the plugin (what `$S/<script>` needs): another
+        # value could change how a script, or the `gh`/`git` it runs, behaves (#554).
+        target = Path(os.path.realpath(os.path.join(cwd or ".", value)))
+        if target != PLUGIN_SCRIPTS.parent and PLUGIN_SCRIPTS.parent not in target.parents:
+            return False
+        env[m.group(1)] = value
+    return True
 
 
 def chain_approved(parsed: "Parsed", cwd: str) -> bool:
@@ -1814,17 +1843,8 @@ def chain_approved(parsed: "Parsed", cwd: str) -> bool:
             return False
         first = cmd.words[0]
         if ASSIGNMENT.fullmatch(first.text):
-            for w in cmd.words:  # a pure assignment command: every word is `name=value`
-                m = ASSIGNMENT.fullmatch(w.text)
-                value = resolve_word(w, env, m.group(2)) if m else None
-                if not m or value is None or UNSAFE_VARIABLE.fullmatch(m.group(1)):
-                    return False
-                # A variable may only name a place inside the plugin (what `$S/<script>` needs): another
-                # value could change how a script, or the `gh`/`git` it runs, behaves (#554).
-                target = Path(os.path.realpath(os.path.join(cwd or ".", value)))
-                if target != PLUGIN_SCRIPTS.parent and PLUGIN_SCRIPTS.parent not in target.parents:
-                    return False
-                env[m.group(1)] = value
+            if not chain_assignment_ok(cmd, env, cwd):
+                return False
             continue
         args = cmd.words[1:]
         if not first.dynamic and first.text in CHAIN_PLAIN:
@@ -1838,17 +1858,473 @@ def chain_approved(parsed: "Parsed", cwd: str) -> bool:
     return True
 
 
+# --- Read-only compound commands for every role, and a worker's test runs and edits (#562). ---
+#
+# An agent that reads with `grep -n x f | sed -n 1,60p; ls | head` hands the permission layer a chain it
+# prompts on, though no step writes. compound_approved reads the line whole and approves it only when EVERY
+# simple command is a form the guard already approves for the role, a read on the lists below, or (a worker,
+# inside its own worktree) a test run or an edit of its own files. It runs after the role's deny rules, which
+# are unchanged. Anything the lexer can't fully read, or one step outside the lists, leaves the whole line to
+# the permission layer (ADR-0002).
+
+COMPOUND_JOINERS = (None, ";", "&&", "||", "|", "\n")
+# Commands whose arguments need no check beyond "plain words" (the flags that write are screened below).
+READ_PLAIN = frozenset(("cat", "wc", "cut", "tr", "ls", "diff", "echo", "true", "test"))
+LOOP_VAR = re.compile(r"[A-Za-z_]\w*")
+LOOP_ITEM = re.compile(r"[A-Za-z0-9_./:@=+,%][A-Za-z0-9_./:@=+,%-]*")
+# A flag that writes or runs a program, by the prefix git, ripgrep or find would accept (getopt takes
+# abbreviations): refused whatever its spelling.
+GIT_READ_VERBS = frozenset(("status", "log", "diff", "show", "ls-remote", "ls-files", "rev-parse", "rev-list"))
+GIT_UNSAFE_LONG = ("--output", "--ext-diff", "--upload-pack", "--exec", "--open-files-in-pager")
+GIT_BRANCH_READS = frozenset(("-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "--show-current"))
+GIT_FETCH_FLAGS = frozenset(("-q", "--quiet", "-v", "--verbose", "--no-tags", "--tags"))
+FIND_UNSAFE = re.compile(r"-(?:exec|execdir|ok|okdir|delete|fprint\w*|fls)")
+RG_UNSAFE = ("--pre", "--hostname-bin")
+SED_FLAG_CLUSTER = re.compile(r"-([nErsu]*)(e?)")
+SED_SUFFIX = re.compile(r"[A-Za-z0-9._~-]*")
+UNITTEST_FLAGS = frozenset(("-v", "-q", "-b", "-f", "-c", "-k", "-s", "-t", "-p", "--verbose", "--quiet", "--buffer",
+                            "--failfast", "--catch", "--locals", "--start-directory", "--top-level-directory",
+                            "--pattern"))
+
+
+def sed_script_ok(script: str) -> bool:
+    """True when a sed script holds only commands that print, delete, quit or substitute with the plain
+    flags: no `w`, `e`, `r`, `y`, label or text command, and no flag after `s///` but `gpiImM` and digits.
+    A `[...]` in a regex must close, and may not hold the delimiter, so that GNU and BSD sed split the
+    script at the same places and no hidden `w` can ride behind a delimiter one of them reads differently."""
+    n = len(script)
+
+    def skip(i: int, chars: str = " \t") -> int:
+        while i < n and script[i] in chars:
+            i += 1
+        return i
+
+    def regex_end(i: int, delim: str) -> int:
+        """Index after the closing delimiter of the regex starting at i, or -1."""
+        while i < n:
+            c = script[i]
+            if c == "\\":
+                i += 2
+            elif c == "\n":
+                return -1
+            elif c == delim:
+                return i + 1
+            elif c == "[":
+                i += 1
+                if i < n and script[i] == "^":
+                    i += 1
+                if i < n and script[i] == "]":
+                    i += 1
+                while i < n and script[i] != "]":
+                    if script[i] in (delim, "\n"):
+                        return -1
+                    if script[i] == "[" and i + 1 < n and script[i + 1] in ".:=":
+                        end = script.find(script[i + 1] + "]", i + 2)
+                        if end < 0:
+                            return -1
+                        i = end + 2
+                    else:
+                        i += 1
+                if i >= n:
+                    return -1
+                i += 1
+            else:
+                i += 1
+        return -1
+
+    def address(i: int) -> int | None:
+        """Index after the address at i, None when there is none, -1 when it is malformed."""
+        if i < n and script[i] == "$":
+            return i + 1
+        m = re.compile(r"\d+(?:~\d+)?").match(script, i)
+        if m:
+            return m.end()
+        if i < n and script[i] in "/\\":
+            if script[i] == "\\":
+                if i + 1 >= n or script[i + 1].isalnum() or script[i + 1] in " \n\\":
+                    return -1
+                i += 1
+            end = regex_end(i + 1, script[i])
+            if end < 0:
+                return -1
+            while end < n and script[end] in "IM":
+                end += 1
+            return end
+        return None
+
+    i = 0
+    while True:
+        i = skip(i, " \t\n;")
+        if i >= n:
+            return True
+        end = address(i)
+        if end == -1:
+            return False
+        if end is not None:
+            i = skip(end)
+            if i < n and script[i] == ",":
+                i = skip(i + 1)
+                m = re.compile(r"[+~]\d+").match(script, i)
+                end = m.end() if m else address(i)
+                if end is None or end == -1:
+                    return False
+                i = end
+            i = skip(i)
+        if i < n and script[i] == "!":
+            i = skip(i + 1)
+        if i >= n:
+            return False
+        c = script[i]
+        if c in "{}":
+            i += 1
+            continue
+        if c in "pdnN=gGhHxDP":
+            i += 1
+        elif c in "qQ":
+            i += 1
+            while i < n and script[i].isdigit():
+                i += 1
+        elif c == "s":
+            if i + 1 >= n or script[i + 1].isalnum() or script[i + 1] in " \n\\":
+                return False
+            delim = script[i + 1]
+            i = regex_end(i + 2, delim)
+            if i < 0:
+                return False
+            while i < n and script[i] != delim:  # the replacement: a newline is allowed only escaped
+                if script[i] == "\\":
+                    i += 1
+                elif script[i] == "\n":
+                    return False
+                i += 1
+            if i >= n:
+                return False
+            i += 1
+            while i < n and (script[i] in "gpiImM" or script[i].isdigit()):
+                i += 1
+        else:
+            return False
+        i = skip(i)
+        if i < n and script[i] not in ";\n}":
+            return False
+
+
+def sed_args(args: list) -> tuple | None:
+    """(in place?, scripts, files) for a sed call whose options are all ones the guard knows, else None. An
+    in-place suffix is `-i` alone, `-i.bak`, `--in-place[=.bak]`, or the BSD form `-i ''`."""
+    inplace, scripts, files, have_e, done, i = False, [], [], False, False, 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if done or a == "-" or not a.startswith("-"):
+            if have_e or scripts:
+                files.append(a)
+            else:
+                scripts.append(a)
+        elif a == "--":
+            done = True
+        elif a in ("--quiet", "--silent", "--regexp-extended", "--separate", "--unbuffered"):
+            continue
+        elif a in ("-e", "--expression"):
+            if i >= len(args):
+                return None
+            scripts.append(args[i])
+            have_e = True
+            i += 1
+        elif a.startswith("--expression="):
+            scripts.append(a.partition("=")[2])
+            have_e = True
+        elif a.startswith("-i") and SED_SUFFIX.fullmatch(a[2:]):
+            inplace = True
+            if a == "-i" and i < len(args) and args[i] == "":
+                i += 1
+        elif a == "--in-place" or (a.startswith("--in-place=") and SED_SUFFIX.fullmatch(a.partition("=")[2])):
+            inplace = True
+        else:
+            m = SED_FLAG_CLUSTER.fullmatch(a)
+            if not m or not (m.group(1) or m.group(2)):
+                return None
+            if m.group(2):
+                if i >= len(args):
+                    return None
+                scripts.append(args[i])
+                have_e = True
+                i += 1
+    if have_e and not scripts or not scripts:
+        return None
+    return inplace, scripts, files
+
+
+def inside_worktree(path: str, here: str, worktree: Path | None) -> bool:
+    """A literal relative path that resolves to a file inside the worker's worktree, not in `.git`."""
+    if worktree is None or not path or path.startswith(("-", "/", "~")):
+        return False
+    resolved = Path(os.path.realpath(os.path.join(here, path)))
+    return worktree in resolved.parents and ".git" not in resolved.relative_to(worktree).parts
+
+
+def awk_ok(args: list) -> bool:
+    """awk with a program that can't write, run a command or read a command's output, and no `-f` file."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a in ("-F", "-v"):
+            i += 1
+        elif a.startswith(("-F", "-v")) and len(a) > 2:
+            continue
+        elif a == "--":
+            break
+        elif a.startswith("-") and a != "-":
+            return False
+        else:
+            i -= 1
+            break
+    return i < len(args) and not re.search(r"system|>|\||getline|@", args[i])
+
+
+def git_read_ok(cmd: Command) -> bool:
+    call = parse_git(cmd.words, 0)
+    if call.options or call.sub is None or call.sub.dynamic:
+        return False
+    sub, args = call.sub.text, [a.text for a in call.args]
+    # A long flag that is a prefix of a writing one (`--outp`) counts as it: git accepts abbreviations.
+    if any(a.startswith("--") and len(a.partition("=")[0]) >= 3 and any(u.startswith(a.partition("=")[0]) for u in GIT_UNSAFE_LONG)
+           for a in args):
+        return False
+    if sub in GIT_READ_VERBS:
+        return True
+    if sub == "branch":
+        return all(a in GIT_BRANCH_READS for a in args)
+    if sub == "fetch":
+        # No refspec that writes a local ref (`src:dst`, `+src`) and no flag but the quiet or tag ones.
+        positional = [a for a in args if not a.startswith("-")]
+        if any(a.startswith("-") and a not in GIT_FETCH_FLAGS for a in args) or not positional:
+            return False
+        remote, refs = positional[0], positional[1:]
+        return (remote == "origin" or REMOTE_URL.fullmatch(remote) is not None) and all(
+            re.fullmatch(r"[\w./@-]+", r) and not r.startswith("+") for r in refs)
+    return False
+
+
+def gh_read_ok(cmd: Command) -> bool:
+    call = parse_gh(cmd.words, 0)
+    args = [a.text for a in call.args]
+    if call.is_sub("issue", "pr") and call.is_verb("view", "list", "diff", "checks"):
+        return not any(a in ("-w", "--web", "--watch") for a in args)
+    if call.is_sub("api"):
+        scan = scan_api(call.args)
+        return (not scan.other and not scan.fields and scan.endpoint is not None and scan.endpoint.text != "graphql")
+    return False
+
+
+def read_command_ok(cmd: Command) -> bool:
+    """One simple command of plain words that only reads (the allowlist of #562)."""
+    first = cmd.words[0]
+    name, words = first.text, cmd.words[1:]
+    args = [w.text for w in words]
+    if first.dynamic or any(w.dynamic or w.glob for w in words) or (first.glob and name != "["):
+        return False
+    if name in ("git", "gh"):
+        return git_read_ok(cmd) if name == "git" else gh_read_ok(cmd)
+    if name in READ_PLAIN:
+        return True
+    if name == "[":
+        return bool(args) and args[-1] == "]"
+    if name == "printf":
+        return chain_flags_ok("printf", words)
+    if name == "sort":
+        return chain_flags_ok("sort", words)
+    if name == "head":
+        return True
+    if name == "tail":
+        return not any(re.fullmatch(r"-[A-Za-z0-9]*[fF][A-Za-z0-9]*", a) or a.startswith(("--follow", "--retry", "--pid"))
+                       for a in args)
+    if name == "uniq":
+        return len([a for a in args if not a.startswith("-")]) <= 1
+    if name in ("grep", "egrep", "rg"):
+        return not any(a.startswith(RG_UNSAFE) for a in args)
+    if name == "find":
+        return not any(FIND_UNSAFE.fullmatch(a) for a in args)
+    if name == "awk":
+        return awk_ok(args)
+    if name == "sed":
+        parsed = sed_args(args)
+        return parsed is not None and not parsed[0] and all(sed_script_ok(s) for s in parsed[1])
+    return False
+
+
+def worker_work_ok(cmd: Command, here: str, worktree: Path | None) -> bool:
+    """A worker's own test runs and edits (#562): this plugin's verify, `python3 -m unittest|py_compile`,
+    `python3 tests/run_parallel.py`, and `sed -i` on literal relative paths inside its worktree."""
+    if worktree is None or cmd.words[0].dynamic or any(w.dynamic or w.glob for w in cmd.words):
+        return False
+    name, args = cmd.words[0].text, [w.text for w in cmd.words[1:]]
+    if Path(os.path.realpath(os.path.join(here, name))) == PLUGIN_SCRIPTS / "verify":
+        return True
+    if name in ("python3", "/usr/bin/python3") and args:
+        if args[0] == "-m" and len(args) > 1 and args[1] == "unittest":
+            return all(not a.startswith("-") or a.partition("=")[0] in UNITTEST_FLAGS for a in args[2:])
+        if args[0] == "-m" and len(args) > 2 and args[1] == "py_compile":
+            return all(inside_worktree(a, here, worktree) for a in args[2:])
+        return Path(os.path.realpath(os.path.join(here, args[0]))) == worktree / "tests" / "run_parallel.py"
+    if name == "sed":
+        parsed = sed_args(args)
+        return (parsed is not None and parsed[0] and bool(parsed[2]) and all(sed_script_ok(s) for s in parsed[1])
+                and all(inside_worktree(f, here, worktree) for f in parsed[2]))
+    return False
+
+
+def scratch_worktree(real: Path, cwd: str) -> bool:
+    """A reviewer's scratch checkout (#562): a directory outside the repo whose `.git` file points into the
+    repo's `.git/worktrees/`. Read off the `.git` file, so no git subprocess runs on a hook call."""
+    roots = [r.resolve() for r in repo_roots(cwd)]
+    if any(real == r or r in real.parents for r in roots):
+        return False
+    try:
+        line = (real / ".git").read_text().split("gitdir:", 1)[1].strip().splitlines()[0]
+        gitdir = Path(os.path.realpath(real / line))
+    except (OSError, IndexError, UnicodeDecodeError):
+        return False
+    return any(gitdir.parent == Path(os.path.realpath(r / ".git" / "worktrees")) for r in roots)
+
+
+def reviewer_verify_ok(cmd: Command, here: str, cwd: str) -> bool:
+    """A reviewer's `<plugin>/scripts/verify --config --cwd <scratch checkout>`, and nothing else."""
+    if cmd.words[0].dynamic or any(w.dynamic or w.glob for w in cmd.words):
+        return False
+    if Path(os.path.realpath(os.path.join(here, cmd.words[0].text))) != PLUGIN_SCRIPTS / "verify":
+        return False
+    args, target, config = [w.text for w in cmd.words[1:]], None, False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--config":
+            config = True
+        elif a == "--cwd" and i < len(args) and target is None:
+            target, i = args[i], i + 1
+        elif a.startswith("--cwd=") and target is None:
+            target = a.partition("=")[2]
+        else:
+            return False
+    return config and bool(target) and scratch_worktree(Path(os.path.realpath(os.path.join(here, target))), cwd)
+
+
+def allowed_redirects(cmd: Command) -> bool:
+    """Only `2>&1` (or `>&2`) and output to /dev/null."""
+    for op, target in cmd.redirects:
+        if target.dynamic:
+            return False
+        if not ((op in (">", "&>") and target.text == "/dev/null") or (op == ">&" and target.text in ("1", "2"))):
+            return False
+    return True
+
+
+def substitute(cmd: Command, values: dict) -> Command | None:
+    """The command with each `$name` the values name replaced by its text, or None when a word holds an
+    expansion that is not one of them."""
+    words = []
+    for w in cmd.words:
+        if not w.dynamic:
+            words.append(w)
+            continue
+        if not w.names or any(name not in values for name in w.names):
+            return None
+        names = iter(w.names)
+        words.append(Word("".join(values[next(names)] if ch == EXP else ch for ch in w.text), False, w.quoted, w.glob))
+    return Command(words, cmd.redirects, cmd.heredocs, cmd.depth, cmd.joiner, cmd.ends)
+
+
+def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str = "") -> bool:
+    """True when every simple command of the line is approved for the role (see the section comment). The
+    loop form is `for NAME in WORD...; do ...; done`, with literal words and one level."""
+    orchestrator = role is None
+    if orchestrator and not config_path(cwd):
+        return False
+    worktree = worker_worktree(cwd)
+    if role == "worker" and worktree is None:
+        return False
+    here, env = os.path.realpath(cwd or "."), {"CLAUDE_SKILL_DIR": str(SKILL_DIR)}
+    loop, pending = None, None  # the open loop's (name, values); a `for` waiting for its `do`
+    for k, cmd in enumerate(parsed.cmds):
+        if cmd.depth or cmd.heredocs or not cmd.words or cmd.joiner not in COMPOUND_JOINERS or cmd.ends not in COMPOUND_JOINERS:
+            return False
+        head = cmd.words[0]
+        if head.dynamic:
+            if not orchestrator or not allowed_redirects(cmd):
+                return False
+        elif head.text == "for" and loop is None and pending is None:
+            words = cmd.words
+            if (cmd.redirects or len(words) < 4 or words[2].text != "in" or not LOOP_VAR.fullmatch(words[1].text)
+                    or cmd.ends not in (";", "\n")
+                    or any(w.dynamic or w.glob or not LOOP_ITEM.fullmatch(w.text) for w in words[3:])
+                    or any(w.dynamic or w.glob for w in words[:3])):
+                return False
+            pending = (words[1].text, [w.text for w in words[3:]])
+            continue
+        elif pending is not None:
+            if head.text != "do":
+                return False
+            loop, pending = pending, None
+            if len(cmd.words) == 1 and not cmd.redirects:
+                continue
+            cmd = Command(cmd.words[1:], cmd.redirects, cmd.heredocs, cmd.depth, cmd.joiner, cmd.ends)
+        elif head.text == "done" and loop is not None and len(cmd.words) == 1 and not cmd.redirects:
+            loop = None
+            continue
+        if not allowed_redirects(cmd):
+            return False
+        cmd = Command(cmd.words, [], [], cmd.depth, cmd.joiner, cmd.ends)
+        if k == 0 and cmd.words[0].text == "cd" and not cmd.words[0].dynamic and loop is None:
+            # A leading `cd <dir>`: the repo root or the caller's own worktree, and nothing else.
+            target = cmd.words[1] if len(cmd.words) == 2 else None
+            if target is None or target.dynamic or target.glob:
+                return False
+            real = Path(os.path.realpath(os.path.join(here, target.text)))
+            if real not in [r.resolve() for r in repo_roots(cwd)] + ([worktree] if worktree else []) and not (
+                    role == "reviewer" and scratch_worktree(real, cwd)):
+                return False
+            here = str(real)
+            continue
+        if orchestrator:
+            if ASSIGNMENT.fullmatch(cmd.words[0].text):
+                if not chain_assignment_ok(cmd, env, cwd):
+                    return False
+                continue
+            if chain_script_ok(cmd, env, cwd):
+                continue
+        for value in (loop[1] if loop else [None]):
+            sub = substitute(cmd, {"?": "0", **({loop[0]: value} if loop else {})})
+            if sub is None or not sub.words or sub.words[0].dynamic:
+                return False
+            one = Parsed([sub])
+            plain = one_plain_command(one)
+            if not (read_command_ok(sub) or (plain is not None and routine_single(role, one, plain, cwd, session))
+                    or (role == "worker" and worker_work_ok(sub, here, worktree))
+                    or (role == "reviewer" and reviewer_verify_ok(sub, here, cwd))):
+                return False
+    return loop is None and pending is None
+
+
 def approval(role: str | None, command: str, cwd: str, session: str = "") -> bool:
     """True when this command, already accepted by the rules, is one of its role's routine writes. `role`
     None is the orchestrator's own session (no `agent_type`), in a repo that carries this plugin's config."""
     parsed = Parsed(parse(command))
     if role == "reviewer":
-        return review_post(parsed) == "" and posting_enabled(cwd)
-    if role is None and config_path(cwd) and chain_approved(parsed, cwd):
+        if review_post(parsed) == "" and posting_enabled(cwd):
+            return True
+    elif role is None and config_path(cwd) and chain_approved(parsed, cwd):
         return True
-    cmd = one_plain_command(parsed)
-    if cmd is None:
-        return False
+    else:
+        cmd = one_plain_command(parsed)
+        if cmd is not None and routine_single(role, parsed, cmd, cwd, session):
+            return True
+    return compound_approved(role, parsed, cwd, session)
+
+
+def routine_single(role: str | None, parsed: "Parsed", cmd: Command, cwd: str, session: str = "") -> bool:
+    """True when `cmd`, the only plain command of `parsed`, is one of the role's routine writes."""
     # `-R`/`--repo` aims a gh call at a repo the agent was not given: leave it to the permission layer.
     plain_gh = (len(parsed.calls) == 1 and cmd.words[0].text == "gh"
                 and not any(REPO_FLAG.fullmatch(w.text) for w in cmd.words))

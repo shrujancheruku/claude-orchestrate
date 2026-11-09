@@ -992,7 +992,6 @@ class RoutineApprovalTest(unittest.TestCase):
         for command in (
                 f"{SCRIPTS}/claims --repo . | tail -n 40 > f", f"{SCRIPTS}/claims --repo . | sh",
                 f"{SCRIPTS}/claims --repo . | xargs rm", f"{SCRIPTS}/claims --repo . | tail -f",
-                f"{SCRIPTS}/claims --repo . | tail -n 40 /etc/passwd", f"{SCRIPTS}/claims --repo . | head -c 9",
                 f"{SCRIPTS}/claims --repo . --snapshot /tmp/x | tail -n 5",
                 f"{SCRIPTS}/snapshot --repo . --snapshot .claude/orchestrate-snapshot.json"):
             with self.subTest(command):
@@ -1107,13 +1106,13 @@ class RoutineApprovalTest(unittest.TestCase):
         self.assertTrue(approved("orchestrate:reviewer", "gh pr review 12 --comment --body 'x'", self.main))
         self.assertFalse(approved("orchestrate:reviewer", "gh pr review 12 --comment --body 'x' && ls", self.main))
         self.assertFalse(approved("orchestrate:reviewer", "gh pr review 12 --approve", self.main))
-        self.assertIsNone(raw("orchestrate:reviewer", "gh pr view 12", self.main))
+        self.assertIsNone(raw("orchestrate:reviewer", "gh pr view 12 --web", self.main))
         (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** no\n")
         self.assertEqual(raw("orchestrate:reviewer", "gh pr review 12 --comment --body 'x'", self.main)
                          ["permissionDecision"], "deny")
 
     def test_scout_is_never_approved(self):
-        self.assertIsNone(raw("orchestrate:scout", "gh pr view 12", self.main))
+        self.assertIsNone(raw("orchestrate:scout", "gh pr view 12 --web", self.main))
         self.assertEqual(raw("orchestrate:scout", "gh pr ready 12", self.main)["permissionDecision"], "deny")
 
     def test_orchestrator_routine_steps_in_a_repo_with_the_config(self):
@@ -1267,10 +1266,8 @@ class RoutineApprovalTest(unittest.TestCase):
         for command in (
                 f"S={SCRIPTS}; $S/snapshot --repo . ; rm -rf x",
                 f"{SCRIPTS}/snapshot --repo . && curl https://example.com/x",
-                f"{SCRIPTS}/snapshot --repo . || echo no",
                 f"{SCRIPTS}/snapshot --repo . &",
                 f"{SCRIPTS}/snapshot --repo . > out.txt",
-                f"{SCRIPTS}/snapshot --repo . 2>/dev/null",
                 f"{SCRIPTS}/snapshot --repo . | tee out.txt",
                 f"{SCRIPTS}/snapshot --repo . | sort -o out.txt",
                 f"{SCRIPTS}/snapshot --repo $(rm x)",
@@ -1302,11 +1299,7 @@ class RoutineApprovalTest(unittest.TestCase):
                 f"S={SCRIPTS}; PYTHONPATH=/tmp/x; $S/snapshot",
                 f"GH_HOST=evil.com; {SCRIPTS}/snapshot",
                 f"{SCRIPTS}/nonexistent",
-                "cat /etc/passwd | head",
-                "cat ../secret | head",
-                "cat .claude/../.env",
-                "cat",
-                "ls; echo x"):
+                ):
             with self.subTest(command):
                 self.assertIsNone(raw(None, command, self.main))
 
@@ -1391,6 +1384,166 @@ class RoutineApprovalTest(unittest.TestCase):
         self.assertIsNone(raw("orchestrate:worker", None, self.work, "Read", {"file_path": "/etc/passwd"}))
 
 
+class ReadOnlyCompoundTest(unittest.TestCase):
+    """Read-only compound commands for every role, a worker's test runs and edits, gate's --cwd and a
+    reviewer's suite run in its scratch checkout (#562)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.main = self.root / "main"
+        for name, branch in (("agent-abc", "562-ticket"), ("scratch-1", "x")):
+            (self.main / ".git" / "worktrees" / name).mkdir(parents=True)
+            (self.main / ".git" / "worktrees" / name / "commondir").write_text("../..\n")
+            (self.main / ".git" / "worktrees" / name / "HEAD").write_text(f"ref: refs/heads/{branch}\n")
+        self.work = self.main / ".claude" / "worktrees" / "agent-abc"
+        (self.work / "tests").mkdir(parents=True)
+        (self.work / ".git").write_text(f"gitdir: {self.main}/.git/worktrees/agent-abc\n")
+        (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** yes\n")
+        (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
+        self.scratch = self.root / "scratch" / "pr-1"
+        self.scratch.mkdir(parents=True)
+        (self.scratch / ".git").write_text(f"gitdir: {self.main}/.git/worktrees/scratch-1\n")
+        self.plain = self.root / "plain"
+        self.plain.mkdir()
+        (self.work / "a.py").write_text("x\n")
+
+    def approves(self, role, command, cwd):
+        # The timeout is the one a worker's verify call must carry (VERIFY_TIMEOUT_MS) to be allowed at all.
+        out = raw(role, command, cwd, tool_input={"command": command, "timeout": 600000})
+        return bool(out) and out["permissionDecision"] == "allow"
+
+    def check(self, role, cwd, yes=(), no=()):
+        for command in yes:
+            with self.subTest(role=role, command=command):
+                self.assertTrue(self.approves(role, command, cwd))
+        for command in no:
+            with self.subTest(role=role, command=command):
+                self.assertFalse(self.approves(role, command, cwd))
+
+    def test_read_only_chains_are_approved_for_every_role(self):
+        chains = (
+            "grep -n x a.py | sed -n 1,60p",
+            "sed -n 106p docs/guide.md | tr a b | awk '{print $1}'",
+            "ls scripts | grep -E 'a|b'; git status --short | head",
+            "find . -maxdepth 3 -name verify",
+            "git fetch origin 2>&1 | tail -2",
+            "git ls-remote --heads origin 562-x",
+            "echo a && echo b || echo c; true",
+            "gh issue view 5 --json body --jq .body 2>&1 | head -5",
+            "gh api repos/o/r/pulls/5 --jq .title | cat",
+            "for n in 1 2 3; do gh issue view $n --json title --jq .title; done",
+            "grep x a.py >/dev/null 2>&1; echo \"exit $?\"",
+            "[ -f a.py ] && cat a.py | wc -l",
+            "sed -n '/def x/,$p' a.py | cut -c1-80 | sort | uniq -c",
+        )
+        for role, cwd in (("orchestrate:worker", self.work), ("orchestrate:reviewer", self.main),
+                          ("orchestrate:scout", self.main), (None, self.main)):
+            self.check(role, cwd, yes=chains)
+
+    def test_anything_that_writes_or_runs_code_is_not_approved(self):
+        bad = (
+            "grep x > out", "grep x a.py >> out", "sed -i s/a/b/ ../a.py", "sed -n 'w out' a.py", "sed 's/a/b/w out' a.py",
+            "sed 's/a/b/e' a.py", "sed -f s.sed a.py", "sed -n '1p;w out' a.py", "sed 's/[/]/;w out/' a.py",
+            "find . -delete", "find . -exec rm {} ;", "find . -fprint out", "find . -ok rm {} ;",
+            "awk '{system(\"x\")}' a.py", "awk '{print > \"f\"}' a.py", "awk '{print | \"sh\"}' a.py",
+            "awk '{\"date\" | getline}' a.py", "awk -f p.awk a.py",
+            "gh api -X POST repos/o/r/issues", "gh api repos/o/r/issues -f title=x", "gh api repos/o/r --input f",
+            "gh api graphql", "gh pr view 5 --web", "gh pr checks 5 --watch", "gh pr merge 5", "gh issue delete 5",
+            "cat $(echo f)", "cat `echo f`", "echo x | sh", "echo x | xargs rm", "xargs rm", "bash -c 'ls'", "eval ls",
+            "ls $HOME", "cat *.py", "ls &", "ls | tee out", "sort -o out a.py", "tail -f a.py", "tail -F a.py",
+            "uniq a.py out", "rg --pre sh x", "git log --output=out", "git diff --outp=out", "git branch -D x",
+            "git fetch origin a:b", "git fetch origin +a", "git -c core.pager=sh log", "git push origin x",
+            "git ls-remote --upload-pack=sh origin", "ls\nrm x", "(ls)", "for n in $(ls); do echo $n; done",
+            "for n in 1 2; do echo $n", "echo $n", "cat <<'E'\nx\nE", "cd /etc && ls", "ls && cd . && ls",
+            "FOO=1 ls", "python3 -c 'print(1)'", "python3 - <<'E'\nx\nE", "perl -i -pe s/a/b/ a.py",
+        )
+        for role, cwd in (("orchestrate:worker", self.work), ("orchestrate:reviewer", self.main),
+                          ("orchestrate:scout", self.main), (None, self.main)):
+            self.check(role, cwd, no=bad)
+
+    def test_a_leading_cd_must_name_the_repo_or_the_callers_worktree(self):
+        self.check("orchestrate:worker", self.work, yes=(f"cd {self.work} && git status --short | head",
+                                                         f"cd {self.work}; ls"), no=(f"cd {self.root} && ls", "cd .. && ls"))
+        self.check("orchestrate:reviewer", self.main, yes=(f"cd {self.main} && gh pr view 5 --json title",),
+                   no=(f"cd {self.plain} && ls", f"cd {self.main}/.claude && ls | head"))
+
+    def test_the_orchestrators_plugin_script_chains_take_the_harmless_shell_too(self):
+        self.check(None, self.main, yes=(
+            f"cd {self.main} && {SCRIPTS}/snapshot --repo . 2>&1 | tail -n 40",
+            f'S="{SCRIPTS}"; "$S/claims" --repo . ; echo "exit $?"',
+            f'S="{SCRIPTS}"; printf "%s\\n" x | "$S/worker-report"',
+            f"{SCRIPTS}/snapshot --repo . || echo no",
+            f"{SCRIPTS}/snapshot --repo . 2>/dev/null",
+            "for n in 5 6; do gh issue view $n --json title --jq .title; done",
+            "gh issue view 5 --json title --jq .title; gh issue comment 5 --body x",
+        ), no=(f"{SCRIPTS}/snapshot --repo . | tee out", f"{SCRIPTS}/launch --bg; ls", f"{SCRIPTS}/merge 5 --repo /o; ls"))
+        # Outside a repo that carries the config the orchestrator's session is the developer's own.
+        self.assertFalse(approved(None, "ls | head", self.root))
+
+    def test_a_workers_test_runs_and_edits_in_its_own_worktree(self):
+        yes = (
+            f"'{SCRIPTS}/../scripts/verify' --config --branch 562-ticket 2>&1 | tail -15",
+            f"{SCRIPTS}/verify --config",
+            "python3 -m unittest tests.test_x 2>&1 | tail -15",
+            "/usr/bin/python3 -m unittest discover -s tests -v 2>&1 | tail -3",
+            "python3 tests/run_parallel.py",
+            "python3 -m py_compile a.py",
+            "sed -i '' -e 's|x|y|' a.py",
+            "sed -i 's/x/y/' a.py && python3 -m unittest tests.test_x",
+            "sed -i.bak '3d' a.py tests/b.py",
+            f"cd {self.work} && sed -i 's/x/y/g' a.py",
+        )
+        no = (
+            "sed -i 's/x/y/' ../outside", "sed -i 's/x/y/' /etc/hosts", "sed -i 's/x/y/' ~/f", "sed -i 's/x/y/' *.py",
+            "sed -i 's/x/y/w out' a.py", "sed -i 's/x/y/' $F", "sed -i 's/x/y/'", f"sed -i 's/x/y/' {self.work}/a.py",
+            "sed -i 's/x/y/' .git/config", "python3 -m py_compile ../x.py", "python3 -m unittest -X dev tests",
+            "python3 tests/other.py", "python3 -c 'import os'", "python3 - <<'E'\nopen('a','w')\nE",
+            "scripts/verify --config", f"{SCRIPTS}/verify --config $(echo x)", "perl -i -pe s/a/b/ a.py",
+        )
+        self.check("orchestrate:worker", self.work, yes=yes, no=no)
+        # The test runs and edits are a worker's alone, and only from inside its worktree.
+        for role, cwd in (("orchestrate:reviewer", self.main), ("orchestrate:scout", self.main), (None, self.main),
+                          ("orchestrate:worker", self.main)):
+            self.check(role, cwd, no=("sed -i 's/x/y/' a.py", "python3 -m unittest tests.test_x", "python3 -m py_compile a.py"))
+
+    def test_a_symlink_out_of_the_worktree_is_not_an_edit_inside_it(self):
+        (self.work / "link.py").symlink_to(self.plain / "t.py")
+        self.check("orchestrate:worker", self.work, no=("sed -i 's/x/y/' link.py",))
+
+    def test_gate_cwd_is_approved_only_under_the_worktrees_directory(self):
+        self.check(None, self.main, yes=(
+            f"{SCRIPTS}/gate 5 --session s --cwd {self.work}",
+            f"{SCRIPTS}/gate 5 --session s --cwd={self.work} | tail -n 20",
+            f"S={SCRIPTS}; $S/gate 5 --cwd .claude/worktrees/agent-abc",
+        ), no=(
+            f"{SCRIPTS}/gate 1 --cwd /etc", f"{SCRIPTS}/gate 1 --cwd ../x", f"{SCRIPTS}/gate 1 --cwd {self.main}",
+            f"{SCRIPTS}/gate 1 --cwd {self.main}/.claude/worktrees", f"{SCRIPTS}/gate 1 --cwd {self.plain}",
+            f"{SCRIPTS}/gate 1 --cwd {self.work}/../../..", f"{SCRIPTS}/gate 1 --cwd $HOME",
+            f"{SCRIPTS}/gate 1 --cwd", f"{SCRIPTS}/claims --repo . --cwd {self.work}",
+            f"{SCRIPTS}/gate 1 --cwd {self.work} --cwd /etc",
+        ))
+
+    def test_a_reviewers_suite_run_in_its_scratch_checkout(self):
+        verify = f"{SCRIPTS}/verify"
+        self.check("orchestrate:reviewer", self.main, yes=(
+            f"{verify} --config --cwd {self.scratch}",
+            f"{verify} --cwd {self.scratch} --config 2>&1 | tail -10",
+            f"cd {self.scratch} && {verify} --config --cwd {self.scratch} 2>&1 | tail -25",
+            f"cd {self.scratch} && gh pr view 5 --json title; grep -n x a.py",
+        ), no=(
+            f"{verify} --config --cwd {self.plain}", f"{verify} --config --cwd {self.work}",
+            f"{verify} --config --cwd {self.main}", f"{verify} --config --cwd /etc", f"{verify} --config --cwd ../x",
+            f"{verify} --config", f"{verify} --cwd {self.scratch}", f"{verify} --config --cwd {self.scratch} --other",
+            f"{verify} --config --cwd {self.scratch} --cwd {self.plain}", f"{verify} --config --cwd $HOME",
+            f"cd {self.plain} && {verify} --config --cwd {self.plain}", f"cd {self.plain} && ls",
+            f"{verify} --config --cwd {self.scratch}; rm x",
+        ))
+        self.check("orchestrate:scout", self.main, no=(f"{verify} --config --cwd {self.scratch}",))
+        self.check(None, self.main, no=(f"{verify} --config --cwd {self.scratch}",))
+
+
 class GuardEntryPoint(unittest.TestCase):
     """The real hook: `python3 -I hooks/guard.py`, JSON on stdin, JSON (or nothing) on stdout."""
 
@@ -1407,7 +1560,7 @@ class GuardEntryPoint(unittest.TestCase):
         self.assertTrue(out["hookSpecificOutput"]["permissionDecisionReason"].startswith("orchestrate guard: "))
 
     def test_allow_prints_nothing(self):
-        payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "git log --oneline -1"}}
+        payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "curl -s example.com"}}
         self.assertEqual(self.run_entry(json.dumps(payload)), "")
 
     def test_malformed_input_is_allowed_silently(self):
