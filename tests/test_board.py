@@ -181,21 +181,6 @@ class Board(unittest.TestCase):
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         self.assertEqual(self.edits(), {"I1": "Building", "I2": "In review"})
 
-    def test_a_permission_denied_ticket_waits_on_you_until_a_pr_exists(self):
-        import runlog
-        self.config()
-        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="1", status="stopped",
-                            stop_reason="permission-denied", denied_command="gh pr create")
-        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="2", status="stopped",
-                            stop_reason="permission-denied", denied_command="gh pr create")
-        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)],
-                prs=[{"number": 12, "headRefName": "2-thing", "state": "OPEN", "mergedAt": None}],
-                cards=[card(1), card(2)])
-        r = self.env.run("board", check=False)
-        self.assertEqual((r.returncode, r.stderr), (0, ""))
-        # #2's PR now exists (the user ran the command): it is in review, not waiting.
-        self.assertEqual(self.edits(), {"I1": "Waiting on you", "I2": "In review"})
-
     def test_a_card_is_added_when_a_ticket_is_first_claimed_and_not_for_an_unclaimed_one(self):
         self.config()
         self.gh(tickets=[ticket(1, claimed=True), ticket(6, ["ready-for-human"])])
@@ -582,17 +567,6 @@ class Board(unittest.TestCase):
         r = self.env.run("board", check=False)
         self.assertEqual((r.returncode, r.stdout), (1, ""))
 
-    def test_an_exhausted_transient_stop_waits_on_you_and_a_retried_one_does_not(self):
-        import runlog
-        self.config()
-        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="1", status="stopped",
-                            stop_reason="transient", exhausted=True)
-        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "valid", ref="2", status="stopped",
-                            stop_reason="transient")
-        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)], cards=[card(1), card(2)])
-        r = self.env.run("board", check=False)
-        self.assertEqual((r.returncode, r.stderr), (0, ""))
-        self.assertEqual(self.edits(), {"I1": "Waiting on you", "I2": "Building"})
 
     def test_a_stage_set_batch_is_resent_after_a_502_and_a_delete_batch_is_not(self):
         retry = {"ORCHESTRATE_GH_5XX_TRIES": "2", "ORCHESTRATE_GH_WAIT": "30"}
@@ -624,6 +598,36 @@ class Board(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("not a single-select field", r.stderr)
         self.assertEqual(self.mutations(), [])
+
+
+class Stages(unittest.TestCase):
+    """The stage of a claim comes from its `claims` state word alone: the board reads no run log (#501)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from importlib.machinery import SourceFileLoader
+        sys.path.insert(0, str(ROOT / "scripts"))
+        cls.board = SourceFileLoader("board_script", str(ROOT / "scripts" / "board")).load_module()
+
+    def stage(self, state, labels=()):
+        import claims
+        issue = {"number": 1, "claimed": True, "labels": set(labels)}
+        return self.board.desired([issue], {1: claims.Claim(1, state)})[1][0]
+
+    def test_a_waiting_claim_is_waiting_on_you(self):
+        self.assertEqual(self.stage("waiting"), "Waiting on you")
+
+    def test_an_idle_claim_is_still_building(self):
+        self.assertEqual(self.stage("idle"), "Building")
+
+    def test_a_ready_pr_is_in_review_never_waiting(self):
+        self.assertEqual(self.stage("in-review"), "In review")
+
+    def test_the_labels_still_send_a_ticket_to_waiting_on_you(self):
+        self.assertEqual(self.stage("building", ["needs-info"]), "Waiting on you")
+
+    def test_the_board_does_not_read_the_run_log(self):
+        self.assertNotIn("runlog", (ROOT / "scripts" / "board").read_text())
 
 
 class Prompts(unittest.TestCase):
