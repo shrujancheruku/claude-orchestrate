@@ -186,6 +186,18 @@ _Avoid_: lead flag, lead setting
 A problem a worker or reviewer finds outside its ticket's scope, filed as a draft ticket (`needs-triage` + `lead`) for the lead to triage. Not a finding, which is a reviewer's comment on the PR under review. Source: `docs/adr/0008-lead-above-orchestrator.md`, `agents/reviewer.md`.
 _Avoid_: follow-up, spin-off, finding
 
+**Grooming**:
+The lead folding related backlog tickets into one before filing a new one, so fewer PRs go through review and CI; never into a claimed ticket, never across the permission-layer merge gate. Source: `skills/lead/SKILL.md`.
+_Avoid_: dedupe, backlog cleanup
+
+**Breakage sweep**:
+The lead's checklist, sent to the scout every 10 merges and on request, for problems that do not arrive in reports (failed CI, leftover worktrees, runlog errors); each finding becomes one ticket or one widening. Source: `skills/lead/SKILL.md`.
+_Avoid_: audit, health check
+
+**Pass digest**:
+The short summary the lead posts in its own session after each pass table from a background orchestrator, since the lead is then the developer's only view of the run. Source: `skills/lead/SKILL.md`.
+_Avoid_: status report, pass table (the table is the orchestrator's; the digest is the lead's)
+
 **Stop comment**:
 The comment a worker's question is posted as when its stop goes to the lead: its first line is `> *Stopped for the lead.*`, and `scripts/lead-route` reads it for the stop's time. Source: `scripts/lead-route`, `skills/run/SKILL.md`.
 _Avoid_: stop note, question comment

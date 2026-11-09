@@ -39,6 +39,7 @@ class Config(NamedTuple):
     verify_groups: tuple = ()  # the Verify section's commands: a tuple of groups, each a tuple of command strings
     has_verify: bool = False  # the config has a `## Verify` section at all
     orchestrator_model: str | None = None  # the Models table's Orchestrator row; None when blank, the old wording or missing
+    lead_model: str | None = None  # the Models table's Lead row, read the same way; None when blank or missing
     ci_wait_limit: int | None = None  # minutes: the optional `**CI wait limit:**` line; None when absent or not a number
     board: str | None = None  # the `- **Board:** <project URL>` line setup writes; None when absent
     problems: tuple = ()  # Problem entries
@@ -89,7 +90,8 @@ class Config(NamedTuple):
             tier_l_lines=l_lines,
             verify_groups=_verify_groups(common.section_of(text, "Verify")),
             has_verify=common.section_of(text, "Verify") is not None,
-            orchestrator_model=_orchestrator_model(common.section_of(text, "Models")),
+            orchestrator_model=_model_row(common.section_of(text, "Models"), "orchestrator"),
+            lead_model=_model_row(common.section_of(text, "Models"), "lead"),
             ci_wait_limit=_ci_wait_limit(text),
             board=_board(text),
             problems=tuple(problems),
@@ -219,8 +221,8 @@ def _board(text):
 _OLD_ORCHESTRATOR ="the session's model"  # the template's wording before the lead layer: means no model
 
 
-def _orchestrator_model(models):
-    """The model of the Models table's Orchestrator row: its first word, or None.
+def _model_row(models, role):
+    """The model of the Models table's row for `role` (Orchestrator, Lead): its first word, or None.
 
     The cell reads `opus (used when the lead launches it; ...)`: the model is the first word, the rest is
     prose. Blank, the old `the session's model` wording and a missing row are all None, so a hand-started
@@ -228,7 +230,7 @@ def _orchestrator_model(models):
     """
     for line in (models or "").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) >= 2 and cells[0].lower() == "orchestrator":
+        if len(cells) >= 2 and cells[0].lower() == role:
             cell = cells[1]
             if not cell or cell.lower().startswith(_OLD_ORCHESTRATOR):
                 return None

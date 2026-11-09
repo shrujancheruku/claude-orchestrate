@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""launch [--greedy[=N] | <ticket>] [--bg] [--resume <sessionId>] [--lead] [--permission-mode MODE] [--print] [--repo PATH] : start the orchestrator.
+"""launch [--greedy[=N] | <ticket>] [--profile] [--bg] [--resume <sessionId> | --resume-latest] [--lead] [--permission-mode MODE] [--print] [--repo PATH] : start the orchestrator.
 
 The one place that knows the orchestrator's launch line; the lead, `/orchestrate:start` and the docs quote this
 script (ADR-0006). The flags cannot live in settings: the session-only auto-mode switch exists only as inline
@@ -13,9 +13,15 @@ script (ADR-0006). The flags cannot live in settings: the session-only auto-mode
     --model <m>                 only when the config's Models table names one in its Orchestrator row
     --plugin-dir <root>         only when the plugin is a checkout: ${CLAUDE_PLUGIN_ROOT}, else this script's
                                 parent; a root under <claude dir>/plugins/ is a marketplace install and gets no flag
-    "/orchestrate:run --greedy" the prompt: `--greedy=N` or a ticket number is passed through; none with --resume
+    "/orchestrate:run --greedy" the prompt: `--greedy=N` or a ticket number is passed through, and `--profile`
+                                is appended; none with --resume
+--resume-latest resumes for the caller: with no live `orchestrator` row, the stopped row of this repo (its `cwd`)
+with the newest `startedAt`; a tie or a missing `startedAt` falls back to the row `claude agents --json --all`
+lists last. One line on stderr says which sessionId was chosen and why.
 --no-model drops --model whatever the config says. --lead builds the lead's line instead: `--name lead`, crossSessionInbound accepted (a lead in a prompting mode
-holds every pass table from a bypass orchestrator otherwise), the plugin flag, prompt "/orchestrate:lead".
+holds every pass table from a bypass orchestrator otherwise), `--model` from the config's Lead row (none when the
+row is missing or blank), the plugin flag, prompt "/orchestrate:lead" followed by the same `--greedy[=N]` or ticket
+and `--profile`, which the lead passes on to the orchestrator it launches. --lead refuses the rest.
 Default runs it in the foreground (the terminal becomes the session); --bg runs `claude --bg` and passes its
 output through; --print only prints the command. Exit codes: 0 launched or printed; 2 could not run: a live
 session already named `orchestrator` (`lead` for --lead) or, with --resume, one live under that id; `claude agents`
@@ -29,6 +35,7 @@ import re
 import shlex
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,9 +69,11 @@ def build(args, root: Path, model) -> list:
         argv += ["--name", "lead", "--settings", json.dumps(INBOUND, separators=(",", ":"))]
         if args.permission_mode:
             argv += ["--permission-mode", args.permission_mode]
+        if model:
+            argv += ["--model", model]
         if not is_marketplace(root):
             argv += ["--plugin-dir", str(root)]
-        return argv + ["/orchestrate:lead"]
+        return argv + [prompt(args, "/orchestrate:lead")]
     if args.resume:
         argv += ["--resume", args.resume]
     if args.bg:
@@ -84,10 +93,15 @@ def build(args, root: Path, model) -> list:
     return argv
 
 
-def prompt(args) -> str:
+def prompt(args, command="/orchestrate:run") -> str:
+    """The skill call: a ticket or `--greedy[=N]` (the lead's line takes both only as a pass-through), then `--profile`."""
     if args.ticket:
-        return f"/orchestrate:run {args.ticket}"
-    return "/orchestrate:run --greedy" + (f"={args.greedy}" if args.greedy else "")
+        text = f"{command} {args.ticket}"
+    elif command == "/orchestrate:lead" and args.greedy is None:
+        text = command  # the lead alone: no flags to pass on
+    else:
+        text = f"{command} --greedy" + (f"={args.greedy}" if args.greedy else "")
+    return text + (" --profile" if args.profile else "")
 
 
 def render(argv: list) -> str:
@@ -121,12 +135,70 @@ def live_sessions() -> list:
     return [r for r in rows if isinstance(r, dict) and r.get("pid") is not None]
 
 
+def agent_rows(everything=False) -> list:
+    """The rows of `claude agents --json [--all]` as dicts, failing closed as live_sessions does."""
+    if not shutil.which("claude"):
+        return []
+    code, out, _ = common.run("claude", "agents", "--json", *(["--all"] if everything else []))
+    if code != 0:
+        common.die(f"launch: cannot run: `claude agents --json` failed (exit {code}); cannot tell which session to resume")
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        common.die("launch: cannot run: `claude agents --json` did not print a list; cannot tell which session to resume")
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def started_at(row):
+    """A row's `startedAt` as epoch seconds (a number, or an ISO-8601 string), or None when missing or unreadable."""
+    value = row.get("startedAt")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) / 1000 if value > 1e11 else float(value)  # milliseconds or seconds
+    if isinstance(value, str):
+        try:
+            when = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+    return None
+
+
+def latest_stopped(rows: list, repo: Path):
+    """(row, why) for the stopped `orchestrator` row of `repo` to resume, or (None, why not).
+
+    Rows from other repos (a different `cwd`) are ignored. Among the rest the newest `startedAt` wins; a tie, or any
+    row without a readable `startedAt`, falls back to the one listed last. A live orchestrator row means nothing is resumed.
+    """
+    named = [r for r in rows if r.get("name") == NAME]
+    live = [r for r in named if r.get("pid") is not None]
+    if live:
+        return None, f"a live session named {NAME} already exists ({live[0].get('sessionId')}); message it instead of resuming another"
+    here = repo.resolve()
+    mine = [r for r in named if isinstance(r.get("cwd"), str) and Path(r["cwd"]).resolve() == here]
+    if not mine:
+        return None, f"no stopped {NAME} session of this repo to resume"
+    dated = [r for r in mine if started_at(r) is not None]
+    if len(dated) < len(mine):  # a missing startedAt makes the order unknowable: the row listed last
+        return mine[-1], f"a stopped {NAME} row of this repo has no startedAt, so the one listed last of {len(mine)}"
+    newest = max(started_at(r) for r in dated)
+    tied = [r for r in dated if started_at(r) == newest]
+    why = "newest startedAt" if len(tied) == 1 else "tied on startedAt, so the one listed last"
+    return tied[-1], f"{why} of {len(mine)} stopped {NAME} rows of this repo"
+
+
 def parse(argv):
     ap = argparse.ArgumentParser(prog="launch", description=__doc__.split("\n")[0])
     ap.add_argument("ticket", nargs="?", help="a ticket number: run narrows to it")
     ap.add_argument("--greedy", nargs="?", const="", default=None, metavar="N", help="greedy mode, as --greedy=N")
+    ap.add_argument("--profile", action="store_true", help="the run also records itself and saves a profile")
     ap.add_argument("--bg", action="store_true", help="run as a background session")
     ap.add_argument("--resume", metavar="SESSION_ID", help="resume that session with the same flags and no prompt")
+    ap.add_argument("--resume-latest", action="store_true",
+                    help="--resume the stopped orchestrator row of this repo with the newest startedAt")
     ap.add_argument("--lead", action="store_true", help="the lead's line instead of the orchestrator's")
     ap.add_argument("--permission-mode", choices=MODES, help="the session's mode (orchestrator default acceptEdits)")
     ap.add_argument("--no-model", action="store_true", help="omit --model (the lead's one relaunch after model_not_found)")
@@ -143,18 +215,31 @@ def parse(argv):
         common.die("launch: cannot run: give --greedy or a ticket, not both")
     if args.resume is not None and not TOKEN.fullmatch(args.resume):
         common.die(f"launch: cannot run: {args.resume!r} is not a session id")
-    if args.resume and (args.ticket or args.greedy is not None):
+    if args.resume and args.resume_latest:
+        common.die("launch: cannot run: give --resume <sessionId> or --resume-latest, not both")
+    if (args.resume or args.resume_latest) and (args.ticket or args.greedy is not None or args.profile):
         common.die("launch: cannot run: --resume takes no prompt")
-    if args.lead and (args.bg or args.resume or args.ticket or args.greedy is not None or args.no_model):
-        common.die("launch: cannot run: --lead takes only --permission-mode and --print")
+    if args.lead and (args.bg or args.resume or args.resume_latest or args.no_model):
+        common.die("launch: cannot run: --lead takes only --greedy[=N] or a ticket, --profile, --permission-mode and --print")
     return args
 
 
 def main(argv=None) -> int:
     args = parse(argv)
-    model = None if args.lead or args.no_model else config.Config.load(args.repo).orchestrator_model
-    if model is not None and not TOKEN.fullmatch(model):
-        common.die(f"launch: cannot run: the config's Orchestrator model {model!r} is not a model name")
+    model = None
+    if not args.no_model:
+        cfg = config.Config.load(args.repo)
+        model, role = (cfg.lead_model, "Lead") if args.lead else (cfg.orchestrator_model, "Orchestrator")
+        if model is not None and not TOKEN.fullmatch(model):
+            common.die(f"launch: cannot run: the config's {role} model {model!r} is not a model name")
+    if args.resume_latest:
+        row, why = latest_stopped(agent_rows(everything=True), Path(args.repo))
+        if row is None:
+            common.die(f"launch: cannot run: {why}")
+        args.resume = row.get("sessionId")
+        if not isinstance(args.resume, str) or not TOKEN.fullmatch(args.resume):
+            common.die(f"launch: cannot run: the chosen {NAME} row has no usable sessionId")
+        print(f"launch: resuming {args.resume}: {why}", file=sys.stderr)
     cmd = build(args, plugin_root(), model)
     if args.print:
         print(render(cmd))

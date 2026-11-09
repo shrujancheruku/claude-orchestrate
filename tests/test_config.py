@@ -61,9 +61,18 @@ class ConfigTemplate(unittest.TestCase):
         row = "| Orchestrator | opus (used when the lead launches it; a hand-started session keeps its own) | |"
         for new in ("| Orchestrator | | |", "| Orchestrator | the session's model | |", "| Orchestrator |", ""):
             text = filled().replace(row, new)
-            self.assertNotIn("opus (used", text)
+            self.assertNotIn("| Orchestrator | opus (used", text)
             self.assertIsNone(config.Config.parse(text).orchestrator_model, new)
-        self.assertEqual(config.Config.parse(filled().replace("opus (used", "sonnet (used")).orchestrator_model, "sonnet")
+        self.assertEqual(config.Config.parse(filled().replace("| Orchestrator | opus (used", "| Orchestrator | sonnet (used")).orchestrator_model, "sonnet")
+
+    def test_lead_model_is_the_lead_row_and_none_when_blank_or_missing(self):
+        row = "| Lead | opus (used when scripts/launch --lead starts it; a hand-started session keeps its own) | |"
+        self.assertIn(row, filled())
+        self.assertEqual(config.Config.parse(filled()).lead_model, "opus")
+        for new in ("| Lead | | |", "| Lead |", ""):
+            self.assertIsNone(config.Config.parse(filled().replace(row, new)).lead_model, new)
+        self.assertEqual(config.Config.parse(filled().replace(row, "| Lead | `sonnet` | |")).lead_model, "sonnet")
+        self.assertEqual(config.Config.parse(filled().replace(row, "")).orchestrator_model, "opus")
 
     def test_board_set_and_missing(self):
         url = "https://github.com/orgs/acme/projects/7"
