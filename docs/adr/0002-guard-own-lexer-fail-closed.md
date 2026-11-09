@@ -28,3 +28,7 @@
 ## Note, 2026-11-09 (#378)
 
 The guard assumes the orchestrator runs in `acceptEdits` or `bypassPermissions`. Auto mode is unsupported for the orchestrator session: workers inherit it, and the auto-mode classifier skips their file edits whatever the guard allows. `scripts/launch` passes the mode and a per-session `disableAutoMode`; see Permission mode in `docs/guide.md`.
+
+## Note, 2026-11-09 (#407)
+
+The orchestrator's own session is refused for one class of command: a hand-made wait (`sleep`, `read -t`, an `until … gh …` poll loop). A background orchestrator that sleeps holds its whole run and reads stale state when it wakes; `scripts/watch-ci` owns waiting on CI and names the next step. The deny reason points at `watch-ci`. Every other main-session command stays unrefused: the guard only ever allows it or says nothing (line 15 above).

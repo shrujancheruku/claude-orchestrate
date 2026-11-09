@@ -674,3 +674,9 @@
 {"role": "orchestrate:orchestrator", "command": "until gh pr view 5 --json mergedAt; do :; done", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "sleep 300; gh api repos/owner/r/pulls/5", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/watch-ci 528 ebc323d", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch --permission-mode bypassPermissions --bg", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/sandbox-git", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/snapshot --repo . --out /tmp/x", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/snapshot --repo . --out .claude/orchestrate-snapshot.json", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; printf -v S %s /tmp/evil; $S/snapshot --repo .", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/snapshot --repo . | sort --out=/tmp/x", "expected": "silent", "source": "hand"}

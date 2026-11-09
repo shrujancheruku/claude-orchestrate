@@ -1670,6 +1670,54 @@ def chain_plain_args(args: list) -> bool:
     return not any(a.dynamic or a.glob for a in args)
 
 
+# The only options a chained `sort` or `printf` may carry. `sort -o/--output/--compress-program` write a file
+# or run a program (getopt accepts any prefix of a long option), and `printf -v` assigns a shell variable the
+# guard's `env` can't see, so a flag outside these is refused rather than recognised (#554).
+CHAIN_SORT_FLAG = re.compile(r"-[nrufbdMV]+|-k\d+(?:,\d+)?")
+
+
+def chain_flags_ok(name: str, args: list) -> bool:
+    if name == "sort":
+        return all(not a.text.startswith("-") or a.text == "-" or CHAIN_SORT_FLAG.fullmatch(a.text) for a in args)
+    if name == "printf":
+        return not (args and args[0].text.startswith("-"))
+    return True
+
+
+# The plugin scripts a chain may call besides merge, threads and board (which keep their own forms): the
+# read-only pass scripts. launch, sandbox-git, rescue, verify and guard-corpus are not here, so they fall to
+# the permission layer as before. Their options are held to SAFE_SCRIPT_FLAGS, spelled in full (argparse
+# accepts abbreviations); `--repo` names the current directory only, and `--out` is snapshot's own file.
+CHAIN_SCRIPTS = frozenset(("snapshot", "rebuild-state", "claims", "frontier", "holds", "gate", "ci-times",
+                           "watch-ci", "worker-report", "lead-route", "lead-brief"))
+SAFE_SCRIPT_FLAGS = frozenset(("--parent", "--ticket", "--all", "--pr", "--base", "--branch", "--reviewer", "--since",
+                               "--now", "--lead", "--cap", "--touch-map", "--literal", "--timeout", "--retry-delay",
+                               "--interval", "--no-run-after", "--stuck-after", "--verbose"))
+SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
+
+
+def chain_script_args_ok(name: str, args: list) -> bool:
+    texts = [a.text for a in args]
+    i = 0
+    while i < len(texts):
+        arg = texts[i]
+        i += 1
+        if arg.startswith("-") and not arg.startswith("--"):
+            return False
+        if not arg.startswith("--"):
+            continue
+        flag, eq, value = arg.partition("=")
+        if flag in ("--repo", "--out") and not eq:
+            value, i = (texts[i] if i < len(texts) else None), i + 1
+        if flag == "--repo" and value == ".":
+            continue
+        if flag == "--out" and name == "snapshot" and value == SNAPSHOT_FILE:
+            continue
+        if flag not in SAFE_SCRIPT_FLAGS:
+            return False
+    return True
+
+
 def chain_cat_ok(args: list, cwd: str) -> bool:
     """`cat` of files under the repo's `.claude/` directory only."""
     config = config_path(cwd)
@@ -1692,7 +1740,9 @@ def chain_script_ok(cmd: Command, env: dict, cwd: str) -> bool:
         return False
     form = {"merge": orchestrator_merge_form, "threads": orchestrator_threads_form,
             "board": orchestrator_board_form}.get(path.name)
-    return form(cmd, args) if form else True
+    if form:
+        return form(cmd, args)
+    return path.name in CHAIN_SCRIPTS and chain_script_args_ok(path.name, args)
 
 
 def chain_approved(parsed: "Parsed", cwd: str) -> bool:
@@ -1711,12 +1761,16 @@ def chain_approved(parsed: "Parsed", cwd: str) -> bool:
                 value = resolve_word(w, env, m.group(2)) if m else None
                 if not m or value is None or UNSAFE_VARIABLE.fullmatch(m.group(1)):
                     return False
+                # A variable may only name a place inside the plugin (what `$S/<script>` needs): another
+                # value could change how a script, or the `gh`/`git` it runs, behaves (#554).
+                target = Path(os.path.realpath(os.path.join(cwd or ".", value)))
+                if target != PLUGIN_SCRIPTS.parent and PLUGIN_SCRIPTS.parent not in target.parents:
+                    return False
                 env[m.group(1)] = value
             continue
         args = cmd.words[1:]
         if not first.dynamic and first.text in CHAIN_PLAIN:
-            if not chain_plain_args(args) or (first.text == "sort" and any(
-                    re.match(r"-\w*o|--output", a.text) for a in args)):
+            if not chain_plain_args(args) or not chain_flags_ok(first.text, args):
                 return False
         elif not first.dynamic and first.text == "cat":
             if not chain_plain_args(args) or not chain_cat_ok(args, cwd):
@@ -1810,7 +1864,7 @@ def main() -> None:
         return
     if orchestrator:
         try:
-            if isinstance(command, str) and orchestrator_waits(Parsed(parse(command))):
+            if isinstance(command, str) and config_path(cwd) and orchestrator_waits(Parsed(parse(command))):
                 deny(WAIT_REFUSAL)
                 return
         except Exception:

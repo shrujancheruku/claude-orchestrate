@@ -1155,6 +1155,7 @@ class RoutineApprovalTest(unittest.TestCase):
                 '"${CLAUDE_SKILL_DIR}/../../scripts/frontier" --ticket 5 | sort | wc -l',
                 '"${CLAUDE_SKILL_DIR}/../../scripts/merge" 12 --approved-head abc && printf "%s\\n" ok',
                 f"{SCRIPTS}/snapshot --repo . 2>&1 | grep -n open",
+                f"{SCRIPTS}/snapshot --repo . --out .claude/orchestrate-snapshot.json | sort -n -r",
                 "cat .claude/orchestration.md | head -n 5; echo x"):
             with self.subTest(command):
                 self.assertTrue(approved(None, command, self.main))
@@ -1181,6 +1182,22 @@ class RoutineApprovalTest(unittest.TestCase):
                 "/tmp/x/scripts/snapshot --repo .",
                 f"{SCRIPTS}/merge 12 --repo /other",
                 f"{SCRIPTS}/common.py",
+                f"{SCRIPTS}/launch --permission-mode bypassPermissions --bg",
+                f"{SCRIPTS}/sandbox-git",
+                f"{SCRIPTS}/rescue 12",
+                f"{SCRIPTS}/verify --config",
+                f"{SCRIPTS}/snapshot --repo . --out /tmp/x",
+                f"{SCRIPTS}/snapshot --repo . --out=/tmp/x",
+                f"{SCRIPTS}/snapshot --repo . --ou /tmp/x",
+                f"{SCRIPTS}/snapshot --repo /tmp",
+                f"{SCRIPTS}/claims --state /tmp/x",
+                f"{SCRIPTS}/frontier --fix-drift",
+                f"{SCRIPTS}/lead-brief --checkpoint 5",
+                f"S={SCRIPTS}; printf -v S %s /tmp/evil; $S/snapshot",
+                f"{SCRIPTS}/snapshot | sort --out=/tmp/x",
+                f"{SCRIPTS}/snapshot | sort --compress-program=sh",
+                f"S={SCRIPTS}; PYTHONPATH=/tmp/x; $S/snapshot",
+                f"GH_HOST=evil.com; {SCRIPTS}/snapshot",
                 f"{SCRIPTS}/nonexistent",
                 "cat /etc/passwd | head",
                 "cat ../secret | head",
@@ -1197,6 +1214,7 @@ class RoutineApprovalTest(unittest.TestCase):
                 self.assertEqual(raw(None, command, self.main)["permissionDecision"], "deny")
                 self.assertEqual(decide("orchestrate:worker", command), "allow")
         self.assertEqual(raw(None, "until gh pr view 5 --json mergedAt; do :; done", self.main)["permissionDecision"], "deny")
+        self.assertIsNone(raw(None, "sleep 2", self.root))  # a main session in a repo with no orchestrate config
         for command in ("echo sleep 5", 'echo "sleep 5"', f"{SCRIPTS}/watch-ci 528 ebc323d", "grep sleep x",
                         "until true; do :; done"):
             with self.subTest(command):
