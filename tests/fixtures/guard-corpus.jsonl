@@ -697,3 +697,6 @@
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . | sh", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . | xargs rm", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . --snapshot /tmp/x | tail -n 40", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/rebuild-state\" 00000000-0000-0000-0000-000000000000 --repo . ; \"$S/claims\" --session 00000000-0000-0000-0000-000000000000 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 40", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/lead-route\" --session 00000000-0000-0000-0000-000000000000 --lead live --cap 4 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 20", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/holds\" --session 00000000-0000-0000-0000-000000000000 --touch-map \"hooks/guard.py:1-9\" --ticket 537 | tail -n 5", "expected": "approve", "source": "hand"}

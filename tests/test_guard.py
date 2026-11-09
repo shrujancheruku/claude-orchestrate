@@ -998,6 +998,28 @@ class RoutineApprovalTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertFalse(approved(None, command, self.main))
 
+    def test_orchestrator_chains_in_the_shape_the_run_skill_emits_after_559(self):
+        # The skill passes `--session <id>` (the id substituted into the skill text) to claims, lead-route, holds and gate.
+        sid, snap = "0123abcd-4567-89ef-0123-456789abcdef", "--snapshot .claude/orchestrate-snapshot.json"
+        for command in (
+                f'S="{SCRIPTS}"; "$S/rebuild-state" {sid} --repo . ; "$S/claims" --session {sid} --repo . {snap} | tail -n 40',
+                f'S="{SCRIPTS}"; "$S/lead-route" --session {sid} --lead live --cap 4 --repo . {snap} | tail -n 20',
+                f'"{SCRIPTS}/holds" --session {sid} --touch-map "hooks/guard.py:1-9" --ticket 537 | tail -n 5',
+                f"{SCRIPTS}/claims --session {sid} 537 --repo . | head -n 5"):
+            with self.subTest(command):
+                self.assertTrue(approved(None, command, self.main))
+        self.assertFalse(approved(None, f"{SCRIPTS}/claims --sess {sid} --repo .", self.main))  # no abbreviations
+
+    def test_the_wait_refusal_finds_the_run_command_after_a_model_or_rename(self):
+        path = self.root / "renamed.jsonl"
+        lines = [f"<command-name>{c}</command-name>" for c in ("/model", "/rename", "/orchestrate:run")]
+        path.write_text("".join(json.dumps({"message": {"role": "user", "content": c}}) + "\n" for c in lines))
+        self.assertEqual(raw(None, "sleep 20", self.main, transcript=path)["permissionDecision"], "deny")
+        both = self.root / "both.jsonl"
+        both.write_text("".join(json.dumps({"message": {"role": "user", "content": f"<command-name>{c}</command-name>"}}) + "\n"
+                                for c in ("/orchestrate:run", "/orchestrate:lead")))
+        self.assertIsNone(raw(None, "sleep 20", self.main, transcript=both))
+
     def test_the_wait_chain_of_lead_route_is_in_the_chain_list(self):
         self.assertIn("lead-route", GUARD_MODULE.CHAIN_SCRIPTS)
 

@@ -1747,7 +1747,7 @@ def chain_flags_ok(name: str, args: list) -> bool:
 CHAIN_SCRIPTS = frozenset(("snapshot", "rebuild-state", "claims", "frontier", "holds", "gate", "ci-times",
                            "watch-ci", "worker-report", "lead-route", "lead-brief"))
 SAFE_SCRIPT_FLAGS = frozenset(("--parent", "--ticket", "--all", "--pr", "--base", "--branch", "--reviewer", "--since",
-                               "--now", "--lead", "--cap", "--touch-map", "--literal", "--timeout", "--retry-delay",
+                               "--now", "--session", "--lead", "--cap", "--touch-map", "--literal", "--timeout", "--retry-delay",
                                "--interval", "--no-run-after", "--stuck-after", "--verbose"))
 SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
 
@@ -1878,12 +1878,14 @@ WAIT_REFUSAL = ("the orchestrator doesn't wait with `sleep`, `read -t` or an `un
 
 
 def is_orchestrator_session(transcript_path: object) -> bool:
-    """True when the main session was started by `/orchestrate:run`: its transcript's first command is that
-    one. The hook input carries no session name, so this is the signal that tells the orchestrator from the
-    lead (`/orchestrate:lead`) or a developer's own session in the same repo (#537). Unreadable or missing
-    transcript: False, so the refusal stays off rather than hitting a session it was not written for."""
+    """True when the main session ran `/orchestrate:run` and never `/orchestrate:lead`, among the first 50
+    lines of its transcript (so a `/model` or `/rename` before the run does not hide it). The hook input
+    carries no session name, so this is the signal that tells the orchestrator from the lead or a developer's
+    own session in the same repo (#537). Unreadable or missing transcript: False, so the refusal stays off
+    rather than hitting a session it was not written for."""
     if not isinstance(transcript_path, str) or not transcript_path:
         return False
+    ran = set()
     try:
         with open(transcript_path, encoding="utf-8") as f:
             for _ in range(50):
@@ -1896,11 +1898,10 @@ def is_orchestrator_session(transcript_path: object) -> bool:
                     continue
                 content = message.get("content") if isinstance(message, dict) and message.get("role") == "user" else None
                 if isinstance(content, str) and "<command-name>" in content:
-                    m = re.search(r"<command-name>([^<]*)</command-name>", content)
-                    return bool(m) and m.group(1).strip() == "/orchestrate:run"
+                    ran.update(c.strip() for c in re.findall(r"<command-name>([^<]*)</command-name>", content))
     except (OSError, UnicodeDecodeError):
         return False
-    return False
+    return "/orchestrate:run" in ran and "/orchestrate:lead" not in ran
 
 
 def orchestrator_waits(parsed: "Parsed") -> bool:
@@ -1948,8 +1949,8 @@ def main() -> None:
         return
     if orchestrator:
         try:
-            if (isinstance(command, str) and config_path(cwd) and is_orchestrator_session(data.get("transcript_path"))
-                    and orchestrator_waits(Parsed(parse(command)))):
+            if (isinstance(command, str) and config_path(cwd) and orchestrator_waits(Parsed(parse(command)))
+                    and is_orchestrator_session(data.get("transcript_path"))):  # the file is read only for a wait
                 deny(WAIT_REFUSAL)
                 return
         except Exception:
