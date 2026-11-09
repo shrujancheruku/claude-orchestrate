@@ -157,6 +157,13 @@ class WatchCi(unittest.TestCase):
         wf = [c for c in self.env.gh_calls() if c[:2] == ["api", self.WF[1][1:].split("?")[0] + "?ref=abc1234"]]
         self.assertEqual(len(wf), 1)  # asked once for the head, then cached
 
+    def test_an_unreadable_workflow_listing_keeps_the_watch_waiting(self):
+        empty = {"statusCheckRollup": [], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
+        self.seq_with_workflows({"7": [empty, empty, view("SUCCESS", head="abc1234")]},
+                                {"exit": 1, "stderr": "gh: Server Error (HTTP 500)"})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "7", check=False)
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #7 pass CLEAN abc1234"], 0))
+
     def test_a_pinned_head_the_pr_never_reaches_ends_the_watch(self):
         stuck = view("SUCCESS", head="0000000aaa")
         self.seq({"504": [stuck]})

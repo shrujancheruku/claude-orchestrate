@@ -110,14 +110,14 @@ _workflows = {}  # head -> whether its tree holds workflow files; only a success
 
 
 def has_workflows(root, head):
-    """True unless the head is known to hold no workflow file (one contents call per head, cached). An unreadable
-    listing counts as True: the caller then reports a missing run, which is the safer reading of a silent head."""
+    """True when the head holds a workflow file (one contents call per head, cached). An unreadable
+    listing counts as False, not cached: the caller keeps waiting and asks again next tick."""
     if head not in _workflows:
         try:
             _workflows[head] = github.has_workflows(head, cwd=root)
         except github.GhError as e:
             print(f"watch-ci: could not read the workflow files of {head[:7]}: {e.message}", file=sys.stderr, flush=True)
-            return True
+            return False
     return _workflows[head]
 
 
