@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import common
+import github
 import runlog
 from repo import ticket_of_branch
 
@@ -167,7 +168,7 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     wts = [w for w in common.worktrees(repo) if Path(w["path"]).is_dir()] if worktrees is None else worktrees
     open_issues = {int(i["number"]): i for i in issues}
     open_pr = {}
-    for pr in prs:
+    for pr in github.own_prs(prs):  # a fork PR is never a ticket's PR (ADR-0015)
         n = ticket_of_branch((pr or {}).get("headRefName"))
         # A ready PR wins over a draft on the same ticket.
         if n is not None and (n not in open_pr or (open_pr[n].get("isDraft") and not pr.get("isDraft"))):

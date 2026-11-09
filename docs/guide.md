@@ -168,6 +168,17 @@ scripts/lead-brief [--repo .] [--now ISO] [--checkpoint <pr>]
 
 `lead-route` is run by the orchestrator each pass, `lead-brief` by the lead at start-up and after a compaction. Their `--now` is for tests.
 
+## Running on a public repo
+
+On a public repo anyone can comment on a ticket or open a pull request from a fork, so orchestrate acts only on text from a **trusted author**: `author_association` `OWNER`, `MEMBER` or `COLLABORATOR`, or a login on the config's optional `- **Trusted authors:** `login`, `login`` line (Backlog section). Comments from anyone else are counted and never read:
+
+- A worker and a reviewer read the ticket body and a trusted author's comments (the tracker doc's **Read an issue** filters them). A stranger's `## Agent Brief` is not the spec. The body is trusted once a collaborator has applied `ready-for-agent`, since only collaborators can label.
+- `lead-route` and `lead-brief` parse stop, ADR-hold and resend markers, risk notes, `tier:` and discovered work from trusted comments and reviews only.
+- A **fork PR** (its head is in another repository) is never a ticket's PR: it holds no path in `holds`, is no claim, no board card and no worker-report match. `merge` never acts on one.
+- A worker addresses review threads from trusted authors only. `threads` lists an untrusted thread as `untrusted (text withheld)` and refuses to resolve it. It still blocks `merge`, which names it as untrusted and asks you to resolve or dismiss it: an outsider can stall a merge, never cause one.
+
+To hear an outside voice, restate it in your own comment or add the login to `Trusted authors:`. GitHub settings that help: under Settings > Moderation options, interaction limits (restrict comments to prior contributors or collaborators); under Settings > Actions > General, require approval for workflows from fork pull requests. The rule is in `docs/adr/0015-act-only-on-trusted-tracker-text.md`.
+
 ## Projects board
 
 Setup offers an opt-in GitHub Projects board. It needs the token's `project` scope (setup gives you `! gh auth refresh -h <host> -s project` to run (`<host>` is the host of `origin`, `github.com` for a github.com remote), and offers retry or skip), creates the project under the repo owner and links it to the repo (falling back to your own account, unlinked), and writes `- **Board:** <project URL>` into the config itself. With that line, `/orchestrate:run` runs `scripts/board` in step 5 of every pass; without it the script does nothing.

@@ -34,13 +34,14 @@ def issues_reply(ticket, blockers=(), body="", open_others=()):
 
 
 def threads_reply(*nodes):
-    """A reviewThreads reply: each node is (isResolved, isOutdated, author, url)."""
+    """A reviewThreads reply: each node is (isResolved, isOutdated, author, url[, authorAssociation: COLLABORATOR])."""
     return {"stdout": json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
         "pageInfo": {"hasNextPage": False, "endCursor": None},
         "nodes": [{"id": f"T{i}", "isResolved": r, "isOutdated": o, "path": "a.py", "line": 1,
                    "comments": {"pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [{"author": {"login": a}, "body": "[blocking] x", "url": u}]}}
-                  for i, (r, o, a, u) in enumerate(nodes)]}}}}})}
+                                "nodes": [{"author": {"login": a}, "authorAssociation": (assoc or ["COLLABORATOR"])[0],
+                                           "body": "[blocking] x", "url": u}]}}
+                  for i, (r, o, a, u, *assoc) in enumerate(nodes)]}}}}})}
 
 
 class ReadinessTest(unittest.TestCase):
@@ -510,6 +511,20 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.stdout.splitlines(), ["PR #7 is not ready: 1 unresolved review thread(s)", "  rev https://x/1",
                                                  "next: send-back 7"])
         self.assertEqual(self.called(MERGE), [])
+
+    def test_an_untrusted_thread_still_blocks_and_is_named_for_the_developer(self):
+        # ADR-0015: only an outsider's thread left: a worker will not address it, so ask the user, not send-back
+        p = self.merge(self.approved, threads=threads_reply((False, False, "eve", "https://x/5", "NONE")))
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.splitlines()[:2], ["PR #7 is not ready: 1 unresolved review thread(s)",
+                         "  eve https://x/5 (untrusted author: the developer resolves or dismisses it)"])
+        self.assertTrue(p.stdout.splitlines()[-1].startswith("next: ask-user"), p.stdout)
+        self.assertEqual(self.called(MERGE), [])
+
+    def test_a_trusted_thread_beside_an_untrusted_one_is_still_a_send_back(self):
+        p = self.merge(self.approved, threads=threads_reply((False, False, "eve", "https://x/5", "NONE"),
+                                                            (False, False, "rev", "https://x/8")))
+        self.assertEqual(p.stdout.splitlines()[-1], "next: send-back 7")
 
     def test_outdated_unresolved_thread_refuses(self):
         p = self.merge(self.approved, threads=threads_reply((False, True, "rev", "https://x/1")))

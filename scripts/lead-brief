@@ -46,8 +46,8 @@ MERGED_QUERY = """query($owner: String!, $name: String!, $limit: Int!) {
       nodes { number title url body mergedAt
         labels(first: 20) { nodes { name } }
         closingIssuesReferences(first: 1) { nodes { number } }
-        reviews(last: 30) { nodes { url body } }
-        comments(last: 50) { nodes { url body } } } } } }"""
+        reviews(last: 30) { nodes { url body authorAssociation author { login } } }
+        comments(last: 50) { nodes { url body authorAssociation author { login } } } } } } }"""
 
 
 class Unavailable(Exception):
@@ -155,21 +155,28 @@ def section_roadmap(issues) -> list:
     return lines or ["none"]
 
 
-def pr_of(node) -> dict:
-    """One merged PR as a plain dict."""
+def trusted_only(nodes, trusted) -> list:
+    """The reviews or comments a trusted author wrote (ADR-0015): `tier:`, risk notes and discovered work are read from
+    these alone, so a stranger's review or comment cannot set a tier or plant a finding."""
+    return [n for n in nodes or [] if github.is_trusted(n.get("authorAssociation"), (n.get("author") or {}).get("login"), trusted)]
+
+
+def pr_of(node, trusted=()) -> dict:
+    """One merged PR as a plain dict; its reviews and comments are the trusted authors' only."""
     refs = ((node.get("closingIssuesReferences") or {}).get("nodes")) or []
     body = node.get("body") or ""
     ticket = refs[0]["number"] if refs else (int(CLOSES.search(body).group(1)) if CLOSES.search(body) else None)
     return {"number": int(node["number"]), "title": node.get("title") or "", "url": node.get("url") or "",
             "body": body, "merged": parse_ts(node.get("mergedAt")), "ticket": ticket,
             "labels": {x["name"] for x in (node.get("labels") or {}).get("nodes") or []},
-            "reviews": [r for r in (node.get("reviews") or {}).get("nodes") or [] if r.get("body")],
-            "comments": (node.get("comments") or {}).get("nodes") or []}
+            "reviews": [r for r in trusted_only((node.get("reviews") or {}).get("nodes"), trusted) if r.get("body")],
+            "comments": trusted_only((node.get("comments") or {}).get("nodes"), trusted)}
 
 
 def load_merged(root, repo):
     data = graphql(root, MERGED_QUERY, MERGED_LIMIT, repo)
-    prs = [pr_of(n) for n in nodes_of(data, "pullRequests", "nodes")]
+    trusted = github.trusted_logins(root)
+    prs = [pr_of(n, trusted) for n in nodes_of(data, "pullRequests", "nodes")]
     prs = sorted((p for p in prs if p["merged"]), key=lambda p: (p["merged"], p["number"]))
     return prs, int(nodes_of(data, "pullRequests", "totalCount"))
 

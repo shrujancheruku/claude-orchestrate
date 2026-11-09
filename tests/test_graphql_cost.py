@@ -50,7 +50,7 @@ def points(query: str, limit: int = 100) -> float:
 class QueryCost(unittest.TestCase):
     def test_the_estimator_prices_the_old_issues_query_at_about_105(self):
         old = github.ISSUES_QUERY.replace(
-            "lastEditedAt\n        comments(last: 100) { nodes { body createdAt lastEditedAt } }",
+            "lastEditedAt\n        comments(last: 100) { nodes { body createdAt lastEditedAt authorAssociation author { login } } }",
             "userContentEdits(first: 20) { nodes { editedAt } }\n"
             "        comments(last: 100) { nodes { body createdAt userContentEdits(first: 20) { nodes { editedAt } } } }")
         self.assertNotEqual(old, github.ISSUES_QUERY)

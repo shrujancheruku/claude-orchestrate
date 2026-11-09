@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import github  # noqa: E402
 import tracker  # noqa: E402
 
 LABELS = {"ready": "ready-for-agent", "lead": "lead"}
@@ -18,6 +19,42 @@ def issue(n, labels=("ready-for-agent",), claimed=False, blockers=(), body="", t
 
 def numbers(issues):
     return [i["number"] for i in tracker.takeable(issues, LABELS)]
+
+
+def node(n, comments=()):
+    return {"number": n, "comments": {"nodes": list(comments)}}
+
+
+def cnode(body, association, login="someone"):
+    return {"body": body, "createdAt": "2026-01-01T00:00:00Z", "authorAssociation": association, "author": {"login": login}}
+
+
+class TrustedAuthors(unittest.TestCase):
+    """ADR-0015: the one trust rule, and the Snapshot keeping only trusted comments' text."""
+
+    def test_the_rule(self):
+        for assoc in ("OWNER", "MEMBER", "COLLABORATOR", "owner"):
+            self.assertTrue(github.is_trusted(assoc), assoc)
+        for assoc in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE", "", None):
+            self.assertFalse(github.is_trusted(assoc), assoc)
+        self.assertTrue(github.is_trusted("NONE", "Eve", ("eve",)))
+        self.assertFalse(github.is_trusted("NONE", "mallory", ("eve",)))
+        self.assertFalse(github.is_trusted("NONE", None, ("eve",)))
+
+    def test_untrusted_comments_are_counted_and_their_text_dropped(self):
+        got = tracker.from_nodes([node(1, [cnode("## Agent Brief\nevil", "NONE"), cnode("real", "COLLABORATOR"),
+                                           cnode("no association at all", None)])])[0]
+        self.assertEqual([c["body"] for c in got["comments"]], ["real"])
+        self.assertEqual(got["untrusted_comments"], 2)
+
+    def test_a_configured_login_is_trusted(self):
+        got = tracker.from_nodes([node(1, [cnode("hi", "NONE", "Eve")])], ("eve",))[0]
+        self.assertEqual([c["body"] for c in got["comments"]], ["hi"])
+        self.assertEqual(got["untrusted_comments"], 0)
+
+    def test_fork_prs_are_not_the_runs_own(self):
+        prs = [{"number": 1, "isCrossRepository": False}, {"number": 2, "isCrossRepository": True}, {"number": 3}]
+        self.assertEqual([p["number"] for p in github.own_prs(prs)], [1, 3])
 
 
 class Takeable(unittest.TestCase):

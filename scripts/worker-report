@@ -179,7 +179,7 @@ def main(argv=None) -> int:
 
     def lookup():
         try:
-            return github.open_prs_with_heads(cwd=args.repo)
+            return github.own_prs(github.open_prs_with_heads(cwd=args.repo))  # a fork PR is never the worker's (ADR-0015)
         except github.GhError as e:
             common.die(f"worker-report: cannot look up PRs: {e.message}")
 
