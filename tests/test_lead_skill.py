@@ -21,6 +21,12 @@ class LeadSkill(unittest.TestCase):
     def test_names_script_and_scout(self):
         self.check(["scripts/lead-brief", "scout"])
 
+    def test_digest_approvals_line_comes_from_prompts(self):
+        digest = self.text.split("### Pass digest")[1].split("### ")[0]
+        for needle in ["scripts/prompts", "--watermark", "--mark", "Approvals", "new kind of prompt", "by role:", "by tool:"]:
+            with self.subTest(needle=needle):
+                self.assertIn(needle, digest)
+
     def test_name_and_duplicate_check(self):
         self.check(["/rename lead", "another live session already has the name `lead`"])
 
