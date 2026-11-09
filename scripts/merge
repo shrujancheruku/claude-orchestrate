@@ -494,7 +494,7 @@ def run_merge(argv=None) -> int:
             # A reviewer's scratch trees would otherwise pile up: nothing else removes them for a PR that never merges.
             for line in remove_scratch(pr, head_oid, cwd):
                 say(f"scratch {line}")
-            log_event(cwd, "merge", "closed",ref=ref, branch=branch)
+            log_event(cwd, "merge", "closed", ref=ref, branch=branch)
             verdict(f"cleaned {pr}")  # a clean end, not an error: the skill's ABANDON reads the verdict
             return 0
         if refused:
@@ -503,7 +503,7 @@ def run_merge(argv=None) -> int:
             return 1
         if time.monotonic() >= deadline:
             say(f"PR #{pr} not MERGED after {args.timeout:g}s (state {state}); run merge again later")
-            log_event(cwd, "merge", "timeout",ref=ref, branch=branch)
+            log_event(cwd, "merge", "timeout", ref=ref, branch=branch)
             return 3
         time.sleep(args.interval)
 
@@ -677,7 +677,7 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
             say(f"sweep: PR #{n} {b}: could not check for conflicts; left alone")
             continue
         for path, outcome in result.events:
-            log_event(cwd, "replay",outcome, ref=n, branch=b, file=path)
+            log_event(cwd, "replay", outcome, ref=n, branch=b, file=path)
         if result.status == "updated":
             say(f"sweep: PR #{n} {b} updated" + (" (force-with-lease)" if method == "rebase" else ""))
         elif result.status == "handed-back":

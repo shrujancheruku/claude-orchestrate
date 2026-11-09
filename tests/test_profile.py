@@ -155,6 +155,16 @@ class ProfileTest(unittest.TestCase):
         idle = self.fx.run()["metrics"]["idle_s"]
         self.assertEqual(idle["worker-idle"], 1800)
 
+    def test_record_with_an_empty_session_exits_2_in_one_line_and_writes_no_pass(self):
+        import subprocess
+        for extra in (['{"slots": 1}'], ["--nudged", "5"]):
+            r = subprocess.run([sys.executable, str(SCRIPTS / "profile.py"), "record", "--repo", str(self.fx.repo),
+                                "--session", "", *extra], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+            self.assertIn("runlog: no session, pass not written", r.stderr)
+        self.assertFalse(runlog.log_path(self.fx.repo, runlog.PASS_LOG).exists())
+
     def test_a_nudge_record_is_not_a_pass(self):
         import subprocess
         self.fx.passes([{"ts": at(1), "slots": 2, "free": 0, "idle": {}}])
