@@ -44,6 +44,17 @@ def load_guard():
     return guard
 
 
+class TrustedAuthors(unittest.TestCase):
+    def test_logins_on_the_backlog_line_are_read_lowercase(self):
+        text = "## Backlog\n\n- **Trusted authors:** `Alice`, `@bob`, `ci-bot[bot]`\n\n## Slots\n- **Trusted authors:** `nope`\n"
+        self.assertEqual(config.Config.parse(text).trusted_authors, ("alice", "bob", "ci-bot[bot]"))
+
+    def test_the_templates_placeholder_names_no_one(self):
+        text = "## Backlog\n\n<!--\n- **Trusted authors:** `<login>`, `<login>`\n-->\n"
+        self.assertEqual(config.Config.parse(text).trusted_authors, ())
+        self.assertEqual(config.Config.parse(filled()).trusted_authors, ())
+
+
 class ConfigTemplate(unittest.TestCase):
     def test_every_field_of_the_filled_template(self):
         cfg = config.Config.parse(filled())
