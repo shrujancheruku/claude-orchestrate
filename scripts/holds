@@ -258,8 +258,7 @@ def run(argv=None) -> int:
             pr_tickets[pr["number"]] = ticket_of_branch(pr.get("headRefName"))
             claim = found.get(pr_tickets[pr["number"]])
             # cached in the snapshot, keyed by head SHA (#446), joined with the ticket's touch map (#398)
-            # a draft's ticket is still building, and holds its map as a building claim
-            record = claim.worker if claim and claim.state == "in-review" else None
+            record = claim.worker if claim else None  # a draft is open work too: it joins the map like any open PR
             prs[pr["number"]], off_map[pr["number"]] = pr_paths(snap.pr_files(pr), record)
         snap.save_cache()
         tickets, others = claimed_paths(found, own_ticket, base)

@@ -288,8 +288,16 @@ class Holds(unittest.TestCase):
         self.state({12: ["src/x.py"]})
         r = self.holds("--touch-map", "src/x.py", "src/drafted.py", "--ticket", "7")
         self.assertEqual(r.stdout.splitlines(), [
-            "src/drafted.py (held by open PR #9)", "src/x.py (held by building #12)",
-            "overlap: src/x.py (held by building #12)", "overlap: src/drafted.py (held by open PR #9)"])
+            "src/drafted.py (held by open PR #9 file)", "src/x.py (held by open PR #9, building #12)",
+            "overlap: src/x.py (held by open PR #9, building #12)",
+            "overlap: src/drafted.py (held by open PR #9 file)"])
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_draft_pr_joins_its_tickets_touch_map_like_any_open_pr(self):
+        self.gh({9: []}, branches={9: "12-the-fix"}, open_tickets=[12], drafts={9})
+        self.state({12: ["src/x.py"]})
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertIn("src/x.py (held by open PR #9, building #12)", r.stdout.splitlines())
         self.assertEqual(r.returncode, 1)
 
     def test_ticket_check_gh_failure_could_not_run(self):
