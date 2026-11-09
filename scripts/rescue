@@ -26,7 +26,7 @@ subprocess. Each step prints one line, in this order:
 
 No worktree on the branch (or for the ticket): `nothing to rescue: no worktree on <branch | #n>`, exit 0 (the remote branch is the whole state).
 Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something held or that could not be checked
-(dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, nothing removed, a lock step 1 lifted put back);
+(dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, a lock step 1 lifted put back, or said to be not put back; the worktree stays unless step 5 already removed it, and an exit 2 after that leaves it removed);
 3 a live lock that is not this session's (`live <pid | ?> <worktree>`). Stdlib only, Python 3.9+.
 """
 
@@ -55,7 +55,9 @@ LIFTED: list = []
 
 def fail(msg) -> int:
     for lroot, path, reason in LIFTED:
-        common.run("git", "worktree", "lock", "--reason", reason, path, cwd=lroot)
+        r = common.run("git", "worktree", "lock", "--reason", reason, path, cwd=lroot)
+        if r.code != 0:
+            msg = f"{msg}; could not put the lock back on {path}: {common.one_line(r.stderr)}"
     LIFTED.clear()
     print(f"rescue: {msg}", file=sys.stderr)
     return 2
@@ -161,6 +163,13 @@ def overlap(root, changed, ticket) -> int:
 
 
 def main(argv=None) -> int:
+    try:
+        return run(argv)
+    except Exception as e:  # unexpected (an OSError from a subprocess, say): put the lifted locks back like any exit 2
+        return fail(f"unexpected {type(e).__name__}: {e}")
+
+
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("branch", metavar="ticket|branch", help="the ticket number, or its branch `<number>-<slug>`")
     ap.add_argument("--title", help="the ticket title, for the wip commit message")
@@ -256,10 +265,9 @@ def main(argv=None) -> int:
             return fail(f"commit failed in {path}: {common.one_line(c.stderr or c.stdout)}")
         k = len(git(path, "show", "--name-only", "--format=", "HEAD").stdout.split())
         say(f"committed {k} paths {git(path, 'rev-parse', '--short', 'HEAD').stdout.strip()}")
-    else:
-        say("committed 0 paths: tree clean")
-
     left = git(path, "status", "--porcelain", "--untracked-files=all", "--", ".claude").stdout.splitlines()
+    if not status.stdout.strip():
+        say("nothing to commit outside .claude/" if left else "committed 0 paths: tree clean")
     if left:
         say(f"left behind (not committed): {len(left)} paths under .claude/: " + ", ".join(x[3:] for x in left))
 
@@ -281,6 +289,7 @@ def main(argv=None) -> int:
         say(removed)
         return fail(removed)
     say(f"removed {path}")
+    LIFTED.clear()  # the worktree is gone: a later failure has no lock to put back
     if args.pr is not None:
         for line in repo.remove_scratch(args.pr, tip, root):
             say(f"scratch {line}")
