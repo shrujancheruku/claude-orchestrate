@@ -293,17 +293,33 @@ def _read_updates(cwd):
     return data if isinstance(data, dict) else {}
 
 
-def record_update(cwd, pr, head):
-    """Remember that update-branch ran on `pr` at `head`, so a rerun does not issue a second one while it is in flight.
-    Best effort: an unwritable file only loses the guard."""
-    data = _read_updates(cwd)
-    data[str(pr)] = {"from": head, "at": time.time()}
+UPDATE_KEEP = 1800  # seconds an entry of the in-flight file lives; an older one is ignored and dropped
+
+
+def _write_updates(cwd, data):
     try:
         path = _updates_path(cwd)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         pass
+
+
+def clear_update(cwd, pr):
+    """Forget the update-branch record of `pr`: it merged or closed, so nothing of it is in flight any more."""
+    data = _read_updates(cwd)
+    if data.pop(str(pr), None) is not None:
+        _write_updates(cwd, data)
+
+
+def record_update(cwd, pr, head):
+    """Remember that update-branch ran on `pr` at `head`, so a rerun does not issue a second one while it is in flight.
+    Best effort: an unwritable file only loses the guard."""
+    now = time.time()
+    data = {k: r for k, r in _read_updates(cwd).items()
+            if isinstance(r, dict) and isinstance(r.get("at"), (int, float)) and 0 <= now - r["at"] < UPDATE_KEEP}
+    data[str(pr)] = {"from": head, "at": now}
+    _write_updates(cwd, data)
 
 
 def update_in_flight(cwd, pr, head):
@@ -454,6 +470,8 @@ def run_merge(argv=None) -> int:
         nv, _ = view(pr, cwd)
         if nv:
             v, state = nv, nv.get("state")
+        if state in ("MERGED", "CLOSED"):
+            clear_update(cwd, pr)
         if state == "MERGED":
             break
         if state == "CLOSED":

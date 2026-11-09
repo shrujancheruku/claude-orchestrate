@@ -131,11 +131,37 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(r.stdout.splitlines(), ["PR #504 pass CLEAN 1111111"])
         self.assertEqual(len(self.env.gh_calls()), 1)
 
+    WF = ["api", "~repos/{owner}/{repo}/contents/.github/workflows?ref="]
+
+    def seq_with_workflows(self, steps, listing):
+        """seq, plus the contents call that lists the head's workflow files (`listing`: a gh reply)."""
+        self.seq(steps)
+        state = json.loads(self.env.gh_state.read_text())
+        state["responses"].append({"args": self.WF, **listing})
+        self.env.gh_state.write_text(json.dumps(state))
+
     def test_a_head_with_no_check_run_ends_as_no_ci_run(self):
         empty = {"statusCheckRollup": [], "mergeStateStatus": "UNKNOWN", "headRefOid": "5ba15c1" + "c" * 33, "state": "OPEN"}
-        self.seq({"504": [empty]})
+        self.seq_with_workflows({"504": [empty]}, {"stdout": '[{"name": "ci.yml"}]'})
         r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "504", check=False)
         self.assertEqual(r.stdout.splitlines(), ["PR #504 error no CI run for 5ba15c1, close-and-reopen fires one"])
+        self.assertEqual(r.returncode, 3)
+
+    def test_a_head_without_workflow_files_is_not_a_missing_run(self):
+        # ADR-0012: no workflow files means no run is expected; the watch keeps waiting and settles once checks appear
+        empty = {"statusCheckRollup": [], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
+        self.seq_with_workflows({"7": [empty, empty, view("SUCCESS", head="abc1234")]},
+                                {"exit": 1, "stderr": "gh: Not Found (HTTP 404)"})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "7", check=False)
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #7 pass CLEAN abc1234"], 0))
+        wf = [c for c in self.env.gh_calls() if c[:2] == ["api", self.WF[1][1:].split("?")[0] + "?ref=abc1234"]]
+        self.assertEqual(len(wf), 1)  # asked once for the head, then cached
+
+    def test_a_pinned_head_the_pr_never_reaches_ends_the_watch(self):
+        stuck = view("SUCCESS", head="0000000aaa")
+        self.seq({"504": [stuck]})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "504", "5ba15c1" + "d" * 33, check=False)
+        self.assertEqual(r.stdout.splitlines(), ["PR #504 error head 5ba15c1 never reached; the PR is at 0000000"])
         self.assertEqual(r.returncode, 3)
 
     def test_a_draft_with_no_check_is_not_a_missing_run(self):

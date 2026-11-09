@@ -212,7 +212,7 @@ def head_in(tree, head_oid, cwd, exact):
     if common.run("git", "cat-file", "-e", f"{head_oid}^{{commit}}", cwd=cwd).code != 0:
         # The PR head is not in this repo yet (a rerun that starts with the PR already merged): fetch it once.
         common.run("git", "fetch", "--quiet", "origin", head_oid, cwd=cwd)
-    return not exact and common.run("git", "merge-base", "--is-ancestor", h.stdout.strip(), head_oid, cwd=cwd).code == 0
+    return common.run("git", "merge-base", "--is-ancestor", h.stdout.strip(), head_oid, cwd=cwd).code == 0
 
 
 def worktree_gone(path, cwd):
@@ -227,8 +227,8 @@ def worktree_refusal(path, branch, head_oid, cwd, scratch=False):
 
     Removed only: a linked worktree of this repo (matched with samefile; a path no worktree matches is refused),
     never the main checkout, never one whose lock is held by another live session, and either on the PR's branch,
-    or on the harness's `worktree-agent-<id>` branch of the `agent-<id>` directory with HEAD at the PR head or
-    an ancestor of it, or detached at the PR head (a lead-PR worktree). With `scratch` (a reviewer's `pr-<n>` tree,
+    or on the harness's `worktree-agent-<id>` branch of the `agent-<id>` directory, or detached (a lead-PR
+    worktree), with HEAD at the PR head or an ancestor of it (a tree a commit behind after an update-branch counts). With `scratch` (a reviewer's `pr-<n>` tree,
     which `scratch_worktrees` matched) the branch rules do not apply: it must be detached, with HEAD at the PR head or
     an ancestor of it. A refusal is a skip, not a failure: the PR is already merged, closed, abandoned or rescued."""
     full = Path(cwd) / path

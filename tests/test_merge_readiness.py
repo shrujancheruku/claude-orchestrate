@@ -176,6 +176,21 @@ class ReadinessTest(unittest.TestCase):
         self.merge(head, behind="2")
         self.assertEqual(len(self.called(UPDATE)), 2)
 
+    def test_the_record_goes_when_the_pr_merges_and_old_entries_are_dropped(self):
+        head = self.push({"b.txt": "x\n"})
+        self.merge(head, behind="2")
+        state = self.repo / ".claude" / "orchestrate-update-branch.json"
+        rec = json.loads(state.read_text())
+        self.assertIn("7", rec)
+        rec["3"] = {"from": "x", "at": rec["7"]["at"] - 3600}  # another PR's entry, an hour old
+        rec["7"]["at"] -= 600  # past the 120 s window, so the next run updates and records again
+        state.write_text(json.dumps(rec))
+        self.merge(head, behind="2")  # records PR 7 again; the stale entry is dropped
+        self.assertEqual(sorted(json.loads(state.read_text())), ["7"])
+        p = self.merge(head)  # behind 0: the PR merges
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(json.loads(state.read_text()), {})
+
     def test_a_second_update_branch_goes_ahead_when_the_head_moved(self):
         head = self.push({"b.txt": "x\n"})
         self.merge(head, behind="2")
