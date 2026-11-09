@@ -35,7 +35,7 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
    - Add `--greedy[=N]` to a full or parent pass to size the slot count from how many tickets can run at once, up to N (5 by default): see [Choosing a slot count](#choosing-a-slot-count).
    - Add `--profile` to any of these to profile the session as it runs: see [Profiling](#profiling).
    - The two combine: `/orchestrate:run --greedy --profile` runs greedy and profiles it, which is how to find out whether greedy paid off on your backlog.
-   - **Starting the orchestrator.** `/orchestrate:start [--greedy=N | <ticket>] [--print]` from any Claude session in the repo launches it in the background and prints the session id and the resume command. `scripts/launch [--greedy=N | <ticket>] [--bg] [--resume <sessionId>] [--print]` does the same from a terminal (foreground by default). Both exit 2 with one line when a live `orchestrator` session exists. `scripts/launch` owns the launch line: its header explains the flags, and the Permission mode section (#378) will.
+   - **Starting the orchestrator.** `/orchestrate:start [--greedy=N | <ticket>] [--print]` from any Claude session in the repo launches it in the background and prints the session id and the resume command. `scripts/launch [--greedy=N | <ticket>] [--bg] [--resume <sessionId>] [--print]` does the same from a terminal (foreground by default). Both exit 2 with one line when a live `orchestrator` session exists. `scripts/launch` owns the launch line: its header explains the flags, and [Permission mode](#permission-mode) says why it passes the mode and the auto-mode switch.
 
 ### Concepts
 
@@ -45,6 +45,19 @@ Needs `git` 2.38 or later (the post-merge sweep checks conflicts with `git merge
 - **Gate:** a ticket, label or path that waits for your go-ahead to start or to merge.
 - **Tier:** review depth from the PR's diff and the config's thresholds (a `size:` label on the ticket overrides). S is a Haiku checklist review; M is a Sonnet correctness review; L is a Sonnet review at high effort whose risk notes go in the posted review for humans; the orchestrator reads no risky files itself. A round-1 `approve` with minors gives the worker the minors to take or leave, and CI alone gates the merge. Later rounds continue the same reviewer, and a push after approval goes back to it only when it touches a risk path or exceeds the S thresholds. With `Post reviews: yes`, the reviewer posts each round on the PR itself as a comment review (verdict in the body, findings inline) and hands back only the verdict, counts and the review URL; the worker reads the findings from the PR, and a finding whose file is outside the diff sits in the review body, where the worker answers it with a PR comment (it has no thread to close). With `no`, or when a post fails, the reviewer returns the full findings. It's always a comment, because GitHub won't let your account approve its own PR. When `merge` refuses an approved PR only for unresolved threads, every one is a `[minor]` and its worker is gone, the orchestrator resolves them itself with `threads <pr> resolve <id> --left "the worker finished; left for a follow-up"` and merges, instead of dispatching a new worker to post replies.
 - **Brief:** the pointer-only prompt a worker gets (see `skills/run/brief.md`). The ticket stays the spec.
+
+## Permission mode
+
+Run the orchestrator in `acceptEdits` or `bypassPermissions`, never in `auto`. Workers are subagents, and a subagent inherits the main session's permission mode (a `permissionMode` in a plugin agent's frontmatter is ignored). Under `auto`, every worker action goes through the auto-mode classifier, and the classifier skips a subagent's `Edit` and `Write`: the worker's first edit in its worktree fails with "the server-side auto mode classifier gave no verdict (it skipped this action)", marked as a hard failure not to retry. Neither the guard's hook allow, an allow rule, the parent's mode, a refreshed auto-mode environment nor a `defaultMode` in settings reaches that skip (#378).
+
+`scripts/launch` and `/orchestrate:start` already start the orchestrator the working way, so use them:
+
+- `--permission-mode <mode>` (default `acceptEdits`). In `acceptEdits`, workers' edits inside their worktrees pass without a prompt, and the guard's `allow` covers the routine `git` and `gh` steps. `bypassPermissions` also works and is wider.
+- `--settings '{"disableAutoMode":"disable"}'`, for this one session only. It removes auto mode from the session, so subagents take the parent's mode instead of falling into the classifier. Your own sessions keep auto mode.
+
+If you start the orchestrator by hand, pass both flags: `claude --name orchestrator --permission-mode acceptEdits --settings '{"disableAutoMode":"disable"}' "/orchestrate:run --greedy"` (add `--plugin-dir <path>` when the plugin runs from a checkout). A developer who never uses auto mode can set `"disableAutoMode": "disable"` in `~/.claude/settings.json` instead; setup never edits it. If you see the "gave no verdict" text on a worker's edit, the session is in auto mode: restart it with the two flags above.
+
+The guard stays the fence in every mode ([ADR-0002](adr/0002-guard-own-lexer-fail-closed.md)). It assumes `acceptEdits` or `bypassPermissions`; auto mode is unsupported for the orchestrator session.
 
 ## Cost
 
