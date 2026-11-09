@@ -20,6 +20,7 @@ and computed strings can still get past it.
 # macOS ships Python 3.9, which needs this for `str | None` annotations.
 from __future__ import annotations
 
+import fnmatch
 import glob
 import json
 import os
@@ -2389,8 +2390,17 @@ def expand_words(words: list, here: str) -> list | None:
         if (not GLOB_SAFE.fullmatch(text) or ".." in text or text.startswith(("/", "~")) or "{" in text or "$" in text):
             return None
         if text.startswith("-"):
+            # Only a long option with a literal name and a glob value (`--include=*`). `-*`, `--*` or `--inc*` expand
+            # to files whose names become options the guard never read (#582).
+            if not (text.startswith("--") and "=" in text and not re.search(r"[*?\\[]", text.partition("=")[0])):
+                return None
             out.append(text)
             continue
+        # Bash before 5.2 (macOS's /bin/bash is 3.2) lets `.*` match `.` and `..`, which Python's glob never returns:
+        # `grep -rn x .*` would read the parent directory. Refuse a component that starts with a dot or bracket and
+        # can match either.
+        if any(c[:1] in (".", "[") and (fnmatch.fnmatchcase(".", c) or fnmatch.fnmatchcase("..", c)) for c in text.split("/")):
+            return None
         matches = sorted(glob.glob(os.path.join(glob.escape(here), text)))
         if len(matches) > 2000 or any(os.path.basename(m).startswith("-") for m in matches):
             return None
@@ -2784,7 +2794,9 @@ UNAPPROVED_MARK = "not approved for"
 INTERPRETERS = frozenset(("python", "python3", "perl", "ruby", "node", "php", "osascript", "lua", "tclsh"))
 EDIT_REASON = ("edit files with the Edit or Write tool, never a heredoc script, `python3 -c`, `perl -i` or similar "
                "(the guard approves those two inside your worktree)")
-MIXED_REASON = "run the write on its own, as a separate Bash call: a write chained with other commands is not approved"
+COMMIT_REASON = ("pass a multi-line commit message with several `-m` flags (`git commit -m 'subject' -m 'body'`); "
+                 "a heredoc or `$(...)` in the message is not approved")
+MIXED_REASON ="run the write on its own, as a separate Bash call: a write chained with other commands is not approved"
 GENERIC_REASON = "find an approved form, or stop and report what you need"
 MONITOR_REASON = "run the tests in the foreground, or wait with an approved loop (`until <read-only test>; do sleep N; done`)"
 SCRIPT_EDIT_FLAGS = re.compile(r"-[A-Za-z]*[ceEi][A-Za-z]*|--eval|--command")
@@ -2827,6 +2839,9 @@ def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool:
     head = f"{UNAPPROVED_MARK} {who}: "
     if tool == "Monitor":
         return head + MONITOR_REASON
+    if any(c.is_sub("commit") for c in parsed.tool("git")) and (
+            any(c.heredocs for c in parsed.cmds) or any(c.depth for c in parsed.cmds)):
+        return head + COMMIT_REASON
     if is_script_edit(parsed):
         return head + EDIT_REASON
     for cmd in parsed.cmds:

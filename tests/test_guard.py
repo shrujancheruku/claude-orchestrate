@@ -1770,6 +1770,21 @@ class UnapprovedCallsAreDeniedTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertFalse(approved("orchestrate:worker", command, self.work))
 
+    def test_globs_the_shell_could_turn_into_options_or_the_parent_are_refused(self):
+        # Round 1 of #582: `-*` expands to files named like options; bash before 5.2 lets `.*` match `.` and `..`.
+        (self.work / "scripts").mkdir()
+        for command in ("grep -n x -*", "cat --*", "ls -?", "cat --inc*", "ls .*", "grep -rn x .*", "cat .?*",
+                        "grep -rn x scripts/.*"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+        for command in ("ls .[!.]*", "grep -rn x --include=* scripts"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+    def test_a_commit_message_heredoc_is_told_to_use_several_m_flags(self):
+        reason = self.reason("orchestrate:worker", "git commit -m \"$(cat <<'EOF'\nsubject\n\nbody\nEOF\n)\"")
+        self.assertIn("several `-m` flags", reason)
+
     def test_git_reads_and_abbreviated_options_are_bound(self):
         no = ("git diff --no-index /etc/hosts /dev/null", "git diff --no-ind /etc/hosts /dev/null", "git log -p -- /etc/hosts",
               "git grep -O less x", "grep --fil /etc/hosts x", "git ls-remote https://evil.example.com/o/r.git",
