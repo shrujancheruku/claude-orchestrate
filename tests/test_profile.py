@@ -147,6 +147,28 @@ class ProfileTest(unittest.TestCase):
         idle = self.fx.run()["metrics"]["idle_s"]
         self.assertEqual((idle["overlap"], idle["empty"]), (600, 600))
 
+    def test_an_unchecked_idle_reason_round_trips_through_record_and_shows_in_the_summary(self):
+        # A slot left empty because holds exited 2 is `unchecked`, not `limit` (which means a usage limit only).
+        for ts, idle in ((at(1), {}), (at(31), {"unchecked": 1, "empty": 1})):
+            subprocess.run([sys.executable, str(SCRIPTS / "profile.py"), "record", "--repo", str(self.fx.repo), "--session", SESSION,
+                            json.dumps({"ts": ts, "scope": "wake", "slots": 2, "free": len(idle) and 2, "idle": idle})], check=True)
+        p = self.fx.run()
+        self.assertEqual((p["metrics"]["idle_s"]["unchecked"], p["metrics"]["idle_s"]["empty"]), (600, 600))
+        self.assertNotIn("limit", p["metrics"]["idle_s"])
+        self.assertIn("unchecked 10m", prof.summary(p, Path("x.json")))
+        self.assertEqual(runlog.read_passes(self.fx.repo, SESSION)[1]["scope"], "wake")
+
+    def test_an_unknown_idle_reason_is_kept(self):
+        self.fx.passes([{"ts": at(1), "slots": 2, "free": 1, "idle": {"mystery": 1}}])
+        self.assertEqual(self.fx.run()["metrics"]["idle_s"]["mystery"], 2400)
+
+    def test_a_pass_record_at_the_edge_of_the_wake_grace_ends_the_window_inside_it_does_but_outside_it_does_not(self):
+        # The transcript's last record is at minute 41.
+        grace = prof.WAKE_GRACE.total_seconds() / 60
+        for record_at, window_end in ((41 + grace - 1 / 60, 41 + grace - 1 / 60), (41 + grace, 41 + grace), (41 + grace + 1 / 60, 41)):
+            self.fx.passes([{"ts": at(record_at), "slots": 2, "free": 1}])
+            self.assertEqual(self.fx.run()["end"], at(window_end), record_at)
+
     def test_stray_jsonl_lines_and_naive_timestamps_do_not_crash_the_profile(self):
         # `record` merges the caller's JSON over ts/session, so a naive ts lands in the pass log verbatim.
         naive = at(5).replace("Z", "")
@@ -804,6 +826,27 @@ class OrchestratorTest(unittest.TestCase):
         out = prof.summary(self.fx.run(), Path("x.json"))
         self.assertEqual(len(out.splitlines()), 6)
         self.assertGreater(len(self.fx.run()["metrics"]["gh_calls"]["passes"]), 1)
+
+    def test_graphql_points_are_summed_per_pass_and_printed(self):
+        # A third pass made no calls (it counts in N); a call after the last record is not a pass; `True` is not a cost.
+        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}, {"ts": at(10), "slots": 2, "free": 1}, {"ts": at(20), "slots": 2, "free": 1}])
+        events = self.gh_events()
+        events.append({"ts": at(30), "session": SESSION, "kind": "gh_call", "script": "gate", "graphql": True, "cost": 50})
+        events.append({"ts": at(31), "session": SESSION, "kind": "gh_call", "script": "gate", "graphql": True, "cost": True})
+        events[0]["cost"] = 7
+        events[5]["cost"] = 3
+        events[1]["cost"] = 99  # a REST call: not counted
+        self.fx.events(events)
+        p = self.fx.run()
+        g = p["metrics"]["gh_calls"]
+        self.assertEqual([r["graphql_points"] for r in g["passes"]], [7, 3, 50])
+        self.assertEqual(g["total"]["graphql_points"], 60)
+        self.assertIn("graphql points per pass: avg 3, max 7 (total 10 over 3 passes)", prof.summary(p, Path("x.json")))
+
+    def test_no_points_line_when_the_log_has_no_costs(self):
+        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
+        self.fx.events(self.gh_events())
+        self.assertNotIn("graphql points", prof.summary(self.fx.run(), Path("x.json")))
 
     def test_an_older_events_log_without_gh_calls_is_not_recorded(self):
         self.fx.events([MERGED_50])
