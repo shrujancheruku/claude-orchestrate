@@ -1244,7 +1244,7 @@ def threads_form(args: list) -> str | None:
 
 # The only flags a worker's number-less threads call may carry, spelled in full: `--repo DIR` (and an
 # abbreviation of it, which argparse would accept) aims the call at another repository.
-THREADS_WORKER_FLAGS = ("--all", "--fixed", "--left", "--why", "--verbose")
+THREADS_WORKER_FLAGS = ("--all", "--fixed", "--left", "--followup", "--no-followup", "--why", "--verbose")
 
 
 def numberless_threads_form(cmd: Command, args: list) -> str | None:
@@ -1262,7 +1262,7 @@ def numberless_threads_form(cmd: Command, args: list) -> str | None:
 
 
 # The only flags the orchestrator's threads call may carry, spelled in full and each once (#389).
-THREADS_ORCHESTRATOR_FLAGS = ("--all", "--fixed", "--left", "--verbose")
+THREADS_ORCHESTRATOR_FLAGS = ("--all", "--fixed", "--left", "--followup", "--no-followup", "--verbose")
 
 
 def orchestrator_threads_form(cmd: Command, args: list) -> bool:
@@ -1279,8 +1279,14 @@ def orchestrator_threads_form(cmd: Command, args: list) -> bool:
     rest = words[1:]
     if rest in ([], ["--all"]):
         return True
+    # `--left <why>` is followed by `--followup <issue>` or `--no-followup` (#442); strip it and require the `--left`.
+    left_only = False
+    if rest[-1:] == ["--no-followup"]:
+        rest, left_only = rest[:-1], True
+    elif len(rest) >= 2 and rest[-2] == "--followup" and rest[-1].isascii() and rest[-1].isdigit():
+        rest, left_only = rest[:-2], True
     # `resolve` takes one or more thread ids, then exactly one of --fixed/--left with its value (scripts/threads).
-    return (len(rest) >= 4 and rest[0] == "resolve" and rest[-2] in ("--fixed", "--left")
+    return (len(rest) >= 4 and rest[0] == "resolve" and rest[-2] in (("--left",) if left_only else ("--fixed", "--left"))
             and not any(w.startswith("-") for w in rest[1:-2] + rest[-1:]))
 
 
