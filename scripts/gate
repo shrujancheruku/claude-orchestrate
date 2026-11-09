@@ -286,7 +286,10 @@ def run_gate(argv=None) -> int:
     undecided = (unknown and len(failed) == 1) or (waits and not failed)
     outcome = "unknown" if undecided else "fail" if failed else "pass"
     # The event lands in the main checkout's run log, beside the pass log.
-    runlog.append_event(args.cwd, "gate", outcome, ref=ref, failed=failed, behind_by=behind, head=head)
+    try:
+        runlog.append_event(args.cwd, "gate", outcome, ref=ref, failed=failed, behind_by=behind, head=head)
+    except runlog.NoSession as e:
+        print(e, file=sys.stderr)  # the verdict stands; only its log line is lost
     return 3 if undecided else 1 if failed else 0
 
 

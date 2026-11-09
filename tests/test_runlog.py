@@ -114,20 +114,24 @@ class RunLogTest(unittest.TestCase):
         runlog.append_event(self.repo, "gate", "pass", session="given")
         self.assertEqual(runlog.read_events(self.repo, "given", *self.span)[0]["session"], "given")
 
-    def test_no_state_file_and_no_session_exits_2_and_writes_nothing(self):
-        with self.assertRaises(SystemExit) as cm:
+    def test_no_state_file_and_no_session_raises_nosession_and_writes_nothing(self):
+        with self.assertRaises(runlog.NoSession) as cm:
             runlog.append_event(self.repo, "gate", "pass", ref=1)
-        self.assertEqual(cm.exception.code, 2)
+        self.assertEqual(str(cm.exception), "runlog: no session, gate event not written")
         self.assertFalse(runlog.log_path(self.repo, runlog.EVENTS_LOG).exists())
 
-    def test_a_state_file_without_a_session_exits_2(self):
+    def test_a_state_file_without_a_session_raises_nosession(self):
         for text in ("not json", json.dumps({"session": ""}), json.dumps({"session": None}), json.dumps([])):
             (self.repo / repo.STATE).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / repo.STATE).write_text(text)
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(runlog.NoSession, msg=text):
                 runlog.append_event(self.repo, "gate", "pass")
-            self.assertEqual(cm.exception.code, 2, text)
         self.assertFalse(runlog.log_path(self.repo, runlog.EVENTS_LOG).exists())
+
+    def test_append_pass_with_no_session_raises_nosession_and_writes_nothing(self):
+        with self.assertRaises(runlog.NoSession):
+            runlog.append_pass(self.repo, "", {"slots": 1})
+        self.assertFalse(runlog.log_path(self.repo, runlog.PASS_LOG).exists())
 
     def test_unknown_outcome_or_kind_raises_and_writes_nothing(self):
         with self.assertRaises(ValueError):

@@ -192,6 +192,8 @@ def main(argv=None) -> int:
         words = ("duplicate", *words)
     try:
         runlog.append_event(args.repo, runlog.WORKER_REPORT, words[0], ref=ticket, **fields)
+    except runlog.NoSession as e:
+        print(e, file=sys.stderr)  # the verdict line below is the answer
     except OSError as e:
         common.die(f"worker-report: cannot write the run log: {e.strerror or e}")
     print(" ".join(words))

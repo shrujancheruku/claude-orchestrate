@@ -82,6 +82,12 @@ class WorkerReport(unittest.TestCase):
         out = self.verdict("status: pr-opened\npr: https://github.com/o/r/pull/12\nbranch: x\n")
         self.assertEqual(out, f"valid pr-opened 12 {HEAD}")
 
+    def test_no_session_keeps_the_verdict_and_exit_code_and_says_so_on_stderr(self):
+        (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
+        r = self.report("status: pr-opened\npr: https://github.com/o/r/pull/12\nbranch: x\n")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, f"valid pr-opened 12 {HEAD}"))
+        self.assertEqual(r.stderr, "runlog: no session, worker-report event not written\n")
+
     def test_pr_opened_without_a_pr_line_finds_the_branch(self):
         self.assertEqual(self.verdict("status: pr-opened\npr: none\n"), f"valid pr-opened 12 {HEAD}")
 

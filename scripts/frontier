@@ -104,7 +104,10 @@ def main(argv=None) -> int:
         lines = [f"#{args.ticket} {reason or 'not ' + labels['ready']}"]
     for line in lines:
         print(line)
-    runlog.append_event(root, "frontier", "ran", takeable=len(tracker.takeable(issues, labels)))
+    try:
+        runlog.append_event(root, "frontier", "ran", takeable=len(tracker.takeable(issues, labels)))
+    except runlog.NoSession as e:
+        print(e, file=sys.stderr)  # the answer is already printed; the missing log is not a failure
     return 0
 
 

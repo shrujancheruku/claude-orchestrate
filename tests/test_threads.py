@@ -114,6 +114,15 @@ class Threads(unittest.TestCase):
         self.assertEqual(len(m), 1)
         self.assertIn("resolveReviewThread", m[0][3])
 
+    def test_no_session_still_prints_the_resolved_line_after_the_mutation(self):
+        (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
+        self.gh(reply([thread("T1", comments=[comment("rev", "[blocking] x"), comment("w", "left: later (follow-up #9)")])]))
+        r = self.env.run("threads", 12, "resolve", "T1", "--left", "later", "--followup", "9", check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("resolved T1:"), r.stdout)
+        self.assertIn("runlog: no session, threads event not written", r.stderr)
+        self.assertEqual(len(self.mutations()), 1)
+
     def test_nothing_printed_when_no_threads(self):
         self.gh(reply([]))
         r = self.env.run("threads", 12)

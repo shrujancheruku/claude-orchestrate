@@ -212,6 +212,8 @@ def main(argv=None) -> int:
         author = thread["comments"][0]["author"] if thread["comments"] else "ghost"
         try:
             runlog.append_event(cwd, runlog.THREADS, outcome, ref=ref, thread=thread["id"], author=author)
+        except runlog.NoSession as e:
+            print(e, file=sys.stderr)  # the mutation has landed: still print the resolved line
         except OSError as e:
             common.die(f"threads: the thread is {outcome}, but the run log is unwritable: {e.strerror or e}")
         print(f"{outcome} {thread['id']}: {reply}")
