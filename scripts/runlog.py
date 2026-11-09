@@ -44,6 +44,11 @@ HANDED_BACK = "handed-back"
 NUDGE_SCOPE = "nudge"  # the pass-log record `record --nudged <ticket>` writes: {"scope": "nudge", "nudged": [<ticket>]}
 
 
+class NoSession(RuntimeError):
+    """No session to stamp an event or a pass with. The message is the line a CLI prints on stderr
+    (`runlog: no session, <kind> event not written`); the CLI keeps its own output and exit code (ADR-0014)."""
+
+
 def log_path(repo, name: str) -> Path:
     """Where the log called `name` (EVENTS_LOG or PASS_LOG) lives for `repo`."""
     return main_checkout(repo) / PROFILES / name
@@ -89,7 +94,8 @@ def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = 
 
     Fields: ts (UTC ISO), session (default: the state file's, see current_session), kind, ref (PR or
     ticket), outcome, plus any extra keys. An unknown kind, or an outcome the kind doesn't have, raises
-    ValueError. With no session from either source nothing is written: one line on stderr, exit 2.
+    ValueError. With no session from either source nothing is written and NoSession is raised;
+    a library never ends the process, so the caller decides what that means.
     """
     if kind not in OUTCOMES:
         raise ValueError(f"unknown event kind {kind!r}; expected one of {EVENT_KINDS}")
@@ -97,8 +103,7 @@ def append_event(repo, kind: str, outcome: str, ref=None, session: str | None = 
         raise ValueError(f"unknown outcome {outcome!r} for {kind!r} events; expected one of {OUTCOMES[kind]}")
     session = session or current_session(repo)
     if not session:
-        common.die(f"runlog: no session for the {kind} event: no {STATE} stamped under {main_checkout(repo)} "
-                   "(rebuild-state writes it; pass session= to override)")
+        raise NoSession(f"runlog: no session, {kind} event not written")
     event = {
         "ts": _now(),
         "session": session,
@@ -142,7 +147,10 @@ def read_events(repo, session: str, start: datetime, end: datetime) -> list | No
 
 
 def append_pass(repo, session: str, entry: dict) -> dict:
-    """Append one pass (a dict from the orchestrator) to the pass log, stamped with ts and session."""
+    """Append one pass (a dict from the orchestrator) to the pass log, stamped with ts and session.
+    An empty session raises NoSession and writes nothing."""
+    if not session:
+        raise NoSession("runlog: no session, pass not written")
     entry = {"ts": _now(), "session": session, **entry}
     _append(repo, PASS_LOG, entry)
     return entry

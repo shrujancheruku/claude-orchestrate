@@ -63,6 +63,13 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(events[1]["merge_state"], "BLOCKED")
         self.assertEqual(events[1]["head"], "2222222")
 
+    def test_no_session_keeps_the_settle_line_and_exit_code_and_says_so_on_stderr(self):
+        (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
+        self.seq({"1": [view("SUCCESS", head="1111111aaa")]})
+        r = self.watch("1")
+        self.assertEqual((r.returncode, r.stdout), (0, "PR #1 pass CLEAN 1111111\n"))
+        self.assertIn("runlog: no session, ci event not written", r.stderr)
+
     def test_events_from_a_subdirectory_and_a_worktree_land_in_the_main_log(self):
         self.seq({"1": [view("SUCCESS", head="1111111aaa")]})
         sub = self.env.repo / "pkg"

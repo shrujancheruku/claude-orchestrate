@@ -120,6 +120,14 @@ def say(msg):
     print(msg, flush=True)
 
 
+def log_event(cwd, kind, outcome, **fields):
+    """Append a run-log event; with no session say so on stderr and carry on (the merge verdict stands)."""
+    try:
+        runlog.append_event(cwd, kind, outcome, **fields)
+    except runlog.NoSession as e:
+        print(e, file=sys.stderr, flush=True)
+
+
 # The run's verdict, printed by main() as the `also:` lines and then the one `next:` line.
 VERDICT = {"next": None, "also": [], "pr": "?"}
 
@@ -486,7 +494,7 @@ def run_merge(argv=None) -> int:
             # A reviewer's scratch trees would otherwise pile up: nothing else removes them for a PR that never merges.
             for line in remove_scratch(pr, head_oid, cwd):
                 say(f"scratch {line}")
-            runlog.append_event(cwd, "merge", "closed", ref=ref, branch=branch)
+            log_event(cwd, "merge", "closed", ref=ref, branch=branch)
             verdict(f"cleaned {pr}")  # a clean end, not an error: the skill's ABANDON reads the verdict
             return 0
         if refused:
@@ -495,7 +503,7 @@ def run_merge(argv=None) -> int:
             return 1
         if time.monotonic() >= deadline:
             say(f"PR #{pr} not MERGED after {args.timeout:g}s (state {state}); run merge again later")
-            runlog.append_event(cwd, "merge", "timeout", ref=ref, branch=branch)
+            log_event(cwd, "merge", "timeout", ref=ref, branch=branch)
             return 3
         time.sleep(args.interval)
 
@@ -548,8 +556,8 @@ def run_merge(argv=None) -> int:
     if safe:
         say(delete_local_branch(branch, cwd))
 
-    runlog.append_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
-                        tickets=[int(t) for t in tickets if t.isdigit()])
+    log_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
+              tickets=[int(t) for t in tickets if t.isdigit()])
     say(fast_forward_main(cwd, default))
     handed = sweep(cwd, pr, branch, default, args.method)
     update_approved(cwd, pr, default, args.also_approved, min(HEAD_GAP, args.interval))
@@ -669,7 +677,7 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
             say(f"sweep: PR #{n} {b}: could not check for conflicts; left alone")
             continue
         for path, outcome in result.events:
-            runlog.append_event(cwd, "replay", outcome, ref=n, branch=b, file=path)
+            log_event(cwd, "replay", outcome, ref=n, branch=b, file=path)
         if result.status == "updated":
             say(f"sweep: PR #{n} {b} updated" + (" (force-with-lease)" if method == "rebase" else ""))
         elif result.status == "handed-back":

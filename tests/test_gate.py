@@ -119,6 +119,15 @@ class GateTest(unittest.TestCase):
         seen = set(log.read_text().split())
         self.assertEqual(seen, {str(self.env.repo.resolve())})
 
+    def test_no_session_keeps_the_verdict_and_exit_code_and_says_so_on_stderr(self):
+        (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
+        self.prime()
+        self.config("codegen is current (run: `echo ok`), see `README.md`")
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines()[-1], f"next: review {HEAD}")
+        self.assertIn("runlog: no session, gate event not written", r.stderr)
+
     def test_passing_gate(self):
         self.prime()
         self.config("codegen is current (run: `echo ok`), see `README.md`")
