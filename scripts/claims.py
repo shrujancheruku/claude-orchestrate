@@ -46,20 +46,44 @@ class Claim:
     pending_branch: bool = False   # the worktree is on a `worktree-agent-*` branch: the worker never made the ticket branch
 
 
-def read_state(path) -> dict:
-    """{ticket as str: worker record}: a missing file is no workers; an unreadable one, or one with no `tickets`
-    object, is ValueError (could not run)."""
+def _sessions(path) -> tuple:
+    """(current session id | None, {session id: tickets object}) from the state file. The file holds one entry per
+    session and `session` names the one that rebuilt last, the current one; the old `{"session", "tickets"}` shape is
+    one session's entry (a file with no id, as older tests write, is the session ""). A missing file has no sessions;
+    an unreadable one, or one with no tickets object, is ValueError (could not run)."""
     path = Path(path)
+    # No lock here: rebuild-state writes a temp file and renames it over this one, so a read sees the old file or the new.
     try:
         data = json.loads(path.read_text())
     except FileNotFoundError:
-        return {}
+        return None, {}
     except (OSError, ValueError) as e:
         raise ValueError(f"unreadable state file {path}: {e}") from None
-    tickets = data.get("tickets") if isinstance(data, dict) else None
-    if not isinstance(tickets, dict):
-        raise ValueError(f"state file {path} has no tickets object")
-    return tickets
+    if isinstance(data, dict) and isinstance(data.get("sessions"), dict):
+        sessions = {k: v.get("tickets") for k, v in data["sessions"].items() if isinstance(v, dict)}
+        current = data.get("session")
+        if all(isinstance(t, dict) for t in sessions.values()):
+            return (current if isinstance(current, str) else None), sessions
+    elif isinstance(data, dict) and isinstance(data.get("tickets"), dict):
+        sid = data.get("session")
+        return (sid if isinstance(sid, str) else ""), {(sid if isinstance(sid, str) else ""): data["tickets"]}
+    raise ValueError(f"state file {path} has no tickets object")
+
+
+def read_state(path) -> dict:
+    """{ticket as str: worker record} of the current session; a missing file is no workers."""
+    current, sessions = _sessions(path)
+    return sessions.get(current, {})
+
+
+def read_other_state(path) -> dict:
+    """{ticket as str: worker record} under any other session: candidates for Elsewhere, never for Building."""
+    current, sessions = _sessions(path)
+    out = {}
+    for sid, tickets in sessions.items():
+        if sid != current:
+            out.update(tickets)
+    return out
 
 
 def find_worktree(ticket, worktrees, record=None):
@@ -116,6 +140,7 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     merged: [{"headRefName", ...}] merged PRs. worktrees: `git worktree list`'s (default: asked of `repo`); changes:
     (path, branch) -> (dirty, unpushed), swappable so a pure test needs no repository."""
     state = read_state(state_file)
+    other = read_other_state(state_file)
     # A worktree git still lists but whose directory is gone (prunable) is gone: git commands in it can't run.
     wts = [w for w in common.worktrees(repo) if Path(w["path"]).is_dir()] if worktrees is None else worktrees
     open_issues = {int(i["number"]): i for i in issues}
@@ -131,11 +156,13 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
         if n is not None:
             merged_branch.setdefault(n, pr["headRefName"])
     records = {int(k): v for k, v in state.items() if str(k).isdigit()}
+    foreign = {int(k): v for k, v in other.items() if str(k).isdigit() and int(k) not in records}
     tickets = sorted({n for n, i in open_issues.items() if i.get("claimed")} | (set(records) - set(open_issues)))
     out = {}
     for n in tickets:
         record = records.get(n) if isinstance(records.get(n), dict) else None
-        wt, shown = find_worktree(n, wts, record), open_pr.get(n)
+        # Another session's record finds the worktree (its lock may be live: Elsewhere) but is never this session's worker.
+        wt, shown = find_worktree(n, wts, record or foreign.get(n)), open_pr.get(n)
         draft = bool(shown and shown.get("isDraft"))
         pr = None if draft else shown  # the PR that decides the state: a draft decides nothing
         pending = bool(wt) and ticket_of_branch(wt["branch"]) is None and is_harness_branch(wt["branch"])

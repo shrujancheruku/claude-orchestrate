@@ -52,7 +52,11 @@ def current_session(repo) -> str | None:
     usable state file. Read from the main checkout, like the log, so a linked worktree's script finds it.
 
     Not $CLAUDE_SESSION_ID: the run skill templates that variable into the commands it names only, so the
-    scripts a run starts never see it, and every event was written with session null (#341)."""
+    scripts a run starts never see it, and every event was written with session null (#341).
+
+    The file keeps one entry per session; its `session` field names the one that rebuilt last, in the old shape and the
+    new alike, so no migration is needed here. No lock is taken: rebuild-state renames a temp file over the state
+    file, so a read sees the old file or the new."""
     try:
         state = json.loads((main_checkout(repo) / STATE).read_text(encoding="utf-8"))
     except (OSError, ValueError):

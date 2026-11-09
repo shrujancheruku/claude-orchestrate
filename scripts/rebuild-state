@@ -2,7 +2,10 @@
 """rebuild-state [<session id | transcript.jsonl>] [--repo PATH] : rebuild .claude/orchestrate-state.json.
 
 The orchestrator never writes the state file; this does, from the session's transcripts, so it
-can't drift from what actually ran. A worker is joined to its ticket by its dispatch
+can't drift from what actually ran. The file keeps one entry per session, `{"session": <the session that last
+rebuilt>, "sessions": {<id>: {"tickets": {...}}}}`; a rebuild replaces only its own session's entry, under an
+exclusive lock, so a second session's rebuild never replaces another's records. A file in the old
+`{"session", "tickets"}` shape is read as one session's entry and rewritten in the new shape. A worker is joined to its ticket by its dispatch
 description, whose first `#<n>` must be its ticket (the run skill recommends `Build #<ticket>`); a
 dispatch of any other agent type, or without a `#<n>`, is ignored. Per ticket
 it records the worker's agent ID, the worktree, the worker model (from the agent's own transcript,
@@ -18,6 +21,8 @@ no transcript). Stdlib only, Python 3.9+.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import sys
@@ -87,6 +92,45 @@ def rebuild(main_path: Path, repo: Path) -> dict:
     return {"session": sid, "tickets": {str(n): tickets[n] for n in sorted(tickets)}}
 
 
+@contextlib.contextmanager
+def state_lock(out: Path):
+    """An exclusive flock on `<state file>.lock`, held across the read-modify-write. Readers take no lock: the write
+    is a temp file and an atomic rename, so they see the old file or the new one."""
+    with open(out.with_name(out.name + ".lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def sessions_of(out: Path) -> dict:
+    """{session id: {"tickets": ...}} already in the file. The old `{"session", "tickets"}` shape is one session's
+    entry; a missing, unreadable or unrecognised file has none (the file is a cache and the tracker wins)."""
+    try:
+        data = json.loads(out.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if isinstance(data.get("sessions"), dict):
+        return {k: v for k, v in data["sessions"].items() if isinstance(v, dict)}
+    if isinstance(data.get("session"), str) and isinstance(data.get("tickets"), dict):
+        return {data["session"]: {"tickets": data["tickets"]}}
+    return {}
+
+
+def write_state(out: Path, state: dict) -> None:
+    """Replace this session's entry and keep the others', under the lock."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with state_lock(out):
+        sessions = sessions_of(out)
+        sessions[state["session"]] = {"tickets": state["tickets"]}
+        tmp = out.with_name(f"{out.name}.tmp.{os.getpid()}")  # unique per process: two rebuilds never share a temp
+        tmp.write_text(json.dumps({"session": state["session"], "sessions": sessions}, indent=2) + "\n")
+        os.replace(tmp, out)  # whole file or nothing, never a half-written cache
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("session", nargs="?", default=os.environ.get("CLAUDE_SESSION_ID"),
@@ -98,10 +142,7 @@ def main(argv=None) -> int:
     repo = Path(args.repo).resolve()
     state = rebuild(find_transcript(args.session), repo)
     out = main_checkout(repo) / STATE  # the main checkout's: runlog reads the session from there (#341)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2) + "\n")
-    os.replace(tmp, out)  # whole file or nothing, never a half-written cache
+    write_state(out, state)
     for n, t in state["tickets"].items():
         print(common.one_line(f"#{n} {t['agent_id']} {t['model']} {t['worktree']} last report {t['last_report']}"))
     print(f"rebuilt {STATE} ({len(state['tickets'])} tickets)")
