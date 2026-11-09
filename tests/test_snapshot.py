@@ -66,6 +66,26 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(snap.blockers(1), [(2, False)])
         self.assertEqual(snap.default_branch, "main")
 
+    def test_a_truncated_snapshot_file_gives_a_one_line_error_naming_it(self):
+        (self.env.repo / FILE).write_text('{"issues": [', encoding="utf-8")
+        for script in ("claims", "frontier"):
+            r = self.env.run(script, "--snapshot", FILE, check=False)
+            self.assertNotEqual(r.returncode, 0, script)
+            self.assertIn(f"cannot read snapshot {FILE}", r.stderr, script)
+            self.assertNotIn("Traceback", r.stderr, script)
+            self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+
+    def test_a_failed_write_leaves_the_old_file_and_no_temp_file(self):
+        target = self.env.repo / FILE
+        target.write_text("old", encoding="utf-8")
+        # Every part given, so `write` reads nothing from gh (the real gh has no token in CI).
+        snap = tracker.Snapshot(None, repo={}, issues=[], prs=[], merged=[], abandoned=[], pr_files={})
+        with unittest.mock.patch("os.replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                snap.write(target)
+        self.assertEqual(target.read_text(encoding="utf-8"), "old")
+        self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
     def files_reply(self, n, paths):
         return {"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{n}/files"], "stdout": json.dumps([{"filename": p} for p in paths])}
 
