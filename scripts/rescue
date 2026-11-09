@@ -26,7 +26,7 @@ subprocess. Each step prints one line, in this order:
 
 No worktree on the branch (or for the ticket): `nothing to rescue: no worktree on <branch | #n>`, exit 0 (the remote branch is the whole state).
 Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something held or that could not be checked
-(dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, nothing removed, a lock step 1 lifted put back);
+(dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, a lock step 1 lifted put back, or said to be not put back; the worktree stays unless step 5 already removed it, and an exit 2 after that leaves it removed);
 3 a live lock that is not this session's (`live <pid | ?> <worktree>`). Stdlib only, Python 3.9+.
 """
 
@@ -55,7 +55,9 @@ LIFTED: list = []
 
 def fail(msg) -> int:
     for lroot, path, reason in LIFTED:
-        common.run("git", "worktree", "lock", "--reason", reason, path, cwd=lroot)
+        r = common.run("git", "worktree", "lock", "--reason", reason, path, cwd=lroot)
+        if r.code != 0:
+            msg = f"{msg}; could not put the lock back on {path}: {common.one_line(r.stderr)}"
     LIFTED.clear()
     print(f"rescue: {msg}", file=sys.stderr)
     return 2
@@ -287,6 +289,7 @@ def run(argv=None) -> int:
         say(removed)
         return fail(removed)
     say(f"removed {path}")
+    LIFTED.clear()  # the worktree is gone: a later failure has no lock to put back
     if args.pr is not None:
         for line in repo.remove_scratch(args.pr, tip, root):
             say(f"scratch {line}")
