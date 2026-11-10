@@ -435,6 +435,8 @@ class Rescue(unittest.TestCase):
         def limited(*a, **k):
             raise github.GhError(github.RATELIMITED, "rate limit until 2026-01-01T00:05:00Z")
 
+        self.addCleanup(setattr, github, "rate_limited_until", None)
+        github.rate_limited_until = "2026-01-01T00:05:00Z"  # as a limited gh call leaves it, whatever raised after
         with unittest.mock.patch.object(mod.tracker.Snapshot, "open", limited), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(mod.overlap(self.env.repo, ["a.txt"], 42), 0)
         self.assertIsNone(github.rate_limited_until)
