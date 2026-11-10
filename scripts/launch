@@ -16,7 +16,9 @@ script (ADR-0006). The flags cannot live in settings: the session-only auto-mode
     --model <m>                 only when the config's Models table names one in its Orchestrator row
     --plugin-dir <snapshot>     only when the plugin is a checkout (${CLAUDE_PLUGIN_ROOT}, else this script's parent;
                                 a root under <claude dir>/plugins/ is a marketplace install and gets no flag). The
-                                flag names a snapshot of the plugin at origin/<default> under
+                                flag names the stable symlink <cache>/orchestrate/plugin/r-<hash>/current (#728), which a
+                                real launch points at the snapshot and scripts/merge repoints after a gated merge, so a
+                                guard fix reaches the run live; the link points to a snapshot of the plugin at origin/<default> under
                                 $XDG_CACHE_HOME (else ~/.cache)/orchestrate/plugin/<sha>/, never the checkout: Claude
                                 Code makes every file under an inline plugin's root sensitive, worktrees included
                                 (#581). The newest 3 snapshots are kept; one stderr line names the sha. The snapshot
@@ -57,17 +59,14 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import sys
-import tarfile
-import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import config  # noqa: E402
+import plugin_dir as store  # noqa: E402
 import runlog  # noqa: E402
 from repo import main_checkout  # noqa: E402
 
@@ -79,10 +78,10 @@ RUN_PROMPT = re.compile(r"/orchestrate:(?:run|lead)(?: [A-Za-z0-9=#._-]+)*")  # 
 ROLE_ENV = "ORCHESTRATE_ROLE"  # hooks/guard.py reads it: the orchestrator's calls it can't approve are denied, not prompted (#579)
 SETTINGS = {"disableAutoMode": "disable"}
 INBOUND = {"crossSessionInbound": "accept"}
-SNAPSHOT_DIRS = (".claude-plugin", "hooks", "agents", "skills", "scripts", "viewer")  # what the plugin loads or reads (viewer: profile.py's HTML, #628)
-SOURCE_FILE = ".source"  # in a snapshot: the path of the checkout it was exported from
-KEEP = 3  # snapshots kept after a launch, the one in use included
-MIN_AGE = 24 * 3600  # a snapshot younger than this is never pruned: a live session may still load it
+SNAPSHOT_DIRS = store.SNAPSHOT_DIRS  # what the plugin loads or reads; the store (scripts/plugin_dir.py) owns the export (#728)
+SOURCE_FILE = store.SOURCE_FILE
+KEEP = store.KEEP
+MIN_AGE = store.MIN_AGE
 
 
 def plugin_root() -> Path:
@@ -97,10 +96,7 @@ def is_marketplace(root: Path) -> bool:
     return resolved == plugins or plugins in resolved.parents
 
 
-def cache_base() -> Path:
-    """Where snapshots live: $XDG_CACHE_HOME/orchestrate/plugin, else ~/.cache/orchestrate/plugin."""
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    return (Path(xdg) if xdg else Path.home() / ".cache") / "orchestrate" / "plugin"
+cache_base = store.cache_base
 
 
 def is_snapshot(root: Path) -> bool:
@@ -125,7 +121,7 @@ def plugin_tree(git, sha: str):
     return out if code == 0 else None
 
 
-SNAPSHOT_PATH = re.compile(r"orchestrate/plugin/([0-9a-f]{40})")
+SNAPSHOT_PATH = re.compile(r"orchestrate/plugin/([0-9a-f]{40}|r-[0-9a-f]{12}/current)")  # a sha directory, or the stable link (#728)
 
 
 def saved_snapshot(session_id):
@@ -212,38 +208,22 @@ def snapshot(root: Path, fetch: bool = True):
     if code != 0 or not re.fullmatch(r"[0-9a-f]{40}", sha):
         common.die(f"launch: cannot run: {ref} does not exist in {top.strip()}; fetch origin first")
     base = cache_base()
-    dest = base / sha
     inside = [Path(top.strip()).resolve(), common.claude_dir().resolve()]
     if any(p == base.resolve() or p in base.resolve().parents for p in inside):
         common.die(f"launch: cannot run: the snapshot cache {base} is inside the repo or the claude dir; set XDG_CACHE_HOME")
-    if dest.is_dir():
-        os.utime(dest)  # newest use wins the pruning
-    else:
-        base.mkdir(parents=True, exist_ok=True)
-        tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=base))
-        try:
-            proc = subprocess.Popen([*git, "archive", sha, *SNAPSHOT_DIRS], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            with tarfile.open(fileobj=proc.stdout, mode="r|") as tar:
-                tar.extractall(tmp, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
-            if proc.wait() != 0:
-                common.die(f"launch: cannot run: git archive of {sha} failed: {proc.stderr.read().decode(errors='replace').strip()}")
-            (tmp / SOURCE_FILE).write_text(top.strip() + "\n")  # lets a launch from this snapshot find the checkout (#628)
-            try:
-                tmp.rename(dest)
-            except OSError:
-                if not dest.is_dir():  # a concurrent launch winning the rename is fine
-                    raise
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-    if not fetch:  # --print launches nothing, so it prunes nothing
-        return dest, sha
-    # A snapshot used within MIN_AGE seconds may belong to a running orchestrator or lead: never prune it.
-    old = sorted((p for p in base.iterdir() if p.is_dir() and re.fullmatch(r"[0-9a-f]{40}", p.name) and p != dest),
-                 key=lambda p: p.stat().st_mtime, reverse=True)
-    for p in old[KEEP - 1:]:
-        if time.time() - p.stat().st_mtime > MIN_AGE:
-            shutil.rmtree(p, ignore_errors=True)
-    return dest, sha
+    try:
+        dest = store.export(git, top, sha)  # .source lets a launch from this snapshot find the checkout (#628)
+        link = store.link_path(top.strip())
+        # The run loads the stable link, not the sha directory, so a merged guard fix can repoint it (#728). A real
+        # launch moves it to this sha; --print launches nothing, so it moves a link that is already there never
+        # (a running session would change under it) and prunes nothing.
+        if fetch or not link.is_symlink():
+            store.point(link, dest)
+    except store.PluginDirError as e:
+        common.die(f"launch: cannot run: {e}")
+    if fetch:  # a snapshot used within MIN_AGE seconds may belong to a running orchestrator or lead: prune never takes it
+        store.prune(base, [dest])
+    return link, sha
 
 
 def read_rule(plugin_dir) -> dict:
@@ -252,7 +232,15 @@ def read_rule(plugin_dir) -> dict:
     Claude Code writes an absolute path in a rule with a `//` prefix (a single `/` anchors at the settings source).
     No Edit, Write or Bash rule: the snapshot holds the running hooks/guard.py. Not --add-dir, which would widen edits too.
     """
-    return {"permissions": {"allow": [f"Read(/{plugin_dir}/**)"]}} if plugin_dir else {}
+    if not plugin_dir:
+        return {}
+    # The whole snapshot cache, not one sha: a Read through a symlink may be matched on the link or on its target, and
+    # a merge repoints the link at a new snapshot mid-run (#728). Read only, and it holds plugin code and links only.
+    base = cache_base()
+    paths = list(dict.fromkeys([str(base), str(base.resolve())]))
+    if not any(Path(plugin_dir).resolve().is_relative_to(Path(p)) for p in paths) and not Path(plugin_dir).is_relative_to(base):
+        paths.append(str(plugin_dir))
+    return {"permissions": {"allow": [f"Read(/{p}/**)" for p in paths]}}
 
 
 def build(args, plugin_dir, model, start=None) -> list:
@@ -554,7 +542,8 @@ def main(argv=None) -> int:
             src = None
         try:
             runlog.append_event(args.repo, runlog.SNAPSHOT, "launched", session="launch", sha=sha,
-                                source=str(main_checkout(src)) if src else None)
+                                source=str(main_checkout(src)) if src else None,
+                                link=str(plugin_dir) if plugin_dir.is_symlink() else None)  # merge repoints it (#728)
         except (OSError, ValueError, runlog.NoSession) as e:
             print(f"launch: the snapshot event was not logged: {e}", file=sys.stderr)
     if args.resume and not args.lead:
