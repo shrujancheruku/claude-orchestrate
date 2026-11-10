@@ -40,7 +40,7 @@ class MergeTest(MergeMixin, unittest.TestCase):
         e = self.env.events()
         self.assertEqual([(x["kind"], x["ref"], x["outcome"]) for x in e], [("merge", 7, "merged")])
         self.assertTrue(e[0]["branch_deleted"])
-        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
         self.assertEqual(p.stdout.count("next:"), 1)
 
     def test_no_session_refuses_before_the_merge(self):
@@ -105,7 +105,7 @@ class MergeTest(MergeMixin, unittest.TestCase):
                   ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
         p = self.merge()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
 
     def test_405_on_an_open_pr_is_a_refusal(self):
         self.seq({PR_VIEW: [pr("OPEN")], PR_MERGE: [{"exit": 1, "stderr": "Pull Request is not mergeable (HTTP 405)"}],

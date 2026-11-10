@@ -39,12 +39,12 @@ again; 6 the change since --approved-head needs re-review (nothing merged); 1 th
 again later; nothing was closed or deleted). A PR found closed unmerged is cleaned up (scratch trees) and ends
 `next: cleaned <pr>`, exit 0. A merge failure that looks transient (5xx, timeout,
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
-Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word: `merged` |
-`wait-ci <pr> <head>` | `re-review <pr>` | `send-back <pr>` (the lines above it are what the PR's owner gets) |
+Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word: `frontier` (a merge landed: the slot is free, so
+the orchestrator runs the frontier and fills it in the same turn, #716) | `wait-ci <pr> <head>` | `re-review <pr>` | `send-back <pr>` (the lines above it are what the PR's owner gets) |
 `ask-user <why>` | `retry` | `retry-after <time>` (a rate limit, exit 2) | `could-not-run [<Class>: <message>]` (exit 2;
 an exception is this, with the traceback on stderr, never `ask-user`). Before it, one `also: <verdict> <pr> ...` line per other PR the run
 touched (--also-approved, the sweep): `wait-ci <pr> <head>`, `send-back <pr>` or `left <pr> <why>`. The exit codes
-are unchanged: 0 and 4 end `merged`, 5 `wait-ci`, 6 `re-review`, 3 `retry`, 2 `could-not-run`, and 1 (a refusal)
+are unchanged: 0 and 4 end `frontier`, 5 `wait-ci`, 6 `re-review`, 3 `retry`, 2 `could-not-run`, and 1 (a refusal)
 `wait-ci`, `send-back` or `ask-user` by its clause.
 After the cleanup it also fast-forwards the main checkout (the first `git worktree list` entry) to origin/<default>, so the
 scripts the orchestrator runs and the files a lead reads are the merged code: one line, `main checkout fast-forwarded to <sha>`
@@ -469,7 +469,7 @@ def main(argv=None) -> int:
     # A path that set no verdict falls back on its exit code: 3 timed out, 0 merged, a rate limit retries after its
     # time, anything else could not run.
     until = github.rate_limit_verdict(code)
-    fallback = {0: "merged", 3: "retry"}.get(code) or ("retry-after " + until if until else "could-not-run")
+    fallback = {0: "frontier", 3: "retry"}.get(code) or ("retry-after " + until if until else "could-not-run")
     word, _, rest = (VERDICT["next"] or fallback).partition(" ")
     return common.verdict(word, rest, exit_code=code)
 
@@ -634,7 +634,7 @@ def run_merge(argv=None) -> int:
     note_snapshot(cwd, pr, default)
     handed = sweep(cwd, pr, branch, default, args.method)
     update_approved(cwd, pr, default, args.also_approved, min(HEAD_GAP, args.interval))
-    verdict("merged")
+    verdict("frontier")
     return 4 if handed else 0
 
 

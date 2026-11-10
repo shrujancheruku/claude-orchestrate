@@ -1297,7 +1297,7 @@ def derive_pass(args) -> dict:
     except (KeyError, TypeError, ValueError, AttributeError) as e:
         common.die(f"profile record: cannot derive the pass: {e}")
     # A lead's ticket holds no slot (skills/run/SKILL.md, step 3), and a done one is not occupying anything.
-    held = [n for n, c in found.items() if c.state not in ("done", "with-lead")]
+    held = [n for n, c in found.items() if c.state not in claims.NO_SLOT]
     entry = {
         "scope": args.scope,
         "slots": slots,

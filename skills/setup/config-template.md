@@ -28,6 +28,14 @@
 
 Tickets run in parallel only when their touch maps don't overlap outside the shared files.
 
+## Velocity
+
+Optional; delete the section for the defaults below. `scripts/lead-brief --watch` reads these to wake the lead when a slot sits idle.
+
+- **Idle window:** 10m. How long a slot may sit free with a dispatchable ticket waiting before the lead is woken.
+- **Expensive hold:** 3. How many takeable tickets one held PR must block before the lead's digest asks the developer about it.
+- **Velocity watch:** on. `off` stops the idle-slot wake.
+
 ## Verify
 
 Commands every worker runs before opening a PR. `verify --config` reads them from here and runs each exactly as written, so nothing else restates them. Write each command as a top-level bullet that opens with one backticked span; text after the span is a remark, and any other line is prose. Commands in a group are independent. A bullet that is just `` `--then` `` starts a group that depends on the ones above it (codegen or a build first), skipped if one of them fails.
