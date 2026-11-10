@@ -56,6 +56,33 @@ class Decide(unittest.TestCase):
     def pr(self, n, branch):
         return {"number": 100 + n, "headRefName": branch, "headRefOid": "a" * 40}
 
+    def log(self, *events):
+        import runlog
+        path = runlog.log_path(self.tmp.name, runlog.EVENTS_LOG)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(e) + "\n" for e in events))
+
+    def test_a_haiku_workers_ticket_escalates_on_a_mechanical_trigger_and_prints_the_word(self):
+        import importlib.machinery
+        import importlib.util
+        haiku = dict(WORKER, model="claude-haiku-4-5")
+        fails = [{"kind": "ci", "outcome": "fail", "ref": 102, "head": h} for h in ("a", "b")]
+        loader = importlib.machinery.SourceFileLoader("claims_cli", str(Path(claims.__file__).parent / "claims"))
+        spec = importlib.util.spec_from_loader("claims_cli", loader)
+        cli = importlib.util.module_from_spec(spec)
+        loader.exec_module(cli)
+        for events, want in (([], None), (fails[:1], None), (fails, "sonnet"),
+                             ([{"kind": "review", "outcome": "request-changes", "ref": 102, "round": 2}], "sonnet")):
+            with self.subTest(events=events):
+                self.log(*events)
+                c = self.decide([issue(2)], prs=[self.pr(2, "2-x")], state={"2": haiku})[2]
+                self.assertEqual(c.escalate, want)
+                self.assertEqual(cli.line(c).endswith(" escalate sonnet"), want is not None)
+
+    def test_a_sonnet_worker_is_not_escalated(self):
+        self.log(*[{"kind": "ci", "outcome": "fail", "ref": 102, "head": h} for h in ("a", "b")])
+        self.assertIsNone(self.decide([issue(2)], prs=[self.pr(2, "2-x")], state={"2": WORKER})[2].escalate)
+
     def test_a_fork_pr_on_the_ticket_branch_is_not_the_tickets_pr(self):
         # ADR-0015: an outsider's PR named 1-widget does not put ticket 1 in review
         fork = dict(self.pr(1, "1-widget"), isCrossRepository=True)

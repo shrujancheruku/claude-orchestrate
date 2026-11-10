@@ -18,6 +18,9 @@ import common
 
 # Kinds of Problem, so a caller can act on the ones it cares about.
 RUN, SHARED, GENERATED = "run", "shared", "generated"
+SIZES = ("S", "M", "L")  # in order: a `size:` label is a floor on this scale
+DEFAULT_WORKER_MODEL = "sonnet"  # a config with no Worker row
+DEFAULT_S_FILES = 3  # the S file limit when the config does not set one
 
 
 class Problem(NamedTuple):
@@ -41,6 +44,8 @@ class Config(NamedTuple):
     has_verify: bool = False  # the config has a `## Verify` section at all
     orchestrator_model: str | None = None  # the Models table's Orchestrator row; None when blank, the old wording or missing
     lead_model: str | None = None  # the Models table's Lead row, read the same way; None when blank or missing
+    worker_model: str | None = None  # the Worker row's first word: the model of every ticket that is not small
+    worker_small_model: str | None = None  # the Worker row's `; <model> for S tickets` clause; None when absent or unparsed
     ci_wait_limit: int | None = None  # minutes: the optional `**CI wait limit:**` line; None when absent or not a number
     board: str | None = None  # the `- **Board:** <project URL>` line setup writes; None when absent
     trusted_authors: tuple = ()  # logins on the optional `- **Trusted authors:**` line (Backlog): trusted besides OWNER, MEMBER, COLLABORATOR (ADR-0015)
@@ -94,6 +99,8 @@ class Config(NamedTuple):
             has_verify=common.section_of(text, "Verify") is not None,
             orchestrator_model=_model_row(common.section_of(text, "Models"), "orchestrator"),
             lead_model=_model_row(common.section_of(text, "Models"), "lead"),
+            worker_model=_model_row(common.section_of(text, "Models"), "worker"),
+            worker_small_model=_worker_small_model(common.section_of(text, "Models")),
             ci_wait_limit=_ci_wait_limit(text),
             board=_board(text),
             trusted_authors=_trusted_authors(common.section_of(text, "Backlog")),
@@ -102,6 +109,51 @@ class Config(NamedTuple):
 
     def is_shared(self, path: str) -> bool:
         return shared_match(path, self.shared_files)
+
+    def model_for(self, labels, touch_map_paths, investigate=False) -> str:
+        """The worker model for a ticket (ADR-0006: the rule is a script's, not the skill's prose).
+
+        `labels`: the ticket's labels. `touch_map_paths`: the touch map's paths, or None while the scout has not
+        produced one (an unlabelled ticket then takes the default; `frontier --touch-map` asks again). `investigate`:
+        the title or body says "investigate" or "design". The small model (the Worker row's `; <model> for S tickets`
+        clause) goes to a `size:S` ticket, or an unlabelled one whose touch map is within the S file limit, and only
+        when the touch map hits no risk path; everything else gets the default (the row's first word, else `sonnet`).
+        A cell that does not parse has no small model, so a guess never routes toward haiku."""
+        default = self.worker_model or DEFAULT_WORKER_MODEL
+        if investigate or not self.worker_small_model:
+            return default
+        sized = [x for x in SIZES if f"size:{x}" in set(labels or ())]
+        if sized and "S" not in sized:
+            return default
+        paths = None if touch_map_paths is None else list(touch_map_paths)
+        if paths is not None and (self.risk_hit(paths) or len(set(paths)) > self._s_files()):
+            return default
+        if sized or paths is not None:  # `size:S`, or an unlabelled ticket whose known map is small and safe
+            return self.worker_small_model
+        return default
+
+    def _s_files(self) -> int:
+        return self.tier_s_files if self.tier_s_files is not None else DEFAULT_S_FILES
+
+    def risk_hit(self, paths) -> bool:
+        """Whether any of `paths` matches a risk path glob (a `dir/` touch-map entry stands for a file under it)."""
+        return any(shared_match(p + "x" if p.endswith("/") else p, self.risk_paths) for p in paths)
+
+    def tier_for(self, lines, files, labels=(), risk_hit=False) -> str:
+        """The reviewer tier `S`, `M` or `L` from a diff's changed lines and file count.
+
+        A risk path is L. Otherwise S is at most the S line and file limits, L is more than the L line limit, M is the
+        rest (a limit the config does not set cannot make a PR S or L). A `size:` label is a floor, never a ceiling
+        (ADR-0016): a label above the computed tier raises it, one below is ignored."""
+        if risk_hit or (self.tier_l_lines is not None and lines > self.tier_l_lines):
+            computed = "L"
+        elif (self.tier_s_lines is not None and self.tier_s_files is not None
+              and lines <= self.tier_s_lines and files <= self.tier_s_files):
+            computed = "S"
+        else:
+            computed = "M"
+        floor = max((SIZES.index(x) for x in SIZES if f"size:{x}" in set(labels or ())), default=0)
+        return SIZES[max(SIZES.index(computed), floor)]
 
     def problems_of(self, kind: str) -> list:
         return [p for p in self.problems if p.kind == kind]
@@ -242,6 +294,19 @@ def _trusted_authors(backlog):
 
 
 _OLD_ORCHESTRATOR ="the session's model"  # the template's wording before the lead layer: means no model
+
+
+_SMALL_CLAUSE = re.compile(r";\s*`?([\w.\-]+)`?\s+for\s+S\s+tickets", re.IGNORECASE)
+
+
+def _worker_small_model(models):
+    """The model of the Worker row's `; <model> for S tickets` clause, or None (no clause, or a cell that doesn't parse)."""
+    for line in (models or "").splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0].lower() == "worker":
+            m = _SMALL_CLAUSE.search(cells[1])
+            return m.group(1).lower() if m else None
+    return None
 
 
 def _model_row(models, role):

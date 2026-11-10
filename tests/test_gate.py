@@ -59,6 +59,44 @@ class GateTest(unittest.TestCase):
     def gate(self, *extra):
         return self.env.run("gate", "7", "--retry-delay", "0", *extra, check=False)
 
+    def tiers(self, risk="`scripts/gate`"):
+        p = self.env.repo / ".claude" / "orchestration.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("## Review\n\n"
+                     f"- **Risk paths** (any PR touching them is reviewed as L): {risk}\n"
+                     "- **Tiers:** S is at most 50 changed lines in at most 3 files, none on a risk path; "
+                     "L touches a risk path or changes more than 400 lines; M is everything else.\n"
+                     "- **Post reviews:** no\n")
+
+    def tier_line(self, r):
+        lines = r.stdout.splitlines()
+        self.assertTrue(lines[-1].startswith("next:"), lines)
+        return lines[-2]
+
+    def test_tier_line_precedes_next(self):
+        label = lambda name: [{"number": 270, "labels": {"nodes": [{"name": name}]}}]
+        small = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+        risky = small.replace("src/a.py", "scripts/gate")
+        rows = [  # (diff, ticket labels, tier)
+            (small, "", "tier S"),
+            (risky, "", "tier L"),
+            (small, "size:M", "tier M"),   # a label raises the computed tier
+            (small, "size:L", "tier L"),
+            (risky, "size:S", "tier L"),   # and never lowers it
+        ]
+        for diff, name, want in rows:
+            with self.subTest(diff=diff[:30], label=name):
+                self.tiers()
+                self.prime(diff=diff, body="Closes #270", issues=label(name) if name else ())
+                r = self.gate()
+                self.assertEqual(self.tier_line(r), want, r.stdout + r.stderr)
+
+    def test_tier_counts_changed_lines_from_the_config(self):
+        self.tiers()
+        big = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n" + "+x\n" * 401
+        self.prime(diff=big)
+        self.assertEqual(self.tier_line(self.gate()), "tier L")
+
     def event(self):
         (e,) = self.env.events()
         self.assertEqual((e["kind"], e["ref"]), ("gate", 7))
@@ -135,6 +173,7 @@ class GateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         lines = r.stdout.splitlines()
         self.assertEqual(lines.pop(), f"next: review {HEAD}")
+        self.assertEqual(lines.pop(), "tier M")  # no Tiers in the config: neither S nor L is reachable
         self.assertEqual(lines[0], f"PR #7 head {HEAD}")
         self.assertEqual(len(lines), 8)  # head, title, mergeable, overlap, dependencies, secrets, lockfiles, run:
         self.assertTrue(all(l.startswith("pass") for l in lines[1:]), lines)
@@ -220,7 +259,7 @@ class GateTest(unittest.TestCase):
                     "user's config scripts (degrade instead).")
         r = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertEqual(len(r.stdout.splitlines()), 8)  # the built-in checks only, then next:
+        self.assertEqual(len(r.stdout.splitlines()), 9)  # the built-in checks only, then tier: and next:
         self.assertNotIn("README.md", r.stdout)
 
     def test_missing_cwd_exits_2_before_any_check(self):
@@ -240,7 +279,7 @@ class GateTest(unittest.TestCase):
         r = self.gate("--cwd", str(other))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("pwd", r.stdout)
-        self.assertEqual(len(r.stdout.splitlines()), 9)
+        self.assertEqual(len(r.stdout.splitlines()), 10)
 
     def test_several_markers_in_one_item_all_run(self):
         self.prime()
@@ -340,7 +379,7 @@ class GateTest(unittest.TestCase):
         self.prime()
         r = self.gate()
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(len(r.stdout.splitlines()), 8)
+        self.assertEqual(len(r.stdout.splitlines()), 9)
 
     def test_missing_gh_is_could_not_run(self):
         r = self.env.run("gate", "7", "--retry-delay", "0", check=False, no_gh=True)

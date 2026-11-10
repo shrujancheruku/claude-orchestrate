@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """frontier [--parent <n> | --ticket <n>] [--all] [--fix-drift] [--snapshot FILE] [--repo DIR] : which tickets are takeable now?
 
-Default: one line per takeable ticket, `#<n> <title>`, ascending, nothing else (an empty frontier prints nothing).
+Default: one line per takeable ticket, `#<n> <title> model <name>`, ascending, nothing else (an empty frontier prints nothing).
+`model <name>` is the model to dispatch the ticket's worker with (Config.model_for: the Worker row of the config's Models
+table, the ticket's `size:` label, "investigate"/"design" in its title or body, and the touch map). The scout's map is not
+known yet when the line first prints, so an unlabelled ticket shows the default model; `--ticket <n> --touch-map '<map>'`
+prints the line again with the model the map earns (the small model only for a map within the S file limit and off every
+risk path).
 --all appends four sections, each `<name>:` then one line per item, or `none`:
     not-takeable:    `#<n> <reason>` for every other `ready-for-agent` ticket (claimed, blocked-by #<m>..., parent, lead, wayfinder)
     ready-for-human: `#<n> <title>`
@@ -19,12 +24,15 @@ docs/agents/triage-labels.md (the defaults when it is missing). Exit codes: 0 ra
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
 import common
+import config
 import github
 import runlog
+import touchmap
 import tracker
 
 def titled(i) -> str:
@@ -35,12 +43,24 @@ def section(name, lines) -> list:
     return [f"{name}:", *(lines or ["none"])]
 
 
-def render(issues, scope, labels, show_all) -> list:
-    """The output lines; `issues` is the whole snapshot (blockers are judged against it), `scope` the part to print."""
+INVESTIGATE = re.compile(r"\b(?:investigate|design)\b", re.IGNORECASE)
+
+
+def model_of(issue, cfg, touch_map) -> str:
+    """The worker model for a ticket: Config.model_for over its labels, its title and body, and the touch map's paths
+    (None until the scout has produced one)."""
+    paths = None if touch_map is None else [e.path for e in touch_map]
+    return cfg.model_for(issue["labels"], paths, bool(INVESTIGATE.search(f"{issue['title']} {issue['body']}")))
+
+
+def render(issues, scope, labels, show_all, cfg=None, touch_map=None) -> list:
+    """The output lines; `issues` is the whole snapshot (blockers are judged against it), `scope` the part to print.
+    Each takeable line ends `model <name>`, the model to dispatch its worker with (`touch_map` is --touch-map's)."""
+    cfg = cfg or config.Config()
     scope = sorted(scope, key=lambda i: i["number"])
     ready = [i for i in scope if labels["ready"] in i["labels"]]
     taken = {i["number"] for i in tracker.takeable(issues, labels)}
-    out = [titled(i) for i in ready if i["number"] in taken]
+    out = [f"{titled(i)} model {model_of(i, cfg, touch_map)}" for i in ready if i["number"] in taken]
     if not show_all:
         return out
     in_scope = {i["number"] for i in scope}
@@ -73,10 +93,20 @@ def main(argv=None) -> int:
                     help="add the not-takeable, ready-for-human, parents-closed and drift sections")
     ap.add_argument("--fix-drift", action="store_true",
                     help="add the native blocked_by edge for each drift line (prints each edge added)")
+    ap.add_argument("--touch-map", help="with --ticket: the scout's touch map; the line's model then follows it (a small, "
+                    "risk-free map lets an unlabelled ticket take the small model)")
     ap.add_argument("--snapshot", help="read the tracker from this file (scripts/snapshot) instead of fetching")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
     root = Path(args.repo).resolve()
+    touch_map = None
+    if args.touch_map is not None:
+        if args.ticket is None:
+            common.die("frontier: cannot run: --touch-map needs --ticket")
+        try:
+            touch_map = touchmap.parse(args.touch_map)
+        except touchmap.TouchMapError as e:
+            common.die(f"frontier: cannot run: {e}")
     if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
         common.die(f"frontier: cannot run: {args.repo} is not in a git repository")
     try:
@@ -95,7 +125,7 @@ def main(argv=None) -> int:
             fix_drift(issues, scope, root)
     except github.GhError as e:
         common.die(f"frontier: cannot run: gh failed: {e.message}")
-    lines = render(issues, scope, labels, args.all)
+    lines = render(issues, scope, labels, args.all, config.Config.load(root), touch_map)
     if args.ticket is not None and not scope:
         lines.insert(0, f"#{args.ticket} not open")
     if args.ticket is not None and not args.all and scope and not lines:
