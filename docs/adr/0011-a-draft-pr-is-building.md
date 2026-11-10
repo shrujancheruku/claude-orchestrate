@@ -14,7 +14,7 @@ A worker used to open its PR only at the end, so the developer saw nothing until
 
 ## Consequences
 
-- GitHub Actions' `pull_request` trigger runs CI on every push to a draft. A repo that wants to skip that adds `if: ${{ !github.event.pull_request.draft }}` to its workflow, and must then also list `types: [opened, synchronize, reopened, ready_for_review]` under `pull_request`; otherwise marking ready runs no CI and the skipped jobs leave the head with no real check: `watch-ci` holds an all-skipped rollup pending and ends in `no-run` (`merge` still reads it as a pass until the `github.ci_verdict` follow-up of #669 lands). The plugin doesn't edit workflows.
+- GitHub Actions' `pull_request` trigger runs CI on every push to a draft. A repo that wants to skip that adds `if: ${{ !github.event.pull_request.draft }}` to its workflow, and must then also list `types: [opened, synchronize, reopened, ready_for_review]` under `pull_request`; otherwise marking ready runs no CI and the skipped jobs leave the head with no real check: `watch-ci` holds an all-skipped rollup pending and ends in `no-run` (`merge` holds it pending too, ADR-0012). The plugin doesn't edit workflows.
 - `ready_for_review` isn't in `pull_request`'s default event types, so marking ready runs no new CI: `watch-ci` settles on the last draft push's checks.
 - The empty start commit adds one `chore:` commit to the branch; the squash merge hides it.
 - Rejected: opening the PR only at Ship (nothing to follow); treating a draft as in review (CI, gate and review on half-built code).
