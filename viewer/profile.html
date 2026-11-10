@@ -197,6 +197,12 @@ function tile(label, value, detail) {
   if (detail) d.append(el("div", { class: "detail" }, detail));
   return d;
 }
+const perHour = (x) => (x == null ? "–" : x.toFixed(2));
+// Merged tickets per hour of the span (session gaps left out): the same span and merged count as $ per merged ticket.
+function throughputTile(p) {
+  const m = p.metrics;
+  return tile("Throughput", m.throughput_per_hour == null ? "–" : perHour(m.throughput_per_hour) + " merged/hour", `${m.tickets_merged} merged over ${fmtDur(m.span_s)}`);
+}
 function legend(items) {
   const l = el("div", { class: "legend" });
   for (const [label, key, cls] of items) {
@@ -627,13 +633,14 @@ function usage(p) {
   return card;
 }
 
-function compare() {
+function compare(list = profiles) {
+  const rows = Array.isArray(list) ? list : [list];
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Sessions compared"));
-  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Peak 5-hour", "Limit hits"],
-    profiles.map((p) => [p.session.slice(0, 8), new Date(t(p.start)).toLocaleString(), fmtDur(p.metrics.span_s), String(p.slots), pct(p.metrics.occupancy),
-      String(p.metrics.tickets_merged), usd(p.metrics.cost.per_merged_ticket), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
-      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 10]));
+  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "Merged / hour", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Peak 5-hour", "Limit hits"],
+    rows.map((p) => [p.session.slice(0, 8), new Date(t(p.start)).toLocaleString(), fmtDur(p.metrics.span_s), String(p.slots), pct(p.metrics.occupancy),
+      String(p.metrics.tickets_merged), perHour(p.metrics.throughput_per_hour), usd(p.metrics.cost.per_merged_ticket), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
+      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 10, 11]));
   return card;
 }
 
@@ -655,6 +662,7 @@ function render() {
     tile("Proxy $ per merged ticket", usd(m.cost.per_merged_ticket), `${usd(m.cost.total)} in all`),
     tile("Slots occupied", pct(m.occupancy), `building ${pct(m.building_share)}`),
     tile("Tickets merged", String(m.tickets_merged), m.tokens_per_merged_ticket ? `${fmtTok(m.tokens_per_merged_ticket)} tokens each` : ""),
+    throughputTile(p),
     tile("Tokens", fmtTok(m.tokens_total), `orchestrator ${pct(m.orchestrator_share)}`),
     tile("Peak 5-hour usage", m.five_hour_peak == null ? "–" : Math.round(m.five_hour_peak) + "%", m.five_hour_start == null ? "no samples" : `${Math.round(m.five_hour_start)}% → ${Math.round(m.five_hour_end)}%`),
     tile("Limit hits", String(m.limit_hits), p.orchestrator.compactions ? `${p.orchestrator.compactions} compaction${p.orchestrator.compactions === 1 ? "" : "s"}` : "no compactions"),

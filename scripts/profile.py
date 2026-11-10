@@ -901,7 +901,7 @@ def limit_events(main: Transcript, agents: list, passes: list) -> list:
 
 def idle_reasons(passes: list, end: datetime) -> dict:
     """Idle slot-seconds by the reason each pass gave, held until the next pass. A claimed ticket the pass's `claimed`
-    map shows as `idle` (its worker not live, nothing reported since its last commit: #501) holds a slot doing nothing:
+    map shows as `idle` (a building ticket whose worker ended its turn with an interim report and has had no completion since: GLOSSARY, Idle) holds a slot doing nothing:
     its seconds count under `worker-idle`."""
     out = {}
     for p, nxt in zip(passes, passes[1:] + [None]):
@@ -1105,6 +1105,9 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "orchestrator_share": sum(main.tokens.values()) / total if total else 0.0,
             "cache_hit_ratio": reads / (reads + fresh) if reads + fresh else 0.0,
             "tickets_merged": len(merged),
+            # Merged tickets per hour of span_s (session gaps left out), the same span and merged count as $ per
+            # merged ticket. Occupied-time throughput was rejected: it hides stops. Same with or without a lead.
+            "throughput_per_hour": len(merged) / (span / 3600) if merged else None,
             "merges_unverified": sum(1 for tk in merged if tk["merge_unverified"]),
             "tokens_per_merged_ticket": sum(tk["tokens"] for tk in merged) / len(merged) if merged else None,
             "five_hour_start": five[0] if five else None,
@@ -1157,8 +1160,10 @@ def summary(p: dict, saved: Path) -> str:
         spend = f"{fmt_usd(c['per_merged_ticket'])} per merged ticket ({m['tickets_merged']} merged): {by_model}"
         orch = c["per_merged_ticket_by_role"].get("orchestrator")
         spend += f" · orchestrator {fmt_usd(orch)}"
+    tph = m.get("throughput_per_hour")
+    throughput = "no tickets merged" if tph is None else f"{tph:.2f} merged/hour"
     lines = [
-        f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {slots_label(p)}",
+        f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {throughput} · {slots_label(p)}",
         f"proxy $ {spend}",
         f"slots   occupied {m['occupancy']:.0%}  (building {m['building_share']:.0%}, review/merge {m['review_share']:.0%})  idle: {idle}",
         f"plan    {plan}",
@@ -1348,6 +1353,7 @@ def figures(p: dict) -> dict:
     tiered = sum(t["merged"] for k, t in tiers.items() if k != "?")
     return {
         "merged": merged,
+        "throughput": m.get("throughput_per_hour"),
         "cost": c["per_merged_ticket"],
         "orchestrator": c["per_merged_ticket_by_role"].get("orchestrator"),
         "changes": r["round1_changes_rate"],
@@ -1461,6 +1467,8 @@ def compare_report(before_name: str, after_name: str, r: dict) -> str:
     def row(label, bv, av, kind):
         lines.append(f"{label:38}{_show(bv, kind):>10}{_show(av, kind):>10}{_delta(bv, av, kind):>12}")
     lines.append(f"{'merged tickets':38}{b['merged']:>10}{a['merged']:>10}{a['merged'] - b['merged']:>+12}")
+    # Informational: no gate and no mix adjustment, so it is not in ROWS.
+    row("throughput (merged/hour)", b["throughput"], a["throughput"], "num")
     for key, label, kind, _ in ROWS:
         row(label, b[key], a[key], kind)
     row("round-1 approvals (outright)", b["outright"], a["outright"], "pct")
