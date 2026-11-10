@@ -15,7 +15,7 @@ The guard (ADR-0002) bounds what an agent can run, not what it is told to build.
 
 - **A trusted author** is one whose `author_association` on the repo is `OWNER`, `MEMBER` or `COLLABORATOR`, or whose login the config's optional `Trusted authors:` line names. One function owns the rule; every script and prompt that reads tracker text goes through it (ADR-0006).
 - **Only trusted text steers the run.** Comments, reviews and review threads from anyone else are never parsed for markers, never read as a brief or a spec change, and never addressed by a worker. They are counted, so a run can say they exist, but their text does not enter an agent's instructions.
-- **A ticket body is trusted once a trusted author has applied `ready-for-agent`.** Only collaborators can label, and only the author or a collaborator can edit a body, so no further check applies to it.
+- **A ticket body is trusted once a trusted author has applied `ready-for-agent`, until an untrusted author edits it.** Only collaborators can label, but an issue's author can still edit the body afterwards, so the body is read as untrusted when its last editor (GraphQL `Issue.editor`) is not a trusted author: the ticket is not takeable and `frontier` and `claims` say why. A trusted author's later edit makes it takeable again.
 - **A fork PR is never the run's own.** A PR whose head is in another repository (`isCrossRepository`) is not a ticket's PR, holds no path, and is not matched by a worker report. `merge` keeps refusing to act on one.
 - **An untrusted unresolved review thread still blocks merge.** `merge` names it as untrusted so the developer can resolve or dismiss it; blocking is the safe direction, since an outsider can only stall a merge, not cause one.
 
