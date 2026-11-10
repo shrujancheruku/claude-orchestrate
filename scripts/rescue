@@ -180,7 +180,7 @@ def main(argv=None) -> int:
     """Run, then end with the one `next:` line (see the module docstring)."""
     def crashed(e):  # unexpected (an OSError from a subprocess, say): put the lifted locks back like any exit 2
         return fail(f"unexpected {type(e).__name__}: {common.one_line(e)}")
-    return github.finish(run, argv, {0: ("done",), 1: ("ask-user", "overlap"), 3: ("elsewhere",)}, on_error=crashed)
+    return common.finish(run, argv, {0: ("done",), 1: ("ask-user", "overlap"), 3: ("elsewhere",)}, on_error=crashed)
 
 
 def run(argv=None) -> int:

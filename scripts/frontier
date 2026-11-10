@@ -145,7 +145,7 @@ def run(argv=None) -> int:
 
 def main(argv=None) -> int:
     """Run, then end with the one `next:` line (see the module docstring)."""
-    return github.finish(run, argv, {0: ("done",)})
+    return common.finish(run, argv, {0: ("done",)})
 
 
 if __name__ == "__main__":
