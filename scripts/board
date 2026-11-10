@@ -470,7 +470,7 @@ def main(argv=None) -> int:
                     help="print no per-change lines on a real sync (for a caller that only wants the exit code)")
     ap.add_argument("--verbose", action="store_true", help="print `writes: <n>` (the writes made) on stderr")
     args = ap.parse_args(argv)
-    url = config.Config.load(args.repo).board
+    url = config.for_checkout(args.repo).board
     if not url:
         return 0
     m = PROJECT_URL.match(url)

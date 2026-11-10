@@ -97,6 +97,7 @@ VERDICT_WORDS = {
     "ask-user": "<why>", "retry": "", "left": "<pr> <why>",
     # gate
     "review": "<head>", "rerun-after-ci": "", "wait-older": "<pr> <older>",
+    "wait-ticket": "<pr> <ticket>",
     # watch-ci: one `also:` per PR that settled, then `settled`
     "settled": "", "ci-pass": "<pr> <head>", "ci-fail": "<pr> <head>", "no-run": "<pr> <head>",
     "stuck": "<pr> <run id> <job id>", "head-not-reached": "<pr> <sha>", "gave-up": "<pr> <why>",

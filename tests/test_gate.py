@@ -292,15 +292,46 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.env.gh_calls(), [])
         self.assertEqual(self.env.events(), [])
 
-    def test_cwd_is_where_repo_commands_and_config_live(self):
-        self.prime()
+    def worktree_copy(self, line):
+        """A PR tree under the main checkout whose own copy of the config carries `line`."""
         other = self.env.repo / "wt"
         (other / ".claude").mkdir(parents=True)
-        (other / ".claude" / "orchestration.md").write_text("## Review\n\n- **Repo-specific checks:** where (run: `pwd`)\n")
+        (other / ".claude" / "orchestration.md").write_text(f"## Review\n\n- **Repo-specific checks:** {line}\n")
+        return other
+
+    def test_cwd_is_where_repo_commands_run_and_the_main_checkout_holds_the_config(self):
+        self.prime()
+        self.config("where (run: `pwd`)")
+        other = self.worktree_copy("none")
         r = self.gate("--cwd", str(other))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("pwd", r.stdout)
         self.assertEqual(len(r.stdout.splitlines()), 10)
+
+    def test_a_config_edit_in_the_prs_worktree_does_not_change_the_gate(self):
+        # The PR adds a failing `run:` command to its own copy of the config: the gate judges by the main checkout's.
+        self.prime()
+        self.config("none")
+        other = self.worktree_copy("sneaky (run: `exit 4`)")
+        r = self.gate("--cwd", str(other))
+        self.assertEqual((r.returncode, self.next_lines(r)), (0, ["next: review " + HEAD]), r.stdout + r.stderr)
+        self.assertNotIn("exit 4", r.stdout)
+
+    def test_a_config_edit_in_the_prs_worktree_cannot_remove_a_check(self):
+        self.prime()
+        self.config("codegen (run: `exit 4`)")
+        other = self.worktree_copy("none")
+        r = self.gate("--cwd", str(other))
+        self.assertEqual((r.returncode, self.next_lines(r)), (1, ["next: send-back 7"]), r.stdout + r.stderr)
+        self.assertIn("exit 4", r.stdout)
+
+    def test_the_tier_thresholds_come_from_the_main_checkout(self):
+        self.prime()
+        self.tiers(risk="`src/a.py`")  # the PR touches it: L
+        other = self.worktree_copy("none")  # the copy has no Risk paths row
+        r = self.gate("--cwd", str(other))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("tier L", r.stdout)
 
     def test_several_markers_in_one_item_all_run(self):
         self.prime()
@@ -440,15 +471,30 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.event()["failed"], [name])
         return r.stdout
 
-    def test_an_overlap_with_a_ticket_that_has_no_pr_fails_with_holds_output(self):
-        # A building ticket (no PR yet) holds src/a.py: the hold was broken at dispatch, so the PR is sent back.
+    def building(self, touch_map="src/a.py"):
         node = {"number": 12, "labels": {"nodes": []}, "assignees": {"totalCount": 1}}
         self.prime(issues=[node])
         state = self.env.repo / ".claude" / "orchestrate-state.json"
         state.parent.mkdir(exist_ok=True)
-        state.write_text(json.dumps({"session": "test-session", "tickets": {"12": {"touch_map": "src/a.py"}}}))
-        out = self.failed_only(self.gate(), "no overlap with held paths")
-        self.assertIn("overlap: src/a.py (held by building #12)", out)
+        state.write_text(json.dumps({"session": "test-session", "tickets": {"12": {"touch_map": touch_map}}}))
+
+    def test_an_overlap_with_a_building_ticket_is_a_hold_naming_it_not_a_send_back(self):
+        # A ticket still building (no PR yet) holds src/a.py: the PR is fine and waits for it (#535).
+        self.building()
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: wait-ticket 7 12"]), r.stdout + r.stderr)
+        self.assertIn("waits for #12 (still building) to merge: src/a.py", r.stdout)
+        self.assertEqual((self.event()["outcome"], self.event()["failed"]), ("unknown", []))
+
+    def test_an_overlap_with_an_exclusive_hold_is_still_a_send_back(self):
+        # An overlap the PR itself must fix: the path is held by no ticket that will merge.
+        self.building()
+        p = self.env.repo / ".claude" / "orchestration.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("## Slots\n\n- **Exclusive holds:** `src/a.py`\n")
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (1, ["next: send-back 7"]), r.stdout + r.stderr)
+        self.assertIn("overlap: src/a.py", r.stdout)
 
     def test_the_younger_of_two_open_prs_on_one_path_waits_for_the_older(self):
         self.prime(others=[{"number": 5, "headRefName": "12-older"}])
@@ -582,8 +628,9 @@ class GateTest(unittest.TestCase):
         wt = self.env.repo / ".claude" / "worktrees" / "w1"
         subprocess.run(["git", "worktree", "add", "-q", "-b", "w1", str(wt)], cwd=self.env.repo, check=True)
         self.assertFalse((wt / ".claude" / "orchestrate-state.json").exists())
-        out = self.failed_only(self.run_from(wt), "no overlap with held paths")
-        self.assertIn("building #12", out)
+        r = self.run_from(wt)
+        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: wait-ticket 7 12"]), r.stdout + r.stderr)
+        self.assertIn("#12 (still building)", r.stdout)
 
     def test_a_renamed_to_secret_path_fails(self):
         diff = "diff --git a/old.txt b/.env\nsimilarity index 100%\nrename from old.txt\nrename to .env\n"

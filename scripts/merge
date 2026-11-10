@@ -395,7 +395,7 @@ def readiness(cwd, pr, v, approved, gap=HEAD_GAP):
         verdict(f"re-review {pr}")
         return 6
     files, lines = changes
-    cfg = config.Config.load(cwd)
+    cfg = config.for_checkout(cwd)
     risky = sorted(f for f in files if replay.is_shared(f, cfg.risk_paths))
     over = cfg.tier_s_lines is not None and cfg.tier_s_files is not None \
         and (lines > cfg.tier_s_lines or len(files) > cfg.tier_s_files)
@@ -691,7 +691,7 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
     if default is None:
         say("sweep skipped: the default branch is unknown")
         return False
-    rules = replay.Rules.from_config(config.Config.load(cwd))
+    rules = replay.Rules.from_config(config.for_checkout(cwd))
     try:
         prs = github.open_prs(default, cwd)
     except github.GhError as e:
