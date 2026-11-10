@@ -1170,33 +1170,89 @@ def cmd_record(argv: list) -> None:
     ap = argparse.ArgumentParser(prog="profile.py record")
     ap.add_argument("--repo", type=Path, required=True)
     ap.add_argument("--session", required=True)
-    ap.add_argument("pass_json", nargs="?", help="the pass as JSON (see skills/run/SKILL.md, Profiling)")
-    ap.add_argument("--nudged", type=int, metavar="TICKET",
-                    help="record that the pass nudged this idle ticket's worker (`claims` then prints `nudged <ts>`)")
+    ap.add_argument("--scope", default="full", help="full (default), status, wake, #<ticket> or parent #<n>")
+    ap.add_argument("--slots", type=int, help="the slot count in force when it is not the config's (a greedy cap)")
+    ap.add_argument("--greedy", action="store_true", help="the pass ran under --greedy (needs --slots: the cap is in no file)")
+    ap.add_argument("--idle", nargs="*", metavar="REASON=N", help=f"why free slots stayed free ({', '.join(runlog.IDLE_REASONS)}); must sum to the free slots")
+    ap.add_argument("--dispatched", type=int, nargs="*", default=[], metavar="TICKET")
+    ap.add_argument("--merged", type=int, nargs="*", default=[], metavar="TICKET")
+    ap.add_argument("--suggestion", help='the slot suggestion, e.g. "2 → 3"')
+    ap.add_argument("--limit-hit", action="store_true")
+    ap.add_argument("--reset-at", help="ISO time the usage limit resets")
+    ap.add_argument("--nudged", type=int, nargs="*", metavar="TICKET",
+                    help="the idle tickets this pass nudged (`claims` then prints `nudged <ts>`); alone, it writes just the nudge")
+    ap.add_argument("--snapshot", help="the tracker snapshot to derive from (default: the snapshot file, else fetch)")
+    ap.add_argument("--state", type=Path, help="state file (default: <repo>/.claude/orchestrate-state.json)")
     args = ap.parse_args(argv)
-    if args.nudged is not None:
-        if args.pass_json:
-            common.die("profile record: --nudged takes no pass JSON")
-        # Not a pass the profile counts for slots (no `slots`); it is the one record `claims` reads for a nudge.
-        try:
-            runlog.append_pass(args.repo, args.session, {"scope": runlog.NUDGE_SCOPE, "nudged": [args.nudged]})
-        except runlog.NoSession as e:
-            common.die(f"profile record: {e}")  # this CLI's whole job is the record
-        return
-    if not args.pass_json:
-        common.die("profile record: expected the pass as JSON, or --nudged <ticket>")
+    if not args.session:
+        common.die("profile record: runlog: no session, pass not written")  # before any derivation: nothing to read for
     try:
-        entry = json.loads(args.pass_json)
-    except ValueError as e:
-        common.die(f"profile record: not JSON: {e}")
-    if not isinstance(entry, dict):
-        common.die("profile record: expected a JSON object")
-    if not isinstance(entry.get("greedy", False), bool):
-        common.die("profile record: greedy must be true or false")
-    try:
-        runlog.append_pass(args.repo, args.session, entry)
+        # A nudge alone is not a pass the profile counts for slots; it is the one record `claims` reads for a nudge.
+        if args.nudged and argv_is_only_nudge(args):
+            runlog.append_pass(args.repo, args.session, {"scope": runlog.NUDGE_SCOPE, "nudged": args.nudged})
+            return
+        runlog.append_pass(args.repo, args.session, derive_pass(args))
     except runlog.NoSession as e:
+        common.die(f"profile record: {e}")  # this CLI's whole job is the record
+    except runlog.BadPass as e:
         common.die(f"profile record: {e}")
+
+
+def argv_is_only_nudge(args) -> bool:
+    return (args.scope == "full" and args.slots is None and not args.greedy and args.idle is None and not args.dispatched
+            and not args.merged and args.suggestion is None and not args.limit_hit and args.reset_at is None)
+
+
+def derive_pass(args) -> dict:
+    """The pass record from the flags (what only the orchestrator knows) and the libraries (everything else): `claimed`
+    from `claims`, `slots` and `free` from the config and the claimed, `takeable_waiting` from the snapshot, `greedy` from
+    the flag. Dies in one line when a source can't be read; `append_pass` refuses what is off the schema."""
+    import claims
+    import github
+    import tracker
+    from repo import STATE
+    root = args.repo.resolve()
+    if args.greedy and args.slots is None:
+        common.die("profile record: --greedy needs --slots <the greedy cap>")
+    slots = args.slots if args.slots is not None else config.Config.load(root).slots
+    if slots is None:
+        common.die("profile record: no slot count: the config has no Slots line; pass --slots")
+    idle = {}
+    for item in args.idle or ():
+        reason, _, count = item.partition("=")
+        if not count.isdigit() or reason in idle:
+            common.die(f"profile record: --idle takes REASON=N once each, not {item!r}")
+        idle[reason] = int(count)
+    snap_path = args.snapshot or (str(root / tracker.SNAPSHOT_FILE) if (root / tracker.SNAPSHOT_FILE).is_file() else None)
+    try:
+        snap = tracker.Snapshot.open(snap_path, root)
+        found = claims.claims(root, args.state or root / STATE, snap.issues, snap.prs, snap.merged, session=args.session)
+        takeable = {i["number"] for i in tracker.takeable(snap.issues, tracker.label_strings(root))}
+    except github.GhError as e:
+        common.die(f"profile record: cannot derive the pass: gh failed: {e.message}")
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        common.die(f"profile record: cannot derive the pass: {e}")
+    # A lead's ticket holds no slot (skills/run/SKILL.md, step 3), and a done one is not occupying anything.
+    held = [n for n, c in found.items() if c.state not in ("done", "with-lead")]
+    entry = {
+        "scope": args.scope,
+        "slots": slots,
+        "greedy": args.greedy,
+        "claimed": {str(n): found[n].state for n in sorted(found)},
+        "free": max(slots - len(held), 0),
+        # A ticket dispatched this pass can still read as takeable in a snapshot taken before it.
+        "takeable_waiting": len(takeable - set(args.dispatched)),
+        "limit_hit": args.limit_hit,
+        "reset_at": args.reset_at,
+        "dispatched": args.dispatched,
+        "merged": args.merged,
+        "suggestion": args.suggestion,
+    }
+    if args.idle is not None or args.scope != "wake":
+        entry["idle"] = idle
+    if args.nudged:
+        entry["nudged"] = args.nudged
+    return entry
 
 
 MIN_MERGED = 20  # a trial with fewer merged tickets is inconclusive

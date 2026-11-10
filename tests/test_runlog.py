@@ -17,6 +17,9 @@ import repo  # noqa: E402
 import runlog  # noqa: E402
 
 
+PASS = {"scope": "full", "slots": 2, "free": 0, "idle": {}}  # the smallest full pass record the schema accepts
+
+
 def _vcs(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
@@ -48,7 +51,7 @@ class RunLogTest(unittest.TestCase):
 
     def test_worktree_pass_and_event_are_found_from_either_checkout(self):
         wt = self.worktree()
-        runlog.append_pass(wt, "s", {"slots": 2})
+        runlog.append_pass(wt, "s", PASS)
         runlog.append_event(wt, "ci", "pass", ref=2, session="s")
         self.assertFalse((wt / runlog.PROFILES).exists())
         for where in (self.repo, wt):
@@ -56,14 +59,44 @@ class RunLogTest(unittest.TestCase):
             self.assertEqual([e["ref"] for e in runlog.read_events(where, "s", *self.span)], [2])
 
     def test_a_wake_pass_keeps_its_scope_and_an_unchecked_idle_reason(self):
-        runlog.append_pass(self.repo, "s", {"scope": "wake", "free": 1, "idle": {"unchecked": 1}})
+        runlog.append_pass(self.repo, "s", {"scope": "wake", "slots": 2, "free": 1, "idle": {"unchecked": 1}})
         (p,) = runlog.read_passes(self.repo, "s")
         self.assertEqual((p["scope"], p["idle"]), ("wake", {"unchecked": 1}))
+
+    def test_append_pass_refuses_an_off_schema_record_and_writes_nothing(self):
+        bad = [
+            {"event": "pass-end", "slots": 2},  # no scope: invented under load
+            {"pass": "wake", "slots": 2, "free": 0},
+            {**PASS, "scope": "weekly"},
+            {**PASS, "extra": 1},
+            {"scope": "full", "slots": 2, "idle": {}},  # no free
+            {**PASS, "free": 3, "idle": {"empty": 3}},  # more free than slots
+            {**PASS, "free": 1, "idle": {"empty": 2}},  # idle does not sum to free
+            {**PASS, "free": 1, "idle": {"bored": 1}},  # unknown reason
+            {"scope": "full", "slots": 2, "free": 1},  # only a wake may omit idle
+            {**PASS, "greedy": "yes"},
+            {**PASS, "dispatched": ["7"]},
+            {**PASS, "claimed": {"1": 2}},
+            {"scope": "nudge", "nudged": []},
+            {"scope": "nudge", "nudged": [3], "slots": 2},
+            [1],
+        ]
+        for entry in bad:
+            with self.assertRaises(runlog.BadPass, msg=entry):
+                runlog.append_pass(self.repo, "s", entry)
+        self.assertFalse(runlog.log_path(self.repo, runlog.PASS_LOG).exists())
+
+    def test_append_pass_accepts_every_scope_a_wake_without_idle_and_a_nudge(self):
+        for scope in ("full", "status", "#7", "parent #9"):
+            runlog.append_pass(self.repo, "s", {**PASS, "scope": scope})
+        runlog.append_pass(self.repo, "s", {"scope": "wake", "slots": 2, "free": 1})
+        runlog.append_pass(self.repo, "s", {"scope": runlog.NUDGE_SCOPE, "nudged": [4]})
+        self.assertEqual(len(runlog.read_passes(self.repo, "s")), 5)  # the nudge is not a pass
 
     def test_a_removed_worktree_still_resolves_to_the_main_checkout(self):
         # The harness removes a worktree when its agent ends, but a transcript still names its path.
         wt = self.worktree()
-        runlog.append_pass(wt, "s", {"slots": 2})
+        runlog.append_pass(wt, "s", PASS)
         _vcs(self.repo, "worktree", "remove", str(wt))
         self.assertFalse(wt.exists())
         self.assertEqual(repo.main_checkout(wt), self.repo)
@@ -71,7 +104,7 @@ class RunLogTest(unittest.TestCase):
 
     def test_profile_built_for_a_worktree_session_finds_both_logs(self):
         wt = self.worktree()
-        runlog.append_pass(wt, "sess", {"slots": 2})
+        runlog.append_pass(wt, "sess", PASS)
         runlog.append_event(wt, "gate", "pass", ref=1, session="sess")
         transcript = self.repo.parent / "sess.jsonl"
         ts = datetime.now(timezone.utc).isoformat()
@@ -161,8 +194,8 @@ class RunLogTest(unittest.TestCase):
         self.assertIsNone(runlog.read_events(self.repo, "s", long_ago, long_ago + timedelta(days=1)))
 
     def test_passes_are_per_session(self):
-        runlog.append_pass(self.repo, "a", {"slots": 1})
-        runlog.append_pass(self.repo, "b", {"slots": 3})
+        runlog.append_pass(self.repo, "a", {**PASS, "slots": 1})
+        runlog.append_pass(self.repo, "b", {**PASS, "slots": 3})
         (p,) = runlog.read_passes(self.repo, "b")
         self.assertEqual((p["slots"], p["session"]), (3, "b"))
         self.assertIn("ts", p)

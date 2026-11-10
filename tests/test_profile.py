@@ -157,7 +157,7 @@ class ProfileTest(unittest.TestCase):
 
     def test_record_with_an_empty_session_exits_2_in_one_line_and_writes_no_pass(self):
         import subprocess
-        for extra in (['{"slots": 1}'], ["--nudged", "5"]):
+        for extra in ([], ["--nudged", "5"]):
             r = subprocess.run([sys.executable, str(SCRIPTS / "profile.py"), "record", "--repo", str(self.fx.repo),
                                 "--session", "", *extra], capture_output=True, text=True)
             self.assertEqual(r.returncode, 2, r.stderr)
@@ -174,11 +174,10 @@ class ProfileTest(unittest.TestCase):
         raw = [json.loads(l) for l in runlog.log_path(self.fx.repo, runlog.PASS_LOG).read_text().splitlines()]
         self.assertEqual((raw[-1]["scope"], raw[-1]["nudged"]), ("nudge", [7]))
 
-    def test_an_unchecked_idle_reason_round_trips_through_record_and_shows_in_the_summary(self):
+    def test_an_unchecked_idle_reason_round_trips_through_the_pass_log_and_shows_in_the_summary(self):
         # A slot left empty because holds exited 2 is `unchecked`, not `limit` (which means a usage limit only).
         for ts, idle in ((at(1), {}), (at(31), {"unchecked": 1, "empty": 1})):
-            subprocess.run([sys.executable, str(SCRIPTS / "profile.py"), "record", "--repo", str(self.fx.repo), "--session", SESSION,
-                            json.dumps({"ts": ts, "scope": "wake", "slots": 2, "free": len(idle) and 2, "idle": idle})], check=True)
+            runlog.append_pass(self.fx.repo, SESSION, {"ts": ts, "scope": "wake", "slots": 2, "free": len(idle) and 2, "idle": idle})
         p = self.fx.run()
         self.assertEqual((p["metrics"]["idle_s"]["unchecked"], p["metrics"]["idle_s"]["empty"]), (600, 600))
         self.assertNotIn("limit", p["metrics"]["idle_s"])
@@ -197,11 +196,10 @@ class ProfileTest(unittest.TestCase):
             self.assertEqual(self.fx.run()["end"], at(window_end), record_at)
 
     def test_stray_jsonl_lines_and_naive_timestamps_do_not_crash_the_profile(self):
-        # `record` merges the caller's JSON over ts/session, so a naive ts lands in the pass log verbatim.
+        # `append_pass` lets the caller's ts win over its own stamp, so a naive ts lands in the pass log verbatim.
         naive = at(5).replace("Z", "")
         self.assertNotIn("+", naive)
-        subprocess.run([sys.executable, str(SCRIPTS / "profile.py"), "record", "--repo", str(self.fx.repo),
-                        "--session", SESSION, json.dumps({"ts": naive, "slots": 2, "free": 0})], check=True)
+        runlog.append_pass(self.fx.repo, SESSION, {"ts": naive, "scope": "full", "slots": 2, "free": 0, "idle": {}})
         log = runlog.log_path(self.fx.repo, runlog.PASS_LOG)
         with open(log, "a") as f:
             f.write("[]\n3\n\n\"text\"\nnot json\n")
@@ -895,27 +893,87 @@ class CommandTest(unittest.TestCase):
         return subprocess.run([sys.executable, "-I", str(SCRIPTS / name), *args], input=stdin,
                               capture_output=True, text=True, env=self.env, check=True)
 
-    def test_record_appends_a_stamped_pass(self):
-        repo = self.root / "repo"
-        self.script("profile.py", "record", "--repo", str(repo), "--session", "s", '{"slots": 2, "free": 1}')
-        self.script("profile.py", "record", "--repo", str(repo), "--session", "s", '{"slots": 2, "free": 0}')
-        rows = [json.loads(line) for line in (runlog.log_path(repo, runlog.PASS_LOG)).read_text().splitlines()]
-        self.assertEqual([(r["session"], r["free"]) for r in rows], [("s", 1), ("s", 0)])
-        self.assertIn("ts", rows[0])
-        self.script("profile.py", "record", "--repo", str(repo), "--session", "s", '{"slots": 5, "free": 2, "greedy": true}')
-        self.assertIs(json.loads((runlog.log_path(repo, runlog.PASS_LOG)).read_text().splitlines()[-1])["greedy"], True)
-
     def run_profile(self, *args):
         return subprocess.run([sys.executable, "-I", str(SCRIPTS / "profile.py"), *args],
                               capture_output=True, text=True, env=self.env)
 
-    def test_record_with_bad_json_could_not_run(self):
-        repo = str(self.root / "repo")
-        for bad in ("{nope", "[1]", '{"slots": 5, "greedy": "yes"}'):
-            r = self.run_profile("record", "--repo", repo, "--session", "s", bad)
-            self.assertEqual(r.returncode, 2, r.stderr)
-            self.assertIn("profile record", r.stderr)
+    def record_repo(self, slots=2):
+        """A git repo whose config has `slots` slots and whose snapshot holds #1 (claimed, no worker: stalled) and the
+        takeable #2 and #3."""
+        repo = self.root / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        (repo / ".claude" / "orchestration.md").write_text(f"## Slots\n\n- **Slots:** {slots}.\n")
+
+        def issue(n, claimed):
+            return {"number": n, "title": f"t{n}", "labels": ["ready-for-agent"], "claimed": claimed, "blockers": [],
+                    "sub_issues": {"total": 0, "completed": 0}, "body": "", "parent": None}
+        (repo / ".claude" / "orchestrate-snapshot.json").write_text(json.dumps(
+            {"repo": {}, "issues": [issue(1, True), issue(2, False), issue(3, False)], "prs": [], "merged": [], "abandoned": []}))
+        return repo
+
+    def record(self, repo, *args):
+        return self.run_profile("record", "--repo", str(repo), "--session", "s", *args)
+
+    def rows(self, repo):
+        path = runlog.log_path(repo, runlog.PASS_LOG)
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_record_derives_claimed_slots_free_takeable_and_greedy(self):
+        repo = self.record_repo()
+        r = self.record(repo, "--idle", "overlap=1", "--dispatched", "2", "--merged", "9", "--suggestion", "2 → 3")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (row,) = self.rows(repo)
+        self.assertEqual({k: row[k] for k in ("scope", "slots", "free", "claimed", "greedy", "idle", "dispatched", "merged", "suggestion",
+                                              "takeable_waiting", "limit_hit", "reset_at")},
+                         {"scope": "full", "slots": 2, "free": 1, "claimed": {"1": "stalled"}, "greedy": False, "idle": {"overlap": 1},
+                          "dispatched": [2], "merged": [9], "suggestion": "2 → 3",
+                          "takeable_waiting": 1,  # #3; #2 was dispatched this pass, though the snapshot still shows it
+                          "limit_hit": False, "reset_at": None})
+        self.assertEqual((row["session"], "ts" in row), ("s", True))
+        # Flags the config does not hold: the greedy cap and the usage limit.
+        self.assertEqual(self.record(repo, "--greedy", "--slots", "4", "--idle", "empty=3", "--limit-hit",
+                                     "--reset-at", "2026-11-10T15:00:00Z").returncode, 0)
+        row = self.rows(repo)[-1]
+        self.assertEqual((row["slots"], row["free"], row["greedy"], row["limit_hit"], row["reset_at"]),
+                         (4, 3, True, True, "2026-11-10T15:00:00Z"))
+
+    def test_a_wake_may_omit_idle_and_a_nudge_rides_on_the_record(self):
+        repo = self.record_repo()
+        self.assertEqual(self.record(repo, "--scope", "wake", "--nudged", "1").returncode, 0)
+        (row,) = self.rows(repo)
+        self.assertNotIn("idle", row)
+        self.assertEqual((row["scope"], row["nudged"]), ("wake", [1]))
+
+    def test_record_nudged_alone_writes_only_the_nudge(self):
+        repo = self.record_repo()
+        self.assertEqual(self.record(repo, "--nudged", "5").returncode, 0)
+        (row,) = self.rows(repo)
+        self.assertEqual((row["scope"], row["nudged"]), ("nudge", [5]))
+
+    def test_record_refuses_what_it_does_not_understand_in_one_line_and_appends_nothing(self):
+        repo = self.record_repo()
+        for args in (["--idle", "overlap=2"],  # one free slot, two idle
+                     [],  # a full pass names why its free slot is free
+                     ["--idle", "bored=1"],
+                     ["--idle", "overlap"],
+                     ["--idle", "overlap=1", "overlap=1"],
+                     ["--scope", "weekly", "--idle", "overlap=1"],
+                     ["--greedy", "--idle", "overlap=1"],  # the cap is in no file
+                     ['{"scope": "full"}']):  # the JSON positional is gone
+            r = self.record(repo, *args)
+            self.assertEqual(r.returncode, 2, (args, r.stderr))
+            self.assertIn("profile", r.stderr.strip().splitlines()[-1], args)  # ours, or argparse's usage error
             self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(self.rows(repo), [])
+
+    def test_record_refuses_when_there_is_no_slot_count(self):
+        repo = self.record_repo()
+        (repo / ".claude" / "orchestration.md").unlink()
+        r = self.record(repo, "--idle", "empty=0")
+        self.assertEqual((r.returncode, len(r.stderr.strip().splitlines())), (2, 1), r.stderr)
+        self.assertIn("no slot count", r.stderr)
+        self.assertEqual(self.record(repo, "--slots", "2", "--idle", "empty=1").returncode, 0)
 
     def test_unknown_session_could_not_run(self):
         r = self.run_profile("no-such-session")

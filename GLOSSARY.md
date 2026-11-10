@@ -107,7 +107,7 @@ One run of `/orchestrate:run`: reconcile, resume, review, fill slots, report. So
 _Avoid_: iteration, cycle
 
 **Pass record**:
-The one line a pass leaves in the **Run log**'s pass log: its scope, slots, claims, idle reasons, dispatches, merges and nudges. `profile.py record` is its one writer and derives what the orchestrator need not say. Source: `scripts/profile.py`, `scripts/runlog.py`.
+The one line a pass leaves in the **Run log**'s pass log: its scope, slots, claims, idle reasons, dispatches, merges and nudges. `profile.py record` is its one writer: it takes flags for what only the orchestrator knows and derives the rest (claims, slots, free, takeable waiting, greedy), and `runlog.append_pass` refuses a record off the schema (idle reasons that do not sum to the free slots, an unknown field or scope) with exit 2 and appends nothing. Source: `scripts/profile.py`, `scripts/runlog.py`.
 _Avoid_: pass table (what the orchestrator prints to the user), pass event
 
 **Run log**:
