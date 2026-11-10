@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""sweep [--repo DIR] [--session ID] [--snapshot FILE] [--due] : the lead's breakage sweep, as one command (GLOSSARY.md, Breakage sweep).
+
+Runs six checks and prints one line per finding, `<check>: <detail>`, then one `next:` line:
+    red-main: <check> on <branch> concluded <conclusion>   the default branch's newest commit has a failed check run
+    stale-claim: #<n> stalled ...                           a claim that is stalled and holds no unsaved work (`claims` has the detail)
+    orphan-worktree: <path> (<why>)                         a worktree under .claude/worktrees/ that no claim names and no live lock holds
+    new-prompt: <role> <tool> <command word>                a kind of permission prompt (`scripts/prompts --watermark`) no earlier sweep reported
+    failed-rescue: #<n> <why>                               a stalled claim whose worktree still holds work (dirty, unpushed, or on the harness's branch): `rescue <n>` did not save it
+    rounds: PR #<n> is in review round <r>                  an open PR whose newest `review` event is round 3 or later
+    next: clean | findings <n>
+The thresholds are constants in this file (DUE_MERGES, ROUND_LIMIT), tested, not config lines.
+Running it writes a `sweep` event `ran` (the watermark) and one `prompt-kind` event per new kind (ref = the kind), to the run log,
+so `--due` and the seen set survive a restart and a compaction. A prompt kind is `<role> <tool> <first word of the command>`.
+--due reads only: `next: due <n>` when DUE_MERGES merges (`merge` events) have landed since the last `ran` event (all of them when
+there is none), else `next: not-due <n>`.
+Exit codes: 0 ran; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository), one line on stderr; a rate limit it would
+not sleep through also ends `next: retry-after <time>`. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import claims
+import common
+import github
+import runlog
+import tracker
+from repo import STATE, main_checkout
+
+DUE_MERGES = 10  # merges since the last sweep before the lead sweeps again
+ROUND_LIMIT = 3  # a PR whose newest review is this round or later has been open too long
+BAD_CONCLUSIONS = {"failure", "timed_out", "cancelled", "startup_failure", "action_required"}
+HERE = Path(__file__).resolve().parent
+
+
+def merges_since(root) -> int:
+    """The `merged` events after the newest `sweep ran` event (all of them with none). Counted by position in the log, not
+    by time: a merge and a sweep in the same second keep their order."""
+    count = 0
+    for e in runlog.read_kinds(root, [runlog.SWEEP, runlog.MERGE]):
+        if e.get("kind") == runlog.SWEEP:
+            count = 0 if e.get("outcome") == "ran" else count
+        elif e.get("outcome") == runlog.MERGED:
+            count += 1
+    return count
+
+
+def red_main(root, branch) -> list:
+    data = github.call_json("api", f"repos/{{owner}}/{{repo}}/commits/{branch}/check-runs?per_page=100", cwd=root)
+    runs = data.get("check_runs") if isinstance(data, dict) else None
+    return [f"red-main: {r.get('name', '?')} on {branch} concluded {r['conclusion']}" for r in runs or []
+            if isinstance(r, dict) and str(r.get("conclusion") or "").lower() in BAD_CONCLUSIONS]
+
+
+def claim_findings(found) -> list:
+    """stale-claim and failed-rescue lines: a stalled claim is a rescue that never saved work when its worktree still holds some."""
+    out = []
+    for n in sorted(found):
+        c = found[n]
+        if c.state != "stalled":
+            continue
+        unsaved = c.pending_branch or (c.changes is not None and any(c.changes))
+        if unsaved:
+            why = "worktree is on the harness's branch" if c.pending_branch else f"worktree holds dirty {c.changes[0]} unpushed {c.changes[1]}"
+            out.append(f"failed-rescue: #{n} {why}")
+        else:
+            out.append(f"stale-claim: #{n} stalled {c.branch or 'no-branch'} lock {c.lock[0] if c.lock else 'none'}")
+    return out
+
+
+def orphans(root, found) -> list:
+    named = {str(Path(c.worktree).resolve()) for c in found.values() if c.worktree}
+    base = str(Path(root).resolve() / ".claude" / "worktrees") + os.sep
+    out = []
+    for wt in common.worktrees(root):
+        path = str(Path(wt["path"]).resolve())
+        if not path.startswith(base) or path in named:
+            continue
+        if wt["locked"] is not None and common.worker_liveness(wt["locked"])[0] != "dead":
+            continue
+        out.append(f"orphan-worktree: {path} ({'dead lock' if wt['locked'] is not None else 'no lock'}, no claim)")
+    return out
+
+
+def prompt_kind(line):
+    """`<role> <tool> <command word>` of a `scripts/prompts` list line (`<time> <role> <tool> <detail>`), or None for a header line."""
+    if line.startswith(("prompts:", "by role:", "by tool:", "...")):
+        return None
+    parts = line.split()
+    if len(parts) < 3:
+        return None
+    word = os.path.basename(parts[3]) if len(parts) > 3 else ""
+    return " ".join(p for p in (parts[1], parts[2], word) if p)
+
+
+def new_prompts(root) -> list:
+    r = common.run(sys.executable, str(HERE / "prompts"), "--repo", str(root), "--watermark")
+    if r.code != 0:
+        common.die(f"sweep: cannot run: prompts failed: {common.one_line(r.stderr)}")
+    seen = {str(e.get("ref")) for e in runlog.read_kinds(root, [runlog.SWEEP]) if e.get("outcome") == "prompt-kind"}
+    kinds = []
+    for line in r.stdout.splitlines():
+        k = prompt_kind(line)
+        if k and k not in seen and k not in kinds:
+            kinds.append(k)
+    return kinds
+
+
+def rounds(root, prs) -> list:
+    newest = {}
+    for e in runlog.read_kinds(root, [runlog.REVIEW]):
+        if isinstance(e.get("round"), int):
+            newest[str(e.get("ref")).lstrip("#")] = e["round"]
+    return [f"rounds: PR #{p['number']} is in review round {newest[str(p['number'])]}" for p in prs
+            if newest.get(str(p.get("number")), 0) >= ROUND_LIMIT]
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    ap.add_argument("--session", default=None, help="this session's id: the claims it reads and the events it writes are its own")
+    ap.add_argument("--snapshot", default=None, help="read the tracker from this file (scripts/snapshot) instead of fetching")
+    ap.add_argument("--due", action="store_true", help="only answer whether DUE_MERGES merges landed since the last sweep")
+    args = ap.parse_args(argv)
+    if args.session:
+        os.environ[runlog.SESSION_ENV] = args.session
+    root = Path(args.repo).resolve()
+    if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
+        common.die(f"sweep: cannot run: {args.repo} is not in a git repository")
+    root = main_checkout(root)
+    if args.due:
+        n = merges_since(root)
+        return common.verdict("due" if n >= DUE_MERGES else "not-due", n, exit_code=0)
+    try:
+        snap = tracker.Snapshot.open(args.snapshot, root)
+        found = claims.claims(root, root / STATE, snap.issues, snap.prs, snap.merged, session=args.session)
+        findings = red_main(root, snap.default_branch) + claim_findings(found) + orphans(root, found)
+        kinds = new_prompts(root)
+        findings += [f"new-prompt: {k}" for k in kinds] + rounds(root, snap.prs)
+    except github.GhError as e:
+        until = common.rate_limit_time(e.message)
+        if until:
+            print(f"sweep: cannot run: gh failed: {e.message}", file=sys.stderr)
+            return common.verdict("retry-after", until, exit_code=2)
+        common.die(f"sweep: cannot run: gh failed: {e.message}")
+    except (KeyError, TypeError, ValueError) as e:
+        common.die(f"sweep: cannot run: {e}")
+    for f in findings:
+        print(f)
+    try:
+        for k in kinds:
+            runlog.append_event(root, runlog.SWEEP, "prompt-kind", ref=k)
+        runlog.append_event(root, runlog.SWEEP, "ran")
+    except runlog.NoSession as e:
+        print(f"{e}; the next sweep will report these again", file=sys.stderr)
+    return common.verdict("clean", exit_code=0) if not findings else common.verdict("findings", len(findings), exit_code=0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
