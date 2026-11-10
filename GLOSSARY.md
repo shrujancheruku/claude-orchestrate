@@ -79,7 +79,7 @@ A **Claim** state: a claimed ticket with no ready PR that only the user can move
 _Avoid_: blocked, on hold, stalled (a stalled ticket has nobody on it; a waiting one has the user)
 
 **Idle**:
-A **Claim** state: a building ticket whose worker is not live and has reported nothing since its last commit. A pass nudges it once, and hands it back if it is still idle after the nudge. Source: `scripts/claims`, `skills/run/SKILL.md`.
+A **Claim** state: a building ticket whose worker ended its turn with a report the pass does not act on (an interim), and has had no completion since. A pass nudges it once, and hands it back if it is still idle after the nudge. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: hung, stuck, stalled (stalled means no worker at all)
 
 **Snapshot**:
