@@ -21,7 +21,7 @@ script (ADR-0006). The flags cannot live in settings: the session-only auto-mode
                                 Code makes every file under an inline plugin's root sensitive, worktrees included
                                 (#581). The newest 3 snapshots are kept; one stderr line names the sha. The snapshot
                                 carries viewer/ too (profile.py reads it). Run from a snapshot (the lead's), launch
-                                reuses it. A plugin change reaches a background run only through a fresh launch; a
+                                exports afresh from the checkout in its .source, else reuses it. A plugin change reaches a background run only through a fresh launch; a
                                 background resume says on stderr when its snapshot (the last orchestrate/plugin/<sha> path in
                                 its saved transcript) is behind origin/<default>, or that it cannot tell (#628).
     "env":{"ORCHESTRATE_ROLE":"orchestrator"}
@@ -80,7 +80,7 @@ SETTINGS = {"disableAutoMode": "disable"}
 INBOUND = {"crossSessionInbound": "accept"}
 SNAPSHOT_DIRS = (".claude-plugin", "hooks", "agents", "skills", "scripts", "viewer")  # what the plugin loads or reads (viewer: profile.py's HTML, #628)
 SOURCE_FILE = ".source"  # in a snapshot: the path of the checkout it was exported from
-KEEP = 3 # snapshots kept after a launch, the one in use included
+KEEP = 3  # snapshots kept after a launch, the one in use included
 MIN_AGE = 24 * 3600  # a snapshot younger than this is never pruned: a live session may still load it
 
 
@@ -134,10 +134,15 @@ def saved_snapshot(session_id):
     own loaded paths are recorded."""
     try:
         path = common.find_transcript(session_id)
-        found = SNAPSHOT_PATH.findall(path.read_text(errors="replace")) if path else []
+        found = None
+        if path:
+            with open(path, errors="replace") as f:  # streamed: a transcript can be tens of MB
+                for line in f:
+                    for m in SNAPSHOT_PATH.finditer(line):
+                        found = m.group(1)
     except OSError:
         return None
-    return cache_base() / found[-1] if found else None
+    return cache_base() / found if found else None
 
 
 def stale_line(args, root: Path, session_id):
@@ -183,9 +188,16 @@ def snapshot(root: Path, fetch: bool = True):
     and the worktrees sit inside the checkout, so each worker edit prompted (#581). The export lives outside the
     repo (never under ~/.claude either). At most KEEP snapshots stay; older ones are removed.
     """
-    if is_snapshot(root):  # launch run from a snapshot (a lead's): reuse it, nothing to export or prune (#628)
-        os.utime(root)
-        return root, root.resolve().name
+    if is_snapshot(root):  # launch run from a snapshot (a lead's, #628): export afresh from the checkout it came from
+        try:
+            source = Path((root / SOURCE_FILE).read_text().strip())
+            usable = source.is_dir() and common.run("git", "-C", str(source), "rev-parse", "--show-toplevel")[0] == 0
+        except OSError:
+            usable = False
+        if not usable:  # no .source (an older snapshot) or its checkout is gone: reuse this one
+            os.utime(root)
+            return root, root.resolve().name
+        root = source
     git = ["git", "-C", str(root)]
     code, top, _ = common.run(*git, "rev-parse", "--show-toplevel")
     if code != 0:

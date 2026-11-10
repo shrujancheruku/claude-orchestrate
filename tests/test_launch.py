@@ -325,6 +325,25 @@ class Launch(unittest.TestCase):
         self.assertTrue((self.snap / "marker").exists())
         self.assertTrue((self.snap / "viewer" / "f.txt").exists())
 
+    def test_launch_from_an_old_snapshot_exports_the_newer_origin(self):
+        self.assertEqual(self.launch("--print").returncode, 0)  # snapshot of v1, with its .source
+        newer = self.commit_plugin("v2")
+        r = self.launch("--bg", "--greedy=4", root=self.snap)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        new_snap = self.cache / "orchestrate" / "plugin" / newer
+        self.assertIn(f"ARG:--plugin-dir\nARG:{new_snap}\n", r.stdout)
+        self.assertEqual((new_snap / "hooks" / "f.txt").read_text(), "v2")
+
+    def test_launch_from_a_snapshot_without_a_usable_source_reuses_it(self):
+        self.assertEqual(self.launch("--print").returncode, 0)
+        self.commit_plugin("v2")
+        (self.snap / ".source").unlink()  # a snapshot exported before the file existed
+        r = self.launch("--bg", "--greedy=4", root=self.snap)
+        self.assertIn(f"ARG:--plugin-dir\nARG:{self.snap}\n", r.stdout)
+        (self.snap / ".source").write_text(str(self.tmp / "gone") + "\n")  # its checkout is gone
+        r = self.launch("--bg", "--greedy=4", root=self.snap)
+        self.assertIn(f"ARG:--plugin-dir\nARG:{self.snap}\n", r.stdout)
+
     def test_a_directory_in_the_cache_that_is_not_a_sha_is_still_refused(self):
         odd = self.cache / "orchestrate" / "plugin" / "not-a-sha"
         odd.mkdir(parents=True)
