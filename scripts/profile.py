@@ -1193,7 +1193,7 @@ def write_html(data: dict, path: Path) -> None:
 
 
 def cmd_profile(argv: list) -> None:
-    ap = argparse.ArgumentParser(prog="profile.py")
+    ap = argparse.ArgumentParser(prog="profile.py", allow_abbrev=False)  # the guard approves the full flag names only (#545)
     ap.add_argument("session", help="session ID or transcript path")
     ap.add_argument("--repo", type=Path, help="repo the session ran in (default: the transcript's cwd)")
     ap.add_argument("--slots", type=int, help="slot count (default: the pass log, then the config)")
@@ -1214,7 +1214,7 @@ def cmd_profile(argv: list) -> None:
 
 
 def cmd_record(argv: list) -> None:
-    ap = argparse.ArgumentParser(prog="profile.py record")
+    ap = argparse.ArgumentParser(prog="profile.py record", allow_abbrev=False)
     ap.add_argument("--repo", type=Path, required=True)
     ap.add_argument("--session", required=True)
     ap.add_argument("--scope", default="full", help="full (default), status, wake, #<ticket> or parent #<n>")

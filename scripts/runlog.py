@@ -33,7 +33,7 @@ GH_CALL = "gh_call"  # scripts/github.py: one per `gh` attempt (ok|failed|rateli
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
-    CI: (PASS, FAIL),
+    CI: (PASS, FAIL, "rerun"),  # "rerun": scripts/ci-rerun made the PR's CI run again (head; run and job for a job rerun)
     MERGE: (MERGED, TIMEOUT, CLOSED),
     REPLAY: ("line-replay", "word-merge", "regenerated", "handed-back"),
     # scripts/worker-report: the first word of its verdict line.

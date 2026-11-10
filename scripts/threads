@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""threads [<pr>] [--all] | resolve <thread>... (--fixed <sha> | --left <why> (--followup <issue> | --no-followup)) | reopen <thread>... --why <why> [--verbose] [--repo DIR]
+"""threads [<pr>] [--all] | resolve <thread>... (--fixed <sha> | --left <why> (--followup <issue> | --no-followup)) | reopen <thread>... --why <why> | followup [<thread>...] [--gist <text>] [--verbose] [--repo DIR]
 
 The one place a review thread is read, closed or reopened (ADR-0006; the rule "a review thread is closed with a reply by
 whoever acts on it" lives here, not in the prompts).
@@ -17,6 +17,14 @@ whoever acts on it" lives here, not in the prompts).
                             A left thread names the ticket that carries it, or says outright that none does (#442):
                             `--left` refuses with neither flag, so a minor left behind is never lost unrecorded.
     threads <pr> reopen <thread>... --why <why>      replies `reopened: <why>`, then unresolves
+    threads <pr> followup [<thread>...] [--gist <text>]
+                            files the one follow-up ticket of the PR (#545) and prints its number, for the
+                            `resolve ... --left <why> --followup <n>` that follows: first line `Left from PR #<pr>`, labels
+                            `needs-triage` and `lead`, each thread as `path:line` with the reviewer's text word for word
+                            (no thread id: every open trusted thread), the worker's `followup-needed` gist when given.
+                            Idempotent: an open issue by a trusted author whose first line is that one is appended to
+                            (only what it lacks) instead of a second being filed. Also adds a `Left for #<n>` line to the
+                            PR body unless it has one. Nothing to carry (no thread, no gist) is exit 1.
 
 A thread whose first comment is from an untrusted author (ADR-0015: not OWNER, MEMBER or COLLABORATOR, and not on the
 config's `Trusted authors:` line) is listed as `<id> <author> <path>:<line> untrusted (text withheld)`, and `resolve` and
@@ -40,6 +48,7 @@ run it again). Stdlib only, Python 3.9+.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 import common
@@ -117,6 +126,64 @@ def on_branch(sha, shas) -> bool:
     return len(sha) >= MIN_SHA and any(s.startswith(sha.lower()) for s in shas)
 
 
+FOLLOWUP_LABELS = ("needs-triage", "lead")
+THREADS_HEADING = "Left threads, the reviewer's text word for word:"
+LEFT_FOR = re.compile(r"(?im)^\s*Left for #(\d+)")
+
+
+def thread_entry(t) -> str:
+    """One left thread as the follow-up ticket lists it: `path:line` and the reviewer's first comment word for word."""
+    where = f"{t['path']}:{t['line'] if t['line'] else 'file'}"
+    quoted = "\n".join("  > " + line if line else "  >" for line in t["comments"][0]["body"].strip().splitlines())
+    return f"- `{where}` (thread {t['id']})\n{quoted}"
+
+
+def followup(pr, threads, args, cwd) -> int:
+    """`threads <pr> followup [<thread id>...] [--gist <text>]`: file the one follow-up ticket of PR <pr> (first line
+    `Left from PR #<pr>`; labels needs-triage and lead; each thread as `path:line` with the reviewer's text; the worker's
+    gist) and print its number, so `resolve ... --left <why> --followup <n>` follows. With no thread id the PR's open
+    trusted threads are the ones left. The PR's earlier ticket (an open issue by a trusted author with that first line) is
+    appended to instead, only with what it lacks, so a second call changes nothing. The PR body gets its `Left for #<n>`
+    line unless it has one (the merged PR then points at the ticket)."""
+    by_id = {t["id"]: t for t in threads}
+    chosen = []
+    for tid in dict.fromkeys(args.thread):
+        thread = by_id.get(tid)
+        if thread is None:
+            return refuse(f"PR #{pr} has no review thread {tid}")
+        if not thread.get("trusted", True):
+            return refuse(f"thread {tid} is from an untrusted author; the developer resolves it (ADR-0015)")
+        chosen.append(thread)
+    if not args.thread:
+        chosen = [t for t in threads if not t["resolved"] and t.get("trusted", True) and t["comments"]]
+    gist = (args.gist or "").strip()
+    if not chosen and not gist:
+        return refuse(f"PR #{pr} has no open thread to carry and no --gist: nothing to file")
+    first = f"Left from PR #{pr}"
+    entries = [thread_entry(t) for t in chosen]
+    trusted = github.trusted_logins(cwd)
+    existing = next((i for i in github.recent_open_issues(cwd=cwd)
+                     if str(i.get("body") or "").strip().split("\n", 1)[0].strip() == first
+                     and github.is_trusted(i.get("author_association"), (i.get("user") or {}).get("login"), trusted)), None)
+    if existing is None:
+        body = "\n\n".join([first, *( [f"From the worker: {gist}"] if gist else []),
+                            *( [THREADS_HEADING, "\n".join(entries)] if entries else [])])
+        title_from = gist.splitlines()[0] if gist else chosen[0]["comments"][0]["body"].strip().splitlines()[0]
+        number = github.create_issue(f"Follow-up from PR #{pr}: {common.one_line(title_from, 70)}", body, FOLLOWUP_LABELS, cwd=cwd)
+    else:
+        number, body = existing["number"], str(existing.get("body") or "").rstrip()
+        missing = [e for t, e in zip(chosen, entries) if f"(thread {t['id']})" not in body]
+        add = ([f"From the worker: {gist}"] if gist and gist not in body else []) + (
+            ([] if THREADS_HEADING in body else [THREADS_HEADING]) + ["\n".join(missing)] if missing else [])
+        if add:
+            github.set_body("issues", number, body + "\n\n" + "\n\n".join(add), cwd=cwd)
+    pr_body = github.pr_view(pr, "body", cwd=cwd)["body"]
+    if not LEFT_FOR.search(pr_body):
+        github.set_body("pulls", pr, (pr_body.rstrip() + "\n\n" if pr_body.strip() else "") + f"Left for #{number}", cwd=cwd)
+    print(number)
+    return 0
+
+
 def main(argv=None) -> int:
     # No abbreviations: the guard approves a worker's call by the flags' full names, so `--rep` must not mean `--repo`.
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
@@ -128,16 +195,26 @@ def main(argv=None) -> int:
     ap.add_argument("--followup", metavar="ISSUE", help="resolve --left: the follow-up ticket that carries the left thread")
     ap.add_argument("--no-followup", action="store_true", help="resolve --left: no ticket carries it (recorded in the reply)")
     ap.add_argument("--why", metavar="WHY", help="reopen: what is still wrong")
+    ap.add_argument("--gist", metavar="TEXT", help="followup: the worker's `followup-needed` gist, put in the ticket")
     ap.add_argument("--verbose", action="store_true", help="print `writes: <n>` (mutation requests sent) on stderr")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
     words = list(args.words)
     pr = words.pop(0).lstrip("#") if words and words[0].lstrip("#").isdigit() else None
-    args.action = words.pop(0) if words and words[0] in ("resolve", "reopen") else None
+    args.action = words.pop(0) if words and words[0] in ("resolve", "reopen", "followup") else None
     args.thread = words if args.action else []
     if words and not args.action:
-        ap.error("the first word must be a PR number, `resolve` or `reopen`")
-    if args.action:
+        ap.error("the first word must be a PR number, `resolve`, `reopen` or `followup`")
+    if args.action == "followup":
+        if pr is None:
+            ap.error("followup needs the PR number")
+        if args.all or args.fixed or args.left or args.why or args.followup is not None or args.no_followup:
+            ap.error("followup takes thread ids and --gist only")
+    elif args.gist is not None:
+        ap.error("--gist goes with followup")
+    if args.action == "followup":
+        pass
+    elif args.action:
         if not args.thread:
             ap.error(f"{args.action} needs a thread id")
         if args.all:
@@ -173,6 +250,8 @@ def main(argv=None) -> int:
             for line in listing(threads, args.all):
                 print(line)
             return 0
+        if args.action == "followup":
+            return followup(pr, threads, args, cwd)
         by_id = {t["id"]: t for t in threads}
         chosen = []
         for tid in dict.fromkeys(args.thread):  # a repeated id is one thread

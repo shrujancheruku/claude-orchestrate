@@ -84,7 +84,7 @@ When the orchestrator runs in the background (launched with `--bg`), you are the
 
 ### Risk notes
 
-Each risk note gets one outcome: take it in, send a scout to check one point, or file a follow-up ticket. Move the watermark past an L-tier PR with `"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief" --repo . --checkpoint <pr>` only when every note on that PR has an outcome.
+A PR whose review was not posted carries its risk notes in the one fallback comment `worker-report <pr> --reviewer --post-risk-notes` posted for the orchestrator (`> *Risk notes (review not posted).*`); `lead-brief` prints whichever the PR has, and you post no risk-notes comment yourself. Each risk note gets one outcome: take it in, send a scout to check one point, or file a follow-up ticket. Move the watermark past an L-tier PR with `"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief" --repo . --checkpoint <pr>` only when every note on that PR has an outcome.
 
 ### CI times
 
