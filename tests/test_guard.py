@@ -2209,9 +2209,10 @@ class GhCallLogTest(unittest.TestCase):
             (root / ".git").mkdir()
             (root / ".claude").mkdir()
             (root / ".claude" / "orchestrate-state.json").write_text(json.dumps({"session": "s1"}))
-            with unittest.mock.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("ORCHESTRATE_SESSION", None)
-                os.environ.pop("ORCHESTRATE_GH_LOG", None)
+            with unittest.mock.patch.dict(os.environ, {}, clear=False), \
+                    unittest.mock.patch.object(GUARD_MODULE, "approval", return_value=True):  # these cases are about the log, not the approval table
+                for name in ("ORCHESTRATE_SESSION", "ORCHESTRATE_GH_LOG", "ORCHESTRATE_ROLE"):
+                    os.environ.pop(name, None)
                 decision = decide(agent_type, command, cwd=root)
             log = root / ".claude" / "orchestrate-profiles" / "events.jsonl"
             lines = log.read_text().splitlines() if log.exists() else []
@@ -2225,11 +2226,21 @@ class GhCallLogTest(unittest.TestCase):
                          ("gh_call", "worker", "agent:worker", "pr view", False, True))
 
     def test_a_write_and_a_rest_call_are_told_apart(self):
-        _, rows = self.rows("orchestrate:reviewer", "gh pr comment 3 --body x && gh api repos/o/r/pulls/3")
-        self.assertEqual([(r["role"], r["write"], r["graphql"]) for r in rows], [("reviewer", True, True), ("reviewer", False, False)])
+        _, rows = self.rows("orchestrate:reviewer", "gh pr view 3 && gh api repos/o/r/pulls/3")
+        self.assertEqual([(r["role"], r["write"], r["graphql"]) for r in rows], [("reviewer", False, True), ("reviewer", False, False)])
 
     def test_a_non_gh_command_writes_nothing(self):
         _, rows = self.rows("orchestrate:worker", "git status && echo gh")
+        self.assertEqual(rows, [])
+
+    def test_a_denied_command_is_not_logged(self):
+        decision, rows = self.rows("orchestrate:worker", "gh pr merge 5")
+        self.assertEqual((decision, rows), ("deny", []))
+
+    def test_the_main_session_is_labelled_orchestrator_and_a_foreign_agent_is_not_logged(self):
+        _, rows = self.rows(None, "gh pr view 1")
+        self.assertEqual([r["role"] for r in rows], ["orchestrator"])
+        _, rows = self.rows("other:agent", "gh pr view 1")
         self.assertEqual(rows, [])
 
     def test_the_decision_is_unchanged_by_logging(self):
