@@ -1558,6 +1558,8 @@ def orchestrator_merge_form(cmd: Command, args: list) -> bool:
     """True when the orchestrator's merge call is `<pr> [flags]`: the script first (no env prefix, no wrapper),
     a PR number, then only MERGE_VALUE_FLAGS, each with one value, in full (`--flag value` or `--flag=value`)."""
     words = [w.text for w in args]
+    if len(cmd.words) - len(args) == 1 and words == ["--fast-forward-only"]:
+        return True  # the first pass's start-up fast-forward of the main checkout (#473): the flag alone, no `--cwd`
     if len(cmd.words) - len(args) != 1 or not words or not is_number(words[0]):
         return False
     seen, j = set(), 1

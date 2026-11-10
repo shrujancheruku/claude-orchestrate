@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -10,8 +11,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCH = ROOT / "scripts" / "launch"
-SETTINGS = "'{\"disableAutoMode\":\"disable\"}'"
-BG_SETTINGS = "'{\"disableAutoMode\":\"disable\",\"crossSessionInbound\":\"accept\"}'"
+
+
+def settings_arg(snap, auto=True, inbound=False):
+    """The --settings argument as launch prints it: single-quoted compact JSON, the snapshot read rule last (#617)."""
+    body = {}
+    if auto:
+        body["disableAutoMode"] = "disable"
+    if inbound:
+        body["crossSessionInbound"] = "accept"
+    body["permissions"] = {"allow": [f"Read(/{snap}/**)"]}
+    return "'" + json.dumps(body, separators=(",", ":")) + "'"
 
 CONFIG = """# Orchestration config
 
@@ -95,7 +105,7 @@ class Launch(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(
             r.stdout.strip(),
-            f"claude --name orchestrator --permission-mode acceptEdits --settings {SETTINGS} --model opus "
+            f"claude --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.snap)} --model opus "
             f"--plugin-dir {self.snap} \"/orchestrate:run --greedy\"")
 
     def test_plugin_dir_is_never_inside_the_repo_in_any_mode(self):
@@ -182,25 +192,54 @@ class Launch(unittest.TestCase):
     def test_bg_adds_the_flag_and_cross_session_inbound(self):
         out = self.launch("--print", "--bg").stdout
         self.assertTrue(out.startswith("claude --bg --name orchestrator "), out)
-        self.assertIn(BG_SETTINGS, out)
+        self.assertIn(settings_arg(self.snap, inbound=True), out)
 
     def test_bypass_permissions_accepts_inbound_messages(self):
         out = self.launch("--print", "--permission-mode", "bypassPermissions").stdout
         self.assertIn("--permission-mode bypassPermissions", out)
-        self.assertIn(BG_SETTINGS, out)
+        self.assertIn(settings_arg(self.snap, inbound=True), out)
+
+    def settings_of(self, *args):
+        """The parsed --settings JSON of a printed line."""
+        out = self.launch("--print", *args)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(shlex.split(out.stdout)[shlex.split(out.stdout).index("--settings") + 1])
+
+    def test_every_line_allows_reads_of_exactly_the_snapshot(self):
+        want = [f"Read(/{self.snap}/**)"]  # `//` + the path without its leading slash
+        self.assertTrue(want[0].startswith("Read(//"))
+        for mode in [(), ("--bg",), ("--lead",), ("--resume", "abc"), ("--permission-mode", "bypassPermissions")]:
+            s = self.settings_of(*mode)
+            self.assertEqual(s["permissions"], {"allow": want}, mode)
+            if "--lead" not in mode:
+                self.assertEqual(s["disableAutoMode"], "disable", mode)
+            if mode in [("--bg",), ("--lead",), ("--permission-mode", "bypassPermissions")]:
+                self.assertEqual(s["crossSessionInbound"], "accept", mode)
+
+    def test_settings_carry_no_edit_write_or_bash_rule(self):
+        for mode in [(), ("--bg",), ("--lead",), ("--resume", "abc")]:
+            perms = self.settings_of(*mode)["permissions"]
+            self.assertEqual(list(perms), ["allow"], mode)
+            for rule in perms["allow"]:
+                self.assertTrue(rule.startswith("Read("), rule)
+        self.assertNotIn("--add-dir", self.launch("--print").stdout)
+
+    def test_marketplace_install_has_no_read_rule(self):
+        root = self.claude_dir / "plugins" / "market"
+        self.assertNotIn("permissions", self.launch("--print", root=root).stdout)
 
     def test_resume_keeps_the_flags_and_drops_the_prompt(self):
         out = self.launch("--print", "--resume", "abc-123").stdout.strip()
         self.assertEqual(
             out,
-            f"claude --resume abc-123 --name orchestrator --permission-mode acceptEdits --settings {SETTINGS} "
+            f"claude --resume abc-123 --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.snap)} "
             f"--model opus --plugin-dir {self.snap}")
         self.assertEqual(self.launch("--print", "--resume", "abc", "--greedy=2").returncode, 2)
 
     def test_lead_line_accepts_inbound_messages(self):
         out = self.launch("--print", "--lead").stdout.strip()
         self.assertEqual(
-            out, "claude --name lead --settings '{\"crossSessionInbound\":\"accept\"}' "
+            out, f"claude --name lead --settings {settings_arg(self.snap, auto=False, inbound=True)} "
                  f"--plugin-dir {self.snap} \"/orchestrate:lead\"")
 
     def test_live_orchestrator_refuses_a_plain_launch(self):
@@ -252,7 +291,7 @@ class Launch(unittest.TestCase):
         self.set_model("sonnet", lead="opus (used when scripts/launch --lead starts it)")
         out = self.launch("--print", "--lead").stdout.strip()
         self.assertEqual(
-            out, "claude --name lead --settings '{\"crossSessionInbound\":\"accept\"}' --model opus "
+            out, f"claude --name lead --settings {settings_arg(self.snap, auto=False, inbound=True)} --model opus "
                  f"--plugin-dir {self.snap} \"/orchestrate:lead\"")
         self.set_model("sonnet", lead="--dangerously-skip-permissions")
         self.assertEqual(self.launch("--print", "--lead").returncode, 2)

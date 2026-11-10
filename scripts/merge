@@ -49,6 +49,8 @@ After the cleanup it also fast-forwards the main checkout (the first `git worktr
 scripts the orchestrator runs and the files a lead reads are the merged code: one line, `main checkout fast-forwarded to <sha>`
 or `main checkout not updated (<reason>)`. It skips, never stashes, resets or fails the merge, when the checkout is dirty, on
 another branch, mid merge/rebase, or the update is not a fast-forward.
+`merge --fast-forward-only` does only that fast-forward (no PR, no session) and prints the same one line: exit 0 when the
+checkout moved, was current or is ahead of origin, exit 1 when a guard refused. The run's first pass calls it before it reads the config.
 Stdlib only, Python 3.9+.
 """
 
@@ -406,6 +408,8 @@ def readiness(cwd, pr, v, approved, gap=HEAD_GAP):
 
 def main(argv=None) -> int:
     """Run the merge, then print the `also:` lines and the one `next:` line (see the module docstring)."""
+    if "--fast-forward-only" in (sys.argv[1:] if argv is None else argv):
+        return run_fast_forward_only(argv)
     VERDICT["next"], VERDICT["also"], VERDICT["pr"] = None, [], "?"
     try:
         code = run_merge(argv)
@@ -425,6 +429,19 @@ def main(argv=None) -> int:
     return code
 
 
+def run_fast_forward_only(argv=None) -> int:
+    """`merge --fast-forward-only`: the run's first pass brings a stale main checkout up to date before it reads the
+    config (the skill runs no git itself, ADR-0006). One line, no verdict; exit 0 when the checkout moved, was
+    current or is ahead, 1 when a guard refused (the run goes on with the stale tree and says so)."""
+    ap = argparse.ArgumentParser(description="fast-forward the main checkout to origin/<default branch>", allow_abbrev=False)
+    ap.add_argument("--fast-forward-only", action="store_true", required=True)
+    ap.add_argument("--cwd", default=".", help="the repo (default: current directory)")
+    args = ap.parse_args(argv)
+    ok, line = fast_forward_result(args.cwd, default_branch(args.cwd))
+    say(line)
+    return 0 if ok else 1
+
+
 def run_merge(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("pr", help="PR number")
@@ -434,6 +451,8 @@ def run_merge(argv=None) -> int:
     ap.add_argument("--also-approved", action="append", default=[], metavar="PR=SHA",
                     help="another approved PR and the head approved; after this merge it is updated if behind (repeatable)")
     ap.add_argument("--worktree", help="the worker's worktree to remove after the merge")
+    ap.add_argument("--fast-forward-only", action="store_true",
+                    help="no PR: only fast-forward the main checkout to origin/<default branch> (handled before this parser; exit 1 when a guard refuses)")
     ap.add_argument("--cwd", default=".", help="the repo (default: current directory)")
     ap.add_argument("--timeout", type=float, default=300, help="seconds to wait for MERGED")
     ap.add_argument("--interval", type=float, default=5, help="seconds between state checks")
@@ -567,40 +586,46 @@ def run_merge(argv=None) -> int:
 
 def fast_forward_main(cwd, default):
     """One line: the main checkout fast-forwarded to origin/<default>, or why it was left alone. Never raises, never discards work."""
+    return fast_forward_result(cwd, default)[1]
+
+
+def fast_forward_result(cwd, default):
+    """(ok, line). ok is False when a guard refused (the line starts `main checkout not updated`); True when the
+    checkout moved, was already current, or is ahead of origin (nothing stale to fix)."""
     if not default:
-        return "main checkout not updated (default branch unknown)"
+        return False, "main checkout not updated (default branch unknown)"
     trees = common.worktrees(cwd)
     if not trees:
-        return "main checkout not updated (cannot list worktrees)"
+        return False, "main checkout not updated (cannot list worktrees)"
     main = trees[0]["path"]
     if trees[0]["branch"] != default:
-        return f"main checkout not updated (on {trees[0]['branch'] or 'a detached HEAD'}, not {default})"
+        return False, f"main checkout not updated (on {trees[0]['branch'] or 'a detached HEAD'}, not {default})"
     for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"):
         r = run("git", "rev-parse", "--git-path", marker, cwd=main)
         if r.code == 0 and (Path(main) / r.stdout.strip()).exists():
-            return "main checkout not updated (a merge or rebase is in progress)"
+            return False, "main checkout not updated (a merge or rebase is in progress)"
     # Tracked changes only: git itself refuses a fast-forward that would overwrite an untracked file.
     r = run("git", "status", "--porcelain", "--untracked-files=no", cwd=main)
     if r.code != 0:
-        return "main checkout not updated (git status failed)"
+        return False, "main checkout not updated (git status failed)"
     if r.stdout.strip():
-        return "main checkout not updated (uncommitted changes)"
+        return False, "main checkout not updated (uncommitted changes)"
     r = run("git", "fetch", "-q", "origin", default, cwd=main)
     if r.code != 0:
-        return "main checkout not updated (fetch failed)"
+        return False, "main checkout not updated (fetch failed)"
     before = run("git", "rev-parse", "HEAD", cwd=main).stdout.strip()
     if run("git", "merge-base", "--is-ancestor", f"origin/{default}", "HEAD", cwd=main).code == 0:
         # HEAD already holds origin's tip: equal, or local commits on top of it.
         if before == run("git", "rev-parse", f"origin/{default}", cwd=main).stdout.strip():
-            return "main checkout already up to date"
-        return "main checkout not updated (ahead of origin)"
+            return True, "main checkout already up to date"
+        return True, "main checkout not updated (ahead of origin)"
     r = run("git", "merge", "--ff-only", "-q", f"origin/{default}", cwd=main)
     if r.code != 0:
         # git's own reason (a diverged history, an untracked file in the way), not a guess.
         lines = [l for l in (r.stderr.strip() or r.stdout.strip()).splitlines() if not l.startswith("hint:")]
-        return f"main checkout not updated ({common.one_line(lines[0]) if lines else 'git refused the fast-forward'})"
+        return False, f"main checkout not updated ({common.one_line(lines[0]) if lines else 'git refused the fast-forward'})"
     r = run("git", "rev-parse", "--short", "HEAD", cwd=main)
-    return f"main checkout fast-forwarded to {r.stdout.strip()}"
+    return True, f"main checkout fast-forwarded to {r.stdout.strip()}"
 
 
 def update_approved(cwd, merged_pr, default, specs, gap=HEAD_GAP):

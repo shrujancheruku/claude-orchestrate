@@ -612,5 +612,83 @@ class Holds(unittest.TestCase):
                 self.assertIn("building #12 has an unparsed touch map", r.stderr)
 
 
+class HoldsLibrary(unittest.TestCase):
+    """scripts/holds.py on plain data: no subprocess, no fake gh."""
+
+    class Cfg:
+        def __init__(self, shared=(), exclusive=()):
+            self.shared, self.exclusive_holds = shared, list(exclusive)
+
+        def is_shared(self, path):
+            return path in self.shared
+
+    def setUp(self):
+        import holds
+        self.holds = holds
+
+    def held(self, cfg=None, **kw):
+        return self.holds.held_paths(cfg or self.Cfg(), kw.get("prs", {}), kw.get("tickets", {}), kw.get("others", {}), kw.get("off_map"))
+
+    def test_held_rows_name_every_holder_in_a_stable_order(self):
+        rows = self.held(self.Cfg(exclusive=["x.py"]), prs={9: ["a.py"], 3: ["a.py"]}, tickets={12: ["a.py", "x.py"]},
+                         others={13: ["a.py"]}, off_map={9: {"a.py"}})
+        self.assertEqual(rows[0], self.holds.Held("a.py", ("open PR #3", "open PR #9 file", "building #12", "elsewhere #13")))
+        self.assertEqual(rows[1].holders, ("building #12", "an exclusive hold"))
+        self.assertEqual(rows[1].render(), "x.py (held by building #12, an exclusive hold)")
+
+    def test_a_candidate_on_a_building_holder_is_counted(self):
+        held = self.held(tickets={12: ["a.py"]})
+        got = self.holds.overlaps(held, ["a.py", "b.py"], self.Cfg())
+        self.assertEqual(got, [self.holds.Overlap("counted", "a.py", ("building #12",))])
+        self.assertEqual(got[0].render(), "overlap: a.py (held by building #12)")
+
+    def test_a_shared_file_is_shared_not_counted(self):
+        held = self.held(prs={9: ["README.md"]})
+        got = self.holds.overlaps(held, ["README.md"], self.Cfg(shared=("README.md",)))
+        self.assertEqual([o.kind for o in got], ["shared"])
+        self.assertEqual(self.holds.Result(held, got).code, 0)
+
+    def test_the_younger_pr_waits_for_the_oldest_older_one_and_the_older_one_passes(self):
+        held = self.held(prs={5: ["a.py"], 7: ["a.py"], 12: ["a.py"]})
+        got = self.holds.overlaps(held, ["a.py"], self.Cfg(), own_pr=9, pr_tickets={5: 50, 7: 70})
+        self.assertEqual(got, [self.holds.Overlap("waits-for", "a.py", ("open PR #5", "open PR #7", "open PR #12"), pr=5, ticket=50)])
+        result = self.holds.Result(held, got)
+        self.assertEqual((result.code, result.wait_lines()), (3, ["waits for #50 (PR #5) to merge: a.py"]))
+        older = self.holds.overlaps(self.held(prs={12: ["a.py"]}), ["a.py"], self.Cfg(), own_pr=9)
+        self.assertEqual([o.kind for o in older], ["younger"])
+        self.assertEqual(self.holds.Result([], older).code, 0)
+
+    def test_a_non_pr_holder_makes_it_a_real_overlap_whatever_the_prs(self):
+        held = self.held(prs={5: ["a.py"]}, tickets={12: ["a.py"]})
+        got = self.holds.overlaps(held, ["a.py"], self.Cfg(), own_pr=9)
+        self.assertEqual([o.kind for o in got], ["counted"])
+        self.assertEqual(self.holds.Result(held, got).code, 1)
+
+    def test_a_directory_candidate_covers_the_held_file_under_it(self):
+        got = self.holds.overlaps(self.held(prs={9: ["db/a.sql"]}), ["db/"], self.Cfg())
+        self.assertEqual([(o.kind, o.path) for o in got], [("counted", "db/")])
+
+    def test_lines_render_the_held_paths_then_the_verdict(self):
+        r = self.holds.Result()
+        self.assertEqual(r.lines(), ["none", "overlap: none"])
+        held = self.held(tickets={12: ["a.py"]})
+        r = self.holds.Result(held, self.holds.overlaps(held, ["a.py"], self.Cfg()))
+        self.assertEqual(r.lines(), ["a.py (held by building #12)", "overlap: a.py (held by building #12)"])
+
+    def test_candidate_paths_report_empty_arguments_instead_of_printing(self):
+        self.assertEqual(self.holds.candidate_paths(["a.py, b.py", "none", " "]), (["a.py", "b.py"], [" "]))
+        self.assertEqual(self.holds.candidate_paths(["a,b.py"], literal=True), (["a,b.py"], []))
+
+    def test_an_unparsed_stored_map_holds_every_path(self):
+        from touchmap import HOLDS_ALL
+        self.assertEqual(self.holds.state_paths("unparsed:see x"), [HOLDS_ALL])
+        self.assertEqual(self.holds.state_paths(["a.py:10", "b.py"]), ["a.py", "b.py"])
+        self.assertEqual(self.holds.state_paths(None), [])
+
+    def test_pr_paths_join_the_declared_map_and_name_files_outside_it(self):
+        paths, off = self.holds.pr_paths(["a.py", "z.py"], {"touch_map": "a.py, b.py"})
+        self.assertEqual((paths, off), (["a.py", "z.py", "b.py"], {"z.py"}))
+
+
 if __name__ == "__main__":
     unittest.main()

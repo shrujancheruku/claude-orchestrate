@@ -410,20 +410,19 @@ class GateTest(unittest.TestCase):
         self.assertEqual((r.returncode, self.next_lines(r)), (1, ["next: send-back 7"]))
         self.assertIn("waits for #12 (PR #5)", r.stdout)
 
-    def test_holds_exit_1_with_no_output_is_could_not_run_not_an_overlap(self):
+    def test_a_holds_library_error_is_could_not_run_not_an_overlap(self):
         from importlib.machinery import SourceFileLoader
         from unittest import mock
         from importlib.util import module_from_spec, spec_from_loader
         loader = SourceFileLoader("gate_under_test", str(Path(__file__).resolve().parent.parent / "scripts" / "gate"))
         gate = module_from_spec(spec_from_loader("gate_under_test", loader))
         loader.exec_module(gate)
-        crash = gate.common.Run(1, "", "Traceback (most recent call last):\nOSError: boom")
-        snap = mock.Mock(repo=None, issues=[], prs=[], merged=[])
-        with mock.patch.object(gate.common, "run", return_value=crash), mock.patch.object(gate.tracker, "Snapshot"), \
+        snap = mock.Mock()
+        with mock.patch.object(gate.holds, "find", side_effect=OSError("boom")), \
                 mock.patch.object(gate.repo, "main_checkout", return_value=str(self.env.repo)):
             out = gate.overlap_check(7, str(self.env.repo), snap)
         self.assertIsInstance(out, str)
-        self.assertIn("holds could not run (exit 1, no verdict)", out)
+        self.assertIn("holds could not run: boom", out)
 
     def test_run_gate_exit_codes_are_pinned(self):
         """main() maps 0, 1 and 3 to a verdict and every other code to could-not-run: a new code must be added to
