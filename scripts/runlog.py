@@ -36,7 +36,7 @@ PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merge
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
     CI: (PASS, FAIL, "rerun"),  # "rerun": scripts/ci-rerun made the PR's CI run again (head; run and job for a job rerun)
-    MERGE: (MERGED, TIMEOUT, CLOSED),
+    MERGE: (MERGED, TIMEOUT, CLOSED, "gate-hold"),  # "gate-hold": scripts/merge refused a PR under a config Merge gate (gate, branch ride along)
     REPLAY: ("line-replay", "word-merge", "regenerated", "handed-back"),
     # scripts/worker-report: the first word of its verdict line.
     WORKER_REPORT: ("valid", "interim", "not-a-stop", "not-a-pr-opened", "duplicate", "missing-report", "limit", "error"),

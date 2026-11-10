@@ -173,7 +173,7 @@ _Avoid_: conflict report
 ### Control points
 
 **Gate**:
-A point where the user decides: a start gate holds a ticket before a worker starts, a merge gate holds an approved PR before it merges. Both come from the config. The **Script gate** and **Merge readiness** are mechanical checks that ask nobody, so they are not gates. Source: `skills/setup/config-template.md`, `skills/run/SKILL.md`.
+A point where the user decides: a start gate holds a ticket before a worker starts, a merge gate holds an approved PR before it merges. Both come from the config. A merge gate is read by `Config.merge_gate_for` and enforced by `merge`, which never merges a gated PR: it ends `next: ask-user gate <glob>` and the developer merges it by hand. The **Script gate** and **Merge readiness** are mechanical checks that ask nobody, so they are not gates. Source: `scripts/config.py`, `scripts/merge`, `skills/setup/config-template.md`, `skills/run/SKILL.md`.
 _Avoid_: approval, checkpoint, hold
 
 **Script gate**:

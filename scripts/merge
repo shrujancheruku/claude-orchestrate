@@ -210,6 +210,43 @@ def pr_patch(cwd, sha, default):
     return {path: tuple(rows) for path, rows in files.items()}
 
 
+def gate_of(cwd, pr):
+    """(glob, None) with the Merge gates glob the PR's changed files hit (glob None: no gate applies), or (None, 2) when
+    the file list can't be read (the PR is then not merged: a gate we can't judge is a gate)."""
+    # The main checkout's config, never the PR's own copy (#535): a PR can't edit the gate that judges it.
+    cfg = config.for_checkout(cwd)
+    if not cfg.merge_gates:
+        return None, None  # no gate configured: no file list to read
+    try:
+        files = github.pr_files(pr, cwd)
+    except github.GhError as e:
+        say(f"merge: could not read the changed files of PR #{pr} to judge its merge gate: {e.message}")
+        return None, 2
+    return cfg.merge_gate_for(files), None
+
+
+def gate_rule(cwd, pr, branch):
+    """Exit code 1 (or 2: could not read) when the PR touches a config Merge gates glob, else None.
+
+    There is no machine-readable go-ahead (#656): every agent runs `gh` as the developer, so a label or a comment
+    could be forged. A gated PR is always refused; the developer merges it by hand and the next call only cleans up."""
+    glob, code = gate_of(cwd, pr)
+    if code is not None:
+        return code
+    if glob is None:
+        return None
+    try:
+        title = github.pr_view(pr, "title", cwd).get("title") or ""
+    except github.GhError:
+        title = ""  # the title only sharpens the message
+    kind = "a release PR, " if title.startswith("chore(main): release") else ""
+    say(f"PR #{pr} is not merged by a script: {kind}it touches the merge gate {glob}; the developer merges it by hand "
+        f"(web UI or `! gh pr merge {pr}`), then run merge again to clean up")
+    log_event(cwd, "merge", "gate-hold", ref=pr, branch=branch, gate=glob)
+    verdict(f"ask-user gate {glob}")
+    return 1
+
+
 def merge_rule(cwd, pr, v, head):
     """Exit code 1 (or 2: could not read) when CI is not green on the head or the PR's ticket has an open blocker, else None."""
     rollup = v.get("statusCheckRollup")
@@ -481,6 +518,10 @@ def run_merge(argv=None) -> int:
     branch = v.get("headRefName") or ""
     state = v.get("state")
     head_oid = v.get("headRefOid") or ""
+    if state == "OPEN":  # with or without --approved-head: a gated PR is never merged by a script
+        code = gate_rule(cwd, pr, branch)
+        if code is not None:
+            return code
     if args.approved_head and state == "OPEN":
         code = readiness(cwd, pr, v, args.approved_head, min(HEAD_GAP, args.interval))
         if code is not None:
@@ -667,6 +708,12 @@ def update_approved(cwd, merged_pr, default, specs, gap=HEAD_GAP):
                 say(f"PR #{n} left alone: its head is no longer the approved one (pushed to since the approval)")
                 also(f"left {n} pushed to since the approval")
                 continue
+            glob, code = gate_of(cwd, n)
+            if glob is not None or code is not None:  # a gate that can't be judged holds too
+                say(f"PR #{n} left alone: " + (f"it touches the merge gate {glob}; the developer merges it by hand"
+                                               if glob else "its merge gate could not be judged"))
+                also(f"left {n} " + (f"gated by {glob}" if glob else "merge gate unknown"))
+                continue
             behind = github.behind_by(default, v.get("headRefName") or sha, cwd)
             if not behind:
                 continue
@@ -706,6 +753,10 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
             continue
         if r.get("isDraft"):
             continue  # a draft is still being built: its worker is pushing, and it enters review when marked ready
+        glob, code = gate_of(cwd, n)
+        if glob is not None or code is not None:  # the developer merges a gated PR; no script pushes to it meanwhile
+            say(f"sweep: PR #{n} {b} left alone: " + (f"it touches the merge gate {glob}" if glob else "its merge gate could not be judged"))
+            continue
         result = replay.sweep_branch(cwd, default, b, method, rules)
         if result.status == "skipped":
             say(result.note)

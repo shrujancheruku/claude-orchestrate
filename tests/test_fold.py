@@ -24,7 +24,9 @@ class Fold(unittest.TestCase):
         self.addCleanup(self.env.close)
         cfg = self.env.repo / ".claude" / "orchestration.md"
         cfg.parent.mkdir(exist_ok=True)
-        cfg.write_text("## Review\n\n- **Risk paths** (any PR touching them is reviewed as L): `hooks/**`\n")
+        # The Risk paths are a decoy: the gate fold reads is the Merge gates line (#656).
+        cfg.write_text("## Review\n\n- **Risk paths** (any PR touching them is reviewed as L): `scripts/x`\n\n"
+                       "## Gates\n\n- **Merge gates:** PRs touching `hooks/**` or `.github/workflows/**` are merged by the developer.\n")
 
     def serve(self, *nodes):
         graphql = {"data": {"repository": {"issues": {"nodes": list(nodes)}}}}
@@ -97,6 +99,13 @@ class Fold(unittest.TestCase):
                 self.assertEqual(r.returncode, 1)
                 self.assertIn("the merge gate differs", r.stdout)
                 self.assertEqual(self.writes(), [])
+
+    def test_two_tickets_under_different_merge_gates_are_not_folded(self):
+        self.serve(node(5, "Touch map: hooks/a.py\n"), node(6, "Touch map: .github/workflows/ci.yml\n"))
+        r = self.fold(5, 6)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("gated by hooks/** and #6 is gated by .github/workflows/**: the merge gate differs", r.stdout)
+        self.assertEqual(self.writes(), [])
 
     def test_two_gated_tickets_fold(self):
         self.serve(node(5, "Touch map: hooks/a.py\n"), node(6, "Touch map: hooks/b.py\n"))

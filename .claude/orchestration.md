@@ -49,7 +49,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 ## Gates
 
 - **Start gates:** none beyond the label filter.
-- **Merge gates:** PRs touching `hooks/**`, `.claude-plugin/**`, `.github/workflows/**`, `release-please-config.json` or `.release-please-manifest.json` wait for the user's go-ahead. release-please's `chore(main): release` PRs are never merged by the orchestrator.
+- **Merge gates:** PRs touching `hooks/**`, `.claude-plugin/**`, `.github/workflows/**`, `release-please-config.json` or `.release-please-manifest.json` are merged by the developer. release-please's `chore(main): release` PRs are never merged by the orchestrator.
 
 ## Human-only steps
 
