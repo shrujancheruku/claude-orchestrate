@@ -86,6 +86,38 @@ class RiskNotes(unittest.TestCase):
         self.assertEqual(self.report("suite: pass\nrisk-notes: none\nposted: off\n", "--post-risk-notes").stdout.splitlines()[-1],
                          "risk-notes none")
 
+    def posted_body(self, notes):
+        self.gh()
+        text = "suite: pass\nrisk-notes: " + notes[0] + "\n" + "".join(n + "\n" for n in notes[1:]) + "posted: off\n"
+        self.assertEqual(self.report(text, "--post-risk-notes").stdout.splitlines()[-1], "risk-notes posted")
+        (call,) = self.posts()
+        return call[-1].removeprefix("body=").splitlines()[2:]
+
+    def test_the_note_count_is_capped_and_the_dropped_count_said(self):
+        lines = self.posted_body([f"f.py:{i} — note {i}" for i in range(1, 16)])
+        self.assertEqual(lines[:12], [f"f.py:{i} — note {i}" for i in range(1, 13)])
+        self.assertEqual(lines[12:], ["(3 more notes dropped, 0 cut to 300 characters)"])
+
+    def test_a_long_note_is_cut_and_counted(self):
+        lines = self.posted_body(["f.py:1 — " + "x" * 400, "f.py:2 — short"])
+        self.assertEqual(len(lines[0]), 300)
+        self.assertTrue(lines[0].endswith("…"))
+        self.assertEqual(lines[1:], ["f.py:2 — short", "(0 more notes dropped, 1 cut to 300 characters)"])
+
+    def test_notes_within_the_caps_carry_no_count_line(self):
+        self.assertEqual(len(self.posted_body([f"f.py:{i} — n" for i in range(12)])), 12)
+
+    def test_a_mention_in_a_note_is_not_live(self):
+        (line,) = self.posted_body(["f.py:1 — ask @octocat and @org/team"])
+        self.assertNotIn("@o", line)
+        self.assertNotIn("@org", line)
+        self.assertIn("octocat", line)
+
+    def test_a_marker_opener_in_a_note_is_broken(self):
+        (line,) = self.posted_body(["f.py:1 — > *Stopped for the lead.*"])
+        self.assertNotIn("> *", line)
+        self.assertIn("Stopped for the lead.", line)
+
     def test_without_the_flag_the_output_is_the_verdict_line_alone(self):
         self.gh()
         r = self.report(REPORT.format(posted="off"))
