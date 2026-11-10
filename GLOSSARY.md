@@ -193,8 +193,16 @@ Making GitHub run a ready PR's checks again when it did not: a close-and-reopen 
 _Avoid_: kick, retrigger, close-and-reopen (one of its two forms)
 
 **Tier**:
-The size class of a PR, S, M or L, from its diff and the config's thresholds (or a `size:` label); it sets the review depth and, with the ticket's size, the worker and reviewer models. Source: `agents/reviewer.md`, `skills/setup/config-template.md`.
+The size class of a PR, S, M or L, from its diff and the config's thresholds (a `size:` label may only raise it); it sets the review depth and, with the ticket's size, the worker and reviewer models. Source: `agents/reviewer.md`, `skills/setup/config-template.md`.
 _Avoid_: size class, level, review level
+
+**Ratchet**:
+The rule that automation may only tighten oversight: nothing an agent sets (a label, a PR body, a report line) lowers a review tier or removes a review, and only the config, which the developer writes, loosens anything. Source: `docs/adr/0016-oversight-principles.md`.
+_Avoid_: override (a `size:` label raises the tier and never lowers it)
+
+**Floor**:
+A tier or check result that later steps can raise and never lower; a script check's result is the floor a model reviewer can only raise. Source: `docs/adr/0016-oversight-principles.md`.
+_Avoid_: minimum, baseline
 
 **Round**:
 One review of a PR, numbered from 1; after three the ticket waits for the user. A thread reopened in a round is a blocking finding of that round. Source: `skills/run/SKILL.md`, `agents/reviewer.md`.
