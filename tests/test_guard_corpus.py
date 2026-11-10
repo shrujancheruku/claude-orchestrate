@@ -12,6 +12,9 @@ reviewed edit to the corpus line in the same PR.
 
 Lines whose long quoted text became `TEXT` (a `bash -c "..."`, `python3 -c "..."` or `gh api "..."`
 call) and heredoc bodies (`BODY`) are shape checks, not the original command: the quoted text is gone.
+`unapproved` is a deny that only says no rule approves the call (#567): a worker, reviewer or scout never gets the
+permission prompt, so what `silent` was for them is `unapproved` now. `allow` stays "no rule refuses it" and also
+matches an `unapproved` actual; pin a new form as `approve` or `unapproved`.
 A line with `"background": true` is a call made with `run_in_background` set.
 Lines with `"source": "hand"` are written by hand, not mined: they pin refusals no real session
 exercised (a worker pushing to main, a scout writing), so over-allowing shows up too.
@@ -120,7 +123,13 @@ class Decider:
             out = sys.stdout.getvalue()
         finally:
             sys.stdin, sys.stdout = stdin, stdout
-        return json.loads(out)["hookSpecificOutput"]["permissionDecision"].replace("allow", "approve") if out else "allow"
+        if not out:
+            return "allow"
+        decision = json.loads(out)["hookSpecificOutput"]
+        if decision["permissionDecision"] == "deny" and decision["permissionDecisionReason"].startswith(
+                "orchestrate guard: " + self.module.UNAPPROVED_MARK):
+            return "unapproved"
+        return decision["permissionDecision"].replace("allow", "approve")
 
 
 class GuardCorpus(unittest.TestCase):
@@ -161,7 +170,7 @@ class GuardCorpus(unittest.TestCase):
                 self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source", "background", "timeout"})
                 self.assertTrue(row["role"].startswith("orchestrate:"), row["role"])
                 self.assertTrue(row["command"].strip())
-                self.assertIn(row["expected"], ("allow", "approve", "silent", "deny"))
+                self.assertIn(row["expected"], ("allow", "approve", "silent", "deny", "unapproved"))
                 if "gap" in row:
                     self.assertRegex(row["gap"], r"^#\d+$")
         keys = [(r["role"], r["command"]) for r in self.rows]
@@ -174,7 +183,7 @@ class GuardCorpus(unittest.TestCase):
             with self.subTest(label):
                 # `allow` means the rules accept the call (silently or by an explicit approval); `approve` is
                 # the explicit `permissionDecision: "allow"` (#358); `silent` is neither, so the permission layer decides.
-                matches = actual == row["expected"] or (row["expected"] == "allow" and actual == "approve") or (
+                matches = actual == row["expected"] or (row["expected"] == "allow" and actual in ("approve", "unapproved")) or (
                     row["expected"] == "silent" and actual == "allow")
                 if "gap" in row:
                     self.assertFalse(

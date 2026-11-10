@@ -77,8 +77,12 @@ def record(payload: dict) -> dict:
 
 def append(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    # The log holds commands of up to 2000 characters in clear text, so it is owner-only (#567): created 0600, and an
+    # existing file made earlier with 0644 is chmod-ed once.
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
+        if os.fstat(fd).st_mode & 0o077:
+            os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             os.write(fd, line.encode("utf-8"))
