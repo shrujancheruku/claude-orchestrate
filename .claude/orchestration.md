@@ -77,7 +77,7 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 
 - **Instruction files:** `CLAUDE.md`, `docs/agents/*.md`, `docs/adr/`
 - **Risk paths** (any PR touching them is reviewed as L): `.claude-plugin/**`, `hooks/**`, `.github/workflows/**`, `release-please-config.json`, `.release-please-manifest.json`, `version.txt`, `CHANGELOG.md`, `scripts/merge`, `scripts/gate`, `scripts/sandbox-git`, `scripts/github.py`, `scripts/replay.py`, `scripts/rescue`
-- **Tiers:** S is at most 50 changed lines in at most 3 files, none on a risk path; L touches a risk path or changes more than 400 lines; M is everything else. A `size:S|M|L` label on the ticket overrides.
+- **Tiers:** S is at most 50 changed lines in at most 3 files, none on a risk path; L touches a risk path or changes more than 400 lines; M is everything else. A `size:` label only raises the tier; a label below the computed tier is ignored.
 - **Repo-specific checks:**
   - behaviour changes come with tests; Python 3.9 compatible
   - user-facing changes update `docs/guide.md`, and `README.md` only where the showcase covers the feature

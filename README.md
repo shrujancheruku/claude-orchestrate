@@ -313,6 +313,10 @@ The opt-in behavioural tier, which runs real headless agents against a temp repo
 
 Issues are welcome. Pull requests from anyone other than the repo's owners, members and collaborators are closed unmerged; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Credits
+
+The oversight rules draw on the Human Oversight System (Thurlow, 2026, docs CC BY 4.0) and a set of published studies of AI-written code and review. [docs/sources.md](docs/sources.md) lists each one and what we took from it.
+
 ## License
 
 [MIT](LICENSE)

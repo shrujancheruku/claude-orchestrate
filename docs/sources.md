@@ -6,7 +6,7 @@ Every source orchestrate takes a rule, a mechanism or a number from. Map #588's 
 
 Thurlow, S. (2026). *Human Oversight System (HOS), documentation and research notes*. https://github.com/thurlow-research/HumanOversightSystem (software archived at https://doi.org/10.5281/zenodo.21347272).
 
-HOS documentation is licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and its code MIT. Orchestrate takes ideas and findings from the documentation, rewritten and regraded in our own words (changes: summarised, regraded on the ledger's A to D scale, and adapted to orchestrate); no HOS code is copied. The oversight-strand notes ([deterministic-diff-checks](research/deterministic-diff-checks.md), [reviewer-benchmarks](research/reviewer-benchmarks.md), [reviewer-framing-and-context](research/reviewer-framing-and-context.md)) cite it throughout.
+HOS documentation is licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and its code MIT. Orchestrate takes ideas and findings from the documentation, rewritten and regraded in our own words (changes: summarised, regraded on the ledger's A to D scale, and adapted to orchestrate); no HOS code is copied. [ADR-0016](adr/0016-oversight-principles.md) takes the ratchet, the cost of human attention, and gating on computed signals rather than self-reported verdicts from HOS's field findings, and cites the papers below. The oversight-strand notes ([deterministic-diff-checks](research/deterministic-diff-checks.md), [reviewer-benchmarks](research/reviewer-benchmarks.md), [reviewer-framing-and-context](research/reviewer-framing-and-context.md)) cite it throughout.
 
 ## Research
 
@@ -14,6 +14,7 @@ Each entry lists the ledger areas that cite it (see the [area index](research/ev
 
 - Abdelnabi, S., Fay, A., et al. (2025). LLMail-Inject: A Dataset from a Realistic Adaptive Prompt Injection Challenge. Preprint, arXiv:2506.09956; IEEE SaTML 2025 competition. https://arxiv.org/abs/2506.09956 *(SF)*
 - Abreu, R., Murali, V., Rigby, P. C., Maddila, C., Sun, W., Ge, J., Chinniah, K., Mockus, A., Mehta, M., Nagappan, N. (2025). Moving Faster and Reducing Risk: Using LLMs in Release Deployment. ICSE-SEIP 2025, https://doi.org/10.1109/ICSE-SEIP66354.2025.00045; arXiv:2410.06351 *(HO)*
+- Adejumo, A., & Johnson, C. (2025). ASEW. Preprint, arXiv:2510.06104. https://arxiv.org/abs/2510.06104. Descriptive, contextual and actionable explanations drive action; thresholds calibrated per project. Used in ADR-0016. *(HO)*
 - Agarwal, S., Singhal, A., Macvean, A., Vasilescu, B., & Breaux, T. (2026). Spec-Driven Development as Prescribed and as Practiced. Preprint, arXiv:2608.25202. https://arxiv.org/abs/2608.25202 *(SP)*
 - Aggarwal, P., Madaan, A., Anand, A., et al. (2024). AutoMix: Automatically Mixing Language Models. NeurIPS 2024; arXiv:2310.12963. https://arxiv.org/abs/2310.12963 *(RT)*
 - Alami, D. (2026). Cognitive Camouflage: How persuasive LLM-written code can pass its own tests and still fail the claim. Author's note, 9 April 2026. https://danielalami.substack.com/p/cognitive-camouflage (HOS cites an SSRN version, abstract id 6512960, not retrieved) *(DC)*
