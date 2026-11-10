@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lead-brief [--repo PATH] [--now ISO] [--checkpoint <pr>] : the lead's whole start-up index, in one call.
+"""lead-brief [--repo PATH] [--now ISO] [--checkpoint <pr>] [--watch [--interval SECONDS]] : the lead's whole start-up index, in one call.
 
 With no arguments it prints these sections, in this fixed order, each under a `== <name> ==` line:
     config       the repo's `.claude/orchestration.md`, whole
@@ -15,6 +15,15 @@ each `path:line-range — what to look at`), from the posted review, else from t
 rest still prints. The watermark is `.claude/orchestrate-lead.json`, written only by `--checkpoint <pr>` (last
 absorbed PR, merged-at time, merge count). A missing or unreadable watermark falls back to the last 7 days of
 merges, at most 20, and says so in one line. Reads only: the tracker is never written.
+
+`--watch` is the lead's background wake-up. It records the newest issue number and the open `needs-lead` set, then
+reads the open-issues snapshot no more than once per `--interval` (default 300 seconds) and exits 0 on the first
+poll with a hit, one line per hit:
+    new: #<n> <title> [<labels>]            an open issue numbered above the newest at start
+    needs-lead: #<n> <title>                an open `needs-lead` ticket that was not in the set at start
+    stale: #<n> <title> blocked-by #<m>...  a takeable ticket whose body `Blocked by:` line names only closed issues
+Then `next: settled` (ADR-0014): the lead triages or grooms what it named and starts the watch again. A rate limit
+ends it as exit 2 with `next: retry-after <time>`; any other failure is `next: could-not-run`.
 """
 
 import argparse
@@ -23,17 +32,20 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import common
 import github
+import tracker
 from repo import first_line, parse_ts
 
 RISK_MARKER = "> *Risk notes (review not posted).*"  # the first line of the fallback comment; run posts it verbatim
 WATERMARK = Path(".claude") / "orchestrate-lead.json"
 FALLBACK_DAYS = 7
 FALLBACK_CAP = 20
+WATCH_INTERVAL = 300  # seconds: the least time between two snapshot reads of --watch
 MERGED_LIMIT = 100  # the newest merged PRs by update, one `gh api graphql`
 RISK_LINE = re.compile(r"^\s*[-*]?\s*(\S+:\d+(?:-\d+)?\s+—\s+\S.*)$")
 TIER = re.compile(r"\btier:\s*([SML])\b")
@@ -283,12 +295,83 @@ def checkpoint(root, number) -> int:
     return 0
 
 
+def watch_state(nodes, ready):
+    """(the open `needs-lead` numbers, {stale ticket number: hit line}) of one snapshot read."""
+    issues = tracker.from_nodes(nodes)
+    open_numbers = {i["number"] for i in issues}
+    stale = {}
+    for i in issues:
+        if ready not in i["labels"] or i["claimed"] or i["blockers"]:
+            continue
+        blockers = tracker.body_blockers(i)
+        if blockers and not any(n in open_numbers for n in blockers):
+            stale[i["number"]] = f"stale: #{i['number']} {i['title']} blocked-by " + " ".join(f"#{n}" for n in blockers)
+    return {i["number"] for i in issues if "needs-lead" in i["labels"]}, stale
+
+
+def watch_hits(nodes, ready, newest, lead_set) -> list:
+    """The hit lines of one read against what the watch recorded at start."""
+    now_lead, stale = watch_state(nodes, ready)
+    hits = []
+    for n in sorted(nodes, key=lambda n: n["number"]):
+        num, title = n["number"], n.get("title") or ""
+        if num > newest:
+            labels = sorted(x["name"] for x in (n.get("labels") or {}).get("nodes") or [])
+            hits.append(f"new: #{num} {title} [{', '.join(labels)}]")
+        if num in now_lead - lead_set:
+            hits.append(f"needs-lead: #{num} {title}")
+        if num in stale:
+            hits.append(stale[num])
+    return hits
+
+
+def run_watch(root, interval, read=None, clock=time.monotonic, sleep=time.sleep) -> int:
+    """Record the baseline, then poll until a hit. `read` returns the raw issue nodes (default: the open-issues read);
+    `clock` and `sleep` are the seams a test fakes. Never writes to the tracker."""
+    github.rate_limited_until = None
+    try:
+        ready = tracker.label_strings(root)["ready"]
+    except (ValueError, OSError, KeyError):
+        ready = tracker.DEFAULTS["ready"]
+    try:
+        if read is None:
+            repo = repo_info(root)
+            read = lambda: github.open_issues(repo, cwd=root)  # noqa: E731
+        base = read()
+        newest = max((n["number"] for n in base), default=0)
+        lead_set, _ = watch_state(base, ready)
+        last = clock()
+        while True:
+            sleep(max(0.0, last + interval - clock()))
+            last = clock()
+            hits = watch_hits(read(), ready, newest, lead_set)
+            if hits:
+                print("\n".join(hits))
+                return common.verdict("settled", exit_code=0)
+    except (Unavailable, github.GhError) as e:
+        message = getattr(e, "message", None) or str(e)
+        until = common.rate_limit_time(message) or github.rate_limited_until
+        print(f"lead-brief: cannot watch: {message}", file=sys.stderr)
+        if until:
+            return common.verdict("retry-after", until, exit_code=2)
+        return common.verdict("could-not-run", exit_code=2)
+    except (KeyError, TypeError, ValueError) as e:
+        print(f"lead-brief: cannot watch: unexpected reply ({e.__class__.__name__})", file=sys.stderr)
+        return common.verdict("could-not-run", exit_code=2)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--repo", default=".", help="repo root; gh runs there and the files are read under it")
     ap.add_argument("--now", default=None, help="the time now, as ISO 8601 (tests; default: the current time)")
     ap.add_argument("--checkpoint", type=int, metavar="PR", help="write the watermark: PR is the last one absorbed")
+    ap.add_argument("--watch", action="store_true", help="wait for a new issue, a new needs-lead ticket or a stale blocker line")
+    ap.add_argument("--interval", type=float, default=WATCH_INTERVAL, help="--watch: least seconds between reads (default 300)")
     args = ap.parse_args(argv)
+    if args.watch and args.checkpoint is not None:
+        common.die("lead-brief: cannot run: --watch and --checkpoint do not go together")
+    if args.watch:
+        return run_watch(Path(args.repo).resolve(), args.interval)
     now = datetime.now(timezone.utc) if args.now is None else parse_ts(args.now)
     if now is None:
         common.die(f"lead-brief: cannot run: --now is not an ISO time: {args.now}")
