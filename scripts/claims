@@ -15,7 +15,8 @@ changes (only with a worktree and no PR): `clean`, `dirty <k>`, `unpushed <k>` o
 `claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line.
 Reads the run log and the pass log (a missing one is no events), the tracker as one Snapshot (scripts/tracker.py; `--snapshot FILE` reads a file `snapshot` wrote instead of fetching), the state file (a missing one means no workers) and
 `git worktree list`. Exit codes: 0 printed; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository, an
-unreadable state file), one line on stderr. Stdlib only, Python 3.9+.
+unreadable state file), one line on stderr; a rate limit it would not sleep through also ends `next: retry-after <time>`.
+Stdlib only, Python 3.9+.
 """
 
 import argparse
@@ -69,6 +70,10 @@ def main(argv=None) -> int:
         snap = tracker.Snapshot.open(args.snapshot, root)
         found = claims.claims(root, state_file, snap.issues, snap.prs, snap.merged, session=args.session)
     except github.GhError as e:
+        until = common.rate_limit_time(e.message)
+        if until:  # a rate limit is the one word everywhere
+            print(f"claims: cannot run: gh failed: {e.message}", file=sys.stderr)
+            return common.verdict("retry-after", until, exit_code=2)
         common.die(f"claims: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError) as e:
         common.die(f"claims: cannot run: {e}")

@@ -63,6 +63,19 @@ class CiTimes(unittest.TestCase):
         self.assertEqual(out[-1], "over: no")
         self.assertNotIn("cause", "\n".join(out))
 
+    def test_the_gap_from_ci_done_to_merged_is_flagged_over_two_minutes(self):
+        # Checks finish at minute 101; the merge lands at 110 (9 minutes later) or 102 (1 minute later).
+        for merged, flag, gap in ((110, "over", "9m00s"), (102, "ok", "1m00s")):
+            with self.subTest(merged=merged):
+                self.serve({1: (merged, [("s1", 100, [check("test", 0, 1, push=100)])])})
+                out = self.times()
+                self.assertIn(f"ci done -> merged: median {gap} over 1 PRs", out)
+                self.assertIn(f"wait: {flag}", out)
+                self.assertEqual(out[-1], "over: no")  # the push-to-green verdict is its own
+
+    def test_abbreviated_flags_are_rejected(self):
+        self.assertNotEqual(self.env.run("ci-times", "--sin", "1", check=False).returncode, 0)
+
     def test_over_with_a_slow_job_and_with_too_few_runners(self):
         self.serve({1: (50, [("a", 0, [check("build", 1, 2), check("test", 1, 12)])])})
         out = self.times()

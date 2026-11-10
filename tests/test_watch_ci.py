@@ -14,6 +14,9 @@ from unittest import mock
 
 from harness import SCRIPTS, ScriptEnv
 
+SETTLED = "next: settled"
+
+
 def view(result, merge="CLEAN", head="abcdef1234567", state="OPEN", draft=False):
     if result is None:
         checks = [{"status": "IN_PROGRESS", "conclusion": ""}]
@@ -53,9 +56,10 @@ class WatchCi(unittest.TestCase):
         })
         out = self.watch("1", "2", "3").stdout.splitlines()
         self.assertEqual(out, [
-            "PR #3 pass CLEAN 3333333",
-            "PR #2 fail BLOCKED 2222222",
-            "PR #1 pass CLEAN 1111111",
+            "also: ci-pass 3 3333333ccc",
+            "also: ci-fail 2 2222222bbb",
+            "also: ci-pass 1 1111111aaa",
+            SETTLED,
         ])
         events = self.env.events()
         self.assertEqual([(e["kind"], e["ref"], e["outcome"]) for e in events],
@@ -67,7 +71,7 @@ class WatchCi(unittest.TestCase):
         (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
         self.seq({"1": [view("SUCCESS", head="1111111aaa")]})
         r = self.watch("1")
-        self.assertEqual((r.returncode, r.stdout), (0, "PR #1 pass CLEAN 1111111\n"))
+        self.assertEqual((r.returncode, r.stdout), (0, "also: ci-pass 1 1111111aaa\nnext: settled\n"))
         self.assertIn("runlog: no session, ci event not written", r.stderr)
 
     def test_events_from_a_subdirectory_and_a_worktree_land_in_the_main_log(self):
@@ -88,12 +92,12 @@ class WatchCi(unittest.TestCase):
                   "2": [view("SUCCESS", head="2222222bbb")]})
         r = self.watch("1", "2")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.splitlines(), ["PR #2 pass CLEAN 2222222", "PR #1 pass CLEAN 1111111"])
+        self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 2 2222222bbb", "also: ci-pass 1 1111111aaa", SETTLED])
 
     def test_empty_rollup_is_pending_until_checks_appear(self):
         empty = {"statusCheckRollup": [], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
         self.seq({"7": [empty, view("SUCCESS", head="abc1234")]})
-        self.assertEqual(self.watch("7").stdout.splitlines(), ["PR #7 pass CLEAN abc1234"])
+        self.assertEqual(self.watch("7").stdout.splitlines(), ["also: ci-pass 7 abc1234", SETTLED])
 
     def load(self):
         loader = importlib.machinery.SourceFileLoader("watch_ci_parse", str(SCRIPTS / "watch-ci"))
@@ -115,13 +119,13 @@ class WatchCi(unittest.TestCase):
         sha = "5ba15c1" + "a" * 33
         self.seq({"504": [view("SUCCESS", head=sha)]})
         r = self.watch_any("504", sha)
-        self.assertEqual((r.stdout.splitlines(), r.returncode), ([f"PR #504 pass CLEAN {sha[:7]}"], 0))
-        self.assertNotIn("error", r.stdout)
+        self.assertEqual((r.stdout.splitlines(), r.returncode), ([f"also: ci-pass 504 {sha}", SETTLED], 0))
+        self.assertNotIn("gave-up", r.stdout)
 
     def test_a_bad_argument_is_could_not_run(self):
         r = self.watch_any("504", "nonsense")
         self.assertEqual(r.returncode, 2)
-        self.assertEqual(r.stdout, "")
+        self.assertEqual(r.stdout, "next: could-not-run\n")
         self.assertIn("neither a PR number nor the head", r.stderr)
 
     def test_a_pinned_head_waits_for_the_pr_to_move_to_it(self):
@@ -129,13 +133,13 @@ class WatchCi(unittest.TestCase):
         old_green = view("SUCCESS", head="0000000aaa")
         self.seq({"504": [old_green, old_green, view("SUCCESS", head=new)]})
         r = self.watch_any("504", new)
-        self.assertEqual(r.stdout.splitlines(), ["PR #504 pass CLEAN 5ba15c1"])
+        self.assertEqual(r.stdout.splitlines(), [f"also: ci-pass 504 {new}", SETTLED])
         self.assertGreaterEqual(len(self.env.gh_calls()), 3)  # the old head's green was not taken for the new one
 
     def test_a_question_mark_head_pins_nothing(self):
         self.seq({"504": [view("SUCCESS", head="1111111aaa")]})
         r = self.watch_any("504", "?")
-        self.assertEqual(r.stdout.splitlines(), ["PR #504 pass CLEAN 1111111"])
+        self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 504 1111111aaa", SETTLED])
         self.assertEqual(len(self.env.gh_calls()), 1)
 
     WF = ["api", "~repos/{owner}/{repo}/contents/.github/workflows?ref="]
@@ -151,7 +155,7 @@ class WatchCi(unittest.TestCase):
         empty = {"statusCheckRollup": [], "mergeStateStatus": "UNKNOWN", "headRefOid": "5ba15c1" + "c" * 33, "state": "OPEN"}
         self.seq_with_workflows({"504": [empty]}, {"stdout": '[{"name": "ci.yml"}]'})
         r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "504", check=False)
-        self.assertEqual(r.stdout.splitlines(), ["PR #504 error no CI run for 5ba15c1, close-and-reopen fires one"])
+        self.assertEqual(r.stdout.splitlines(), ["also: no-run 504 " + "5ba15c1" + "c" * 33, SETTLED])
         self.assertEqual(r.returncode, 3)
 
     def test_a_head_without_workflow_files_is_not_a_missing_run(self):
@@ -160,7 +164,7 @@ class WatchCi(unittest.TestCase):
         self.seq_with_workflows({"7": [empty, empty, view("SUCCESS", head="abc1234")]},
                                 {"exit": 1, "stderr": "gh: Not Found (HTTP 404)"})
         r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "7", check=False)
-        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #7 pass CLEAN abc1234"], 0))
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["also: ci-pass 7 abc1234", SETTLED], 0))
         wf = [c for c in self.env.gh_calls() if c[:2] == ["api", self.WF[1][1:].split("?")[0] + "?ref=abc1234"]]
         self.assertEqual(len(wf), 1)  # asked once for the head, then cached
 
@@ -169,13 +173,13 @@ class WatchCi(unittest.TestCase):
         self.seq_with_workflows({"7": [empty, empty, view("SUCCESS", head="abc1234")]},
                                 {"exit": 1, "stderr": "gh: Server Error (HTTP 500)"})
         r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "7", check=False)
-        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #7 pass CLEAN abc1234"], 0))
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["also: ci-pass 7 abc1234", SETTLED], 0))
 
     def test_a_pinned_head_the_pr_never_reaches_ends_the_watch(self):
         stuck = view("SUCCESS", head="0000000aaa")
         self.seq({"504": [stuck]})
         r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "504", "5ba15c1" + "d" * 33, check=False)
-        self.assertEqual(r.stdout.splitlines(), ["PR #504 error head 5ba15c1 never reached; the PR is at 0000000"])
+        self.assertEqual(r.stdout.splitlines(), ["also: head-not-reached 504 " + "5ba15c1" + "d" * 33, SETTLED])
         self.assertEqual(r.returncode, 3)
 
     def test_a_draft_with_no_check_is_not_a_missing_run(self):
@@ -183,24 +187,24 @@ class WatchCi(unittest.TestCase):
         ready = view("SUCCESS", head="abc1234")
         self.seq({"7": [empty, empty, ready]})
         r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "7", check=False)
-        self.assertEqual(r.stdout.splitlines(), ["PR #7 pass CLEAN abc1234"])
+        self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 7 abc1234", SETTLED])
 
     def test_status_context_failure(self):
         v = {"statusCheckRollup": [{"state": "ERROR"}], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
         self.seq({"8": [v]})
-        self.assertEqual(self.watch("8").stdout.splitlines(), ["PR #8 fail CLEAN abc1234"])
+        self.assertEqual(self.watch("8").stdout.splitlines(), ["also: ci-fail 8 abc1234", SETTLED])
 
     def test_merged_settles_as_pass_and_closed_as_fail(self):
         self.seq({"4": [view(None, state="MERGED", head="4444444aaa")],
                   "5": [view(None, state="CLOSED", merge="DIRTY", head="5555555bbb")]})
         out = self.watch("4", "5").stdout.splitlines()
-        self.assertEqual(out, ["PR #4 pass CLEAN 4444444", "PR #5 fail DIRTY 5555555"])
+        self.assertEqual(out, ["also: ci-pass 4 4444444aaa", "also: ci-fail 5 5555555bbb", SETTLED])
         self.assertEqual([(e["ref"], e["outcome"]) for e in self.env.events()], [(4, "pass"), (5, "fail")])
 
     def test_gh_error_is_retried(self):
         self.seq({"6": ["GH_ERROR", "GH_ERROR", view("SUCCESS", head="6666666ccc")]})
         r = self.watch("6")
-        self.assertEqual(r.stdout.splitlines(), ["PR #6 pass CLEAN 6666666"])
+        self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 6 6666666ccc", SETTLED])
         self.assertIn("gh failed: HTTP 502", r.stderr)
         self.assertEqual(len(self.env.gh_calls()), 3)
 
@@ -212,7 +216,7 @@ class WatchCi(unittest.TestCase):
         self.seq({"1": [view("SUCCESS", head="1111111aaa")], "2": [view("FAILURE", head="2222222bbb")]})
         r = self.watch("1", "2")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout.splitlines(), ["PR #1 pass CLEAN 1111111", "PR #2 fail CLEAN 2222222"])
+        self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 1 1111111aaa", "also: ci-fail 2 2222222bbb", SETTLED])
         self.assertIn("could not write event", r.stderr)
 
     def test_missing_gh_exits_could_not_run_instead_of_waiting(self):
@@ -237,34 +241,34 @@ class WatchCi(unittest.TestCase):
     def test_repeated_failures_end_in_an_error_line_and_exit_3(self):
         self.seq({"6": ["GH_ERROR"]})
         r = self.watch_any("6")
-        self.assertEqual(r.stdout.splitlines(), ["PR #6 error HTTP 502: bad gateway"])
+        self.assertEqual(r.stdout.splitlines(), ["also: gave-up 6 HTTP 502: bad gateway", SETTLED])
         self.assertEqual(r.returncode, 3)
         self.assertEqual(len(self.env.gh_calls()), 5)
 
     def test_failures_under_the_bound_still_settle(self):
         self.seq({"6": ["GH_ERROR"] * 4 + [view("SUCCESS", head="6666666ccc")]})
         r = self.watch_any("6")
-        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #6 pass CLEAN 6666666"], 0))
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["also: ci-pass 6 6666666ccc", SETTLED], 0))
 
     def test_a_success_resets_the_failure_count(self):
         ok = view(None)
         self.seq({"6": ["GH_ERROR"] * 4 + [ok] + ["GH_ERROR"] * 4 + [view("SUCCESS", head="6666666ccc")]})
         r = self.watch_any("6")
-        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #6 pass CLEAN 6666666"], 0))
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["also: ci-pass 6 6666666ccc", SETTLED], 0))
 
     def test_a_pr_missing_from_the_reply_is_retried_and_does_not_end_the_watch(self):
         self.seq({"6": ["MISSING", "MISSING", view("SUCCESS", head="6666666ccc")],
                   "7": [view(None), view(None), view(None), view("SUCCESS", head="7777777ddd")]})
         r = self.watch_any("6", "7")
-        self.assertEqual(r.stdout.splitlines(), ["PR #6 pass CLEAN 6666666", "PR #7 pass CLEAN 7777777"])
+        self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 6 6666666ccc", "also: ci-pass 7 7777777ddd", SETTLED])
         self.assertEqual(r.returncode, 0)
 
     def test_three_misses_end_in_an_error_and_the_others_carry_on(self):
         self.seq({"6": ["MISSING"], "7": [view(None), view(None), view("SUCCESS", head="7777777ccc")]})
         r = self.watch_any("6", "7")
-        self.assertIn("PR #6 error not in gh's pr list", r.stdout)
-        self.assertNotIn("PR #7 pass", r.stdout)  # a pass after an error in the same run is never printed
-        self.assertIn("PR #7 error pass withheld", r.stdout)
+        self.assertIn("also: gave-up 6 not in gh's pr list", r.stdout)
+        self.assertNotIn("ci-pass 7", r.stdout)  # a pass after an error in the same run is never printed
+        self.assertIn("also: gave-up 7 pass withheld", r.stdout)
         self.assertEqual(r.returncode, 3)
 
     def test_three_watched_prs_cost_one_gh_call_per_tick(self):
@@ -273,7 +277,7 @@ class WatchCi(unittest.TestCase):
                   "3": [view(None), view(None), view("SUCCESS", head="3333333ccc")]})
         r = self.watch("1", "2", "3")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(len(r.stdout.splitlines()), 3)
+        self.assertEqual(len(r.stdout.splitlines()), 4)  # three settles and the next: line
         calls = self.env.gh_calls()
         self.assertEqual(len(calls), 3)  # three ticks, one request each
         self.assertTrue(all(c[:2] == ["pr", "list"] for c in calls))
@@ -308,8 +312,16 @@ class WatchCi(unittest.TestCase):
         self.env.set_gh([{"args": ["pr", "list"], "stderr": "fatal: not a git repository\n", "exit": 1}])
         r = self.watch_any("6")
         self.assertEqual(r.returncode, 2)
-        self.assertEqual(r.stdout, "")
+        self.assertEqual(r.stdout, "next: could-not-run\n")
         self.assertEqual(len(self.env.gh_calls()), 1)
+
+    def test_a_rate_limit_over_the_wait_budget_ends_retry_after_its_time(self):
+        self.env.set_gh([{"args": ["pr", "list"], "exit": 1,
+                          "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
+        with tempfile.TemporaryDirectory() as cache, mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            r = self.watch_any("6")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertRegex(r.stdout.strip(), r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
     def test_started_outside_a_repository_exits_2(self):
         with tempfile.TemporaryDirectory() as d:
@@ -332,7 +344,7 @@ class WatchCi(unittest.TestCase):
         shutil.rmtree(wt)
         self.seq({"6": [view("SUCCESS", head="6666666ccc")]})
         out, err = p.communicate(timeout=20)
-        self.assertEqual((out.splitlines(), p.returncode), (["PR #6 pass CLEAN 6666666"], 0), err)
+        self.assertEqual((out.splitlines(), p.returncode), (["also: ci-pass 6 6666666ccc", SETTLED], 0), err)
 
 
 RUN_URL = "https://github.com/o/r/actions/runs/900/job/901"
@@ -361,9 +373,7 @@ class StuckJob(unittest.TestCase):
 
     def test_a_job_with_all_steps_done_still_in_progress_is_reported_once(self):
         r = self.stuck_watch(jobs_reply(["completed", "completed"]), 0)
-        self.assertEqual(r.stdout.splitlines(), [
-            "PR #5: job validate stuck in_progress with all steps done; rerun with gh run rerun 900 --job 901",
-            "PR #5 pass CLEAN 5555555"])
+        self.assertEqual(r.stdout.splitlines(), ["also: stuck 5 900 901", "also: ci-pass 5 5555555aaa", SETTLED])
         self.assertIn(["api", "repos/{owner}/{repo}/actions/runs/900/jobs?per_page=100"],
                       self.env.gh_calls())
 
@@ -385,9 +395,7 @@ class StuckJob(unittest.TestCase):
                          {"args": ["api"], "seq": [first, later]}])
         r = self.env.run("watch-ci", "--interval", "0", "--stuck-after", "0", "5")
         self.assertEqual(r.stdout.splitlines(), [
-            "PR #5: job job901 stuck in_progress with all steps done; rerun with gh run rerun 900 --job 901",
-            "PR #5: job job902 stuck in_progress with all steps done; rerun with gh run rerun 900 --job 902",
-            "PR #5 pass CLEAN 5555555"])
+            "also: stuck 5 900 901", "also: stuck 5 900 902", "also: ci-pass 5 5555555aaa", SETTLED])
 
     def test_a_check_without_a_run_id_makes_no_jobs_call(self):
         for url in ("", "https://ci.example.com/build/7"):
@@ -401,15 +409,15 @@ class StuckJob(unittest.TestCase):
 
     def test_nothing_is_reported_before_the_wait_is_over(self):
         r = self.stuck_watch(jobs_reply(["completed"]), 3600)
-        self.assertEqual(r.stdout.splitlines(), ["PR #5 pass CLEAN 5555555"])
+        self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 5 5555555aaa", SETTLED])
 
     def test_a_job_with_a_step_still_running_is_not_stuck(self):
         r = self.stuck_watch(jobs_reply(["completed", "in_progress"]), 0)
-        self.assertEqual(r.stdout.splitlines(), ["PR #5 pass CLEAN 5555555"])
+        self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 5 5555555aaa", SETTLED])
 
     def test_a_failed_jobs_read_does_not_end_the_watch(self):
         r = self.stuck_watch({"args": ["api"], "stderr": "HTTP 502: bad gateway\n", "exit": 1}, 0)
-        self.assertEqual((r.stdout.splitlines(), r.returncode), (["PR #5 pass CLEAN 5555555"], 0), r.stderr)
+        self.assertEqual((r.stdout.splitlines(), r.returncode), (["also: ci-pass 5 5555555aaa", SETTLED], 0), r.stderr)
 
 
 if __name__ == "__main__":

@@ -248,9 +248,29 @@ class MergeTest(MergeMixin, unittest.TestCase):
 
         with mock.patch.object(mod, "run_merge", boom), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = mod.main(["7"])
-        self.assertEqual(code, 1)
-        self.assertEqual(out.getvalue().splitlines()[-1], "next: ask-user 7 ValueError: headRefOid second line")
+        # A program error is not a merge refusal: could-not-run (exit 2), never ask-user.
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue().splitlines()[-1], "next: could-not-run ValueError: headRefOid second line")
         self.assertIn("Traceback", err.getvalue())
+
+    def test_a_rate_limit_ends_retry_after_its_time(self):
+        import importlib.machinery
+        import importlib.util
+        import io
+        import contextlib
+        from unittest import mock
+        loader = importlib.machinery.SourceFileLoader("merge_under_test2", str(Path(common.__file__).parent / "merge"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)
+
+        def limited(argv=None):
+            mod.github.GhError(mod.github.RATELIMITED, "rate limit until 2026-01-01T00:05:00Z")
+            return 2
+
+        out = io.StringIO()
+        with mock.patch.object(mod, "run_merge", limited), contextlib.redirect_stdout(out):
+            code = mod.main(["7"])
+        self.assertEqual((code, out.getvalue().splitlines()[-1]), (2, "next: retry-after 2026-01-01T00:05:00Z"))
 
     def test_unreadable_pr(self):
         self.seq({PR_VIEW: [{"exit": 1, "stderr": "boom"}]})

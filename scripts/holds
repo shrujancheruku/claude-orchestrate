@@ -26,7 +26,8 @@ Why the PR number: it is in the snapshot, and the `assigned` time would cost a t
 
 Exit codes: 0 nothing overlaps; 1 an overlap (and only that); 2 could not run (no `gh`, a failed `gh` or `git` call, an
 unreadable state file, `--repo` not in a git repository, any other error: `holds: could not run: <type>: <message>`); 3 `--pr` only: it waits for an older
-open PR. Stdlib only, Python 3.9+.
+open PR. A rate limit it would not sleep through is exit 2 and ends `next: retry-after <time>` (the one rate-limit
+word of every script). Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
@@ -85,7 +86,8 @@ def run(argv=None) -> int:
                           warn=lambda text: print(f"holds: {text}", file=sys.stderr))
     except github.GhError as e:
         print(f"holds: gh: {e.message}", file=sys.stderr)
-        return 2
+        until = common.rate_limit_time(e.message)
+        return common.verdict("retry-after", until, exit_code=2) if until else 2  # a rate limit is the one word everywhere
     except (KeyError, TypeError, ValueError) as e:
         print(f"holds: {e}", file=sys.stderr)
         return 2

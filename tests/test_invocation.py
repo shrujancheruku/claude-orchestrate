@@ -80,14 +80,12 @@ class Invocation(unittest.TestCase):
 
     def test_every_cli_the_guard_approves_by_flag_name_rejects_abbreviations(self):
         # The guard spells flags in full (SAFE_SCRIPT_FLAGS, MERGE_VALUE_FLAGS, ...) and says it relies on the
-        # scripts not accepting an abbreviation such as `--meth` (#537). ci-times is on the chain list but is
-        # edited by another open PR (#448); it joins once that merges (tracked in #537's PR, Discovered work).
+        # scripts not accepting an abbreviation such as `--meth` (#537).
         spec = importlib.util.spec_from_file_location("guard_names", ROOT / "hooks" / "guard.py")
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
         named = {"merge", "board", "threads"} | set(guard.CHAIN_SCRIPTS)
-        pending = {"ci-times"}
-        for name in sorted(named - pending):
+        for name in sorted(named):
             with self.subTest(name):
                 self.assertIn("allow_abbrev=False", (SCRIPTS / name).read_text())
 

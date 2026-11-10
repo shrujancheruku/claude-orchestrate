@@ -10,6 +10,8 @@ counts as its own head. Output, one item per line:
     p90: <t>
     slowest checks (queued / running):  then up to 3 lines, by median total
     limit: <minutes>m (default|config)
+    ci done -> merged: median <t> over <n> PRs     the gap from a PR's last green head to its merge
+    wait: over|ok                                   over when that median exceeds 2 minutes (a sleep or hand-polled wait)
     cause: <runners|slow job> (<check>)     only when over
     over: yes|no
 Default window: the last 10 merged PRs; --since <ISO time | PR number> takes every merged PR since instead.
@@ -21,6 +23,7 @@ Stdlib only, Python 3.9+.
 
 import argparse
 import math
+from datetime import timedelta
 import statistics
 import sys
 
@@ -32,6 +35,7 @@ from repo import main_checkout, parse_ts
 DEFAULT_PR_COUNT = 10
 DEFAULT_LIMIT_MINUTES = 10
 SLOWEST = 3
+WAIT_LIMIT_MINUTES = 2  # a median gap from CI done to merged above this is flagged `wait: over`
 LIST_LIMIT = 100  # merged PRs fetched; --since beyond the newest 100 is cut off
 # Not paginated: `check-runs?per_page=100` stops at 100, so a head with more check runs than that could read as
 # green from a partial list. (The PR's commits are paged by github.pr_commits.)
@@ -82,11 +86,14 @@ def merged_prs(since_arg, root):
 
 
 def measure(prs, root):
-    """(push-to-green list, per-check {name: [(queued, running)]}, heads never green) over the PRs."""
-    greens, per_check, never = [], {}, 0
+    """(push-to-green list, per-check {name: [(queued, running)]}, heads never green, ci-done-to-merged list) over the PRs.
+
+    The last list has one entry per PR with a green head: seconds from that head's checks finishing to the merge."""
+    greens, per_check, never, waits = [], {}, 0, []
     fetched = {}  # oid -> check runs: a commit shared by stacked PRs is fetched once, and still counts per PR
     for pr in prs:
         commits = github.pr_commits(pr["number"], cwd=root)
+        done = None  # when the PR's last green head finished its checks
         for c in commits:
             pushed = parse_ts(c.get("committedDate"))
             if pushed is None:
@@ -103,13 +110,18 @@ def measure(prs, root):
                 never += 1
                 continue
             greens.append(got[0])
+            finished = pushed + timedelta(seconds=got[0])
+            done = finished if done is None else max(done, finished)
             for name, queued, running in got[1]:
                 per_check.setdefault(name, []).append((queued, running))
-    return greens, per_check, never
+        merged = parse_ts(pr.get("mergedAt"))
+        if done is not None and merged is not None:
+            waits.append(max((merged - done).total_seconds(), 0))
+    return greens, per_check, never, waits
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--since", help="an ISO time, or a PR number (merged after that PR)")
     args = ap.parse_args(argv)
     code, _, _ = common.run("git", "rev-parse", "--show-toplevel")
@@ -120,7 +132,7 @@ def main(argv=None) -> int:
     limit, source = (cfg.ci_wait_limit, "config") if cfg.ci_wait_limit else (DEFAULT_LIMIT_MINUTES, "default")
     try:
         prs = merged_prs(args.since, root)
-        greens, per_check, never = measure(prs, root)
+        greens, per_check, never, waits = measure(prs, root)
     except github.GhError as e:
         common.die(f"ci-times: cannot run: gh failed: {e.message}")
     print(f"heads: {len(greens)} green over {len(prs)} PRs ({never} never green)")
@@ -142,6 +154,11 @@ def main(argv=None) -> int:
     for _, name, q, run in stats[:SLOWEST]:
         print(f"  {name}: {fmt(q)} / {fmt(run)}")
     print(f"limit: {limit}m ({source})")
+    # The gap from CI done to merged: a median over WAIT_LIMIT_MINUTES means the orchestrator is sleeping or polling
+    # instead of running `watch-ci` as a Monitor (#542), which the push-to-green times above never show.
+    wait = statistics.median(waits)
+    print(f"ci done -> merged: median {fmt(wait)} over {len(waits)} PRs")
+    print(f"wait: {'over' if wait > WAIT_LIMIT_MINUTES * 60 else 'ok'}")
     if over:
         _, name, q, run = stats[0]
         print(f"cause: {'runners' if q > run else 'slow job'} ({name})")
