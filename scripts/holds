@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """holds (--touch-map ENTRIES... --ticket N | --pr N) [--repo DIR] [--state FILE] : what is held, and does this overlap it.
 
-The one place the overlap rule lives. A path is held by an open PR (its diff plus its ticket's touch map, #398: the file list `snapshot` cached, else one `gh` read per PR), by a
+The command line over the `holds` library (scripts/holds.py), the one place the overlap rule lives; `gate` and `rescue`
+import the library instead of running this. A path is held by an open PR (its diff plus its ticket's touch map, #398: the file list `snapshot` cached, else one `gh` read per PR), by a
 building ticket (its touch map in the state file, or its worktree's changes when this session's own worker has no record), by an Elsewhere ticket (a live worker in another session:
 the changes in its worktree, ADR 0009) or by an exclusive hold (the config). The ticket states come from the
 claims module (scripts/claims.py): one tracker Snapshot per run (`--snapshot FILE` reads one `snapshot` wrote), never a `gh` call per ticket. Paths are compared
@@ -24,182 +25,23 @@ Why the PR number: it is in the snapshot, and the `assigned` time would cost a t
 `--touch-map` (dispatch) has no PR yet, so every open PR holder there still counts.
 
 Exit codes: 0 nothing overlaps; 1 an overlap (and only that); 2 could not run (no `gh`, a failed `gh` or `git` call, an
-unreadable state file, any other error: `holds: could not run: <type>: <message>`); 3 `--pr` only: it waits for an older
+unreadable state file, `--repo` not in a git repository, any other error: `holds: could not run: <type>: <message>`); 3 `--pr` only: it waits for an older
 open PR. Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
 import claims
 import common
-import config
 import github
+import holds as lib
 import touchmap
 import tracker
-from repo import STATE, ticket_of_branch, worktree_changes
-
-def plain(entry) -> str:
-    """A touch-map entry (an Entry, or text holding one) as a file path; unparseable text stands for itself."""
-    if isinstance(entry, touchmap.Entry):
-        return entry.path
-    try:
-        found = touchmap.parse(entry)
-    except touchmap.TouchMapError:
-        return str(entry).strip()
-    return found[0].path if found else ""
-
-
-def state_paths(value) -> list:
-    """The paths of a state file's `touch_map`: the canonical string `rebuild-state` writes (or an older list of entries)."""
-    if isinstance(value, list):
-        value = ", ".join(e for e in value if isinstance(e, str))
-    if not isinstance(value, str):
-        return []
-    if value.startswith(touchmap.UNPARSED):
-        return [touchmap.HOLDS_ALL]
-    try:
-        return [e.path for e in touchmap.parse(value)]
-    except touchmap.TouchMapError:
-        return [touchmap.HOLDS_ALL]  # a hand edit the grammar rejects fails closed: it holds every path, never none
-
-
-def candidate_paths(args: list, literal: bool = False) -> tuple:
-    """(paths, ignored) for the `--touch-map` arguments. Each is parsed by `touchmap.parse`, so one quoted string and
-    separate arguments give the same paths; with `literal`, each argument is one path, unparsed. `none` is an empty
-    touch map, not an ignored argument; an empty argument is reported on stderr as `ignored: <arg>` and counted.
-    An entry off the grammar raises touchmap.TouchMapError."""
-    paths, ignored = [], 0
-    for arg in args:
-        if not literal and arg.strip().lower() in ("none", "none."):
-            continue
-        found = [arg] if literal else [e.path for e in touchmap.parse(arg)]
-        if not found:
-            print(f"ignored: {arg}", file=sys.stderr)
-            ignored += 1
-        paths.extend(found)
-    return paths, ignored
-
-
-def claimed_paths(found: dict, own, base: str) -> tuple:
-    """({ticket: [paths]} for the Building claims, {ticket: [paths]} for the Elsewhere claims), the ticket `own` left out.
-    A Building claim holds its touch map (the state-file entries, through `plain`); a Building claim with no record
-    (this session's own worker, `worker unknown`) has no touch map, so it holds its worktree's changes and is labelled
-    building. An Elsewhere claim holds its worktree's changes, the ones a live worker has made so far (ADR 0009). An
-    open PR is a different claim state, so a ticket with a PR is held through the PR (`pr_paths`), not here. A Building
-    claim with a record and a worktree holds its touch map plus the worktree's changes (#398)."""
-    tickets, others = {}, {}
-    for n, c in sorted(found.items()):
-        if n == own:
-            continue
-        if c.state == "building":
-            if c.worker is None:
-                paths = worktree_changes(c.worktree, base) if c.worktree else []
-            else:
-                paths = state_paths(c.worker.get("touch_map"))
-                if touchmap.HOLDS_ALL in paths:
-                    print(f"holds: building #{n} has an unparsed touch map, so it holds every path until its state is fixed or it finishes", file=sys.stderr)
-                elif c.worktree:
-                    # The map is a prediction: an edit outside it, committed or not, is held too (#398).
-                    paths = paths + [p for p in worktree_changes(c.worktree, base) if p not in paths]
-            if paths:
-                tickets[n] = paths
-        elif c.state == "elsewhere" or (c.state == "with-lead" and c.lock and c.lock[0] in ("ours", "foreign-live") and c.worktree):
-            # A `lead` ticket with a live worker's worktree still holds its uncommitted changes, as it did before the
-            # claims module: the claims state says with-lead, but a live lock means someone is still writing there.
-            paths = worktree_changes(c.worktree, base)
-            if paths:
-                others[n] = paths
-    return tickets, others
-
-
-RELEASE_PLEASE_PREFIX = tracker.RELEASE_PLEASE_PREFIX
-
-
-def covers(held: str, path: str) -> bool:
-    """Whether a held entry and a path name the same file, or one is a directory (`db/`) containing the other (touchmap.overlaps)."""
-    return touchmap.overlaps(touchmap.Entry(held), touchmap.Entry(path))
-
-
-def pr_paths(files: list, record) -> tuple:
-    """(paths, off_map) for an open PR: its changed files joined with its ticket's touch map from the worker record (#398),
-    so a PR that opened with an empty commit still holds its declared map. `off_map` is the set of PR files outside a
-    non-empty map, which the output names `open PR #n file`."""
-    mapped = state_paths(record.get("touch_map")) if isinstance(record, dict) else []
-    if touchmap.HOLDS_ALL in mapped:
-        mapped = []  # an unparsed map is reported for the building claim; the PR still holds its diff
-    paths = list(files) + [p for p in mapped if p not in files]
-    off = {p for p in files if mapped and not any(covers(m, p) for m in mapped)}
-    return paths, off
-
-
-def held_paths(cfg, prs: dict, tickets: dict, others: dict, off_map: dict = None) -> dict:
-    """{path: [holder, ...]} in a stable order. `tickets` is {ticket: [paths]} for the Building tickets, `others` for the
-    Elsewhere ones; `off_map` is {pr: {paths}} the PR changed outside its ticket's touch map (named `open PR #n file`)."""
-    held: dict = {}
-    off_map = off_map or {}
-    for n, paths in sorted(prs.items()):
-        for p in paths:
-            held.setdefault(p, []).append(f"open PR #{n} file" if p in off_map.get(n, ()) else f"open PR #{n}")
-    for n, paths in sorted(tickets.items()):
-        for p in paths:
-            held.setdefault(p, []).append(f"building #{n}")
-    for n, paths in sorted(others.items()):
-        for p in paths:
-            held.setdefault(p, []).append(f"elsewhere #{n}")
-    for p in cfg.exclusive_holds:
-        held.setdefault(plain(p), []).append("an exclusive hold")
-    return held
-
-
-def is_shared(cfg, path: str) -> bool:
-    return cfg.is_shared(path)
-
-
-PR_HOLDER = re.compile(r"open PR #(\d+)(?: file)?$")
-
-
-def report(held: dict, candidates: list, cfg, own_pr=None, pr_tickets=None) -> int:
-    """Print the held paths and the overlaps; the exit code (0, 1, or 3 when only older open PRs overlap).
-    With `own_pr` (the gate's check), an open-PR holder is an ordering: a lower-numbered PR is older and makes this one
-    wait; a higher-numbered one is younger and is not counted. Any other holder of the same path still counts."""
-    pr_tickets = pr_tickets or {}
-    for p, who in held.items():
-        print(f"{p} (held by {', '.join(who)})")
-    if not held:
-        print("none")
-    counted, waits = 0, {}
-    for c in candidates:
-        for p, who in held.items():
-            if not covers(p, c):
-                continue
-            shown = f"{c} (held by {', '.join(who)})"
-            if is_shared(cfg, c) or is_shared(cfg, p):  # a directory candidate overlaps the held file under it
-                print(f"shared (not counted): {shown}")
-                continue
-            if own_pr is not None and all(PR_HOLDER.match(w) for w in who):
-                older = [n for n in (int(PR_HOLDER.match(w).group(1)) for w in who) if n < own_pr]
-                if older:
-                    waits.setdefault(min(older), []).append(c)
-                else:
-                    print(f"younger PR (not counted): {shown}")
-                continue
-            print(f"overlap: {shown}")
-            counted += 1
-    if counted:
-        return 1
-    for n, paths in sorted(waits.items()):
-        ticket = pr_tickets.get(n)
-        who = f"#{ticket} (PR #{n})" if ticket is not None else f"PR #{n}"
-        print(f"waits for {who} to merge: {', '.join(sorted(set(paths)))}")
-    if waits:
-        return 3
-    print("overlap: none")
-    return 0
+from repo import STATE
 
 
 def run(argv=None) -> int:
@@ -221,56 +63,34 @@ def run(argv=None) -> int:
     candidates = None
     if args.touch_map is not None:
         try:
-            candidates, ignored = candidate_paths(args.touch_map, args.literal)
+            candidates, ignored = lib.candidate_paths(args.touch_map, args.literal)
         except touchmap.TouchMapError as e:
             print(f"holds: {e}", file=sys.stderr)
             return 2
+        for arg in ignored:
+            print(f"ignored: {arg}", file=sys.stderr)
         if not candidates and ignored:
             print("holds: --touch-map yields no path", file=sys.stderr)
             return 2
-    repo = Path(args.repo)
-    cfg = config.Config.load(repo)
+    repo = Path(args.repo).resolve()
+    if not repo.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=repo).code != 0:
+        common.die(f"holds: cannot run: {args.repo} is not in a git repository")
     state_file = Path(args.state) if args.state else repo / STATE
     try:
         snap = tracker.Snapshot.open(args.snapshot, repo)
         # The PR file lists are cached in the snapshot file whether or not the tracker is read from it (#446): a PR whose
         # head SHA matches its entry costs no call, and the misses are written back for the next call in the pass.
         snap.use_cache(args.snapshot or repo / tracker.SNAPSHOT_FILE)
-        base = snap.default_branch
-        own_pr, own_ticket = None, args.ticket
-        if args.pr:
-            own_pr = common.pr_ref(args.pr)[0]
-            view = github.pr_view(own_pr, "headRefName", cwd=repo)
-            own_ticket = ticket_of_branch(view.get("headRefName"))
-            candidates = github.pr_files(own_pr, cwd=repo)
-        open_prs = [p for p in github.own_prs(snap.prs) if isinstance(p, dict) and p.get("baseRefName", base) == base]
-        # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
-        # `changes` is a no-op: holds needs each worktree's changed paths, not the dirty and unpushed counts claims
-        # would take, and a git failure there would stop a pass that never needed them.
-        found = claims.claims(repo, state_file, snap.issues, snap.prs, snap.merged, changes=lambda path, branch: None)
-        prs, pr_tickets, off_map = {}, {}, {}
-        for pr in open_prs:
-            if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
-                raise github.GhError(github.MALFORMED, "gh returned a PR list entry without a number")
-            if str(pr["number"]) == str(own_pr) or (own_ticket is not None and ticket_of_branch(pr.get("headRefName")) == own_ticket):
-                continue
-            if str(pr.get("headRefName") or "").startswith(RELEASE_PLEASE_PREFIX):
-                continue  # the release PR's files are never a real overlap, and its diff is not fetched
-            pr_tickets[pr["number"]] = ticket_of_branch(pr.get("headRefName"))
-            claim = found.get(pr_tickets[pr["number"]])
-            # cached in the snapshot, keyed by head SHA (#446), joined with the ticket's touch map (#398)
-            record = claim.worker if claim else None  # a draft is open work too: it joins the map like any open PR
-            prs[pr["number"]], off_map[pr["number"]] = pr_paths(snap.pr_files(pr), record)
-        snap.save_cache()
-        tickets, others = claimed_paths(found, own_ticket, base)
+        result = lib.find(snap, repo, state_file, candidates=candidates, ticket=args.ticket, pr=args.pr,
+                          warn=lambda text: print(f"holds: {text}", file=sys.stderr))
     except github.GhError as e:
         print(f"holds: gh: {e.message}", file=sys.stderr)
         return 2
     except (KeyError, TypeError, ValueError) as e:
         print(f"holds: {e}", file=sys.stderr)
         return 2
-    return report(held_paths(cfg, prs, tickets, others, off_map), candidates, cfg,
-                  own_pr=int(own_pr) if own_pr is not None else None, pr_tickets=pr_tickets)
+    print("\n".join(result.lines()))
+    return result.code
 
 
 def main(argv=None) -> int:

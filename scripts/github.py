@@ -58,6 +58,9 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         labels(first: 30) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
+        editor { login }
+        author { login }
+        authorAssociation
         lastEditedAt
         comments(last: 100) { nodes { body createdAt lastEditedAt authorAssociation author { login } } }
       }
@@ -143,10 +146,18 @@ TRUSTED_ASSOCIATIONS = frozenset(("OWNER", "MEMBER", "COLLABORATOR"))
 
 def is_trusted(association, login=None, extra=()) -> bool:
     """True for a trusted author: an `author_association` of OWNER, MEMBER or COLLABORATOR, or a login in `extra` (the
-    config's `Trusted authors:` line, lowercase). A missing association is untrusted (fail closed)."""
+    config's `Trusted authors:` line, lowercase). A missing association is untrusted (fail closed). GraphQL's
+    `author.login` for a bot drops the `[bot]` suffix that the REST login and the config carry, so both sides are
+    compared without it."""
     if str(association or "").upper() in TRUSTED_ASSOCIATIONS:
         return True
-    return bool(login) and str(login).lower() in extra
+    return bool(login) and _bare(login) in {_bare(x) for x in extra}
+
+
+def _bare(login) -> str:
+    """A login lowercased and without a trailing `[bot]`."""
+    s = str(login).lower()
+    return s[:-5] if s.endswith("[bot]") else s
 
 
 def trusted_logins(cwd=None) -> tuple:
