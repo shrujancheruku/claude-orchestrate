@@ -2291,7 +2291,7 @@ def checkout_root(real: Path, cwd: str) -> bool:
     return scratch_worktree(real, cwd)
 
 
-def git_read_ok(cmd: Command,cwd: str = "", here: str = ".") -> bool:
+def git_read_ok(cmd: Command, cwd: str = "", here: str = ".") -> bool:
     call = parse_git(cmd.words, 0)
     if call.sub is None or call.sub.dynamic:
         return False
