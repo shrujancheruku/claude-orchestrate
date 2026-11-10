@@ -231,8 +231,12 @@ The lead folding related backlog tickets into one before filing a new one, so fe
 _Avoid_: dedupe, backlog cleanup
 
 **Breakage sweep**:
-The lead's checklist, sent to the scout every 10 merges and on request, for problems that do not arrive in reports (failed CI, leftover worktrees, runlog errors); each finding becomes one ticket or one widening. Source: `skills/lead/SKILL.md`.
+The six checks `scripts/sweep` runs, due after 10 merges since its last run (a run-log event) and on request, for problems that do not arrive in reports (red main, stale claims, orphaned worktrees, new kinds of permission prompt, failed rescues, PRs past a third review round); each finding line becomes one ticket or one widening. Source: `scripts/sweep`, `skills/lead/SKILL.md`.
 _Avoid_: audit, health check
+
+**Fold**:
+Widening one open ticket with another and closing the other as a duplicate, moving its blocking edges: `scripts/fold <from> <into>`. It refuses (`next: ask-user <why>`) a claimed ticket and a pair where only one is gated on the permission layer. Source: `scripts/fold`, `skills/lead/SKILL.md`.
+_Avoid_: merge (a PR merge), dedupe
 
 **Pass digest**:
 The short summary the lead posts in its own session after each pass table from a background orchestrator, since the lead is then the developer's only view of the run. Source: `skills/lead/SKILL.md`.

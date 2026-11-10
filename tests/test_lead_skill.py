@@ -79,9 +79,8 @@ class LeadSkill(unittest.TestCase):
 
     def test_grooming_breakage_sweep_and_pass_digest(self):
         self.check(["### Grooming", "### Breakage sweep", "### Pass digest",
-                    "## Also, folded from #<n>", "Agent Brief", "Never fold into a ticket that is claimed or in review",
-                    "ungated ticket into one gated on the permission layer", "`hooks/**`", "reread the absorbers",
-                    "Every 10 merges", "`NOT removed`", "`gh_call`", "closed without a merged PR",
+                    "scripts/fold", "Agent Brief", "`ask-user <why>`", "a claimed ticket", "`hooks/**`", "reread the absorbers",
+                    "scripts/sweep", "--due", "`next: due <n>`", "`next: clean`", "`new-prompt:`",
                     "The orchestrator sends you each pass report", "the developer's only view", "launched with `--bg`", "see Grooming"])
 
     def test_staying_current(self):
