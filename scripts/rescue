@@ -163,6 +163,9 @@ def overlap(root, changed, ticket) -> int:
     except (KeyError, TypeError, ValueError, OSError) as e:
         say(f"overlap: could not check ({common.one_line(str(e)) or type(e).__name__})")
         return 1
+    except Exception as e:  # any other crash is an overlap that could not be checked, never a traceback (#618)
+        say(f"overlap: could not check ({type(e).__name__}: {common.one_line(str(e))})")
+        return 1
     if not result.counted:
         say("overlap: none")
         return 0

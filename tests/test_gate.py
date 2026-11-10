@@ -550,6 +550,18 @@ class GateTest(unittest.TestCase):
         self.assertIsInstance(out, str)
         self.assertIn("holds could not run: boom", out)
 
+    def test_an_unlisted_holds_exception_is_could_not_run_not_a_traceback(self):
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("gate_under_test2", str(Path(__file__).resolve().parent.parent / "scripts" / "gate"))
+        gate = module_from_spec(spec_from_loader("gate_under_test2", loader))
+        loader.exec_module(gate)
+        with mock.patch.object(gate.holds, "find", side_effect=RuntimeError("boom")), \
+                mock.patch.object(gate.repo, "main_checkout", return_value=str(self.env.repo)):
+            out = gate.overlap_check(7, str(self.env.repo), mock.Mock())
+        self.assertEqual(out, "holds could not run: RuntimeError: boom")
+
     def test_run_gate_exit_codes_are_pinned(self):
         """main() maps 0, 1 and 3 to a verdict and every other code to could-not-run: a new code must be added to
         both on purpose, so this fails when run_gate returns one the mapping doesn't know (#453)."""

@@ -36,7 +36,7 @@ Commands every worker runs before opening a PR. `verify --config` reads them fro
 
 ## Shared files
 
-A **shared file** is one many PRs edit. The `merge` script resolves collisions in the files listed here by replaying each PR's lines onto main, so nobody merges them by hand; a conflict in any other file is handed to the worker.
+A **shared file** is one many PRs edit. The `merge` script resolves collisions in the files listed here by replaying each PR's lines onto main, so nobody merges them by hand (paths match case-sensitively); a conflict in any other file is handed to the worker.
 
 - **Shared files:** one nested bullet per file (a path or glob in backticks), with the only change each PR may make in it.
   - `<path>`: <per-PR rule, e.g. "add one line under Unreleased">
