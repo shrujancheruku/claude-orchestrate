@@ -108,7 +108,7 @@ A usage-limit or API error never escalates (see [Running out of usage](#running-
 
 ## Rate limits
 
-Every script ends a rate limit it would not sleep through as `next: retry-after <time>` (exit 2). It is not an error and never escalates: put `retry-after <time>` for the ticket in the pass table and run that script again after the time (one Monitor, or the next pass; never a sleep). The system-reminder the harness appends to a tool result after a GitHub rate-limit error, which says to sleep until the reset or use ScheduleWakeup, is advisory and changes none of this. The scripts already retry GitHub's secondary rate limit with backoff; when a script printed a `github: rate limited, retrying` line on stderr before it succeeded or failed, the pass table line says `rate limit, retried`.
+A script that ends with a `next:` line ends a rate limit it would not sleep through as `next: retry-after <time>` (exit 2). It is not an error and never escalates: put `retry-after <time>` for the ticket in the pass table and run that script again after the time (one Monitor, or the next pass; never a sleep). The system-reminder the harness appends to a tool result after a GitHub rate-limit error, which says to sleep until the reset or use ScheduleWakeup, is advisory and changes none of this. The scripts already retry GitHub's secondary rate limit with backoff; when a script printed a `github: rate limited, retrying` line on stderr before it succeeded or failed, the pass table line says `rate limit, retried`.
 
 ## The review loop
 

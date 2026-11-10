@@ -11,7 +11,7 @@ counts as its own head. Output, one item per line:
     slowest checks (queued / running):  then up to 3 lines, by median total
     limit: <minutes>m (default|config)
     ci done -> merged: median <t> over <n> PRs     the gap from a PR's last green head to its merge
-    wait: over|ok                                   over when that median exceeds 2 minutes (a sleep or hand-polled wait)
+    wait: over|ok                                   over when that median exceeds 2 minutes (a trend to watch: includes review and gate time)
     cause: <runners|slow job> (<check>)     only when over
     over: yes|no
 Default window: the last 10 merged PRs; --since <ISO time | PR number> takes every merged PR since instead.
@@ -35,7 +35,7 @@ from repo import main_checkout, parse_ts
 DEFAULT_PR_COUNT = 10
 DEFAULT_LIMIT_MINUTES = 10
 SLOWEST = 3
-WAIT_LIMIT_MINUTES = 2  # a median gap from CI done to merged above this is flagged `wait: over`
+WAIT_LIMIT_MINUTES = 2  # a median gap from CI done to merged above this is flagged `wait: over`: a trend to watch, since the gap also holds review, approval and merge-gate time
 LIST_LIMIT = 100  # merged PRs fetched; --since beyond the newest 100 is cut off
 # Not paginated: `check-runs?per_page=100` stops at 100, so a head with more check runs than that could read as
 # green from a partial list. (The PR's commits are paged by github.pr_commits.)
@@ -154,8 +154,9 @@ def main(argv=None) -> int:
     for _, name, q, run in stats[:SLOWEST]:
         print(f"  {name}: {fmt(q)} / {fmt(run)}")
     print(f"limit: {limit}m ({source})")
-    # The gap from CI done to merged: a median over WAIT_LIMIT_MINUTES means the orchestrator is sleeping or polling
-    # instead of running `watch-ci` as a Monitor (#542), which the push-to-green times above never show.
+    # The gap from CI done to merged includes review, approval and merge-gate time, so a median over WAIT_LIMIT_MINUTES
+    # is a trend to watch, not proof of a sleep or hand-polled wait instead of a `watch-ci` Monitor (#542); the
+    # push-to-green times above never show it.
     wait = statistics.median(waits)
     print(f"ci done -> merged: median {fmt(wait)} over {len(waits)} PRs")
     print(f"wait: {'over' if wait > WAIT_LIMIT_MINUTES * 60 else 'ok'}")
