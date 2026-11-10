@@ -16,7 +16,8 @@ The state, decided in this order:
               `dispatched` time in its record: the worker ended its turn with a report nobody acts on, and a stopped
               subagent is never re-invoked unless messaged. The lock plays no part (it is always `ours`, ADR 0009). A
               record with no `dispatched` is never idle. `since` is that report's time; `nudged` is the time of the pass
-              log's `record --nudged` for it, when that is not older than `since`. A pass nudges it once, then hands it back
+              log's `record --nudged` after that dispatch, kept until a real completion (a later interim does not clear it).
+              A pass nudges it once, then hands it back
   waiting     replaces building and stalled (never a ready PR): the ticket's newest worker-report event is a
               `permission-denied` stop or an `exhausted` transient one. The developer must act; it never expires, and
               only a newer report ends it. `reason` is `permission-denied` or `exhausted`, `since` the report's time
@@ -60,7 +61,7 @@ class Claim:
     pending_branch: bool = False   # the worktree is on a `worktree-agent-*` branch: the worker never made the ticket branch
     reason: str | None = None      # waiting only: `permission-denied` | `exhausted`
     since: str | None = None       # waiting and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report
-    nudged: str | None = None      # idle only: the same, of the pass's nudge, when it is not older than `since`
+    nudged: str | None = None      # idle only: the same, of the pass's nudge after the dispatch, kept until a real completion
     escalate: str | None = None    # the model to escalate to: a haiku worker whose PR hit a mechanical trigger (see escalation)
 
 
@@ -174,13 +175,31 @@ def fmt_ts(dt) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _reports(repo) -> dict:
-    """{ticket as text: its newest worker-report event}, a duplicate passed over, from the run log."""
+CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW)  # the only kinds a claim's state reads
+
+
+def _reports(events) -> dict:
+    """{ticket as text: its newest worker-report event}, a duplicate passed over, from the run-log events."""
     out = {}
-    for e in common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG)):
+    for e in events:
         if e.get("kind") == runlog.WORKER_REPORT and e.get("outcome") != "duplicate":
             out[str(e.get("ref"))] = e
     return out
+
+
+class _LazyConfig:
+    """The config, parsed on the first attribute read: only a haiku worker's escalation reads it, and most calls
+    have none."""
+
+    def __init__(self, repo):
+        self._repo, self._cfg = repo, None
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if self._cfg is None:
+            self._cfg = config.Config.load(self._repo)
+        return getattr(self._cfg, name)
 
 
 def _nudges(repo) -> dict:
@@ -235,8 +254,9 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     records = {int(k): v for k, v in state.items() if str(k).isdigit()}
     foreign = {int(k): v for k, v in other.items() if str(k).isdigit() and int(k) not in records}
     tickets = sorted({n for n, i in open_issues.items() if i.get("claimed")} | (set(records) - set(open_issues)))
-    reports, nudges = _reports(repo), _nudges(repo)
-    events, cfg = list(common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG))), config.Config.load(repo)
+    # One pass over the events log, parsing only the kinds a claim reads (it grows with every `gh_call` line, #683).
+    events, nudges = runlog.read_kinds(repo, CLAIM_EVENT_KINDS), _nudges(repo)
+    reports, cfg = _reports(events), _LazyConfig(repo)
     out = {}
     for n in tickets:
         record = records.get(n) if isinstance(records.get(n), dict) else None
@@ -277,7 +297,9 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             dispatched = parse_ts(record.get("dispatched"))
             if dispatched and reported and reported > dispatched:
                 claim.state, claim.since = "idle", fmt_ts(reported)
-                if n in nudges and nudges[n] >= reported:
+                # A nudge stays on until a real completion (that ends idle above), so a second interim after a nudge
+                # reads `idle nudged` and the pass hands it back (#690). Only this dispatch's own nudge counts.
+                if n in nudges and nudges[n] > dispatched:
                     claim.nudged = fmt_ts(nudges[n])
         if wt and pr is None and claim.state in ("building", "idle", "stalled", "waiting", "elsewhere"):
             claim.changes = changes(wt["path"], wt["branch"])
