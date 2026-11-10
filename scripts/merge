@@ -451,6 +451,8 @@ def run_merge(argv=None) -> int:
     ap.add_argument("--also-approved", action="append", default=[], metavar="PR=SHA",
                     help="another approved PR and the head approved; after this merge it is updated if behind (repeatable)")
     ap.add_argument("--worktree", help="the worker's worktree to remove after the merge")
+    ap.add_argument("--fast-forward-only", action="store_true",
+                    help="no PR: only fast-forward the main checkout to origin/<default branch> (handled before this parser; exit 1 when a guard refuses)")
     ap.add_argument("--cwd", default=".", help="the repo (default: current directory)")
     ap.add_argument("--timeout", type=float, default=300, help="seconds to wait for MERGED")
     ap.add_argument("--interval", type=float, default=5, help="seconds between state checks")
