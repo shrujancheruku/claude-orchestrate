@@ -50,7 +50,7 @@ class Prompts(unittest.TestCase):
             entry("2026-11-09T10:04:00+00:00", session="X", command="e"),  # not in the agents list
         ])
         out = self.run_prompts().stdout.splitlines()
-        self.assertEqual(out[1], "by role: main 2, lead 2, orchestrator 1")
+        self.assertEqual(out[1], "by role: lead 2, main 2, orchestrator 1")
         self.assertIn("orchestrator Bash a", out[3])
         self.assertIn("lead Bash b", out[4])
         self.assertIn("main Bash d", out[6])
