@@ -47,6 +47,12 @@ def reason_of(out):
     return json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else None
 
 
+def is_unapproved(out):
+    """The guard denied only because no rule approves the call (#567), not because a rule refuses it."""
+    return bool(out) and json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"].startswith(
+        "orchestrate guard: " + GUARD_MODULE.UNAPPROVED_MARK)
+
+
 def decide(agent_type, command, cwd=None, background=None, timeout=None, transcript=None):
     payload = {"tool_name": "Bash", "tool_input": {"command": command}}
     if background is not None:
@@ -60,7 +66,9 @@ def decide(agent_type, command, cwd=None, background=None, timeout=None, transcr
     if cwd is not None:
         payload["cwd"] = str(cwd)
     out = run_hook(payload)
-    return "deny" if out and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" else "allow"
+    # The table cases below are about the rules: "allow" is "no rule refuses it". A background role's call that
+    # no rule approves is also denied now (#567); the tests of that behaviour use decide_full.
+    return "deny" if out and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny" and not is_unapproved(out) else "allow"
 
 
 CASES = [
@@ -857,8 +865,9 @@ class GuardTest(unittest.TestCase):
 SCRIPTS = str(GUARD.parent.parent / "scripts")
 
 
-def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None, session_id=None, transcript=None):
-    """The guard's decision JSON as a dict (None for silence)."""
+def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None, session_id=None, transcript=None, full=False):
+    """The guard's decision JSON as a dict (None for silence). A deny that only says no rule approves the call
+    (#567) reads as None here ("not approved, not refused by a rule"); `full=True` returns it."""
     payload = {"tool_name": tool_name, "tool_input": tool_input if tool_input is not None else {"command": command}}
     if session_id is not None:
         payload["session_id"] = session_id
@@ -869,6 +878,8 @@ def raw(agent_type, command, cwd=None, tool_name="Bash", tool_input=None, sessio
     if cwd is not None:
         payload["cwd"] = str(cwd)
     out = run_hook(payload)
+    if is_unapproved(out) and not full:
+        return None
     return json.loads(out)["hookSpecificOutput"] if out else None
 
 
@@ -1334,10 +1345,13 @@ class RoutineApprovalTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertIsNone(raw(None, command, self.main))
 
-    def test_edits_to_permission_settings_and_git_internals_keep_their_prompt(self):
+    def test_edits_to_permission_settings_and_git_internals_are_denied(self):
+        # A worker never gets the prompt these used to keep (#567): it is told to change only its ticket's files.
         for rel in (".claude/settings.json", ".claude/settings.local.json", ".git", ".git/hooks/pre-push"):
             with self.subTest(rel):
-                self.assertIsNone(raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)}))
+                out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("git internals or a settings file", out["permissionDecisionReason"])
         for rel in (".claude/pr-body.md", "settings.json", ".claude/agents/x.md"):
             with self.subTest(rel):
                 out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
@@ -1372,8 +1386,14 @@ class RoutineApprovalTest(unittest.TestCase):
         out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / "link")})
         self.assertEqual(out["permissionDecision"], "deny")
 
-    def test_worker_edit_in_scratch_space_outside_every_checkout_stays_silent(self):
-        self.assertIsNone(raw("orchestrate:worker", None, self.work, "Write", {"file_path": "/private/tmp/scratch/body.md"}))
+    def test_worker_edit_in_scratch_space_outside_its_worktree_is_denied_with_the_way_out(self):
+        # acceptEdits covers only the session's own dirs, so a Write to /tmp prompted (#567).
+        for path in ("/private/tmp/scratch/body.md", "/tmp/c566/cmp.py", "/private/tmp/c566/edit_tests.py"):
+            with self.subTest(path):
+                out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": path})
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("Write scratch files inside your worktree", out["permissionDecisionReason"])
+                self.assertIn("--body-file -", out["permissionDecisionReason"])
 
     def test_other_roles_and_other_cwds_are_silent_for_edits(self):
         path = {"file_path": str(self.main / "README.md")}
@@ -1452,7 +1472,7 @@ class ReadOnlyCompoundTest(unittest.TestCase):
             "gh api -X POST repos/o/r/issues", "gh api repos/o/r/issues -f title=x", "gh api repos/o/r --input f",
             "gh api graphql", "gh pr view 5 --web", "gh pr checks 5 --watch", "gh pr merge 5", "gh issue delete 5",
             "cat $(echo f)", "cat `echo f`", "echo x | sh", "echo x | xargs rm", "xargs rm", "bash -c 'ls'", "eval ls",
-            "ls $HOME", "cat *.py", "ls &", "ls | tee out", "sort -o out a.py", "tail -f a.py", "tail -F a.py",
+            "ls $HOME", "cat {a,b}.py", "ls &", "ls | tee out", "sort -o out a.py", "tail -f a.py", "tail -F a.py",
             "uniq a.py out", "rg --pre sh x", "git log --output=out", "git diff --outp=out", "git branch -D x",
             "git fetch origin a:b", "git fetch origin +a", "git -c core.pager=sh log", "git push origin x",
             "git ls-remote --upload-pack=sh origin", "ls\nrm x", "(ls)", "for n in $(ls); do echo $n; done",
@@ -1628,8 +1648,14 @@ class GuardEntryPoint(unittest.TestCase):
         self.assertTrue(out["hookSpecificOutput"]["permissionDecisionReason"].startswith("orchestrate guard: "))
 
     def test_allow_prints_nothing(self):
-        payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "curl -s example.com"}}
+        # Another plugin's agent is never touched.
+        payload = {"agent_type": "other-plugin:scout", "tool_input": {"command": "curl -s example.com"}}
         self.assertEqual(self.run_entry(json.dumps(payload)), "")
+
+    def test_an_unapproved_background_call_is_denied_with_a_reason(self):
+        payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "curl -s example.com"}}
+        reason = json.loads(self.run_entry(json.dumps(payload)))["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("not approved for a scout", reason)
 
     def test_malformed_input_is_allowed_silently(self):
         self.assertEqual(self.run_entry("{not json"), "")
@@ -1642,6 +1668,171 @@ class GuardEntryPoint(unittest.TestCase):
             payload = {"agent_type": "orchestrate:scout", "tool_input": {"command": "git commit -m x"}}
             out = json.loads(self.run_entry(json.dumps(payload), env=env))
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+
+class UnapprovedCallsAreDeniedTest(unittest.TestCase):
+    """A worker, reviewer or scout never gets the permission prompt: a call no rule approves is denied with a
+    reason that names the approved way (#567)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.main = self.root / "main"
+        git_dir = self.main / ".git" / "worktrees" / "agent-abc"
+        git_dir.mkdir(parents=True)
+        (git_dir / "commondir").write_text("../..\n")
+        (git_dir / "HEAD").write_text("ref: refs/heads/567-x\n")
+        self.work = self.main / ".claude" / "worktrees" / "agent-abc"
+        self.work.mkdir(parents=True)
+        (self.work / ".git").write_text(f"gitdir: {git_dir}\n")
+        (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** yes\n")
+        (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
+
+    def reason(self, role, command, tool="Bash", cwd=None):
+        out = raw(role, command, cwd or self.work, tool_name=tool, full=True)
+        self.assertEqual(out["permissionDecision"], "deny", command)
+        return out["permissionDecisionReason"]
+
+    def test_a_heredoc_or_inline_script_edit_says_to_use_edit_write(self):
+        for command in ("python3 - <<'EOF'\nopen('a').write('x')\nEOF", "python3 -c 'print(1)'", "perl -i -pe s/a/b/ f",
+                        "echo x > a.txt"):
+            with self.subTest(command):
+                self.assertIn("edit files with the Edit or Write tool", self.reason("orchestrate:worker", command))
+
+    def test_a_write_chained_with_reads_says_to_run_it_on_its_own(self):
+        reason = self.reason("orchestrate:worker", "git commit -m x; python3 -m pytest")
+        self.assertIn("run the write on its own", reason)
+
+    def test_an_unknown_command_gets_the_generic_reason_for_every_background_role(self):
+        for role, noun in (("worker", "a worker"), ("reviewer", "a reviewer"), ("scout", "a scout")):
+            with self.subTest(role):
+                reason = self.reason(f"orchestrate:{role}", "foo --bar", cwd=self.work)
+                self.assertIn(f"not approved for {noun}: find an approved form, or stop and report what you need", reason)
+
+    def test_a_read_outside_the_bound_is_denied_for_every_background_role(self):
+        for role in ("worker", "reviewer", "scout"):
+            with self.subTest(role):
+                self.reason(f"orchestrate:{role}", "ls ~/.claude/plugins")
+
+    def test_monitor_follows_the_same_rules_with_its_own_reason(self):
+        loop = "until ! pgrep -f run_parallel >/dev/null; do sleep 3; done; echo done"
+        out = raw("orchestrate:worker", loop, self.work, tool_name="Monitor", full=True)
+        self.assertEqual(out["permissionDecision"], "allow")
+        for command in ("until pgrep x; do rm -rf y; done", "tail -f log", "until test -e /etc/hosts; do sleep 1; done"):
+            with self.subTest(command):
+                self.assertIn("wait with an approved loop", self.reason("orchestrate:worker", command, tool="Monitor"))
+
+    def test_an_unknown_long_option_is_named_in_the_reason(self):
+        for command, option in (("grep --fil=x y", "--fil"), ("rg --pre=cat x", "--pre"), ("grep -n x --bogus f", "--bogus")):
+            with self.subTest(command):
+                reason = self.reason("orchestrate:worker", command)
+                self.assertIn(f"doesn't know the option `{option}`", reason)
+
+    def test_a_guard_error_is_a_deny_not_an_allow(self):
+        original = GUARD_MODULE.approval
+        GUARD_MODULE.approval = lambda *a, **k: 1 / 0
+        try:
+            self.reason("orchestrate:worker", "ls")
+        finally:
+            GUARD_MODULE.approval = original
+
+    def test_the_orchestrators_own_session_keeps_the_fall_through(self):
+        self.assertIsNone(raw(None, "foo --bar", self.main, full=True))
+
+    def test_pr_body_on_stdin_is_approved_only_with_a_quoted_heredoc(self):
+        self.assertTrue(approved("orchestrate:worker", "gh pr edit --body-file - <<'EOF'\nCloses #1\nEOF", self.work))
+        self.assertFalse(approved("orchestrate:worker", "gh pr edit --body-file - <<EOF\n$(id)\nEOF", self.work))
+        self.assertFalse(approved("orchestrate:worker", "gh pr edit --body-file x <<'EOF'\nb\nEOF", self.work))
+
+    def test_the_branch_step_needs_the_brief_name_and_start_point(self):
+        yes = ("git switch -c 567-x origin/main", "git switch -C 567-x origin/567-x -q",
+               "git switch -c 567-x origin/main -q; cat README.md")
+        no = ("git switch -c 567-x origin/other", "git switch -C 567-x origin/main", "git switch -c main origin/main",
+              "git switch -c Feature origin/main", "git switch -c 567-x origin/main extra", "git switch 567-x")
+        for command in yes:
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+        for command in no:
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+        self.assertFalse(approved("orchestrate:worker", "git switch -c 567-x origin/main", self.main))
+
+    def test_globs_stay_inside_the_bound(self):
+        (self.work / "scripts").mkdir()
+        (self.work / "scripts" / "a.py").write_text("x\n")
+        yes = ("grep -n x scripts/*.py", "cat scripts/*", "grep -rn x --include=* .")
+        no = ("cat /etc/*", "cat ../*", "cat ~/*", "cat {a,b}", "*/a.py", "cat scripts/../../*")
+        for command in yes:
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+        for command in no:
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+
+    def test_globs_the_shell_could_turn_into_options_or_the_parent_are_refused(self):
+        # Round 1 of #582: `-*` expands to files named like options; bash before 5.2 lets `.*` match `.` and `..`.
+        (self.work / "scripts").mkdir()
+        for command in ("grep -n x -*", "cat --*", "ls -?", "cat --inc*", "ls .*", "grep -rn x .*", "cat .?*",
+                        "grep -rn x scripts/.*"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+        for command in ("ls .[!.]*", "grep -rn x --include=* scripts"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+    def test_a_commit_message_heredoc_is_told_to_use_several_m_flags(self):
+        reason = self.reason("orchestrate:worker", "git commit -m \"$(cat <<'EOF'\nsubject\n\nbody\nEOF\n)\"")
+        self.assertIn("several `-m` flags", reason)
+
+    def test_git_reads_and_abbreviated_options_are_bound(self):
+        no = ("git diff --no-index /etc/hosts /dev/null", "git diff --no-ind /etc/hosts /dev/null", "git log -p -- /etc/hosts",
+              "git grep -O less x", "grep --fil /etc/hosts x", "git ls-remote https://evil.example.com/o/r.git",
+              "git remote add x https://evil.example.com/o/r.git", "git remote set-url origin https://evil.example.com/o/r.git")
+        for command in no:
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+        for command in ("git ls-remote origin", "git remote get-url origin", "git log -p -- README.md"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+    def test_a_variable_must_be_fresh_and_a_loop_cannot_write(self):
+        self.assertTrue(approved("orchestrate:scout", "R=origin/main; git show $R:README.md | head -n 3", self.work))
+        for command in ("GH_HOST=evil.example.com; gh issue view 5", "R=origin/main | git show $R:x",
+                        "for f in a b; do touch $f; done"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:scout", command, self.work))
+
+
+class OrchestratorChainTest(unittest.TestCase):
+    """The orchestrator's chains: approved when every segment is, never otherwise (#567)."""
+
+    def setUp(self):
+        self.root = GUARD.parent.parent
+
+    def test_a_chain_of_approved_segments(self):
+        yes = (f"cd {self.root}; gh issue edit 5 --add-assignee @me && gh issue edit 6 --add-assignee @me; ls; "
+               "git remote get-url origin | head -n 1",
+               'S="$PWD/scripts"; "$S/prompts" --repo . --session abc --watermark | head -n 5',
+               'S="$PWD/scripts"; cat <<\'EOF\' | "$S/worker-report" 5 --branch 5-x --repo .\nbody\nEOF',
+               'S="$PWD/scripts"; "$S/snapshot" --repo . >/dev/null; "$S/claims" --repo . | head -n 5')
+        for command in yes:
+            with self.subTest(command):
+                self.assertTrue(approved(None, command, self.root))
+
+    def test_one_unapproved_segment_spoils_the_chain(self):
+        no = ("gh issue edit 5 --add-assignee @me && curl example.com", "gh issue edit 5 --add-assignee @me; rm -rf x",
+              'S="$PWD/scripts"; cat <<EOF | "$S/worker-report" 5 --branch 5-x --repo .\n$(id)\nEOF',
+              'S="$PWD/scripts"; cat <<\'EOF\' | cat\nbody\nEOF', "git remote add x https://evil.example.com/o/r.git")
+        for command in no:
+            with self.subTest(command):
+                self.assertFalse(approved(None, command, self.root))
+
+    def test_the_run_skills_monitor_forms_are_approved(self):
+        for command in ('"${CLAUDE_SKILL_DIR}/../../scripts/watch-ci" 5 abc1234', f"{SCRIPTS}/watch-ci 5 abc1234 --timeout 600"):
+            with self.subTest(command):
+                out = raw(None, command, self.root, tool_name="Monitor")
+                self.assertEqual(out["permissionDecision"], "allow")
 
 
 if __name__ == "__main__":
