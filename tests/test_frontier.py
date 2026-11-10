@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from harness import Run, ScriptEnv, gh_repo_view  # noqa: E402
+from harness import Run, ScriptEnv, gh_pr_list, gh_repo_rest, gh_repo_view  # noqa: E402
 
 
 def node(n, labels=("ready-for-agent",), claimed=False, blockers=(), body="", total=0, completed=0, parent=None):
@@ -227,6 +227,22 @@ class Frontier(unittest.TestCase):
         self.snapshot_event("stale")
         self.serve(page([node(1)]))
         self.assertTrue(self.frontier().stdout.startswith("relaunch:"))
+
+    def test_slots_ends_the_listing_with_the_cap_count_and_a_parked_claim_is_not_counted(self):
+        import runlog
+        (self.env.repo / ".claude" / "orchestration.md").write_text("## Slots\n\n- **Slots:** 3. throttle\n")
+        runlog.append_event(self.env.repo, runlog.PARK, "parked", ref=105, ticket=5, session="s")
+        graphql = {"args": ["api", "graphql"], "seq": [page([node(3), node(5, claimed=True), node(6, claimed=True)])]}
+        self.env.set_gh([gh_repo_view(), gh_repo_rest({"owner": {"login": "o"}, "name": "r", "defaultBranchRef": {"name": "main"}}),
+                         graphql, gh_pr_list([], "--state", "open"), gh_pr_list([], "--state", "merged")])
+        r = self.frontier("--slots")
+        # #5 is parked (listed by `claims`, not counted); #6 holds no worktree and no record, so it is stalled and counts
+        self.assertEqual(r.stdout, "#3 title 3 model sonnet\nslots: 1/3 building, 1 parked\n")
+        self.assertEqual(r.verdict, "next: done")
+
+    def test_without_slots_no_claims_are_read(self):
+        self.serve(page([node(3)]))
+        self.assertNotIn("slots:", self.frontier().stdout)
 
     def test_a_failed_gh_exits_2_with_nothing_on_stdout(self):
         self.serve(graphql_exit=1)

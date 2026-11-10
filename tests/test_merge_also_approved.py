@@ -53,7 +53,7 @@ class AlsoApprovedTest(unittest.TestCase):
         lines = p.stdout.splitlines()
         self.assertRegex(lines[-3], r"^also: wait-ci 8 \S+$")
         self.assertRegex(lines[-2], r"^also: wait-ci 9 \S+$")
-        self.assertEqual(lines[-1], "next: merged")
+        self.assertEqual(lines[-1], "next: frontier")
 
     def test_a_pr_not_named_approved_is_left_alone(self):
         p = self.merge([self.other(8, "b" * 40), self.behind(8, 3)])
@@ -70,20 +70,20 @@ class AlsoApprovedTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertEqual(self.updated(), [])
         self.assertIn("PR #8 is behind main by 2 and DIRTY; not updated: hand it back", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[-2:], ["also: send-back 8", "next: merged"])
+        self.assertEqual(p.stdout.splitlines()[-2:], ["also: send-back 8", "next: frontier"])
 
     def test_a_pr_pushed_to_since_its_approval_is_left_alone(self):
         p = self.merge([self.other(8, "d" * 40), self.behind(8, 2)], "8=" + "b" * 40)
         self.assertEqual(self.updated(), [])
         self.assertIn("PR #8 left alone", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 pushed to since the approval", "next: merged"])
+        self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 pushed to since the approval", "next: frontier"])
 
     def test_a_failed_update_does_not_fail_the_merge(self):
         p = self.merge([self.other(8, "b" * 40), self.behind(8, 2)], "8=" + "b" * 40,
                        update={"exit": 1, "stderr": "boom"})
         self.assertEqual(p.returncode, 0)
         self.assertIn("PR #8 not updated", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 not updated: boom", "next: merged"])
+        self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 not updated: boom", "next: frontier"])
 
     def test_a_gated_pr_is_left_alone_even_when_behind(self):
         cfg = self.env.repo / ".claude" / "orchestration.md"
@@ -99,7 +99,7 @@ class AlsoApprovedTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.updated(), ["9"])
         self.assertIn("PR #8 left alone: it touches the merge gate hooks/**", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[-3:], ["also: left 8 gated by hooks/**", "also: wait-ci 9 " + p.stdout.split("also: wait-ci 9 ")[1].split()[0], "next: merged"])
+        self.assertEqual(p.stdout.splitlines()[-3:], ["also: left 8 gated by hooks/**", "also: wait-ci 9 " + p.stdout.split("also: wait-ci 9 ")[1].split()[0], "next: frontier"])
 
     def test_a_malformed_spec_is_skipped(self):
         p = self.merge([], "nonsense")
@@ -138,7 +138,7 @@ class AlsoApprovedTest(unittest.TestCase):
         p = self.merge([self.other(8, head), self.behind(8, 1)], "8=" + approved)
         self.assertEqual(self.updated(), [])
         self.assertIn("PR #8 left alone", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
 
 
 if __name__ == "__main__":

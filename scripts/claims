@@ -14,7 +14,9 @@ lock:  `ours <pid>` (this session's own worker); `foreign-live <pid>`; `foreign-
 changes (only with a worktree and no PR): `clean`, `dirty <k>`, `unpushed <k>` or `dirty <k> unpushed <j>`.
 escalate: a line ends `escalate <model>` when the ticket's haiku worker met a mechanical trigger on its PR (a second `ci fail`, or a `review`
 event of round 2 or later that requested changes): hand the ticket to a new worker on that model. An unanswerable `stopped` report is the orchestrator's judgement, not this word's.
-`claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line.
+`claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line, unless `--slots` ends the listing with
+`slots: <building>/<cap> building, <k> parked` (#716): the claims that occupy a slot against the config's Slots count, and the parked
+ones apart. A `parked` claim is listed but never counted against the cap; `done` and `with-lead` claims are not counted either.
 Reads the run log and the pass log (a missing one is no events), the tracker as one Snapshot (scripts/tracker.py; `--snapshot FILE` reads a file `snapshot` wrote instead of fetching), the state file (a missing one means no workers) and
 `git worktree list`. Exit codes: 0 printed; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository, an
 unreadable state file), one line on stderr. Every run ends with exactly one `next:` line (ADR-0014): `done` (0), `retry-after <time>`
@@ -29,6 +31,7 @@ from pathlib import Path
 
 import claims
 import common
+import config
 import github
 import runlog
 import tracker
@@ -69,6 +72,7 @@ def run(argv=None) -> int:
     ap.add_argument("--session", default=None,
                     help="this session's id: its state-file entry is the current one, not the last rebuilder's (#532)")
     ap.add_argument("--snapshot", default=None, help="read the tracker from this file (scripts/snapshot) instead of fetching")
+    ap.add_argument("--slots", action="store_true", help="end the listing with `slots: <building>/<cap> building, <k> parked`")
     args = ap.parse_args(argv)
     if args.session:
         os.environ[runlog.SESSION_ENV] = args.session  # github's gh_call events are written under it too
@@ -83,12 +87,15 @@ def run(argv=None) -> int:
         common.die(f"claims: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError) as e:
         common.die(f"claims: cannot run: {e}")
+    all_found = found  # the slot count is over every claim, whatever `<ticket>` narrows the listing to
     if args.ticket is not None:
         found = {args.ticket: found[args.ticket]} if args.ticket in found else {}
         if not found:
             print(f"#{args.ticket} not claimed")
     for n in sorted(found):
         print(line(found[n]))
+    if args.slots:
+        print(claims.slots_line(all_found, config.for_checkout(root).slots))
     return 0
 
 

@@ -1942,9 +1942,9 @@ ORCHESTRATOR_FORMS = (
     # The read-only pass scripts, with the exact flags the run and lead skills pass.
     Form("snapshot", (), {"--repo": "repo", "--out": "snapshot"}),
     Form("rebuild-state", ("word?",), {"--session": "word", "--repo": "repo"}),
-    Form("claims", ("n?",), SESSION_FLAGS),
+    Form("claims", ("n?",), {**SESSION_FLAGS, "--slots": ""}),
     Form("frontier", (), {"--all": "", "--parent": "num", "--ticket": "num", "--touch-map": "word", "--snapshot": "snapshot",
-                          "--repo": "repo"}),
+                          "--repo": "repo", "--slots": "", "--session": "word"}),
     Form("holds", (), {**SESSION_FLAGS, "--touch-map": "word+", "--literal": "", "--ticket": "num", "--pr": "num"}),
     Form("gate", ("pr",), {"--session": "word", "--cwd": "cwd", "--base": "word", "--timeout": "float", "--retry-delay": "float"}),
     # The suite run in a scratch tree (#624): the config's commands only, in a worktree or scratch tree the run made.
@@ -1952,7 +1952,7 @@ ORCHESTRATOR_FORMS = (
     Form("ci-times", (), {"--since": "word"}),
     Form("watch-ci", ("target+",), {"--no-run-after": "float", "--interval": "float", "--stuck-after": "float"}),
     Form("lead-route", (), {**SESSION_FLAGS, "--cap": "num", "--now": "word"}, need=("--cap",)),
-    Form("lead-brief", (), {"--repo": "repo", "--now": "word", "--checkpoint": "num", "--watch": "", "--interval": "float"}),
+    Form("lead-brief", (), {"--repo": "repo", "--now": "word", "--checkpoint": "num", "--watch": "", "--interval": "float", "--velocity": ""}),
     # `--session` is the caller's own id (#634): the mark and the watermark are per session, so another session's id is refused.
     Form("prompts", (), {"--repo": "repo", "--session": "own", "--since": "word", "--watermark": "", "--mark": ""}),
     # One ticket, through the trust rule (every role may read one).

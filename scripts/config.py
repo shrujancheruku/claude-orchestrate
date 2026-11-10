@@ -50,6 +50,9 @@ class Config(NamedTuple):
     ci_wait_limit: int | None = None  # minutes: the optional `**CI wait limit:**` line; None when absent or not a number
     board: str | None = None  # the `- **Board:** <project URL>` line setup writes; None when absent
     trusted_authors: tuple = ()  # logins on the optional `- **Trusted authors:**` line (Backlog): trusted besides OWNER, MEMBER, COLLABORATOR (ADR-0015)
+    idle_window: int = 10  # minutes: the Velocity section's `**Idle window:**`; how long a slot may sit idle with work waiting before the lead is woken (#716)
+    hold_threshold: int = 3  # the Velocity section's `**Expensive hold:**`: takeable tickets one held PR blocks before the digest asks the developer
+    velocity_watch: bool = True  # the Velocity section's `**Velocity watch:** on|off`; a missing section is on
     problems: tuple = ()  # Problem entries
 
     @classmethod
@@ -107,6 +110,7 @@ class Config(NamedTuple):
             board=_board(text),
             trusted_authors=_trusted_authors(common.section_of(text, "Backlog")),
             problems=tuple(problems),
+            **_velocity(common.section_of(text, "Velocity")),
         )
 
     def is_shared(self, path: str) -> bool:
@@ -290,6 +294,22 @@ def _tiers(review):
     s = re.search(r"S is at most <?(\d+)>? changed lines in at most <?(\d+)>? files", text)
     l = re.search(r"L touches[^;.]*? more than <?(\d+)>? lines", text)
     return (int(s.group(1)) if s else None, int(s.group(2)) if s else None, int(l.group(1)) if l else None)
+
+
+def _velocity(section) -> dict:
+    """The Velocity section's three lines as Config fields. A missing section, a missing line or one that does not
+    parse keeps the default (idle window 10 minutes, expensive hold 3, watch on). The window reads `10m` or `10`."""
+    out = {}
+    m = re.search(r"\*\*Idle window:?\*\*:?\s*(\d+)", section or "", re.IGNORECASE)
+    if m and int(m.group(1)) > 0:
+        out["idle_window"] = int(m.group(1))
+    m = re.search(r"\*\*Expensive hold:?\*\*:?\s*(\d+)", section or "", re.IGNORECASE)
+    if m and int(m.group(1)) > 0:
+        out["hold_threshold"] = int(m.group(1))
+    m = re.search(r"\*\*Velocity watch:?\*\*:?\s*(on|off)\b", section or "", re.IGNORECASE)
+    if m:
+        out["velocity_watch"] = m.group(1).lower() == "on"
+    return out
 
 
 def _ci_wait_limit(text):

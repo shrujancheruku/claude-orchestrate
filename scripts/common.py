@@ -97,7 +97,7 @@ def pr_ref(s) -> tuple:
 # codes keep their numbers for tests and the guard. This dict is the one list: word -> the arguments it carries.
 VERDICT_WORDS = {
     # merge, and the gate's hand-offs
-    "merged": "", "cleaned": "<pr>", "wait-ci": "<pr> <head>", "re-review": "<pr>", "send-back": "<pr>",
+    "frontier": "", "cleaned": "<pr>", "wait-ci": "<pr> <head>", "re-review": "<pr>", "send-back": "<pr>",
     "ask-user": "<why>", "retry": "", "left": "<pr> <why>",
     # gate
     "review": "<head>", "rerun-after-ci": "", "wait-older": "<pr> <older>",

@@ -263,6 +263,46 @@ def overlaps(held: list, candidates: list, cfg, own_pr=None, pr_tickets=None) ->
     return out
 
 
+LANDS_IN = re.compile(r"^[\s>*_-]*Lands in\b:?\**:?\s*(.*)$", re.IGNORECASE)
+
+
+def ticket_paths(body) -> list:
+    """The paths a ticket's `Lands in:` line (and the lines after it up to a blank one) names in backticks: the map a
+    ticket declares before any scout reads it. [] when it has none or a token is off the touch-map grammar. The lead's
+    watch uses it to ask `find` whether a takeable ticket is held, with no model judgement (#716)."""
+    lines, inside, found = (body or "").splitlines(), False, []
+    for line in lines:
+        m = LANDS_IN.match(line)
+        if m:
+            inside = True
+            text = m.group(1)
+        elif inside and line.strip():
+            text = line
+        else:
+            inside = False
+            continue
+        for token in re.findall(r"`([^`]+)`", text):
+            try:
+                found += [e.path for e in touchmap.parse(token)]
+            except touchmap.TouchMapError:
+                continue
+    return list(dict.fromkeys(found))
+
+
+def held_tickets(snap, repo, tickets, state_file=None, cfg=None) -> tuple:
+    """(the tickets held, {PR number: [tickets it holds]}) for `tickets` ({ticket: [paths]}): each is run through `find` as
+    a dispatch check, and a ticket with a counted overlap is held. The open PRs among the holders of that overlap are the
+    ones that block it; a ticket held only by a building ticket or an exclusive hold blocks no PR. Raises what `find` raises."""
+    held, by_pr = set(), {}
+    for n, paths in sorted(tickets.items()):
+        result = find(snap, repo, state_file, candidates=paths, ticket=n, cfg=cfg)
+        if result.counted:
+            held.add(n)
+        for pr in sorted({int(m.group(1)) for o in result.counted for h in o.holders for m in [PR_HOLDER.match(h)] if m}):
+            by_pr.setdefault(pr, []).append(n)
+    return held, by_pr
+
+
 def find(snap, repo, state_file=None, candidates=None, ticket=None, pr=None, cfg=None, warn=None) -> Result:
     """What is held, and which of the candidates overlap it, from the tracker `snap` (a tracker.Snapshot).
 

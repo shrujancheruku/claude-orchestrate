@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lead-brief [--repo PATH] [--now ISO] [--checkpoint <pr>] [--watch [--interval SECONDS]] : the lead's whole start-up index, in one call.
+"""lead-brief [--repo PATH] [--now ISO] [--checkpoint <pr>] [--velocity] [--watch [--interval SECONDS]] : the lead's whole start-up index, in one call.
 
 With no arguments it prints these sections, in this fixed order, each under a `== <name> ==` line:
     config       the repo's `.claude/orchestration.md`, whole
@@ -22,8 +22,19 @@ poll with a hit, one line per hit:
     new: #<n> <title> [<labels>]            an open issue numbered above the newest at start
     needs-lead: #<n> <title>                an open `needs-lead` ticket that was not in the set at start
     stale: #<n> <title> blocked-by #<m>...  a takeable ticket whose body `Blocked by:` line names only closed issues
+    idle-slot: <b>/<cap> building; dispatchable: #<n> ... (<m>m)
+                                            building claims (parked ones not counted, `claims.slot_use`) stayed under the
+                                            config's Slots count for longer than the Velocity section's idle window (default 10m)
+                                            while `frontier` listed a ticket no `holds` check blocks (read from the ticket's
+                                            `Lands in:` paths; one with none counts as free). It reads `claims` and `frontier`
+                                            rules only; `velocity watch: off` or no Slots line skips it. Each wake restarts the clock.
 Then `next: settled` (ADR-0014): the lead triages or grooms what it named and starts the watch again. A rate limit
 ends it as exit 2 with `next: retry-after <time>`; any other failure is `next: could-not-run`.
+
+`--velocity` is the pass digest's slot read: `slots: <building>/<cap> building, <k> parked`, then one
+`expensive-hold: PR #<n> holds #<a> #<b> ...` line per open PR that holds at least the Velocity section's
+`Expensive hold` count (default 3) of takeable tickets (through `holds`, by each ticket's `Lands in:` paths), then
+`next: done` (ADR-0014; a rate limit is `retry-after <time>`, any other failure `could-not-run`).
 """
 
 import argparse
@@ -36,10 +47,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import claims
 import common
+import config
 import github
+import holds
 import tracker
-from repo import first_line, parse_ts
+from repo import STATE, first_line, parse_ts
 
 RISK_MARKER = "> *Risk notes (review not posted).*"  # the first line of the fallback comment; run posts it verbatim
 WATERMARK = Path(".claude") / "orchestrate-lead.json"
@@ -325,10 +339,52 @@ def watch_hits(nodes, ready, newest, lead_set) -> list:
     return hits
 
 
-def run_watch(root, interval, read=None, clock=time.monotonic, sleep=time.sleep) -> int:
+def velocity(root, cfg=None):
+    """(building, cap, parked, dispatchable, holders) of the tracker now, from `claims` and `frontier`'s rules only (#716).
+    `dispatchable` are the takeable tickets with no hold: the ticket's `Lands in:` paths (holds.ticket_paths) run through
+    `holds`, so one with no declared paths counts as free. `holders` is {PR: [takeable tickets it holds]}. The cap is the
+    config's Slots count, or None."""
+    cfg = cfg or config.for_checkout(root)
+    snap = tracker.Snapshot.open(None, root)
+    found = claims.claims(root, root / STATE, snap.issues, snap.prs, snap.merged, changes=lambda path, branch: None)
+    building, parked = claims.slot_use(found)
+    take = tracker.takeable(snap.issues, tracker.label_strings(root))
+    declared = {i["number"]: holds.ticket_paths(i.get("body")) for i in take}
+    held, holders = holds.held_tickets(snap, root, {n: p for n, p in declared.items() if p}, cfg=cfg)
+    return building, cfg.slots, parked, [i["number"] for i in take if i["number"] not in held], holders
+
+
+def idle_slot_line(building, cap, dispatchable, idle_minutes) -> str:
+    shown = " ".join(f"#{n}" for n in dispatchable[:5]) + (" …" if len(dispatchable) > 5 else "")
+    return f"idle-slot: {building}/{cap} building; dispatchable: {shown} ({idle_minutes}m)"
+
+
+def section_velocity(root, cfg=None) -> list:
+    """The pass digest's two lines (`lead-brief --velocity`): `slots: <building>/<cap> building, <k> parked`, then one
+    `expensive-hold: PR #<n> holds #<a> #<b> ...` per open PR that holds at least the config's threshold of takeable tickets."""
+    cfg = cfg or config.for_checkout(root)
+    building, cap, parked, _, holders = velocity(root, cfg)
+    out = [f"slots: {building}/{cap if cap is not None else '?'} building, {parked} parked"]
+    for pr, tickets in sorted(holders.items()):
+        if len(tickets) >= cfg.hold_threshold:
+            out.append(f"expensive-hold: PR #{pr} holds " + " ".join(f"#{n}" for n in sorted(tickets)))
+    return out
+
+
+def run_watch(root, interval, read=None, clock=time.monotonic, sleep=time.sleep, slots=None) -> int:
     """Record the baseline, then poll until a hit. `read` returns the raw issue nodes (default: the open-issues read);
-    `clock` and `sleep` are the seams a test fakes. Never writes to the tracker."""
+    `clock` and `sleep` are the seams a test fakes. `slots` returns (building, cap, dispatchable tickets) and defaults to
+    `velocity` when the config has a Slots count; the watch adds an `idle-slot:` hit once building is under the cap with a
+    dispatchable ticket for longer than the config's idle window (`velocity watch: off` skips it). Never writes to the tracker."""
     github.rate_limited_until = None
+    cfg = config.for_checkout(root)
+    if not cfg.velocity_watch:
+        slots = None
+    elif slots is None and cfg.slots is not None:
+        def slots():  # noqa: E306
+            building, cap, _, free, _ = velocity(root, cfg)
+            return building, cap, free
+    idle_since = None
     try:
         ready = tracker.label_strings(root)["ready"]
     except (ValueError, OSError, KeyError):
@@ -345,6 +401,14 @@ def run_watch(root, interval, read=None, clock=time.monotonic, sleep=time.sleep)
             sleep(max(0.0, last + interval - clock()))
             last = clock()
             hits = watch_hits(read(), ready, newest, lead_set)
+            if slots is not None:
+                building, cap, free = slots()
+                if cap is not None and building < cap and free:
+                    idle_since = last if idle_since is None else idle_since
+                    if last - idle_since > cfg.idle_window * 60:
+                        hits.append(idle_slot_line(building, cap, free, int((last - idle_since) // 60)))
+                else:
+                    idle_since = None
             if hits:
                 print("\n".join(hits))
                 return common.verdict("settled", exit_code=0)
@@ -360,6 +424,22 @@ def run_watch(root, interval, read=None, clock=time.monotonic, sleep=time.sleep)
         return common.verdict("could-not-run", exit_code=2)
 
 
+def run_velocity(root) -> int:
+    """Print `section_velocity`'s lines and end `next: done`; a failed read ends as the watch's does."""
+    github.rate_limited_until = None
+    try:
+        lines = section_velocity(root)
+    except (Unavailable, github.GhError, KeyError, TypeError, ValueError, OSError) as e:
+        message = getattr(e, "message", None) or str(e)
+        until = common.rate_limit_time(message) or github.rate_limited_until
+        print(f"lead-brief: cannot read the velocity: {message}", file=sys.stderr)
+        if until:
+            return common.verdict("retry-after", until, exit_code=2)
+        return common.verdict("could-not-run", exit_code=2)
+    print("\n".join(lines))
+    return common.verdict("done", exit_code=0)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--repo", default=".", help="repo root; gh runs there and the files are read under it")
@@ -367,9 +447,13 @@ def main(argv=None) -> int:
     ap.add_argument("--checkpoint", type=int, metavar="PR", help="write the watermark: PR is the last one absorbed")
     ap.add_argument("--watch", action="store_true", help="wait for a new issue, a new needs-lead ticket or a stale blocker line")
     ap.add_argument("--interval", type=float, default=WATCH_INTERVAL, help="--watch: least seconds between reads (default 300)")
+    ap.add_argument("--velocity", action="store_true",
+                    help="print the digest's slot use and expensive holds (`slots:`, `expensive-hold:`), then `next: done`")
     args = ap.parse_args(argv)
-    if args.watch and args.checkpoint is not None:
-        common.die("lead-brief: cannot run: --watch and --checkpoint do not go together")
+    if sum(bool(x) for x in (args.watch, args.velocity, args.checkpoint is not None)) > 1:
+        common.die("lead-brief: cannot run: --watch, --velocity and --checkpoint do not go together")
+    if args.velocity:
+        return run_velocity(Path(args.repo).resolve())
     if args.watch:
         return run_watch(Path(args.repo).resolve(), args.interval)
     now = datetime.now(timezone.utc) if args.now is None else parse_ts(args.now)

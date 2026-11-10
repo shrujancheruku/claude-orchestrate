@@ -275,6 +275,17 @@ class WaitingAndIdle(unittest.TestCase):
         self.park(2)
         self.assertEqual(self.one(2).state, "parked")  # no record: not stalled, so never redispatched
 
+    def test_a_parked_claim_is_listed_but_not_counted_against_the_cap(self):
+        self.park(1)
+        wts = [{"path": f"/wt/{n}", "branch": f"{n}-x", "locked": None} for n in (1, 2, 3)]
+        self.state.write_text(json.dumps({"tickets": {"1": WORKER, "2": WORKER}}))
+        found = claims.claims(self.tmp.name, self.state, [issue(1), issue(2), issue(3)], [self.pr(3, "3-x")], [], wts,
+                              lambda p, b: (0, 0))
+        self.assertEqual({n: c.state for n, c in found.items()}, {1: "parked", 2: "building", 3: "in-review"})
+        self.assertEqual(claims.slot_use(found), (2, 1))  # the parked claim is the 1, and the cap sees only the other two
+        self.assertEqual(claims.slots_line(found, 4), "slots: 2/4 building, 1 parked")
+        self.assertEqual(claims.slots_line(found, None), "slots: 2/? building, 1 parked")
+
     def test_unparking_reopens_the_claim_and_an_open_pr_beats_parked(self):
         self.park(1)
         self.park(1, "unparked")
@@ -453,6 +464,24 @@ class Cli(unittest.TestCase):
         r = self.cli(*args)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
         return r.stdout.strip()
+
+    def test_slots_ends_the_listing_with_the_building_count_against_the_cap_and_parked_apart(self):
+        import runlog
+        self.nodes = [(1, True), (2, True)]
+        self.worktree("1-widget", reason=own_start_reason())
+        runlog.append_event(self.env.repo, runlog.PARK, "parked", ref=102, ticket=2, session="s")
+        (self.env.repo / ".claude").mkdir(exist_ok=True)
+        (self.env.repo / ".claude" / "orchestration.md").write_text("## Slots\n\n- **Slots:** 4. throttle\n")
+        self.serve()
+        r = self.cli("--slots")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.strip().splitlines()
+        self.assertTrue(lines[1].startswith("#2 parked "), lines)
+        self.assertEqual(lines[-1], "slots: 1/4 building, 1 parked")
+        self.serve()  # a named ticket narrows the listing, never the count
+        self.assertEqual(self.cli("2", "--slots").stdout.strip().splitlines()[-1], "slots: 1/4 building, 1 parked")
+        self.serve()
+        self.assertNotIn("slots:", self.cli().stdout)  # opt-in: the default listing is unchanged
 
     def test_own_live_lock_is_building_worker_unknown_and_clean(self):
         self.nodes = [(1, True)]
