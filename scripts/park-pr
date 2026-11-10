@@ -8,7 +8,10 @@ Park a PR when it is older than another PR and waits on that PR's fix, so each w
                                  along). `claims` reads the newest such event and calls the ticket `parked`, so it is
                                  not rescued, redispatched or held as building, and `holds` (the gate's overlap
                                  check) holds nothing for it.
-    park-pr <pr> --unpark        reopen the PR the same way and append a `park` event with outcome `unparked`.
+    park-pr <pr> --unpark        reopen the PR the same way and append a `park` event with outcome `unparked`. A parked
+                                 claim shows `pr none` (it reads open PRs only), so the PR number is the one the park
+                                 printed (`next: parked <pr>`), also the `ref` of the ticket's `park` event in the run log.
+A parked ticket keeps its slot: it stays claimed (`lead-route` counts it, and `profile record` lists it as held).
 Refused, exit 1 and `next: refused <why>`: a PR that is already closed or merged (park), one that is not closed (unpark),
 or a fork PR. Exit 2: could not run (a failed `gh`, one line on stderr), or `next: retry-after <time>`.
 A failed comment after the state change, or a lost run-log line, says so on stderr and does not undo the change.
