@@ -27,6 +27,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 PLUGIN = "orchestrate"
 
@@ -1273,35 +1274,6 @@ def numberless_threads_form(cmd: Command, args: list) -> str | None:
     return "resolve" if words[0] == "resolve" else None
 
 
-# The only flags the orchestrator's threads call may carry, spelled in full and each once (#389).
-THREADS_ORCHESTRATOR_FLAGS = ("--all", "--fixed", "--left", "--followup", "--no-followup", "--verbose")
-
-
-def orchestrator_threads_form(cmd: Command, args: list) -> bool:
-    """True when the orchestrator's threads call is one of its routine forms, each naming its PR: `<pr>`,
-    `<pr> --all`, or `<pr> resolve <id>... --fixed|--left <value>`, with an optional trailing `--verbose`. Like
-    the worker's (#379) the script is the first word (no env prefix, no wrapper) and every flag is one of
-    THREADS_ORCHESTRATOR_FLAGS in full. Anything else (`--repo`, `reopen`, an abbreviation, a number-less
-    call) is left to the permission layer, so a mistaken `resolve` can't land on another PR or repository."""
-    words = [w.text for w in args]
-    if len(cmd.words) - len(args) != 1 or not words or not is_number(words[0]):
-        return False
-    if words and words[-1] == "--verbose":
-        words = words[:-1]
-    rest = words[1:]
-    if rest in ([], ["--all"]):
-        return True
-    # `--left <why>` is followed by `--followup <issue>` or `--no-followup` (#442); strip it and require the `--left`.
-    left_only = False
-    if rest[-1:] == ["--no-followup"]:
-        rest, left_only = rest[:-1], True
-    elif len(rest) >= 2 and rest[-2] == "--followup" and rest[-1].isascii() and rest[-1].isdigit():
-        rest, left_only = rest[:-2], True
-    # `resolve` takes one or more thread ids, then exactly one of --fixed/--left with its value (scripts/threads).
-    return (len(rest) >= 4 and rest[0] == "resolve" and rest[-2] in (("--left",) if left_only else ("--fixed", "--left"))
-            and not any(w.startswith("-") for w in rest[1:-2] + rest[-1:]))
-
-
 def threads_refusal(role: str, parsed: "Parsed") -> str | None:
     """Why a scout's or reviewer's call of scripts/threads is refused, or None. Not a threads call, or a
     worker's (every form), is None. Like the review post: an optional leading `cd <path> &&`, nothing else
@@ -1435,7 +1407,6 @@ EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path
 TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
 REMOTE_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+?(?:\.git)?")
 CREDENTIAL_OPTION = "credential.helper=!gh auth git-credential"
-BOARD_SCRIPT = re.compile(r"(?:^|/)scripts/board$")
 PLUGIN_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 REPO_FLAG = re.compile(r"-R.*|--repo(?:=.*)?")
 SETTINGS_FILE = re.compile(r"settings[^/]*\.json")
@@ -1545,48 +1516,6 @@ def own_script(cmd: Command, args: list, cwd: str, name: str) -> bool:
     same-named file elsewhere (a worker can write one in its worktree)."""
     word = cmd.words[len(cmd.words) - len(args) - 1].text
     return Path(os.path.realpath(os.path.join(cwd or ".", word))) == PLUGIN_SCRIPTS / name
-
-
-# The flags the orchestrator's merge call may carry, spelled in full (argparse accepts abbreviations, and
-# `--cwd` aims the script at another repository), each taking one value. `--also-approved` and `--ticket`
-# repeat; the rest are given once (#441).
-MERGE_VALUE_FLAGS = ("--method", "--approved-head", "--ticket", "--also-approved", "--worktree", "--timeout", "--interval")
-MERGE_REPEATABLE = ("--ticket", "--also-approved")
-
-
-def orchestrator_merge_form(cmd: Command, args: list) -> bool:
-    """True when the orchestrator's merge call is `<pr> [flags]`: the script first (no env prefix, no wrapper),
-    a PR number, then only MERGE_VALUE_FLAGS, each with one value, in full (`--flag value` or `--flag=value`)."""
-    words = [w.text for w in args]
-    if len(cmd.words) - len(args) == 1 and words == ["--fast-forward-only"]:
-        return True  # the first pass's start-up fast-forward of the main checkout (#473): the flag alone, no `--cwd`
-    if len(cmd.words) - len(args) != 1 or not words or not is_number(words[0]):
-        return False
-    seen, j = set(), 1
-    while j < len(words):
-        name, eq, _ = words[j].partition("=")
-        if name not in MERGE_VALUE_FLAGS or (name in seen and name not in MERGE_REPEATABLE):
-            return False
-        if not eq:
-            j += 1
-            if j >= len(words) or words[j].startswith("-"):
-                return False
-        seen.add(name)
-        j += 1
-    return True
-
-
-BOARD_FLAGS = ("--dry-run", "--verbose")
-
-
-def orchestrator_board_form(cmd: Command, args: list) -> bool:
-    """True when the orchestrator's board call carries only BOARD_FLAGS, each once, in full, optionally after
-    exactly `--repo .` (the run skill's form): any other `--repo` aims the sync at another repository, and a
-    positional word is refused (#441)."""
-    words = [w.text for w in args]
-    if words[:2] == ["--repo", "."]:  # the run skill's own sync (`scripts/board --repo .`): the current repo only
-        words = words[2:]
-    return len(cmd.words) - len(args) == 1 and len(set(words)) == len(words) and all(w in BOARD_FLAGS for w in words)
 
 
 # The brief's branch name, `<n>-<slug>` (the config's `Branch:` convention), as a worker's first git step makes it.
@@ -1786,16 +1715,174 @@ def chain_flags_ok(name: str, args: list) -> bool:
     return True
 
 
-# The plugin scripts a chain may call besides merge, threads and board (which keep their own forms): the
-# read-only pass scripts. launch, sandbox-git, rescue, verify and guard-corpus are not here, so they fall to
-# the permission layer as before. Their options are held to SAFE_SCRIPT_FLAGS, spelled in full (argparse
-# accepts abbreviations); `--repo` names the current directory only, and `--out` is snapshot's own file.
-CHAIN_SCRIPTS = frozenset(("snapshot", "rebuild-state", "claims", "frontier", "holds", "gate", "ci-times",
-                           "watch-ci", "worker-report", "lead-route", "lead-brief", "prompts"))
-SAFE_SCRIPT_FLAGS = frozenset(("--parent", "--ticket", "--all", "--pr", "--base", "--branch", "--reviewer", "--since",
-                               "--now", "--session", "--lead", "--cap", "--touch-map", "--literal", "--timeout", "--retry-delay",
-                               "--interval", "--no-run-after", "--stuck-after", "--verbose", "--watermark"))
 SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
+
+
+# --- ORCHESTRATOR_FORMS: the one table of plugin-script calls the orchestrator (and the lead) may run unprompted (#545).
+#
+# One row per call shape: the script's file name, its positional words in order, and every flag it may carry, spelled in
+# full (the scripts set allow_abbrev=False, and tests/test_invocation.py asserts the table and the scripts agree), each
+# with the kind of value it takes. A call matches a row only when every word fits: an unknown flag, a short flag, a
+# repeated flag the row does not repeat, a value of the wrong kind or a missing required flag leaves the whole call to the
+# permission layer. The sets of forms replace the former merge, threads and board functions and the loose read-only list.
+# launch, sandbox-git, rescue, verify and guard-corpus have no row, so they fall to the permission layer as before.
+#
+# Positional tokens: "pr" and "n" (a number), "word" (any plain word), "hash" (7 to 40 hex digits), "target" (watch-ci's
+# `<pr>` or its head), or a literal word such as "resolve"; a trailing "+", "*" or "?" repeats the last token.
+# Flag value kinds, one per value, space separated: "" (a switch), "word", "num", "float", "hash", "repo" (only `.`),
+# "snapshot" (only the pass's own snapshot file), "cwd" (gate's: a worktree of this repo), "under" (scratch's: this
+# session's scratchpad), and "word*" / "word+" / "num*" for a list.
+class Form(NamedTuple):
+    script: str
+    shape: tuple = ()
+    flags: dict = {}
+    need: tuple = ()
+    repeat: tuple = ()
+    inline: bool = True  # `--flag=value` is accepted (threads' forms are spelled `--flag value` only, as before)
+
+
+class FormContext(NamedTuple):
+    cwd: str = ""
+    session: str = ""
+
+
+TICKET_FLAGS = {"--method": "word", "--approved-head": "word", "--ticket": "num", "--also-approved": "word",
+                "--worktree": "word", "--timeout": "float", "--interval": "float"}
+SESSION_FLAGS = {"--session": "word", "--repo": "repo", "--snapshot": "snapshot"}
+ORCHESTRATOR_FORMS = (
+    # The merge (and the first pass's start-up fast-forward of the main checkout, #473: the flag alone, no `--cwd`).
+    Form("merge", ("pr",), TICKET_FLAGS, repeat=("--ticket", "--also-approved")),
+    Form("merge", (), {"--fast-forward-only": ""}, need=("--fast-forward-only",)),
+    # Review threads: list, resolve (fixed, or left with its follow-up ticket or none), and the one follow-up ticket per PR.
+    Form("threads", ("pr",), {"--all": "", "--verbose": ""}, inline=False),
+    Form("threads", ("pr", "resolve", "word+"), {"--fixed": "word", "--verbose": ""}, need=("--fixed",), inline=False),
+    Form("threads", ("pr", "resolve", "word+"), {"--left": "word", "--followup": "num", "--no-followup": "", "--verbose": ""},
+         need=("--left",), inline=False),  # the script refuses a --left with neither (or both) of the follow-up flags
+    Form("threads", ("pr", "followup", "word*"), {"--gist": "word", "--verbose": ""}, inline=False),
+    Form("board", (), {"--repo": "repo", "--dry-run": "", "--verbose": ""}),
+    # Making CI run again (once), and the scratch worktree add; scratch's `--under` is this session's scratchpad.
+    Form("ci-rerun", ("pr",), {"--job": "num num", "--repo": "repo"}),
+    Form("scratch", ("pr", "hash"), {"--under": "under", "--repo": "repo"}, need=("--under",)),
+    # worker-report: a worker's completion, and a reviewer's (which may post its risk notes once).
+    Form("worker-report", ("n",), {"--branch": "word", "--repo": "repo"}, need=("--branch",)),
+    Form("worker-report", ("n",), {"--reviewer": "", "--post-risk-notes": "", "--repo": "repo"}, need=("--reviewer",)),
+    # The read-only pass scripts, with the exact flags the run and lead skills pass.
+    Form("snapshot", (), {"--repo": "repo", "--out": "snapshot"}),
+    Form("rebuild-state", ("word?",), {"--session": "word", "--repo": "repo"}),
+    Form("claims", ("n?",), SESSION_FLAGS),
+    Form("frontier", (), {"--all": "", "--parent": "num", "--ticket": "num", "--touch-map": "word", "--snapshot": "snapshot",
+                          "--repo": "repo"}),
+    Form("holds", (), {**SESSION_FLAGS, "--touch-map": "word+", "--literal": "", "--ticket": "num", "--pr": "num"}),
+    Form("gate", ("pr",), {"--session": "word", "--cwd": "cwd", "--base": "word", "--timeout": "float", "--retry-delay": "float"}),
+    Form("ci-times", (), {"--since": "word"}),
+    Form("watch-ci", ("target+",), {"--no-run-after": "float", "--interval": "float", "--stuck-after": "float"}),
+    Form("lead-route", (), {**SESSION_FLAGS, "--lead": "word", "--cap": "num", "--now": "word"}, need=("--lead", "--cap")),
+    Form("lead-brief", (), {"--repo": "repo", "--now": "word", "--checkpoint": "num", "--watch": "", "--interval": "float"}),
+    Form("prompts", (), {"--repo": "repo", "--session": "word", "--since": "word", "--watermark": "", "--mark": ""}),
+    # One ticket, through the trust rule (every role may read one).
+    Form("issue", ("n",), {"--repo": "repo"}),
+    # profile.py, run as `python3 -I <plugin>/scripts/profile.py`: the pass record and the profile build.
+    Form("profile.py", ("record",), {"--repo": "repo", "--session": "word", "--scope": "word", "--slots": "num", "--greedy": "",
+                                     "--idle": "word*", "--dispatched": "num*", "--merged": "num*", "--suggestion": "word",
+                                     "--limit-hit": "", "--reset-at": "word", "--nudged": "num*", "--snapshot": "snapshot"},
+         need=("--repo", "--session")),
+    Form("profile.py", ("word",), {"--repo": "repo", "--slots": "num", "--threshold": "float", "--quiet": ""}),
+)
+FORM_SCRIPTS = frozenset(f.script for f in ORCHESTRATOR_FORMS)
+# The scripts any role may run as a read (the form is the same for every role).
+READ_FORMS = frozenset(("issue",))
+HEX = re.compile(r"[0-9a-fA-F]{7,40}")
+FLOAT = re.compile(r"\d+(?:\.\d+)?")
+WATCH_TARGET = re.compile(r"#?\d+|[0-9a-fA-F]{7,40}|\?")
+
+
+def under_ok(value: str, session: str) -> bool:
+    """scratch's `--under` (#545): an absolute path that, symlinks followed, sits inside this session's scratchpad
+    (`<tmp>/claude-<uid>/<project>/<session>/scratchpad/...`, as a reviewer's and a worker's are) or the background
+    jobs' `~/.claude/jobs/<session>/tmp`. Any other directory is a place the run did not make; with no session id nothing matches."""
+    if not session or not value.startswith("/"):
+        return False
+    real = os.path.realpath(value)
+    jobs = os.path.join(os.path.realpath(os.path.expanduser("~")), ".claude", "jobs", session, "tmp")
+    if real == jobs or real.startswith(jobs + "/"):
+        return True
+    pad = scratchpad_pattern(session)
+    return any(real.startswith(t + "/") and pad.fullmatch(real[len(t):]) for t in TEMP_ROOTS)
+
+
+def value_ok(kind: str, value: str, ctx: FormContext) -> bool:
+    if kind in ("word", "word*", "word+"):
+        return bool(value) and not value.startswith("-")
+    if kind in ("num", "num*"):
+        return value.isascii() and value.isdigit()
+    return {"float": lambda: FLOAT.fullmatch(value) is not None, "hash": lambda: HEX.fullmatch(value) is not None,
+            "repo": lambda: value == ".", "snapshot": lambda: value == SNAPSHOT_FILE,
+            "cwd": lambda: gate_cwd_ok(value, ctx.cwd), "under": lambda: under_ok(value, ctx.session)}.get(kind, lambda: False)()
+
+
+def positional_ok(token: str, text: str) -> bool:
+    kind = token.rstrip("+*?")
+    if kind in ("pr", "n"):
+        return text.isascii() and text.isdigit()
+    if kind == "word":
+        return bool(text) and not text.startswith("-")
+    if kind == "hash":
+        return HEX.fullmatch(text) is not None
+    if kind == "target":
+        return WATCH_TARGET.fullmatch(text) is not None
+    return text == kind
+
+
+def form_flags(form: Form, words: list, ctx: FormContext) -> "tuple | None":
+    """(positional words, {flag: count}) when every flag word fits the form, else None."""
+    positional, seen, i = [], {}, 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if not word.startswith("-"):
+            positional.append(word)
+            continue
+        name, eq, inline = word.partition("=")
+        kinds = form.flags.get(name, "").split() if name in form.flags else None
+        if kinds is None or (name in seen and name not in form.repeat):
+            return None
+        seen[name] = seen.get(name, 0) + 1
+        if eq:  # `--flag=value`: one plain value only
+            if not form.inline or len(kinds) != 1 or kinds[0][-1:] in "*+" or not value_ok(kinds[0], inline, ctx):
+                return None
+            continue
+        for kind in kinds:
+            taken = 0
+            while i < len(words) and not words[i].startswith("-") and (taken == 0 or kind[-1:] in "*+"):
+                if not value_ok(kind, words[i], ctx):
+                    return None
+                i += 1
+                taken += 1
+                if kind[-1:] not in "*+":
+                    break
+            if taken == 0 and kind[-1:] != "*":
+                return None
+    return positional, seen
+
+
+def form_matches(form: Form, words: list, ctx: FormContext) -> bool:
+    parsed = form_flags(form, words, ctx)
+    if parsed is None or any(n not in parsed[1] for n in form.need):
+        return False
+    positional, shape = parsed[0], list(form.shape)
+    if shape and shape[-1][-1:] in "+*?":
+        tail, shape = shape[-1], shape[:-1]
+        fixed, rest = positional[:len(shape)], positional[len(shape):]
+        low = 1 if tail[-1] == "+" else 0
+        if len(positional) < len(shape) or len(rest) < low or (tail[-1] == "?" and len(rest) > 1):
+            return False
+        return all(positional_ok(t, w) for t, w in zip(shape, fixed)) and all(positional_ok(tail, w) for w in rest)
+    return len(positional) == len(shape) and all(positional_ok(t, w) for t, w in zip(shape, positional))
+
+
+def script_form_ok(name: str, words: list, ctx: FormContext) -> bool:
+    """True when the plugin script `name` called with these argument texts matches one of its ORCHESTRATOR_FORMS rows."""
+    return any(f.script == name and form_matches(f, words, ctx) for f in ORCHESTRATOR_FORMS)
 
 
 def gate_cwd_ok(value: str | None, cwd: str) -> bool:
@@ -1805,32 +1892,6 @@ def gate_cwd_ok(value: str | None, cwd: str) -> bool:
         return False
     real = Path(os.path.realpath(os.path.join(cwd or ".", value)))
     return any((root.resolve() / ".claude" / "worktrees") in real.parents for root in repo_roots(cwd))
-
-
-def chain_script_args_ok(name: str, args: list, cwd: str = "") -> bool:
-    texts = [a.text for a in args]
-    i = 0
-    while i < len(texts):
-        arg = texts[i]
-        i += 1
-        if arg.startswith("-") and not arg.startswith("--"):
-            return False
-        if not arg.startswith("--"):
-            continue
-        flag, eq, value = arg.partition("=")
-        if flag in ("--repo", "--out", "--snapshot", "--cwd") and not eq:
-            value, i = (texts[i] if i < len(texts) else None), i + 1
-        if flag == "--cwd" and name == "gate" and gate_cwd_ok(value, cwd):
-            continue
-        if flag == "--repo" and value == ".":
-            continue
-        if flag == "--out" and name == "snapshot" and value == SNAPSHOT_FILE:
-            continue
-        if flag == "--snapshot" and name != "snapshot" and value == SNAPSHOT_FILE:
-            continue  # the pass's own snapshot file, read by claims, frontier and lead-route
-        if flag not in SAFE_SCRIPT_FLAGS:
-            return False
-    return True
 
 
 def chain_cat_ok(args: list, cwd: str) -> bool:
@@ -1843,28 +1904,39 @@ def chain_cat_ok(args: list, cwd: str) -> bool:
     return all(base in Path(os.path.realpath(os.path.join(cwd or ".", f))).parents for f in files)
 
 
-def chain_script_ok(cmd: Command, env: dict, cwd: str) -> bool:
+def chain_script_ok(cmd: Command, env: dict, cwd: str, session: str = "") -> bool:
     """The command word is a file directly in this plugin's own scripts/ directory (by resolved path), called
-    with plain words. merge, threads and board keep their exact argument forms."""
-    resolved = resolve_word(cmd.words[0], env)
+    with plain words, and the whole call matches a row of ORCHESTRATOR_FORMS. profile.py is a standalone script
+    run as `python3 -I <path>` (its row is keyed `profile.py`)."""
+    words = cmd.words
+    if len(words) >= 3 and not words[0].dynamic and words[0].text == "python3" and words[1].text == "-I":
+        words = words[2:]  # the interpreter form: only a script that is a plain .py file of this plugin
+        interpreter = True
+    else:
+        interpreter = False
+    resolved = resolve_word(words[0], env)
     if resolved is None:
         return False
     path = Path(os.path.realpath(os.path.join(cwd or ".", resolved)))
-    args = cmd.words[1:]
-    if path.parent != PLUGIN_SCRIPTS or path.suffix == ".py" or not path.is_file() or not chain_plain_args(args):
+    if path.parent != PLUGIN_SCRIPTS or (path.suffix == ".py") != interpreter or not path.is_file():
         return False
-    form = {"merge": orchestrator_merge_form, "threads": orchestrator_threads_form,
-            "board": orchestrator_board_form}.get(path.name)
-    if form:
-        return form(cmd, args)
-    return path.name in CHAIN_SCRIPTS and chain_script_args_ok(path.name, args, cwd)
+    # An argument that is a known variable (`$ME`, `${CLAUDE_SKILL_DIR}`) is read as its value; anything else unknown,
+    # and any glob, leaves the call to the permission layer.
+    texts = [resolve_word(a, env) for a in words[1:]]
+    if any(t is None for t in texts):
+        return False
+    return path.name in FORM_SCRIPTS and script_form_ok(path.name, texts, FormContext(cwd or "", session))
 
 
-def chain_assignment_ok(cmd: Command, env: dict, cwd: str) -> bool:
+def chain_assignment_ok(cmd: Command, env: dict, cwd: str, session: str = "") -> bool:
     """A pure assignment command (every word `name=value`) whose values name a place inside the plugin; it
-    records them in `env`."""
+    records them in `env`. One more is approved: `ME=<this hook's session id>` (#545), with `$ME` then expanding to
+    that id, so a chain can name the session once."""
     for w in cmd.words:
         m = ASSIGNMENT.fullmatch(w.text)
+        if m and m.group(1) == "ME" and session and not w.dynamic and m.group(2) == session:
+            env["ME"] = session
+            continue
         value = resolve_word(w, env, m.group(2)) if m else None
         if not m or value is None or UNSAFE_VARIABLE.fullmatch(m.group(1)):
             return False
@@ -1891,7 +1963,7 @@ def report_heredoc(cmds: list, k: int, env: dict, cwd: str) -> bool:
     return resolved is not None and Path(os.path.realpath(os.path.join(cwd or ".", resolved))) == PLUGIN_SCRIPTS / "worker-report"
 
 
-def chain_approved(parsed: "Parsed", cwd: str) -> bool:
+def chain_approved(parsed: "Parsed", cwd: str, session: str = "") -> bool:
     """True when every simple command of the line is a plugin script, one of CHAIN_PLAIN, a `cat` under
     `.claude/`, or a variable assignment, joined by `;`, `&&`, `|` or a newline."""
     env = {"CLAUDE_SKILL_DIR": str(SKILL_DIR), "PWD": os.path.realpath(cwd or ".")}
@@ -1906,7 +1978,7 @@ def chain_approved(parsed: "Parsed", cwd: str) -> bool:
             return False
         first = cmd.words[0]
         if ASSIGNMENT.fullmatch(first.text):
-            if not chain_assignment_ok(cmd, env, cwd):
+            if not chain_assignment_ok(cmd, env, cwd, session):
                 return False
             continue
         args = cmd.words[1:]
@@ -1919,7 +1991,7 @@ def chain_approved(parsed: "Parsed", cwd: str) -> bool:
         elif not first.dynamic and first.text == "cat":
             if not chain_plain_args(args) or not chain_cat_ok(args, cwd):
                 return False
-        elif not chain_script_ok(cmd, env, cwd):
+        elif not chain_script_ok(cmd, env, cwd, session):
             return False
     return True
 
@@ -2737,7 +2809,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
             here = str(real)
             continue
         if ASSIGNMENT.fullmatch(cmd.words[0].text) and loop is None and waiting is None:
-            if orchestrator and not any(w.text.partition("=")[0] in values for w in cmd.words) and chain_assignment_ok(cmd, env, cwd):
+            if orchestrator and not any(w.text.partition("=")[0] in values for w in cmd.words) and chain_assignment_ok(cmd, env, cwd, session):
                 continue
             # A plain `NAME=word` assignment of literal words (`R=origin/main`), for the reads after it to use.
             # Not in a pipeline (the shell would run it in a subshell, and the value would not exist after).
@@ -2749,7 +2821,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                 values[name] = value
             continue
         if orchestrator and waiting is None:
-            if chain_script_ok(cmd, env, here):  # relative paths resolve from the dir after a leading cd
+            if chain_script_ok(cmd, env, here, session):  # relative paths resolve from the dir after a leading cd
                 continue
         for value in (loop[1] if loop else [None]):
             sub = substitute(cmd, {"?": "0", **values, **({loop[0]: value} if loop else {})})
@@ -2793,7 +2865,7 @@ def parsed_approval(role: str | None, parsed: "Parsed", cwd: str, session: str =
     if role == "reviewer":
         if review_post(parsed) == "" and posting_enabled(cwd):
             return True
-    elif role is None and config_path(cwd) and chain_approved(parsed, cwd):
+    elif role is None and config_path(cwd) and chain_approved(parsed, cwd, session):
         return True
     else:
         cmd = one_plain_command(parsed) or (one_body_heredoc_command(parsed) if role == "worker" else None)
@@ -2816,14 +2888,14 @@ def routine_single(role: str | None, parsed: "Parsed", cmd: Command, cwd: str, s
             return numberless_threads_form(found[0], found[1]) is not None and own_script(found[0], found[1], cwd, "threads")
         return routine_git(cmd, parsed, cwd) or (plain_gh and routine_pr(parsed.calls[0], cwd, session))
     if role is None and config_path(cwd):
-        for pattern, name in ((MERGE_SCRIPT, "merge"), (THREADS_SCRIPT, "threads"), (BOARD_SCRIPT, "board")):
-            found = script_call(parsed, pattern)
+        for name in sorted(FORM_SCRIPTS - {"profile.py"}):
+            found = script_call(parsed, re.compile(r"(?:^|/)scripts/%s$" % re.escape(name)))
             if found is not None:
-                form = {"threads": orchestrator_threads_form, "merge": orchestrator_merge_form,
-                        "board": orchestrator_board_form}[name]
-                if not form(found[0], found[1]):
-                    return False
-                return own_script(found[0], found[1], cwd, name)
+                cmd_, args = found
+                return (len(cmd_.words) - len(args) == 1 and cmd_.ends in (None, ";", "\n")
+                        and not any(a.dynamic or a.glob for a in args)
+                        and script_form_ok(name, [a.text for a in args], FormContext(cwd or "", session))
+                        and own_script(cmd_, args, cwd, name))
         return plain_gh and parsed.calls[0].is_sub("issue") and parsed.calls[0].is_verb("edit", "comment", "create", "close")
     return False
 
@@ -3100,7 +3172,7 @@ def main() -> None:
         except Exception:
             pass  # silence: the permission layer decides
         try:
-            if isinstance(command, str) and approval(None, command, cwd):
+            if isinstance(command, str) and approval(None, command, cwd, session):
                 allow("routine orchestrator step")
                 return
         except Exception:

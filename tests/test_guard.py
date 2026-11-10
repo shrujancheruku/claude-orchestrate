@@ -1031,8 +1031,8 @@ class RoutineApprovalTest(unittest.TestCase):
                                 for c in ("/orchestrate:run", "/orchestrate:lead")))
         self.assertIsNone(raw(None, "sleep 20", self.main, transcript=both))
 
-    def test_the_wait_chain_of_lead_route_is_in_the_chain_list(self):
-        self.assertIn("lead-route", GUARD_MODULE.CHAIN_SCRIPTS)
+    def test_the_wait_chain_of_lead_route_is_in_the_forms_table(self):
+        self.assertIn("lead-route", GUARD_MODULE.FORM_SCRIPTS)
 
     def test_the_allow_json_shape(self):
         out = raw("orchestrate:worker", "gh pr ready", self.work)
@@ -1244,11 +1244,11 @@ class RoutineApprovalTest(unittest.TestCase):
                 self.assertTrue(approved("orchestrate:worker", command, self.work))
 
     def test_board_accepts_exactly_repo_dot_once(self):
-        for command in (f"{SCRIPTS}/board --repo .", f"{SCRIPTS}/board --repo . --dry-run"):
+        for command in (f"{SCRIPTS}/board --repo .", f"{SCRIPTS}/board --repo . --dry-run", f"{SCRIPTS}/board --repo=.",
+                        f"{SCRIPTS}/board --dry-run --repo ."):
             with self.subTest(command):
                 self.assertTrue(approved(None, command, self.main))
-        for command in (f"{SCRIPTS}/board --repo ..", f"{SCRIPTS}/board --repo /x", f"{SCRIPTS}/board --repo=.",
-                        f"{SCRIPTS}/board --repo . --repo .", f"{SCRIPTS}/board --dry-run --repo ."):
+        for command in (f"{SCRIPTS}/board --repo ..", f"{SCRIPTS}/board --repo /x", f"{SCRIPTS}/board --repo . --repo ."):
             with self.subTest(command):
                 self.assertFalse(approved(None, command, self.main))
 
@@ -1305,7 +1305,7 @@ class RoutineApprovalTest(unittest.TestCase):
                 f"{SCRIPTS}/snapshot --repo /tmp",
                 f"{SCRIPTS}/claims --state /tmp/x",
                 f"{SCRIPTS}/frontier --fix-drift",
-                f"{SCRIPTS}/lead-brief --checkpoint 5",
+                f"{SCRIPTS}/lead-brief --checkpoint x",
                 f"S={SCRIPTS}; printf -v S %s /tmp/evil; $S/snapshot",
                 f"{SCRIPTS}/snapshot | sort --out=/tmp/x",
                 f"{SCRIPTS}/snapshot | sort --compress-program=sh",
@@ -1525,7 +1525,7 @@ class ReadOnlyCompoundTest(unittest.TestCase):
         self.check(None, self.main, yes=(
             f"cd {self.main} && {SCRIPTS}/snapshot --repo . 2>&1 | tail -n 40",
             f'S="{SCRIPTS}"; "$S/claims" --repo . ; echo "exit $?"',
-            f'S="{SCRIPTS}"; printf "%s\\n" x | "$S/worker-report"',
+            f'S="{SCRIPTS}"; printf "%s\\n" x | "$S/worker-report" 5 --reviewer',
             f"{SCRIPTS}/snapshot --repo . || echo no",
             f"{SCRIPTS}/snapshot --repo . 2>/dev/null",
             "for n in 5 6; do gh issue view $n --json title --jq .title; done",
@@ -2080,7 +2080,7 @@ class OrchestratorChainTest(unittest.TestCase):
                 self.assertFalse(approved(None, command, self.root))
 
     def test_the_run_skills_monitor_forms_are_approved(self):
-        for command in ('"${CLAUDE_SKILL_DIR}/../../scripts/watch-ci" 5 abc1234', f"{SCRIPTS}/watch-ci 5 abc1234 --timeout 600"):
+        for command in ('"${CLAUDE_SKILL_DIR}/../../scripts/watch-ci" 5 abc1234', f"{SCRIPTS}/watch-ci 5 abc1234 --interval 30"):
             with self.subTest(command):
                 out = raw(None, command, self.root, tool_name="Monitor")
                 self.assertEqual(out["permissionDecision"], "allow")

@@ -657,7 +657,7 @@
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo . --dry-run", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo . --repo .", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo ..", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo=.", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo=.", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge \u00b2", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cd ~/x && gh pr review 12 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cd * && gh pr review 12 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
@@ -715,7 +715,7 @@
 {"role": "orchestrate:scout", "command": "find . -maxdepth 3 -name verify; ls scripts | grep -E 'ver|gate'", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/snapshot\" --repo . 2>&1 | tail -n 40; echo \"exit $?\"", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "gh issue view 5 --json title --jq .title; gh issue view 6 --json title --jq .title", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; printf 'x' | \"$S/worker-report\"", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; printf 'x' | \"$S/worker-report\" 5 --reviewer", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "for n in 5 6 7; do gh issue view $n --json title --jq .title; done", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "grep x > out", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "sed -i 's/x/y/' ../outside", "expected": "unapproved", "source": "hand"}
