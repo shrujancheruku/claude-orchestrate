@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 CLIS = sorted(p.name for p in SCRIPTS.iterdir() if p.suffix == "" and p.is_file())
-LIBRARIES = {"common", "checks", "replay", "github", "runlog", "session", "config", "repo", "claims", "tracker", "touchmap", "holds"}
+LIBRARIES = {"common", "checks", "replay", "github", "runlog", "session", "config", "repo", "claims", "tracker", "touchmap", "holds", "gqlcheck"}
 STANDALONE = {"profile.py"}
 
 

@@ -99,7 +99,10 @@ PROJECT_QUERY = """query($owner: String!, $number: Int!, $after: String) {
 # Closed `wontfix` tickets that still have an assignee: run unassigns on ABANDON, so each is routed once.
 # The filter keeps only the assigned ones (`assignee: "*"` is any assignee), so a grooming pass that closes a dozen
 # tickets `wontfix` cannot push an assigned one past the page (#476); `after` pages the unlikely overflow.
-ABANDON_QUERY = """query($owner: String!, $name: String!, $after: String) {
+# The root fields of the schema's Mutation type: `gate` checks a changed mutation's fields against it and never runs the mutation (#663).
+MUTATION_FIELDS_QUERY = '{ __type(name: "Mutation") { fields { name } } }'
+
+ABANDON_QUERY ="""query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
     issues(first: 30, after: $after, states: CLOSED, labels: ["wontfix"], filterBy: {assignee: "*"},
            orderBy: {field: UPDATED_AT, direction: DESC}) {

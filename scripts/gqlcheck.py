@@ -23,7 +23,6 @@ VARIABLE = re.compile(r"\$(\w+)\s*:\s*([^,)=$]+)")
 PLACEHOLDER = "gate-fixture"  # a required variable with no better fixture; a missing node is not a schema error
 MAX_QUERIES = 8  # one gate run never makes more calls than this (the rest are reported, not run)
 NOT_RESOLVED = re.compile(r"Could not resolve to|NOT_FOUND", re.I)  # the data is absent, the query is valid
-MUTATION_FIELDS = '{ __type(name: "Mutation") { fields { name } } }'
 
 
 def norm(text) -> str:
@@ -114,7 +113,7 @@ def run(query, pr, cwd=None):
     """(ok, why) for one query. A query is run once; a mutation is checked against the schema and never sent.
     Raises github.GhError when gh itself could not run (the caller decides)."""
     if is_mutation(query):
-        data = github.call_json("api", "graphql", "-f", f"query={MUTATION_FIELDS}", cwd=cwd)
+        data = github.call_json("api", "graphql", "-f", f"query={github.MUTATION_FIELDS_QUERY}", cwd=cwd)
         try:
             known = {f["name"] for f in data["data"]["__type"]["fields"]}
         except (KeyError, TypeError):
