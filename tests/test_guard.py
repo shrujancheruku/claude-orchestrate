@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 GUARD = Path(__file__).resolve().parent.parent / "hooks" / "guard.py"
@@ -1803,6 +1804,239 @@ class UnapprovedCallsAreDeniedTest(unittest.TestCase):
                         "for f in a b; do touch $f; done"):
             with self.subTest(command):
                 self.assertFalse(approved("orchestrate:scout", command, self.work))
+
+
+class FalsePositiveRefusalsTest(unittest.TestCase):
+    """Refusals seen on 2026-11-10 that cost a worker a retry (#579)."""
+
+    def setUp(self):
+        UnapprovedCallsAreDeniedTest.setUp(self)
+
+    def test_heredoc_text_that_feeds_body_file_stdin_is_data(self):
+        for body in ("Run `git push --force origin main` then `gh pr merge 5`.", "git push origin main; rm -rf x"):
+            command = f"gh pr edit --body-file - <<'EOF'\nCloses #1\n{body}\nEOF"
+            with self.subTest(body):
+                out = raw("orchestrate:worker", command, self.work, full=True)
+                self.assertEqual(out["permissionDecision"], "allow", out)
+
+    def test_an_unquoted_heredoc_body_still_counts(self):
+        command = "gh pr edit --body-file - <<EOF\n$(git push --force origin main)\nEOF"
+        self.assertFalse(approved("orchestrate:worker", command, self.work))
+
+    def test_bre_alternation_in_a_single_quoted_grep_pattern(self):
+        (self.work / "f").write_text("a\n")
+        for role in ("worker", "reviewer", "scout"):
+            for command in (r"grep 'a\|b' f", r"grep -n 'a\|b' f", r"grep -c 'x\|y\|z' f"):
+                with self.subTest((role, command)):
+                    self.assertTrue(approved(f"orchestrate:{role}", command, self.work))
+
+    def reason(self, role, command, tool="Bash", cwd=None):
+        return UnapprovedCallsAreDeniedTest.reason(self, role, command, tool, cwd)
+
+    def test_a_cd_refusal_says_to_use_absolute_paths_or_git_C(self):
+        reason = self.reason("orchestrate:worker", "cd /etc && ls")
+        self.assertIn("absolute path", reason)
+        self.assertIn("git -C", reason)
+
+    def test_a_pr_body_heredoc_that_is_not_the_current_branch_form_says_so(self):
+        # Not "edit files with the Edit tool": the heredoc is a PR body, and the form needs no number, redirect or pipe.
+        for command in ("gh pr edit 473 --body-file - <<'EOF'\nbody git push\nEOF",
+                        "gh pr edit --body-file - <<'EOF' 2>&1\nbody\nEOF"):
+            with self.subTest(command):
+                self.assertIn("current-branch form", self.reason("orchestrate:worker", command))
+
+
+class SymlinkFollowingReadsTest(unittest.TestCase):
+    """`grep -R` and the other recursive reads that follow a symlink read past the bound (#586, #579)."""
+
+    def setUp(self):
+        UnapprovedCallsAreDeniedTest.setUp(self)
+        self.outside = self.root / "outside"
+        self.outside.mkdir()
+        (self.outside / "secret.txt").write_text("needle\n")
+        (self.work / "src").mkdir()
+        (self.work / "src" / "a.txt").write_text("hay\n")
+        (self.work / "src" / "link").symlink_to(self.outside)
+
+    NO = ("grep -R x src", "grep -nR x src", "grep -Rn x src", "grep --dereference-recursive x src",
+          "grep --deref x src", "grep -S -r x src", "egrep -R x src", "rg -L x src", "rg --follow x src",
+          "find -L src -name a.txt", "find src -follow", "ls -RL src", "ls --dereference -R src", "diff -r src src2")
+    YES = ("grep -rn x src", "grep -r x src", "grep -nr x src", "grep -e R -r src", "rg -n x src", "find src -name a.txt",
+           "ls -R src", "grep -A3 -r x src")
+
+    def test_the_following_forms_are_not_approved_for_any_role(self):
+        for role in ("worker", "reviewer", "scout"):
+            for command in self.NO:
+                with self.subTest((role, command)):
+                    self.assertFalse(approved(f"orchestrate:{role}", command, self.work))
+
+    def test_the_reason_names_the_safe_form(self):
+        reason = UnapprovedCallsAreDeniedTest.reason(self, "orchestrate:scout", "grep -nR x src", cwd=self.work)
+        self.assertIn("use `grep -r`, which doesn't follow symlinks", reason)
+
+    def test_the_plain_recursive_forms_stay_approved(self):
+        for command in self.YES:
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+    def test_the_lead_gets_no_decision(self):
+        self.assertIsNone(raw(None, "grep -R x src", self.work, full=True))
+
+    def test_grep_r_does_not_follow_a_symlink_on_this_platform(self):
+        # The premise of approving `grep -r`: it skips the symlink met while walking. (`grep -R` may follow it.)
+        grep = subprocess.run(["grep", "-rn", "needle", str(self.work / "src")], capture_output=True, text=True)
+        self.assertNotIn("needle", grep.stdout)
+        self.assertEqual(grep.returncode, 1)
+
+
+class GitCOnReadsTest(unittest.TestCase):
+    """`git -C <dir>` reads inside the read bound are the same reads run from <dir> (#579)."""
+
+    def setUp(self):
+        UnapprovedCallsAreDeniedTest.setUp(self)
+
+    def test_git_C_with_a_dir_in_the_bound(self):
+        for role in ("worker", "reviewer", "scout"):
+            for command in (f"git -C {self.main} fetch origin abc123", f"git -C {self.main} log --oneline -3",
+                            f"git -C {self.work} status", f"git -C {self.main} show origin/main:README.md"):
+                with self.subTest((role, command)):
+                    self.assertTrue(approved(f"orchestrate:{role}", command, self.work))
+
+    def test_git_C_outside_the_bound_or_with_a_write_or_other_global_option(self):
+        for command in ("git -C /etc log", "git -C /var/db log", "git -C ~ log", f"git -C {self.main} push origin x",
+                        f"git -C {self.main} -c core.pager=x log", f"git -C {self.main} --git-dir=/x log",
+                        f"git -C {self.main} -C /etc log", f"git -C {self.main} commit -m x"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:scout", command, self.work))
+
+
+class ThreadsReadsTest(unittest.TestCase):
+    """A reviewer's and scout's documented `threads` reads are approved; writes are not (#579)."""
+
+    def setUp(self):
+        UnapprovedCallsAreDeniedTest.setUp(self)
+
+    def test_reads_are_approved_for_reviewer_and_scout(self):
+        for role in ("reviewer", "scout"):
+            for command in (f"{SCRIPTS}/threads 12", f"{SCRIPTS}/threads 12 --all"):
+                with self.subTest((role, command)):
+                    self.assertTrue(approved(f"orchestrate:{role}", command, self.work))
+
+    def test_writes_and_other_forms_are_not(self):
+        for command in (f"{SCRIPTS}/threads 12 resolve PRRT_x --fixed abc", f"{SCRIPTS}/threads 12 --repo o/r",
+                        f"{SCRIPTS}/threads 12 --all --verbose", f"{SCRIPTS}/threads", f"{SCRIPTS}/threads 12 --all | head",
+                        f"{self.work}/scripts/threads 12"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:scout", command, self.work))
+        self.assertFalse(approved("orchestrate:scout", f"{SCRIPTS}/threads 12 reopen PRRT_x --why no", self.work))
+
+    def test_the_checkouts_copy_of_a_plugin_script_names_the_plugins_copy(self):
+        (self.work / "scripts").mkdir()
+        (self.work / "scripts" / "threads").write_text("#!/bin/sh\n")
+        for role in ("worker", "reviewer", "scout"):
+            for command in (f"{self.work}/scripts/threads 12", "scripts/threads 12"):
+                with self.subTest((role, command)):
+                    reason = UnapprovedCallsAreDeniedTest.reason(self, f"orchestrate:{role}", command, cwd=self.work)
+                    self.assertIn(f"call the plugin's copy: `{SCRIPTS}/", reason)
+
+
+class OrchestratorDenyTest(unittest.TestCase):
+    """With ORCHESTRATE_ROLE=orchestrator (set by scripts/launch on the orchestrator's line only) a call the guard
+    can't approve is denied with the approved way; without it the lead and a hand-started session keep the
+    fall-through (#579)."""
+
+    def setUp(self):
+        self.root = GUARD.parent.parent
+        patcher = unittest.mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("ORCHESTRATE_ROLE", None)
+
+    def strict(self):
+        os.environ["ORCHESTRATE_ROLE"] = "orchestrator"
+
+    def reason(self, command, tool="Bash"):
+        out = raw(None, command, self.root, tool_name=tool, full=True)
+        self.assertEqual(out["permissionDecision"], "deny", command)
+        return out["permissionDecisionReason"]
+
+    UNAPPROVABLE = ("curl -s example.com", "foo --bar", "git push origin main", "rm -rf x")
+
+    def test_an_unapprovable_bash_call_is_denied_with_a_reason(self):
+        self.strict()
+        for command in self.UNAPPROVABLE:
+            with self.subTest(command):
+                self.assertIn("not approved for the orchestrator", self.reason(command))
+                self.assertIn("needs-lead", self.reason(command))
+
+    def test_an_unapprovable_monitor_call_is_denied_with_a_reason(self):
+        self.strict()
+        reason = self.reason("tail -f log", tool="Monitor")
+        self.assertIn("not approved for the orchestrator", reason)
+        self.assertIn("watch-ci", reason)
+
+    def test_without_the_variable_nothing_is_decided(self):
+        for command in self.UNAPPROVABLE:
+            with self.subTest(command):
+                self.assertIsNone(raw(None, command, self.root, full=True))
+        self.assertIsNone(raw(None, "tail -f log", self.root, tool_name="Monitor", full=True))
+        os.environ["ORCHESTRATE_ROLE"] = "lead"
+        self.assertIsNone(raw(None, "foo --bar", self.root, full=True))
+
+    def test_an_approved_call_is_still_allowed(self):
+        self.strict()
+        self.assertEqual(raw(None, f"{SCRIPTS}/snapshot --repo .", self.root, full=True)["permissionDecision"], "allow")
+
+    def test_a_script_chain_with_a_trailing_filter_says_to_run_it_alone(self):
+        self.strict()
+        # (`| tail -n 5` and `; echo "exit $?"` are approved already; these are the filters the chain form refuses.)
+        for tail in (" | tail -f", " | tail -n 5 > /tmp/out.txt"):
+            with self.subTest(tail):
+                self.assertIn("run the script on its own; its output is already bounded",
+                              self.reason(f"{SCRIPTS}/merge 5 --approved-head abc{tail}"))
+
+    def test_a_hand_run_form_a_script_covers_names_the_script(self):
+        self.strict()
+        for command, script in (("gh pr merge 5 --squash", "scripts/merge"), ("gh run watch 5", "scripts/watch-ci"),
+                                ("git merge origin/main", "scripts/merge"),
+                                ("gh api -X POST repos/o/r/pulls/5/comments -f body=x", "scripts/threads")):
+            with self.subTest(command):
+                reason = self.reason(command)
+                self.assertIn("use ", reason)
+                self.assertIn(script, reason)
+
+    def test_the_checkouts_copy_of_a_script_names_the_plugins_copy(self):
+        self.strict()
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            (repo / ".claude").mkdir()
+            (repo / ".claude" / "orchestration.md").write_text("x\n")
+            (repo / "scripts").mkdir()
+            (repo / "scripts" / "snapshot").write_text("#!/bin/sh\n")
+            out = raw(None, "scripts/snapshot --repo .", repo, full=True)
+            self.assertEqual(out["permissionDecision"], "deny")
+            self.assertIn(f"call the plugin's copy: `{SCRIPTS}/snapshot`", out["permissionDecisionReason"])
+
+    def test_a_guard_error_is_a_deny(self):
+        self.strict()
+        original = GUARD_MODULE.orchestrator_reason
+        GUARD_MODULE.orchestrator_reason = lambda *a, **k: 1 / 0
+        try:
+            self.assertIn("not approved for the orchestrator", self.reason("foo --bar"))
+        finally:
+            GUARD_MODULE.orchestrator_reason = original
+        original = GUARD_MODULE.approval
+        GUARD_MODULE.approval = lambda *a, **k: 1 / 0
+        try:
+            self.assertIn("not approved for the orchestrator", self.reason(f"{SCRIPTS}/snapshot --repo ."))
+        finally:
+            GUARD_MODULE.approval = original
+
+    def test_a_subagent_is_unaffected_by_the_variable(self):
+        self.strict()
+        out = raw("orchestrate:scout", "git log", self.root, full=True)
+        self.assertIn(out["permissionDecision"], ("allow", "deny"))
+        self.assertNotIn("orchestrator", out.get("permissionDecisionReason", ""))
 
 
 class OrchestratorChainTest(unittest.TestCase):

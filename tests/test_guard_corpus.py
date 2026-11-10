@@ -26,6 +26,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -56,7 +57,10 @@ LEAKS = re.compile(
 ORCHESTRATOR = "orchestrate:orchestrator"
 # The lead's own session: a main session like the orchestrator's (no agent type), started by /orchestrate:lead.
 LEAD_SESSION = "orchestrate:lead-session"
-MAIN_SESSIONS = (ORCHESTRATOR, LEAD_SESSION)
+# The orchestrator as `scripts/launch` starts it (ORCHESTRATE_ROLE=orchestrator): a call the guard can't approve is
+# denied with a reason (`unapproved`) instead of falling through to the prompt (#579).
+ORCHESTRATOR_RUN = "orchestrate:orchestrator-run"
+MAIN_SESSIONS = (ORCHESTRATOR, LEAD_SESSION, ORCHESTRATOR_RUN)
 
 
 def load_extract():
@@ -90,7 +94,8 @@ class Decider:
         # The hook input names the main session's transcript, whose first command tells the orchestrator
         # (/orchestrate:run) from the lead (/orchestrate:lead).
         self.transcripts = {}
-        for role, command in ((ORCHESTRATOR, "/orchestrate:run"), (LEAD_SESSION, "/orchestrate:lead")):
+        for role, command in ((ORCHESTRATOR, "/orchestrate:run"), (LEAD_SESSION, "/orchestrate:lead"),
+                              (ORCHESTRATOR_RUN, "/orchestrate:run")):
             path = Path(cwd) / f"{command.rsplit(':', 1)[1]}-transcript.jsonl"
             content = f"<command-message>x</command-message>\n<command-name>{command}</command-name>"
             path.write_text(json.dumps({"message": {"role": "user", "content": content}}) + "\n")
@@ -116,8 +121,13 @@ class Decider:
             payload["agent_type"] = role
         stdin, stdout = sys.stdin, sys.stdout
         sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+        # Only the orchestrator as launched has the variable (#579); the lead and a hand-started session never do.
+        env = {"ORCHESTRATE_ROLE": "orchestrator"} if role == ORCHESTRATOR_RUN else {}
         try:
-            self.module.main()
+            with unittest.mock.patch.dict(os.environ, env):
+                if not env:
+                    os.environ.pop("ORCHESTRATE_ROLE", None)
+                self.module.main()
             out = sys.stdout.getvalue()
         except SystemExit:
             out = sys.stdout.getvalue()

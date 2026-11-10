@@ -38,6 +38,38 @@ class PromptLog(unittest.TestCase):
         self.assertEqual(entry["matcher"], "*")
         self.assertIn("hooks/prompt_log.py", entry["hooks"][0]["command"])
 
+    def test_hooks_json_registers_the_permission_notifications(self):
+        entry = json.loads((ROOT / "hooks" / "hooks.json").read_text())["hooks"]["Notification"][0]
+        self.assertEqual(entry["matcher"], "permission_prompt|worker_permission_prompt")
+        self.assertIn("hooks/prompt_log.py", entry["hooks"][0]["command"])
+
+    def notification(self, **kw):
+        p = {"session_id": "s1", "cwd": str(self.repo), "hook_event_name": "Notification",
+             "message": "Claude requested permissions to edit /r/hooks/guard.py which is a sensitive file.",
+             "title": "Permission needed", "notification_type": "permission_prompt"}
+        p.update(kw)
+        return json.dumps(p)
+
+    def test_notification_line_holds_message_and_title_and_decides_nothing(self):
+        for kind in ("permission_prompt", "worker_permission_prompt"):
+            with self.subTest(kind):
+                r = run_hook(self.notification(notification_type=kind))
+                self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+                last = self.lines()[-1]
+                self.assertEqual((last["source"], last["notification_type"], last["title"]), ("notification", kind, "Permission needed"))
+                self.assertIn("sensitive file", last["message"])
+                self.assertEqual((last["session_id"], last["cwd"], last["tool_name"]), ("s1", str(self.repo), None))
+                self.assertIsNone(last["agent_type"])
+
+    def test_notification_without_the_event_name_and_a_long_message(self):
+        run_hook(self.notification(hook_event_name=None, message="m" * 900, agent_type="orchestrate:worker"))
+        last = self.lines()[0]
+        self.assertEqual((last["source"], len(last["message"]), last["agent_type"]), ("notification", 500, "orchestrate:worker"))
+
+    def test_request_line_says_so(self):
+        run_hook(self.payload("Bash", {"command": "ls"}))
+        self.assertEqual(self.lines()[0]["source"], "request")
+
     def test_log_is_owner_only_and_an_older_0644_file_is_tightened(self):
         import importlib.util
         import stat

@@ -105,7 +105,7 @@ class Launch(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(
             r.stdout.strip(),
-            f"claude --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.snap)} --model opus "
+            f"ORCHESTRATE_ROLE=orchestrator claude --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.snap)} --model opus "
             f"--plugin-dir {self.snap} \"/orchestrate:run --greedy\"")
 
     def test_plugin_dir_is_never_inside_the_repo_in_any_mode(self):
@@ -191,7 +191,7 @@ class Launch(unittest.TestCase):
 
     def test_bg_adds_the_flag_and_cross_session_inbound(self):
         out = self.launch("--print", "--bg").stdout
-        self.assertTrue(out.startswith("claude --bg --name orchestrator "), out)
+        self.assertTrue(out.startswith("ORCHESTRATE_ROLE=orchestrator claude --bg --name orchestrator "), out)
         self.assertIn(settings_arg(self.snap, inbound=True), out)
 
     def test_bypass_permissions_accepts_inbound_messages(self):
@@ -232,7 +232,7 @@ class Launch(unittest.TestCase):
         out = self.launch("--print", "--resume", "abc-123").stdout.strip()
         self.assertEqual(
             out,
-            f"claude --resume abc-123 --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.snap)} "
+            f"ORCHESTRATE_ROLE=orchestrator claude --resume abc-123 --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.snap)} "
             f"--model opus --plugin-dir {self.snap}")
         self.assertEqual(self.launch("--print", "--resume", "abc", "--greedy=2").returncode, 2)
 
@@ -241,6 +241,34 @@ class Launch(unittest.TestCase):
         self.assertEqual(
             out, f"claude --name lead --settings {settings_arg(self.snap, auto=False, inbound=True)} "
                  f"--plugin-dir {self.snap} \"/orchestrate:lead\"")
+
+    def test_the_role_variable_is_set_on_the_orchestrator_lines_and_never_on_the_lead(self):
+        # The guard tells the orchestrator from the lead by ORCHESTRATE_ROLE, so the environment `claude` is started
+        # with must carry it on every orchestrator line and never on the lead's (#579). The fake `claude` prints it.
+        script = self.bin / "claude"
+        script.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$1" = agents ]; then cat {self.tmp}/agents.json; exit 0; fi\n'
+            'echo "ROLE:${ORCHESTRATE_ROLE-unset}"\n')
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        (self.tmp / "agents.json").write_text(json.dumps([self.bg_row()]))
+        env_free = self.launch("--lead").stdout  # not an orchestrator line
+        self.assertEqual(env_free.strip(), "ROLE:unset")
+        for args in (["--greedy=2"], ["403"], ["--bg"], ["--resume", "b1"]):
+            with self.subTest(args):
+                if args[0] == "--bg":  # a live orchestrator row would refuse it
+                    (self.tmp / "agents.json").write_text("[]")
+                if args[0] == "--resume":
+                    (self.tmp / "agents.json").write_text(json.dumps([self.bg_row()]))
+                r = self.launch(*args)
+                self.assertEqual((r.returncode, r.stdout.strip()), (0, "ROLE:orchestrator"), r.stderr)
+        (self.tmp / "agents.json").write_text(json.dumps([self.stopped("s9", self.repo, "2026-11-05T10:00:00Z")]))
+        r = self.launch("--resume-latest")
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "ROLE:orchestrator"), r.stderr)
+
+    def test_the_printed_orchestrator_line_carries_the_variable_and_the_lead_line_does_not(self):
+        self.assertTrue(self.launch("--print").stdout.startswith("ORCHESTRATE_ROLE=orchestrator claude "))
+        self.assertNotIn("ORCHESTRATE_ROLE", self.launch("--print", "--lead").stdout)
 
     def test_live_orchestrator_refuses_a_plain_launch(self):
         self.live({"name": "orchestrator", "pid": 4242, "sessionId": "s1"})
@@ -416,7 +444,7 @@ class Launch(unittest.TestCase):
         self.live(self.bg_row())
         self.transcript("b1", self.user("hello"), self.user("/orchestrate:run 533 --profile"))
         out = self.launch("--print", "--resume", "b1").stdout.strip()
-        self.assertEqual(out, 'claude --resume b1 --bg "/orchestrate:run 533 --profile"')
+        self.assertEqual(out, 'ORCHESTRATE_ROLE=orchestrator claude --resume b1 --bg "/orchestrate:run 533 --profile"')
         r = self.launch("--resume-latest")  # --bg is added though not given, and the fake claude echoes the argv
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "ARG:--resume\nARG:b1\nARG:--bg\nARG:/orchestrate:run 533 --profile\n")
@@ -430,14 +458,14 @@ class Launch(unittest.TestCase):
     def test_background_resume_without_a_transcript_builds_the_prompt_from_tokens(self):
         self.live(self.bg_row())
         out = self.launch("--print", "--resume", "b1", "--greedy=4", "--profile").stdout.strip()
-        self.assertEqual(out, 'claude --resume b1 --bg "/orchestrate:run --greedy=4 --profile"')
+        self.assertEqual(out, 'ORCHESTRATE_ROLE=orchestrator claude --resume b1 --bg "/orchestrate:run --greedy=4 --profile"')
         self.assertEqual(self.launch("--print", "--resume", "b1", "403").stdout.strip(),
-                         'claude --resume b1 --bg "/orchestrate:run 403"')
+                         'ORCHESTRATE_ROLE=orchestrator claude --resume b1 --bg "/orchestrate:run 403"')
 
     def test_background_resume_with_no_prompt_prints_the_attach_line(self):
         self.live(self.bg_row())
         r = self.launch("--print", "--resume", "b1")
-        self.assertEqual(r.stdout.strip(), "claude --resume b1 --bg")
+        self.assertEqual(r.stdout.strip(), "ORCHESTRATE_ROLE=orchestrator claude --resume b1 --bg")
         self.assertIn("claude attach b1", r.stderr)
         self.assertIn("/orchestrate:run", r.stderr)
         self.assertNotIn("--profile", r.stderr)
