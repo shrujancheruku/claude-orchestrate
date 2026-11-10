@@ -9,6 +9,7 @@ import re
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,9 +20,9 @@ LAUNCH = ROOT / "scripts" / "launch"
 
 
 def read_rules(link, snap):
-    """The Read rules a line carries: the stable link, and the snapshot it points to (#728)."""
-    snap = Path(snap).resolve()
-    return [f"Read(/{p}/**)" for p in dict.fromkeys([str(link), str(snap)])]
+    """The Read rules a line carries: the whole snapshot cache, so a flip of the link strands none (#728)."""
+    base = Path(link).parent.parent
+    return [f"Read(/{p}/**)" for p in dict.fromkeys([str(base), str(base.resolve())])]
 
 
 def settings_arg(link, snap, auto=True, inbound=False):
@@ -203,6 +204,15 @@ class Launch(unittest.TestCase):
         self.assertEqual(self.launch().returncode, 0)
         self.assertEqual(self.link.resolve().name, newer)
         self.assertEqual(list(self.link.parent.glob(".current-*")), [])  # no temporary link left
+
+    def test_a_failed_repoint_leaves_no_temporary_link_behind(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import plugin_dir
+        link = self.tmp / "links" / "current"
+        with mock.patch.object(plugin_dir.os, "replace", side_effect=OSError("boom")):
+            with self.assertRaises(plugin_dir.PluginDirError):
+                plugin_dir.point(link, self.tmp)
+        self.assertEqual(list(link.parent.iterdir()), [])
 
     def test_the_snapshot_a_link_points_to_is_never_pruned(self):
         base = self.cache / "orchestrate" / "plugin"

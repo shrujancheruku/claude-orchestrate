@@ -101,6 +101,10 @@ def point(link, dest) -> None:
         tmp.symlink_to(dest)
         os.replace(tmp, link)
     except OSError as e:
+        try:
+            tmp.unlink()  # the rename failed after the symlink was made: leave no .current-<pid> behind
+        except OSError:
+            pass
         raise PluginDirError(f"could not repoint {link}: {e}") from e
 
 

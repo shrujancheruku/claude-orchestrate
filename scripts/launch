@@ -234,11 +234,12 @@ def read_rule(plugin_dir) -> dict:
     """
     if not plugin_dir:
         return {}
-    # The stable link, and the snapshot it points to now: a Read through a symlink may be matched on either path.
-    paths = [str(plugin_dir)]
-    real = str(Path(plugin_dir).resolve())
-    if real != paths[0]:
-        paths.append(real)
+    # The whole snapshot cache, not one sha: a Read through a symlink may be matched on the link or on its target, and
+    # a merge repoints the link at a new snapshot mid-run (#728). Read only, and it holds plugin code and links only.
+    base = cache_base()
+    paths = list(dict.fromkeys([str(base), str(base.resolve())]))
+    if not any(Path(plugin_dir).resolve().is_relative_to(Path(p)) for p in paths) and not Path(plugin_dir).is_relative_to(base):
+        paths.append(str(plugin_dir))
     return {"permissions": {"allow": [f"Read(/{p}/**)" for p in paths]}}
 
 
