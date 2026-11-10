@@ -32,6 +32,11 @@ class RunTest(unittest.TestCase):
             self.assertEqual((code, out), (127, ""))
             self.assertIn("definitely-not-a-binary-xyz", err)
 
+    def test_a_command_past_the_timeout_is_127_with_a_message(self):
+        code, out, err = common.run(sys.executable, "-c", "import time; time.sleep(60)", timeout=0.5)
+        self.assertEqual((code, out), (127, ""))
+        self.assertIn("timed out after 0.5s", err)
+
     def test_returncode_alias(self):
         self.assertEqual(common.run(sys.executable, "-c", "pass").returncode, 0)
 
