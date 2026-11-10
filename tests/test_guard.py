@@ -1178,12 +1178,13 @@ class RoutineApprovalTest(unittest.TestCase):
                 self.assertFalse(approved(None, command, self.main))
 
     def test_orchestrator_merge_and_board_calls_are_approved_only_in_their_argument_shape(self):
-        for command in (f"{SCRIPTS}/merge 12", f"{SCRIPTS}/merge 12 --method rebase --approved-head abc --ticket 5 --ticket 6",
+        for command in (f"{SCRIPTS}/merge --fast-forward-only", f"{SCRIPTS}/merge 12", f"{SCRIPTS}/merge 12 --method rebase --approved-head abc --ticket 5 --ticket 6",
                         f"{SCRIPTS}/merge 12 --also-approved 13=abc --also-approved 14=def --worktree /w --timeout=60",
                         f"{SCRIPTS}/board", f"{SCRIPTS}/board --dry-run --verbose"):
             with self.subTest(command):
                 self.assertTrue(approved(None, command, self.main))
-        for command in (f"{SCRIPTS}/merge", f"{SCRIPTS}/merge --method squash", f"{SCRIPTS}/merge x",
+        for command in (f"{SCRIPTS}/merge", f"{SCRIPTS}/merge --method squash", f"{SCRIPTS}/merge --fast-forward-only --cwd /other",
+                        f"{SCRIPTS}/merge --fast-forward-only 12", f"{SCRIPTS}/merge --fast-forward", f"{SCRIPTS}/merge x",
                         f"{SCRIPTS}/merge 12 --cwd /other", f"{SCRIPTS}/merge 12 --cw /other",
                         f"{SCRIPTS}/merge 12 --method", f"{SCRIPTS}/merge 12 --method --ticket 5",
                         f"{SCRIPTS}/merge 12 --method squash --method merge", f"{SCRIPTS}/merge 12 extra",

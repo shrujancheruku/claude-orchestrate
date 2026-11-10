@@ -54,7 +54,7 @@ class WorkerTurnRules(unittest.TestCase):
     def test_run_skill_checks_the_worktree_before_continuing_a_no_pr_worker(self):
         s = (ROOT / "skills/run/SKILL.md").read_text()
         rule = next(l for l in s.splitlines() if l.startswith("- **Worktree check before any SendMessage"))
-        for term in ("answered `valid stopped`", "`RESUME`", "usage-limit resume", "`worktree`", "null",
+        for term in ("answered `valid stopped`", "`RESUME`", "usage-limit resume", "`claims <ticket>`", "`worktree gone`",
                      "`Build #<ticket>`", "stop question", "the answer"):
             self.assertIn(term, rule)
         backstop = next(l for l in s.splitlines() if l.startswith("- `valid stopped worktree-gone`"))
