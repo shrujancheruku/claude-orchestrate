@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, gh_repo_view  # noqa: E402
+from harness import Run, ScriptEnv, gh_repo_view  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 MARKER = "> *Risk notes (review not posted).*"
@@ -32,8 +32,9 @@ class RiskNotes(unittest.TestCase):
     def report(self, text, *flags):
         env = dict(os.environ, PATH=f"{self.env.bin}{os.pathsep}{os.environ['PATH']}", FAKE_GH_STATE=str(self.env.gh_state),
                    ORCHESTRATE_GH_LOG="off", ORCHESTRATE_GH_5XX_TRIES="1")
-        return subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "494", "--reviewer", *flags],
-                              cwd=self.env.repo, env=env, input=text, capture_output=True, text=True)
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "494", "--reviewer", *flags],
+                           cwd=self.env.repo, env=env, input=text, capture_output=True, text=True)
+        return Run(r)  # stdout is what precedes the one closing `next:` line, which is `.verdict` (ADR-0014)
 
     def posts(self):
         return [c for c in self.env.gh_calls() if c[:3] == ["api", "--method", "POST"]]
@@ -41,7 +42,7 @@ class RiskNotes(unittest.TestCase):
     def test_an_unposted_review_has_its_notes_posted_word_for_word_once(self):
         self.gh()
         r = self.report(REPORT.format(posted="off"), "--post-risk-notes")
-        self.assertEqual(r.stdout.splitlines(), ["valid", "risk-notes posted"], r.stderr)
+        self.assertEqual((r.stdout.splitlines(), r.verdict), (["risk-notes posted"], "next: valid"), r.stderr)
         (call,) = self.posts()
         self.assertEqual(call[-2:], ["-f", "body=" + "\n".join([MARKER, "", "hooks/guard.py:10-20 — a wrong form approves a write",
                                                               "scripts/merge:5 — the fast-forward"])])
@@ -64,13 +65,13 @@ class RiskNotes(unittest.TestCase):
     def test_a_posted_review_carries_the_notes_so_nothing_is_posted(self):
         self.gh()
         r = self.report(REPORT.format(posted="https://github.com/o/r/pull/494#pullrequestreview-1"), "--post-risk-notes")
-        self.assertEqual(r.stdout.splitlines(), ["valid", "risk-notes none"])
+        self.assertEqual(r.stdout.splitlines(), ["risk-notes none"])
         self.assertEqual(self.posts(), [])
 
     def test_a_report_without_notes_posts_nothing(self):
         self.gh()
         r = self.report("verdict: approve\nsuite: pass\nposted: off\n", "--post-risk-notes")
-        self.assertEqual(r.stdout.splitlines(), ["valid", "risk-notes none"])
+        self.assertEqual(r.stdout.splitlines(), ["risk-notes none"])
 
     def test_a_backticked_location_is_posted_without_the_backticks(self):
         self.gh()
@@ -81,7 +82,7 @@ class RiskNotes(unittest.TestCase):
     def test_notes_that_do_not_parse_are_reported_unparsed_and_nothing_is_posted(self):
         self.gh()
         r = self.report("suite: pass\nrisk-notes: guard.py — a wrong form\nposted: off\n", "--post-risk-notes")
-        self.assertEqual(r.stdout.splitlines(), ["valid", "risk-notes unparsed"])
+        self.assertEqual(r.stdout.splitlines(), ["risk-notes unparsed"])
         self.assertEqual(self.posts(), [])
         self.assertEqual(self.report("suite: pass\nrisk-notes: none\nposted: off\n", "--post-risk-notes").stdout.splitlines()[-1],
                          "risk-notes none")
@@ -125,7 +126,7 @@ class RiskNotes(unittest.TestCase):
     def test_without_the_flag_the_output_is_the_verdict_line_alone(self):
         self.gh()
         r = self.report(REPORT.format(posted="off"))
-        self.assertEqual(r.stdout.splitlines(), ["valid"])
+        self.assertEqual((r.stdout, r.verdict), ("", "next: valid"))
         self.assertEqual(self.posts(), [])
 
     def test_the_flag_needs_reviewer(self):

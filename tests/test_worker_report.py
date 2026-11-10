@@ -11,7 +11,14 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, gh_pulls  # noqa: E402
+from harness import Run, ScriptEnv, gh_pulls  # noqa: E402
+
+
+def one_verdict(r) -> str:
+    """The words after `next:` in a run's output, which must hold that one line and nothing else (ADR-0014)."""
+    run = Run(r)
+    assert run.stdout == "", run.stdout
+    return run.verdict[len("next: "):]
 
 ROOT = Path(__file__).resolve().parent.parent
 HEAD = "7e38ea0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -30,7 +37,7 @@ class WorkerReport(unittest.TestCase):
         self.addCleanup(self.env.close)
         self.env.set_gh(prs((12, BRANCH, HEAD)))
 
-    def report(self, text, ticket="260", check=True, no_gh=False):
+    def report(self, text, ticket="260", check=True, no_gh=False, cache=None):
         # ScriptEnv.run has no stdin: run the CLI the way it does (fake gh first on PATH), with the completion piped in.
         if no_gh:
             empty = tempfile.mkdtemp()
@@ -39,6 +46,8 @@ class WorkerReport(unittest.TestCase):
         else:
             path = f"{self.env.bin}{os.pathsep}{os.environ['PATH']}"
         env = dict(os.environ, PATH=path, FAKE_GH_STATE=str(self.env.gh_state), ORCHESTRATE_GH_5XX_TRIES="1")
+        if cache:
+            env["XDG_CACHE_HOME"] = cache  # the rate-limit pause is cached here, never in the developer's cache
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "worker-report"), ticket, "--branch", BRANCH, "--repo", "."],
             cwd=self.env.repo, env=env, input=text, capture_output=True, text=True, check=check)
@@ -47,7 +56,7 @@ class WorkerReport(unittest.TestCase):
         r = subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "494", "--reviewer"],
                            cwd=self.env.repo, input=text, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        return r.stdout.strip()
+        return one_verdict(r)
 
     def test_reviewer_report_with_a_suite_line_is_valid(self):
         for suite in ("pass", "fail 2", "fail", "not run (S tier)", "`pass`",
@@ -101,7 +110,7 @@ class WorkerReport(unittest.TestCase):
     def verdict(self, text, **kw):
         r = self.report(text, **kw)
         self.assertEqual(r.returncode, 0, r.stderr)
-        return r.stdout.strip()
+        return one_verdict(r)
 
     def test_pr_opened_takes_the_pr_and_head_from_the_host(self):
         out = self.verdict("status: pr-opened\npr: https://github.com/o/r/pull/12\nbranch: x\n")
@@ -110,7 +119,7 @@ class WorkerReport(unittest.TestCase):
     def test_no_session_keeps_the_verdict_and_exit_code_and_says_so_on_stderr(self):
         (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
         r = self.report("status: pr-opened\npr: https://github.com/o/r/pull/12\nbranch: x\n")
-        self.assertEqual((r.returncode, r.stdout.strip()), (0, f"valid pr-opened 12 {HEAD}"))
+        self.assertEqual((r.returncode, one_verdict(r)), (0, f"valid pr-opened 12 {HEAD}"))
         self.assertEqual(r.stderr, "runlog: no session, worker-report event not written\n")
 
     def test_pr_opened_without_a_pr_line_finds_the_branch(self):
@@ -279,13 +288,39 @@ class WorkerReport(unittest.TestCase):
         r = self.report("status: pr-opened\n", check=False, no_gh=True)
         self.assertEqual(r.returncode, 2)
         self.assertEqual(len(r.stderr.strip().splitlines()), 1)
-        self.assertEqual(r.stdout, "")
+        self.assertEqual(Run(r).verdict, "next: could-not-run")
 
     def test_exit_2_on_a_failed_pr_lookup(self):
         self.env.set_gh([{"args": ["api", "~repos/{owner}/{repo}/pulls"], "stderr": "HTTP 502", "exit": 1}])
         r = self.report("status: pr-opened\n", check=False)
         self.assertEqual((r.returncode, len(r.stderr.strip().splitlines())), (2, 1))
+        self.assertEqual(Run(r).verdict, "next: could-not-run")
         self.assertEqual([e for e in self.env.events() if e["kind"] == "worker-report"], [])
+
+    def test_a_rate_limit_ends_retry_after_with_the_reset_time(self):
+        self.env.set_gh([{"args": ["api", "~repos/{owner}/{repo}/pulls"], "exit": 1,
+                          "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
+        with tempfile.TemporaryDirectory() as cache:
+            r = self.report("status: pr-opened\n", check=False, cache=cache)
+        self.assertEqual((r.returncode, Run(r).stdout), (2, ""))
+        self.assertRegex(Run(r).verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_a_program_error_in_a_reviewer_report_ends_could_not_run(self):
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "494", "--reviewer", "--post-risk-notes", "--bogus"],
+                           cwd=self.env.repo, input="", capture_output=True, text=True)
+        self.assertEqual((r.returncode, Run(r).verdict), (2, "next: could-not-run"))
+
+    def test_help_prints_no_verdict_line(self):
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "--help"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("\nnext: ", "\n" + r.stdout)
+
+    def test_post_risk_notes_line_comes_before_the_one_next_line(self):
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "494", "--reviewer", "--post-risk-notes"],
+                           cwd=self.env.repo, input="verdict: approve\nround: 1\nsuite: pass\nblocking: 0\nposted: on\n",
+                           capture_output=True, text=True)
+        run = Run(r)
+        self.assertEqual((r.returncode, run.stdout, run.verdict), (0, "risk-notes none\n", "next: valid"))
 
     def test_exit_2_on_an_unwritable_run_log(self):
         log = self.env.repo / ".claude" / "orchestrate-profiles"
@@ -294,7 +329,7 @@ class WorkerReport(unittest.TestCase):
         self.addCleanup(log.chmod, stat.S_IRWXU)
         r = self.report("working", check=False)
         self.assertEqual((r.returncode, len(r.stderr.strip().splitlines())), (2, 1))
-        self.assertEqual(r.stdout, "")
+        self.assertEqual(Run(r).verdict, "next: could-not-run")
 
 
 class PromptSide(unittest.TestCase):

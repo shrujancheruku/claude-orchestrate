@@ -1003,7 +1003,7 @@ class CommandTest(unittest.TestCase):
     def test_record_derives_claimed_slots_free_takeable_and_greedy(self):
         repo = self.record_repo()
         r = self.record(repo, "--idle", "overlap=1", "--dispatched", "2", "--merged", "9", "--suggestion", "2 → 3")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((r.returncode, r.stdout), (0, "next: recorded\n"), r.stderr)
         (row,) = self.rows(repo)
         self.assertEqual({k: row[k] for k in ("scope", "slots", "free", "claimed", "greedy", "idle", "dispatched", "merged", "suggestion",
                                               "takeable_waiting", "limit_hit", "reset_at")},
@@ -1044,8 +1044,24 @@ class CommandTest(unittest.TestCase):
                      ['{"scope": "full"}']):  # the JSON positional is gone
             r = self.record(repo, *args)
             self.assertEqual(r.returncode, 2, (args, r.stderr))
+            self.assertEqual(r.stdout, "next: could-not-run\n", args)  # a program error is never a decision
             self.assertIn("profile", r.stderr.strip().splitlines()[-1], args)  # ours, or argparse's usage error
             self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(self.rows(repo), [])
+
+    def test_record_on_a_rate_limit_ends_retry_after_with_the_reset_time(self):
+        repo = self.record_repo()
+        (repo / ".claude" / "orchestrate-snapshot.json").unlink()  # no snapshot: the tracker is read, and gh is limited
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text("#!/bin/sh\necho 'gh: You have exceeded a secondary rate limit. (HTTP 403)' >&2\n"
+                      "echo 'retry-after: 300' >&2\nexit 1\n")
+        gh.chmod(0o755)
+        self.env.update(PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", XDG_CACHE_HOME=str(self.root / "cache"))
+        r = self.record(repo, "--idle", "overlap=1")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertRegex(r.stdout, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$")
         self.assertEqual(self.rows(repo), [])
 
     def test_record_refuses_when_there_is_no_slot_count(self):

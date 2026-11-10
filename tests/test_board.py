@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git, verdict_runs  # noqa: E402
 
 import common  # noqa: E402
 
@@ -62,7 +62,7 @@ def live_reason():
 
 class Board(unittest.TestCase):
     def setUp(self):
-        self.env = ScriptEnv()
+        self.env = verdict_runs(ScriptEnv(), "board")  # board ends in exactly one `next:` line, checked on every run
         self.addCleanup(self.env.close)
 
     def config(self, line=f"- **Board:** {URL}\n"):
@@ -167,7 +167,7 @@ class Board(unittest.TestCase):
                 prs=[{"number": 12, "headRefName": "2-thing", "state": "OPEN", "mergedAt": None}],
                 cards=[card(1), card(2), card(3), card(4), card(5)])
         r = self.env.run("board", check=False)
-        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual((r.returncode, r.stderr, r.verdict), (0, "", "next: done"))
         self.assertEqual(self.edits(), {"I1": "Building", "I2": "In review", "I3": "Needs lead",
                                         "I4": "Waiting on you", "I5": "Waiting on you"})
 
@@ -411,6 +411,7 @@ class Board(unittest.TestCase):
         self.assertEqual(len(r.stderr.strip().splitlines()), 1)
         self.assertTrue(r.stderr.startswith("board: "))
         self.assertIn("project", r.stderr)
+        self.assertRegex(r.verdict, r"^next: could-not-run .*project")  # exit 1 stays 1; the verdict carries the line
 
     def test_an_unreadable_board_url_fails_in_one_line(self):
         self.config("- **Board:** https://example.com/nope\n")
@@ -482,6 +483,7 @@ class Board(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("rate limit", r.stderr)
         self.assertNotIn("unknown owner type", r.stderr)
+        self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
     def test_an_empty_owner_reply_is_a_lookup_failure_with_exit_2(self):
         self.config()
@@ -489,6 +491,7 @@ class Board(unittest.TestCase):
         r = self.env.run("board", check=False)
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stderr.strip(), "board: owner lookup failed: gh returned no owner")
+        self.assertEqual(r.verdict, "next: could-not-run")
 
     def test_an_owner_reply_with_a_gh_error_carries_its_message(self):
         self.config()
