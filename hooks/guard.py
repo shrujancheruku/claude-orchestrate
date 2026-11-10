@@ -1855,6 +1855,8 @@ ORCHESTRATOR_FORMS = (
                           "--repo": "repo"}),
     Form("holds", (), {**SESSION_FLAGS, "--touch-map": "word+", "--literal": "", "--ticket": "num", "--pr": "num"}),
     Form("gate", ("pr",), {"--session": "word", "--cwd": "cwd", "--base": "word", "--timeout": "float", "--retry-delay": "float"}),
+    # The suite run in a scratch tree (#624): the config's commands only, in a worktree or scratch tree the run made.
+    Form("verify", (), {"--config": "", "--cwd": "cwd", "--timeout": "float"}, need=("--config", "--cwd")),
     Form("ci-times", (), {"--since": "word"}),
     Form("watch-ci", ("target+",), {"--no-run-after": "float", "--interval": "float", "--stuck-after": "float"}),
     Form("lead-route", (), {**SESSION_FLAGS, "--lead": "word", "--cap": "num", "--now": "word"}, need=("--lead", "--cap")),
@@ -1898,7 +1900,7 @@ def value_ok(kind: str, value: str, ctx: FormContext) -> bool:
         return value.isascii() and value.isdigit()
     return {"float": lambda: FLOAT.fullmatch(value) is not None, "hash": lambda: HEX.fullmatch(value) is not None,
             "repo": lambda: value == ".", "snapshot": lambda: value == SNAPSHOT_FILE,
-            "cwd": lambda: gate_cwd_ok(value, ctx.cwd), "under": lambda: under_ok(value, ctx.session)}.get(kind, lambda: False)()
+            "cwd": lambda: gate_cwd_ok(value, ctx.cwd, ctx.session), "under": lambda: under_ok(value, ctx.session)}.get(kind, lambda: False)()
 
 
 def positional_ok(token: str, text: str) -> bool:
@@ -1970,13 +1972,21 @@ def script_form_ok(name: str, words: list, ctx: FormContext) -> bool:
     return any(f.script == name and form_matches(f, words, ctx) for f in ORCHESTRATOR_FORMS)
 
 
-def gate_cwd_ok(value: str | None, cwd: str) -> bool:
-    """gate's `--cwd` (#562): a literal directory that resolves under `<repo>/.claude/worktrees/`, the worktree
-    of a PR's branch. Any other value aims the gate's checks at a place the run didn't make."""
+SCRATCH_TREE = re.compile(r"pr-\d+[a-z]?(?:-[\w.]+)?")
+
+
+def gate_cwd_ok(value: str | None, cwd: str, session: str = "") -> bool:
+    """gate's and verify's `--cwd` (#562): a literal directory that resolves under `<repo>/.claude/worktrees/`, the
+    worktree of a PR's branch, or (#624) a scratch tree `scripts/scratch` made: `<scratchpad>/pr-<n>[letter]`, the
+    same root `scratch --under` takes, so never `..`, a path in the checkout, or a missing session id. Any other value
+    aims the checks at a place the run didn't make."""
     if not value or value.startswith("-"):
         return False
     real = Path(os.path.realpath(os.path.join(cwd or ".", value)))
-    return any((root.resolve() / ".claude" / "worktrees") in real.parents for root in repo_roots(cwd))
+    if any((root.resolve() / ".claude" / "worktrees") in real.parents for root in repo_roots(cwd)):
+        return True
+    return (value.startswith("/") and ".." not in value.split("/") and SCRATCH_TREE.fullmatch(real.name) is not None
+            and under_ok(str(real.parent), session) and not any(r.resolve() in (real, *real.parents) for r in repo_roots(cwd)))
 
 
 def chain_cat_ok(args: list, cwd: str) -> bool:

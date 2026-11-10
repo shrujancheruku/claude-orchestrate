@@ -2105,6 +2105,21 @@ class ScriptFormsTest(unittest.TestCase):
     def ok(self, command, role=None, cwd=None, session=None):
         return approved(role, command, cwd or self.main, session_id=session or self.SID)
 
+    def test_gate_and_verify_run_in_a_scratch_tree_the_scratch_script_made(self):
+        tree = f"{self.pad}/pr-12"
+        for command in (f"{SCRIPTS}/verify --config --cwd {tree}", f"{SCRIPTS}/verify --config --cwd {self.pad}/pr-12b",
+                        f"{SCRIPTS}/gate 12 --cwd {tree}", f"{SCRIPTS}/gate 12 --session {self.SID} --cwd {self.pad}/x/pr-3"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))  # a directory below the pad is the pad (as scratch's --under)
+        for command in (f"{SCRIPTS}/verify --config --cwd {self.pad}/../pr-12", f"{SCRIPTS}/verify --config --cwd {self.pad}/other",
+                        f"{SCRIPTS}/verify --config --cwd {self.main}/pr-12", f"{SCRIPTS}/verify --config --cwd /tmp/pr-12",
+                        f"{SCRIPTS}/verify --config --cwd pr-12", f"{SCRIPTS}/verify --cwd {tree} make test",
+                        f"{SCRIPTS}/verify --config", f"{SCRIPTS}/gate 12 --cwd /tmp/claude-0/-proj/{self.SID}/scratchpad/../pr-12"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+        self.assertFalse(approved(None, f"{SCRIPTS}/verify --config --cwd {tree}", self.main))  # no session id
+        self.assertTrue(self.ok(f"{SCRIPTS}/verify --config --cwd {self.work}"))
+
     def test_rescue_is_the_orchestrators_in_its_two_documented_forms(self):
         for command in (f'{SCRIPTS}/rescue 666 --title "ci: skip draft PRs" --repo . --pr 668',
                         f'{SCRIPTS}/rescue 666-ci-skip-draft-prs --title "ci: skip draft PRs" --repo . --pr 668',
@@ -2473,6 +2488,16 @@ class WorkerOwnBranchFormsTest(unittest.TestCase):
                         "git checkout -f origin/main -- tracked.txt", "git restore --source $X -- tracked.txt"):
             with self.subTest(command):
                 self.assertFalse(self.ok(command))
+
+    def test_the_config_is_editable_in_its_own_worktree_only(self):
+        (self.work / ".claude").mkdir(exist_ok=True)
+        for tool in ("Edit", "Write"):
+            own = raw("orchestrate:worker", None, self.work, tool_name=tool,
+                      tool_input={"file_path": str(self.work / ".claude" / "orchestration.md")}, full=True)
+            self.assertEqual(own["permissionDecision"], "allow", tool)
+            other = raw("orchestrate:worker", None, self.work, tool_name=tool,
+                        tool_input={"file_path": str(self.main / ".claude" / "orchestration.md")}, full=True)
+            self.assertEqual(other["permissionDecision"], "deny", tool)
 
     def test_a_leading_cd_into_its_own_worktree_before_an_approved_call(self):
         for command in (f"cd {self.work} && git push origin {self.BRANCH}", f"cd {self.work} && git fetch origin {self.BRANCH}",
