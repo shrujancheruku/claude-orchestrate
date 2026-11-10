@@ -182,7 +182,7 @@ def main(argv=None) -> int:
 
 
 def run(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)  # the guard approves it by flag name
     ap.add_argument("branch", metavar="ticket|branch", help="the ticket number, or its branch `<number>-<slug>`")
     ap.add_argument("--title", help="the ticket title, for the wip commit message")
     ap.add_argument("--pr", type=int, help="the ticket's open PR: its reviewer scratch worktrees are removed too")
@@ -270,11 +270,12 @@ def run(argv=None) -> int:
     say(f"changed {len(changed)} paths")
 
     # Nothing under .claude/ belongs in a PR (#413): a leaked pr-body.md or agent file is left behind, not staged.
-    status = git(path, "status", "--porcelain", "--", ".", ":!.claude")
+    # A worker's `pr-body.md` at the worktree root (#582) is the same kind of leftover: it is not staged either (#624).
+    status = git(path, "status", "--porcelain", "--", ".", ":!.claude", ":(top,exclude)pr-body.md")
     if status.code != 0:
         return fail(f"git status failed in {path}: {common.one_line(status.stderr)}")
     if status.stdout.strip():
-        add = git(path, "add", "-A", "--", ".", ":!.claude")
+        add = git(path, "add", "-A", "--", ".", ":!.claude", ":(top,exclude)pr-body.md")
         msg = f"chore(wip): rescue #{ticket}" if created else f"chore(wip): {args.title}" if args.title else f"chore(wip): #{ticket} work in progress" if ticket is not None \
             else "chore(wip): work in progress"
         c = git(path, "commit", "--no-verify", "-m", msg) if add.code == 0 else add

@@ -88,6 +88,24 @@ class Rescue(unittest.TestCase):
         self.assertEqual(files, ["a.txt"])
         self.assertFalse(self.wt.exists())  # a lone pr-body.md goes with the tree
 
+    def test_a_pr_body_at_the_worktree_root_is_not_committed_and_goes_with_the_tree(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        (self.wt / "pr-body.md").write_text("body\n")
+        r = self.rescue("--title", "Fix the thing")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"committed 1 paths [0-9a-f]+")
+        files = git(self.env.origin, "diff", "--name-only", f"main..{BRANCH}").split()
+        self.assertEqual(files, ["a.txt"])
+        self.assertFalse(self.wt.exists())
+
+    def test_a_worktree_holding_only_a_root_pr_body_is_removed(self):
+        self.worktree()
+        (self.wt / "pr-body.md").write_text("body\n")
+        r = self.rescue("--title", "Fix the thing")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.wt.exists())
+
     def test_without_title_the_message_names_the_ticket(self):
         self.worktree()
         (self.wt / "a.txt").write_text("a\n")

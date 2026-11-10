@@ -429,6 +429,22 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertNotIn("NOT removed", p.stdout)
         self.assertFalse(wt.exists())
 
+    def test_a_pr_body_at_the_worktree_root_alone_does_not_block_the_removal(self):
+        wt = self.agent_tree()
+        (wt / "pr-body.md").write_text("body\n")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertNotIn("NOT removed", p.stdout)
+        self.assertFalse(wt.exists())
+
+    def test_another_untracked_file_is_named_when_it_blocks_the_removal(self):
+        wt = self.agent_tree()
+        (wt / "pr-body.md").write_text("body\n")
+        (wt / "probe.py").write_text("x\n")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertIn("NOT removed", p.stdout)
+        self.assertIn("probe.py", p.stdout)
+        self.assertTrue(wt.exists())
+
     def test_another_untracked_file_beside_the_pr_body_still_blocks_the_removal(self):
         wt = self.agent_tree()
         (wt / ".claude").mkdir()
