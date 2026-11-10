@@ -44,6 +44,7 @@ DETAIL_WIDTH = 200
 PAIR_WINDOW = 2  # seconds between a notification and the request of the same prompt
 
 
+AGENTS_TIMEOUT = 15  # seconds `claude agents` may take: a hung call falls back to {} (#718) instead of hanging prompts, and the sweep with it
 LEAD_NAME = "lead"  # the name scripts/launch --lead gives the lead's session
 _names = None
 
@@ -55,7 +56,7 @@ def session_names() -> dict:
     if _names is None:
         _names = {}
         if shutil.which("claude"):
-            code, out, _ = common.run("claude", "agents", "--json", "--all")
+            code, out, _ = common.run("claude", "agents", "--json", "--all", timeout=AGENTS_TIMEOUT)
             try:
                 rows = json.loads(out) if code == 0 else None
             except ValueError:

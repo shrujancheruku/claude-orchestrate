@@ -397,6 +397,24 @@ class PrChecks(unittest.TestCase):
         self.assertNotIn("after=C1", calls[0])
         self.assertIn("after=C1", calls[1])
 
+    def test_every_check_skipped_or_neutral_is_pending_not_a_pass(self):
+        # A draft head: the push skipped the test job and the ready_for_review run never joined the rollup.
+        checks = [check_run(1, "SKIPPED"), check_run(2, "NEUTRAL")]
+        self.assertEqual(github.ci_verdict(checks), ("pending", ["c1", "c2"]))
+        self.assertEqual(github.ci_verdict([check_run(1, "SKIPPED")]), ("pending", ["c1"]))
+
+    def test_success_beside_skipped_is_still_a_pass(self):
+        checks = [check_run(1, "SKIPPED"), check_run(2), check_run(3, "NEUTRAL")]
+        self.assertEqual(github.ci_verdict(checks), ("pass", []))
+
+    def test_a_bad_conclusion_beside_skips_still_fails(self):
+        checks = [check_run(1, "SKIPPED"), check_run(2, "FAILURE")]
+        self.assertEqual(github.ci_verdict(checks), ("failed", ["c2"]))
+
+    def test_a_commit_status_success_counts_as_a_real_result(self):
+        checks = [check_run(1, "SKIPPED"), {"context": "lint", "state": "SUCCESS"}]
+        self.assertEqual(github.ci_verdict(checks), ("pass", []))
+
     def test_a_pr_past_the_page_cap_fails_closed(self):
         self.serve(*[graphql_reply([check_run(n)], next_cursor=f"C{n}") for n in range(github.PR_CHECK_PAGES)])
         with self.assertRaises(github.GhError) as e:
