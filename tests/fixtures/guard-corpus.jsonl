@@ -550,7 +550,7 @@
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.11/scripts/verify' --config", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.12/scripts/verify' --config", "expected": "deny", "timeout": 300000, "source": "hand"}
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.13/scripts/verify' --config", "expected": "allow", "timeout": 600000, "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/53/comments -f path=hooks/guard.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/53/comments -f path=hooks/guard.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/53/comments -f path=hooks/guard.py -f subject_type=line -f commit_id=abc1234 -f body='[blocking] x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/53/comments -f path=hooks/guard.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --fixed abc1234", "expected": "allow", "source": "hand"}
@@ -572,8 +572,8 @@
 {"role": "orchestrate:worker", "command": "gh pr edit 42 --body-file x", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "scripts/threads 12 reopen PRRT_x --why nope", "expected": "unapproved", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh pr review 12 --comment --body 'x'", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/r/pulls/12/comments -f path=a.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh pr review 12 --comment --body 'x'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/r/pulls/12/comments -f path=a.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr merge 12 --squash", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "scripts/merge 12 --approved-head abc1234", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh pr ready 12", "expected": "deny", "source": "hand"}
@@ -591,14 +591,14 @@
 {"role": "orchestrate:worker", "command": "gh pr create --title \"TEXT\" --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/359/reviews --input - <<'EOF'\nBODY\nEOF\ngh api --method POST repos/owner/claude-orchestrate/pulls/359/comments -f path=tests/test_holds.py -f subject_type=file -f commit_id=abc1234 -f body='[minor] x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/359/reviews --input - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/3/comments -f path=tests/test_holds.py -f subject_type=file -f commit_id=abc1234 -f body='[minor] x'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/3/comments -f path=tests/test_holds.py -f subject_type=file -f commit_id=abc1234 -f body='[minor] x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh pr diff 352 > /private/tmp/scratch/pr352.diff", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "git show FETCH_HEAD:scripts/gate > /private/tmp/scratch/gate.py", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "sed -i 's/x/y/' /private/tmp/scratch/rev.py", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cat > /private/tmp/scratch/rev.json <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "diff <(git show FETCH_HEAD:scripts/gate) <(git show origin/main:scripts/gate)", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh pr diff 352 | head -200", "expected": "allow", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh pr review 354 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh pr review 354 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit --body-file .claude/pr-body.md && gh pr ready", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr edit --body-file .claude/pr-body.md; gh pr ready", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'the worker finished; left for a follow-up'", "expected": "approve", "source": "hand"}
@@ -659,7 +659,7 @@
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo ..", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/board --repo=.", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge \u00b2", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "cd ~/x && gh pr review 12 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cd ~/x && gh pr review 12 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cd * && gh pr review 12 --comment --body-file - <<'EOF'\nBODY\nEOF", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" -Fb.md", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" -F=b.md", "expected": "approve", "source": "hand"}

@@ -605,26 +605,20 @@ class Parsed:
         return [c for c in self.calls if c.tool == name]
 
 
-# The writes a reviewer may make: a comment review posted through the API (its JSON on a
-# heredoc) or through `gh pr review --comment`. The aimed command must be exactly one of
-# these shapes (see review_post); the payload is checked separately. A heredoc delimiter must be
+# The write a reviewer may make: a comment review posted through the API (its JSON on a
+# heredoc), the one form agents/reviewer.md names. The aimed command must be exactly that
+# shape (see review_post); the payload is checked separately. A heredoc delimiter must be
 # quoted, or the shell would expand `$(...)` inside the body, and no word may hold an expansion.
 # An optional leading `cd <path> &&` is allowed, a plain cd and nothing chained after it.
 REVIEWS_PATH = re.compile(r"pulls/\d+/reviews")
 REVIEW_ENDPOINT = re.compile(r"repos/[^/\s]+/[^/\s]+/pulls/\d+/reviews")
-# A finding whose line is outside the diff is posted on its own as a file-level comment (agents/reviewer.md).
+# Aimed but never approved (#700): `gh pr review` and a file-level comment have no form in agents/reviewer.md.
 FILE_COMMENT_PATH = re.compile(r"pulls/\d+/comments")
-FILE_COMMENT_ENDPOINT = re.compile(r"repos/[^/\s]+/[^/\s]+/pulls/\d+/comments")
-FILE_COMMENT_FIELDS = {"path", "subject_type", "commit_id", "body"}
 SHAPES = (
-    "Post exactly one of these (an optional leading `cd <path> &&` is fine, nothing else chained, nothing after the heredoc):\n"
+    "Post exactly this (an optional leading `cd <path> &&` is fine, nothing else chained, nothing after the heredoc):\n"
     "gh api --method POST repos/{owner}/{repo}/pulls/<n>/reviews --input - <<'EOF'\n"
     '{"event": "COMMENT", "body": "<body>", "comments": []}\nEOF\n'
-    "gh pr review <n> --comment --body-file - <<'EOF'\n<body>\nEOF\n"
-    "gh pr review <n> --comment --body '<body, no single quotes>'\n"
-    "A finding outside the diff, posted after the review as a file-level comment:\n"
-    "gh api --method POST repos/{owner}/{repo}/pulls/<n>/comments -f path=<path> -f subject_type=file "
-    "-f commit_id=<head sha> -f body=<finding>"
+    "A finding outside the diff goes in the body under `## Outside the diff`, never in a second request."
 )
 # The config line that turns posting on, e.g. `- **Post reviews:** yes`. Leaving `<` out of
 # the separator keeps the template's `<yes | no>` placeholder from reading as yes.
@@ -1151,51 +1145,15 @@ def cd_target_plain(cd: Command) -> bool:
 
 
 def review_shape(cmd: Command) -> str | None:
-    """Which accepted shape a `gh` command is: "api" (the review JSON on a heredoc), "body-file" (the
-    body on a heredoc) or "inline" (the body on the command line); None for anything else."""
+    """"api" for the one post form agents/reviewer.md names (the review JSON on a heredoc); None for
+    anything else, `gh pr review` and the file-comment POST included (#700)."""
     words = [w.text for w in cmd.words]
-    if words[:1] != ["gh"] or not only_plain_words(cmd):
+    if words[:2] != ["gh", "api"] or not only_plain_words(cmd):
         return None
-    if words[1:2] == ["api"]:
-        args = words[2:]
-        if (len(args) == 5 and args[0] in ("-X", "--method") and args[1] == "POST"
-                and REVIEW_ENDPOINT.fullmatch(args[2]) and args[3:] == ["--input", "-"]):
-            return "api"
-        if len(args) == 11 and args[0] in ("-X", "--method") and args[1] == "POST" and FILE_COMMENT_ENDPOINT.fullmatch(args[2]):
-            fields = {}
-            for flag, pair in zip(args[3::2], args[4::2]):
-                key, eq, value = pair.partition("=")
-                if flag != "-f" or not eq:
-                    return None
-                fields[key] = value
-            if set(fields) == FILE_COMMENT_FIELDS and fields["subject_type"] == "file":
-                return "file-comment"
-        return None
-    if words[1:3] != ["pr", "review"] or len(words) < 5 or not is_number(words[3]):
-        return None
-    args, comment, body, body_file = words[4:], 0, 0, 0
-    j = 0
-    while j < len(args):
-        a = args[j]
-        j += 1
-        if a == "--comment":
-            comment += 1
-        elif a in ("-b", "--body") and j < len(args):
-            body += 1
-            j += 1
-        elif a.startswith("--body="):
-            body += 1
-        elif a in ("--body-file", "-F") and args[j:j + 1] == ["-"]:
-            body_file += 1
-            j += 1
-        elif a == "--body-file=-":
-            body_file += 1
-        else:
-            return None
-    if comment == 1 and body == 1 and body_file == 0:
-        return "inline"
-    if comment == 1 and body == 0 and body_file == 1:
-        return "body-file"
+    args = words[2:]
+    if (len(args) == 5 and args[0] in ("-X", "--method") and args[1] == "POST"
+            and REVIEW_ENDPOINT.fullmatch(args[2]) and args[3:] == ["--input", "-"]):
+        return "api"
     return None
 
 
@@ -1227,7 +1185,14 @@ def review_post(p: Parsed) -> str | None:
             return "it isn't in the accepted shape"
     post = cmds[at]
     shape = review_shape(post)
-    if shape is None or len(post.heredocs) != (0 if shape in ("inline", "file-comment") else 1):
+    if shape is None:
+        if post.words[1:3] and [w.text for w in post.words[1:3]] == ["pr", "review"]:
+            return "`gh pr review` is not a reviewer's post form (the review goes through the reviews API as one comment review)"
+        if any(FILE_COMMENT_PATH.search(w.text) for w in post.words):
+            return ("a file-level comment is not a reviewer's post form (a finding outside the diff goes in the "
+                    "review body under `## Outside the diff`)")
+        return "it isn't in the accepted shape"
+    if len(post.heredocs) != 1:
         return "it isn't in the accepted shape"
     heredoc = post.heredocs[0] if post.heredocs else None
     if heredoc and not heredoc.quoted:
@@ -1237,8 +1202,6 @@ def review_post(p: Parsed) -> str | None:
     # Anything after the review would run unchecked.
     if len(cmds) > at + 1:
         return "it runs more after the review"
-    if shape != "api":
-        return ""
     try:
         payload = json.loads(heredoc.body)
     except json.JSONDecodeError:
