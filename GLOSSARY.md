@@ -137,7 +137,7 @@ The files a ticket is expected to change, as a prediction rather than a fence. I
 _Avoid_: file list, change set
 
 **Held path**:
-A file that another ticket holds: in an open PR's diff, in a building ticket's touch map (or, for this session's own worker with no record, its worktree's changes), in the changed files of an **Elsewhere** ticket's live worktree, or under an exclusive hold. A ticket may not change one. `scripts/holds` is the one source of the rule: it decides what is held and whether a ticket overlaps it, and the brief's `Held paths:` line is its output. Source: `scripts/holds`, `skills/run/SKILL.md`.
+A file that another ticket holds: in an open PR's diff, in a building ticket's touch map (or, for this session's own worker with no record, its worktree's changes), in the changed files of an **Elsewhere** ticket's live worktree, or under an exclusive hold. A ticket may not change one. `scripts/holds.py` is the one source of the rule: it decides what is held and whether a ticket overlaps it, and the brief's `Held paths:` line is its output. Source: `scripts/holds.py`, `skills/run/SKILL.md`.
 _Avoid_: locked file, reserved path, blocked path
 
 **Exclusive hold**:
@@ -177,7 +177,7 @@ A point where the user decides: a start gate holds a ticket before a worker star
 _Avoid_: approval, checkpoint, hold
 
 **Script gate**:
-The mechanical checks a PR passes before any reviewer reads it: mergeability with its base, its title against Conventional Commits, overlap with held paths, dependencies merged, no secrets, lockfiles with their manifests, and the config's repo-specific `run:` commands. Everything in it is something the worker alone can fix. Not a **Gate**: it asks nobody. Source: `scripts/gate` (every check, calling `scripts/holds` for held paths), `skills/run/SKILL.md` (The review loop).
+The mechanical checks a PR passes before any reviewer reads it: mergeability with its base, its title against Conventional Commits, overlap with held paths, dependencies merged, no secrets, lockfiles with their manifests, and the config's repo-specific `run:` commands. Everything in it is something the worker alone can fix. Not a **Gate**: it asks nobody. Source: `scripts/gate` (every check, running the `scripts/holds.py` library in process for held paths), `skills/run/SKILL.md` (The review loop).
 _Avoid_: pre-merge check, pre-flight, gate (bare, for the script)
 
 **Merge readiness**:
@@ -231,8 +231,12 @@ The lead folding related backlog tickets into one before filing a new one, so fe
 _Avoid_: dedupe, backlog cleanup
 
 **Breakage sweep**:
-The lead's checklist, sent to the scout every 10 merges and on request, for problems that do not arrive in reports (failed CI, leftover worktrees, runlog errors); each finding becomes one ticket or one widening. Source: `skills/lead/SKILL.md`.
+The six checks `scripts/sweep` runs, due after 10 merges since its last run (a run-log event) and on request, for problems that do not arrive in reports (red main, stale claims, orphaned worktrees, new kinds of permission prompt, failed rescues, PRs past a third review round); each finding line becomes one ticket or one widening. Source: `scripts/sweep`, `skills/lead/SKILL.md`.
 _Avoid_: audit, health check
+
+**Fold**:
+Widening one open ticket with another and closing the other as a duplicate, moving its blocking edges: `scripts/fold <from> <into>`. It refuses (`next: ask-user <why>`) a claimed ticket and a pair where only one is gated on the permission layer. Source: `scripts/fold`, `skills/lead/SKILL.md`.
+_Avoid_: merge (a PR merge), dedupe
 
 **Pass digest**:
 The short summary the lead posts in its own session after each pass table from a background orchestrator, since the lead is then the developer's only view of the run. Source: `skills/lead/SKILL.md`.

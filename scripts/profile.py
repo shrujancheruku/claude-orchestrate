@@ -793,10 +793,12 @@ def gh_block(events: list) -> dict:
     GraphQL points spent (the `cost` the helper records on a GraphQL call; a call without one adds nothing)."""
     calls = [e for e in events if e.get("outcome") != "wait"]
     waits = [e for e in events if e.get("outcome") == "wait"]
-    by_script = {}
+    by_script, by_role = {}, {}
     for e in calls:
         name = str(e.get("script") or "?")
         by_script[name] = by_script.get(name, 0) + 1
+        if e.get("role"):  # a row the guard wrote for an agent's own `gh` command (#445)
+            by_role[str(e["role"])] = by_role.get(str(e["role"]), 0) + 1
     remaining = [e["remaining"] for e in calls if isinstance(e.get("remaining"), int)]
     writes = sorted(t for t in (parse_ts(e.get("ts")) for e in calls if e.get("write")) if t)
     seconds = lambda es: round(sum(e.get("seconds") or 0 for e in es), 1)
@@ -806,6 +808,9 @@ def gh_block(events: list) -> dict:
         "graphql": sum(1 for e in calls if e.get("graphql")),
         "graphql_points": sum(e["cost"] for e in calls if e.get("graphql") and isinstance(e.get("cost"), int) and not isinstance(e["cost"], bool)),
         "by_script": dict(sorted(by_script.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "by_role": dict(sorted(by_role.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "agent_calls": sum(by_role.values()),
+        "script_calls": len(calls) - sum(by_role.values()),
         "retries": sum(1 for e in calls if (e.get("attempt") or 1) > 1),
         "rate_limited": sum(1 for e in calls if e.get("outcome") == "ratelimited"),
         "lowest_remaining": min(remaining) if remaining else None,
@@ -846,6 +851,9 @@ def gh_lines(g: dict) -> list:
     top = ", ".join(f"{k} {v}" for k, v in list(t["by_script"].items())[:4])
     # One line however long the run: the per-pass blocks live in the saved JSON (metrics.gh_calls.passes).
     out = [f"GitHub calls: {line(t)}" + (f" · top: {top}" if top else "")]
+    if t.get("agent_calls"):  # scripts vs the agents' own `gh` commands
+        roles = ", ".join(f"{k} {v}" for k, v in t["by_role"].items())
+        out.append(f"GitHub calls by source: {t['script_calls']} from scripts, {t['agent_calls']} from agents ({roles})")
     # Points per pass: each row's sum of GraphQL `cost` (calls outside any record form a row of their own).
     # Shown only when the log carries costs, so a log from before #490 keeps the old summary.
     # N is the pass records (a pass with no calls counts, the row for calls outside any pass does not).
@@ -893,7 +901,7 @@ def limit_events(main: Transcript, agents: list, passes: list) -> list:
 
 def idle_reasons(passes: list, end: datetime) -> dict:
     """Idle slot-seconds by the reason each pass gave, held until the next pass. A claimed ticket the pass's `claimed`
-    map shows as `idle` (its worker not live, nothing reported since its last commit: #501) holds a slot doing nothing:
+    map shows as `idle` (a building ticket whose worker ended its turn with an interim report and has had no completion since: GLOSSARY, Idle) holds a slot doing nothing:
     its seconds count under `worker-idle`."""
     out = {}
     for p, nxt in zip(passes, passes[1:] + [None]):
@@ -926,6 +934,41 @@ def recommend(slots: int, occupancy: float, wins: list, limits: list) -> str | N
 WAKE_GRACE = timedelta(minutes=5)
 
 
+SILENCE = timedelta(minutes=30)  # a transcript silence this long, with no `resume` event, is noted (GLOSSARY: Session gap)
+
+
+def session_gaps(times: list, events: list | None) -> list:
+    """Each Session gap, as [start, end]: from the session's last transcript entry before a `resume` event up to the
+    event. `times` is the sorted transcript timestamps. A resume with no earlier entry has no gap to measure."""
+    gaps = []
+    for e in events or []:
+        at = parse_ts(e.get("ts")) if e.get("kind") == runlog.RESUME else None
+        before = [t for t in times if t < at] if at else []
+        if before:
+            gaps.append([before[-1], at])
+    return merge_intervals(gaps)
+
+
+def unexplained_silences(times: list, gaps: list) -> list:
+    """Silences over SILENCE between consecutive transcript entries that no `resume` event explains: noted, never
+    excluded (a hand `claude --resume` skips `launch`, so no event marks it)."""
+    return [[a, b] for a, b in zip(times, times[1:])
+            if b - a > SILENCE and not any(g[0] < b and g[1] > a for g in gaps)]
+
+
+def outside_gaps(start: datetime, end: datetime, gaps: list) -> list:
+    """The profile's [start, end] window minus its Session gaps, as intervals: the span per-hour figures divide by and
+    the window the lead's cost is clipped to (later tickets reuse this)."""
+    out, at = [], start
+    for s, e in merge_intervals([list(g) for g in clip(gaps, start, end)]):
+        if s > at:
+            out.append([at, s])
+        at = max(at, e)
+    if end > at:
+        out.append([at, end])
+    return out
+
+
 def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: float, now: datetime) -> dict:
     main = Transcript(transcript)
     sid = transcript.stem
@@ -949,7 +992,10 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     # (an older config, or lanes) means the session's own concurrency is the truth for that stretch.
     segments, slots_raised = slot_segments(passes, tickets, start, end, slots, config_slots(repo))
     slots = segments[-1][2]
-    span = max((end - start).total_seconds(), 1.0)
+    gaps = session_gaps(main.times, events)
+    silences = unexplained_silences(main.times, gaps)
+    # The span per-hour figures use leaves the Session gaps out: a resumed run's downtime is not slow work.
+    span = max(seconds(outside_gaps(start, end, gaps)), 1.0)
     capacity = sum(n * (b - a).total_seconds() for a, b, n in segments) or span
     occupied = sum(seconds(clip([[tk["start"], tk["end"]]], start, end)) for tk in tickets)
     building = sum(seconds(tk["building"]) for tk in tickets)
@@ -1045,6 +1091,10 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         "limits": limits,
         "metrics": {
             "span_s": span,
+            # Downtime of a resumed run (`launch --resume` logs a `resume` event), outside span_s.
+            "session_gap": {"total_s": seconds(clip(gaps, start, end)), "intervals": interval(clip(gaps, start, end))},
+            # Transcript silences over 30 minutes that no event explains (a hand resume): noted, still inside span_s.
+            "unexplained_silences": interval(silences),
             "occupancy": occupancy,
             "building_share": building / capacity,
             "review_share": max(occupied - building, 0.0) / capacity,
@@ -1055,6 +1105,9 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "orchestrator_share": sum(main.tokens.values()) / total if total else 0.0,
             "cache_hit_ratio": reads / (reads + fresh) if reads + fresh else 0.0,
             "tickets_merged": len(merged),
+            # Merged tickets per hour of span_s (session gaps left out), the same span and merged count as $ per
+            # merged ticket. Occupied-time throughput was rejected: it hides stops. Same with or without a lead.
+            "throughput_per_hour": len(merged) / (span / 3600) if merged else None,
             "merges_unverified": sum(1 for tk in merged if tk["merge_unverified"]),
             "tokens_per_merged_ticket": sum(tk["tokens"] for tk in merged) / len(merged) if merged else None,
             "five_hour_start": five[0] if five else None,
@@ -1107,8 +1160,10 @@ def summary(p: dict, saved: Path) -> str:
         spend = f"{fmt_usd(c['per_merged_ticket'])} per merged ticket ({m['tickets_merged']} merged): {by_model}"
         orch = c["per_merged_ticket_by_role"].get("orchestrator")
         spend += f" · orchestrator {fmt_usd(orch)}"
+    tph = m.get("throughput_per_hour")
+    throughput = "no tickets merged" if tph is None else f"{tph:.2f} merged/hour"
     lines = [
-        f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {slots_label(p)}",
+        f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {throughput} · {slots_label(p)}",
         f"proxy $ {spend}",
         f"slots   occupied {m['occupancy']:.0%}  (building {m['building_share']:.0%}, review/merge {m['review_share']:.0%})  idle: {idle}",
         f"plan    {plan}",
@@ -1118,6 +1173,11 @@ def summary(p: dict, saved: Path) -> str:
         lines.append(f"WARNING {w}")
     if p["recommendation"]:
         lines.append(f"advice  {p['recommendation']}")
+    gap = m.get("session_gap") or {}
+    if gap.get("intervals"):
+        lines.append(f"note    session gap {fmt_dur(gap['total_s'])} over {len(gap['intervals'])} resume(s), outside the span")
+    for s, e in m.get("unexplained_silences") or []:
+        lines.append(f"WARNING no transcript entry from {s[:16]}Z to {e[:16]}Z and no resume event (a hand `claude --resume`?): inside the span, not excluded")
     if p.get("slots_raised"):
         lines.append("note    more tickets ran at once than the slot count in force; occupancy is against the higher count")
     if p["metrics"].get("merges_unverified"):
@@ -1138,7 +1198,11 @@ def slots_label(p: dict) -> str:
 
 
 def write_html(data: dict, path: Path) -> None:
-    viewer = VIEWER.read_text()
+    try:
+        viewer = VIEWER.read_text()
+    except OSError:  # a plugin copy without viewer/ (#628): the JSON is already saved, so say so and go on
+        print(f"profile.py: the viewer {VIEWER} cannot be read, so only the JSON profile was written", file=sys.stderr)
+        return
     # `</` can't appear inside a script element; JSON allows escaping the slash.
     payload = json.dumps(data).replace("</", "<\\/")
     marker = '<script id="profile-data" type="application/json">null</script>'
@@ -1146,7 +1210,7 @@ def write_html(data: dict, path: Path) -> None:
 
 
 def cmd_profile(argv: list) -> None:
-    ap = argparse.ArgumentParser(prog="profile.py")
+    ap = argparse.ArgumentParser(prog="profile.py", allow_abbrev=False)  # the guard approves the full flag names only (#545)
     ap.add_argument("session", help="session ID or transcript path")
     ap.add_argument("--repo", type=Path, help="repo the session ran in (default: the transcript's cwd)")
     ap.add_argument("--slots", type=int, help="slot count (default: the pass log, then the config)")
@@ -1167,7 +1231,7 @@ def cmd_profile(argv: list) -> None:
 
 
 def cmd_record(argv: list) -> None:
-    ap = argparse.ArgumentParser(prog="profile.py record")
+    ap = argparse.ArgumentParser(prog="profile.py record", allow_abbrev=False)
     ap.add_argument("--repo", type=Path, required=True)
     ap.add_argument("--session", required=True)
     ap.add_argument("--scope", default="full", help="full (default), status, wake, #<ticket> or parent #<n>")
@@ -1289,6 +1353,7 @@ def figures(p: dict) -> dict:
     tiered = sum(t["merged"] for k, t in tiers.items() if k != "?")
     return {
         "merged": merged,
+        "throughput": m.get("throughput_per_hour"),
         "cost": c["per_merged_ticket"],
         "orchestrator": c["per_merged_ticket_by_role"].get("orchestrator"),
         "changes": r["round1_changes_rate"],
@@ -1402,6 +1467,8 @@ def compare_report(before_name: str, after_name: str, r: dict) -> str:
     def row(label, bv, av, kind):
         lines.append(f"{label:38}{_show(bv, kind):>10}{_show(av, kind):>10}{_delta(bv, av, kind):>12}")
     lines.append(f"{'merged tickets':38}{b['merged']:>10}{a['merged']:>10}{a['merged'] - b['merged']:>+12}")
+    # Informational: no gate and no mix adjustment, so it is not in ROWS.
+    row("throughput (merged/hour)", b["throughput"], a["throughput"], "num")
     for key, label, kind, _ in ROWS:
         row(label, b[key], a[key], kind)
     row("round-1 approvals (outright)", b["outright"], a["outright"], "pct")

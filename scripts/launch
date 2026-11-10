@@ -19,8 +19,14 @@ script (ADR-0006). The flags cannot live in settings: the session-only auto-mode
                                 flag names a snapshot of the plugin at origin/<default> under
                                 $XDG_CACHE_HOME (else ~/.cache)/orchestrate/plugin/<sha>/, never the checkout: Claude
                                 Code makes every file under an inline plugin's root sensitive, worktrees included
-                                (#581). The newest 3 snapshots are kept; one stderr line names the sha. A plugin
-                                change reaches a run only through a relaunch or resume via launch.
+                                (#581). The newest 3 snapshots are kept; one stderr line names the sha. The snapshot
+                                carries viewer/ too (profile.py reads it). Run from a snapshot (the lead's), launch
+                                exports afresh from the checkout in its .source, else reuses it. A plugin change reaches a background run only through a fresh launch; a
+                                background resume says on stderr when its snapshot (the last orchestrate/plugin/<sha> path in
+                                its saved transcript) is behind origin/<default>, or that it cannot tell (#628).
+    "env":{"ORCHESTRATE_ROLE":"orchestrator"}
+                                in the same --settings JSON on every orchestrator line, never the lead's: `claude --bg`
+                                hands the session to a daemon that never sees the line's own variable (#628)
     "/orchestrate:run --greedy" the prompt: `--greedy=N` or a ticket number is passed through, and `--profile`
                                 is appended; none with --resume
 Resuming a row whose `kind` is `background` is different (#555): Claude Code keeps a background session's saved options
@@ -62,6 +68,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import config  # noqa: E402
+import runlog  # noqa: E402
 
 NAME = "orchestrator"
 MODES = ("acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan")
@@ -71,7 +78,8 @@ RUN_PROMPT = re.compile(r"/orchestrate:(?:run|lead)(?: [A-Za-z0-9=#._-]+)*")  # 
 ROLE_ENV = "ORCHESTRATE_ROLE"  # hooks/guard.py reads it: the orchestrator's calls it can't approve are denied, not prompted (#579)
 SETTINGS = {"disableAutoMode": "disable"}
 INBOUND = {"crossSessionInbound": "accept"}
-SNAPSHOT_DIRS = (".claude-plugin", "hooks", "agents", "skills", "scripts")  # what the plugin loads
+SNAPSHOT_DIRS = (".claude-plugin", "hooks", "agents", "skills", "scripts", "viewer")  # what the plugin loads or reads (viewer: profile.py's HTML, #628)
+SOURCE_FILE = ".source"  # in a snapshot: the path of the checkout it was exported from
 KEEP = 3  # snapshots kept after a launch, the one in use included
 MIN_AGE = 24 * 3600  # a snapshot younger than this is never pruned: a live session may still load it
 
@@ -94,6 +102,85 @@ def cache_base() -> Path:
     return (Path(xdg) if xdg else Path.home() / ".cache") / "orchestrate" / "plugin"
 
 
+def is_snapshot(root: Path) -> bool:
+    """True when `root` is a snapshot this script made: a <sha> directory directly under the cache (#628).
+
+    A lead started through `launch --lead` runs from its snapshot, which has no .git; it is reused as it is."""
+    try:
+        resolved = root.resolve()
+        return resolved.parent == cache_base().resolve() and bool(re.fullmatch(r"[0-9a-f]{40}", resolved.name))
+    except OSError:
+        return False
+
+
+def origin_ref(git) -> str:
+    code, head, _ = common.run(*git, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    return head.strip() if code == 0 and head.strip().startswith("origin/") else "origin/main"
+
+
+def plugin_tree(git, sha: str):
+    """The plugin dirs' tree entries at `sha` (None when git cannot list them): equal text means an equal plugin."""
+    code, out, _ = common.run(*git, "ls-tree", sha, "--", *SNAPSHOT_DIRS)
+    return out if code == 0 else None
+
+
+SNAPSHOT_PATH = re.compile(r"orchestrate/plugin/([0-9a-f]{40})")
+
+
+def saved_snapshot(session_id):
+    """The snapshot a session loads: the last `orchestrate/plugin/<sha>` path in its saved transcript (read only), else None.
+
+    `claude agents --json` rows carry no plugin dir (Claude Code 2.1.311), and the transcript is where the session's
+    own loaded paths are recorded."""
+    try:
+        path = common.find_transcript(session_id)
+        found = None
+        if path:
+            with open(path, errors="replace") as f:  # streamed: a transcript can be tens of MB
+                for line in f:
+                    for m in SNAPSHOT_PATH.finditer(line):
+                        found = m.group(1)
+    except OSError:
+        return None
+    return cache_base() / found if found else None
+
+
+def stale_line(args, root: Path, session_id):
+    """The line a background resume prints when the snapshot it keeps is older than origin/<default>'s plugin tree (#628).
+
+    A background resume keeps its saved --plugin-dir (#555), so a merged plugin change reaches it only through a fresh
+    launch. The saved snapshot comes from the session's transcript; the new tree is read from the checkout the
+    snapshot was exported from, else the plugin checkout, else --repo. When the snapshot cannot be found, one line
+    says so; None when the plugin tree is unchanged or cannot be read."""
+    old = saved_snapshot(session_id)
+    if old is None:
+        return f"launch: resume cannot tell which snapshot {session_id} keeps (none in its transcript), so it cannot say whether origin/<default> has moved"
+    try:
+        source = Path((old / SOURCE_FILE).read_text().strip())
+    except OSError:
+        source = root  # a snapshot exported before the file existed
+    for checkout in (source, root, Path(args.repo)):
+        if is_snapshot(checkout):
+            continue
+        git = ["git", "-C", str(checkout)]
+        code, _, _ = common.run(*git, "rev-parse", "--show-toplevel")
+        if code != 0:
+            continue
+        ref = origin_ref(git)
+        code, new, _ = common.run(*git, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+        new = new.strip()
+        if code != 0 or not re.fullmatch(r"[0-9a-f]{40}", new):
+            continue
+        name = old.resolve().name
+        if new == name:
+            return None
+        seen = plugin_tree(git, name)  # a sha this checkout does not know counts as different
+        if seen is not None and seen == plugin_tree(git, new):
+            return None
+        return f"launch: resume keeps snapshot {name[:12]}; {ref} is {new[:12]}: a fresh launch picks it up"
+    return None
+
+
 def snapshot(root: Path, fetch: bool = True):
     """(path, sha): the plugin tree at origin/<default>, exported once per sha under the cache and reused after.
 
@@ -101,13 +188,22 @@ def snapshot(root: Path, fetch: bool = True):
     and the worktrees sit inside the checkout, so each worker edit prompted (#581). The export lives outside the
     repo (never under ~/.claude either). At most KEEP snapshots stay; older ones are removed.
     """
+    if is_snapshot(root):  # launch run from a snapshot (a lead's, #628): export afresh from the checkout it came from
+        try:
+            source = Path((root / SOURCE_FILE).read_text().strip())
+            usable = source.is_dir() and common.run("git", "-C", str(source), "rev-parse", "--show-toplevel")[0] == 0
+        except OSError:
+            usable = False
+        if not usable:  # no .source (an older snapshot) or its checkout is gone: reuse this one
+            os.utime(root)
+            return root, root.resolve().name
+        root = source
     git = ["git", "-C", str(root)]
     code, top, _ = common.run(*git, "rev-parse", "--show-toplevel")
     if code != 0:
         common.die(f"launch: cannot run: the plugin root {root} is not a git checkout, so it cannot be snapshotted "
                    "(a marketplace install needs no snapshot)")
-    code, head, _ = common.run(*git, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    ref = head.strip() if code == 0 and head.strip().startswith("origin/") else "origin/main"
+    ref = origin_ref(git)
     if fetch:
         common.run(*git, "fetch", "--quiet", "origin", ref[len("origin/"):])  # best effort: offline keeps the last fetch
     code, sha, err = common.run(*git, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
@@ -130,6 +226,7 @@ def snapshot(root: Path, fetch: bool = True):
                 tar.extractall(tmp, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
             if proc.wait() != 0:
                 common.die(f"launch: cannot run: git archive of {sha} failed: {proc.stderr.read().decode(errors='replace').strip()}")
+            (tmp / SOURCE_FILE).write_text(top.strip() + "\n")  # lets a launch from this snapshot find the checkout (#628)
             try:
                 tmp.rename(dest)
             except OSError:
@@ -182,6 +279,9 @@ def build(args, plugin_dir, model, start=None) -> list:
     mode = args.permission_mode or "acceptEdits"
     if args.bg or mode == "bypassPermissions":
         settings.update(INBOUND)
+    # The role also rides in the settings `env`: `claude --bg` hands the session to a pre-spawned daemon that never
+    # sees the variable set on this line (#628). Never on the lead's settings.
+    settings["env"] = dict(role_env(args))
     settings.update(read_rule(plugin_dir))
     argv += ["--name", NAME, "--permission-mode", mode,
              "--settings", json.dumps(settings, separators=(",", ":"))]
@@ -385,6 +485,7 @@ def parse(argv):
 
 def main(argv=None) -> int:
     args = parse(argv)
+    root = plugin_root()
     model = None
     if not args.no_model:
         cfg = config.Config.load(args.repo)
@@ -413,12 +514,14 @@ def main(argv=None) -> int:
                            f"{saved_mode or 'unreadable'}), so --permission-mode {args.permission_mode} cannot apply; "
                            f"start a fresh orchestrator without --resume to change it")
             start = saved_prompt or (prompt(args) if tokens else None)
+            stale = stale_line(args, root, args.resume) if not args.print and not is_marketplace(root) else None
+            if stale:
+                print(stale, file=sys.stderr)
             if start is None:
                 print(f"launch: {args.resume} has no saved start prompt and none was given; once it is resumed run "
                       f"`claude attach {args.resume}` and type: /orchestrate:run --greedy{' --profile' if args.profile else ''}", file=sys.stderr)
         elif tokens or args.profile:
             common.die("launch: cannot run: --resume takes no prompt for a session that is not a background one")
-    root = plugin_root()
     if not args.print:  # refuse before exporting a snapshot a refused launch would not use
         live = live_sessions()
         name = "lead" if args.lead else NAME
@@ -438,6 +541,13 @@ def main(argv=None) -> int:
         # The printed line carries the variable as a shell prefix, so running it by hand starts the same session.
         print("".join(f"{k}={v} " for k, v in extra.items()) + render(cmd))
         return 0
+    if args.resume and not args.lead:
+        # The profile finds a Session gap from this event: the gap runs from the session's last transcript entry
+        # before it up to its ts. Best effort: a log that cannot be written must not stop the resume.
+        try:
+            runlog.append_event(args.repo, runlog.RESUME, "resumed", session=args.resume)
+        except (OSError, ValueError, runlog.NoSession) as e:
+            print(f"launch: the resume event was not logged: {e}", file=sys.stderr)
     env = {**os.environ, **extra}
     if args.lead:
         env.pop(ROLE_ENV, None)  # an inherited orchestrator role must not make the lead's calls deny

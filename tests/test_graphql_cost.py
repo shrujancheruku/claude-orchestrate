@@ -13,6 +13,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import github  # noqa: E402
+import gqlcheck  # noqa: E402
 
 _loader = SourceFileLoader("lead_brief", str(SCRIPTS / "lead-brief"))
 lead_brief = module_from_spec(spec_from_loader("lead_brief", _loader))
@@ -142,6 +143,61 @@ class QueryCost(unittest.TestCase):
     def test_the_issues_query_asks_for_edit_times_without_a_connection(self):
         self.assertNotIn("userContentEdits", github.ISSUES_QUERY)
         self.assertEqual(github.ISSUES_QUERY.count("lastEditedAt"), 2)
+
+
+class GateQueryCheck(unittest.TestCase):
+    """What gate's GraphQL check (gqlcheck, #682) reads from the source: strings in arguments, and `threads`' mutations."""
+
+    def test_a_closing_paren_or_brace_inside_a_string_argument_does_not_end_the_field(self):
+        m = 'mutation($id: ID!) { a(input: {body: "x) } y"}) { id } b: c(input: {t: """z } ) {"""}) { id } }'
+        self.assertTrue(gqlcheck.is_operation(m))
+        self.assertEqual(gqlcheck.mutation_fields(m), ["a", "c"])
+
+    def test_a_string_with_an_escaped_quote_is_skipped_whole(self):
+        m = 'mutation { a(input: {body: "say \\") } now"}) { id } }'
+        self.assertEqual(gqlcheck.mutation_fields(m), ["a"])
+
+    def test_threads_single_mutations_are_whole_queries_the_check_reads(self):
+        loader = SourceFileLoader("threads_script", str(SCRIPTS / "threads"))
+        threads = module_from_spec(spec_from_loader("threads_script", loader))
+        loader.exec_module(threads)
+        read = gqlcheck.queries_in((SCRIPTS / "threads").read_text())
+        for whole in (threads.REPLY, threads.RESOLVE_THREAD, threads.UNRESOLVE_THREAD):
+            self.assertIn(whole, read)
+        # the literals stay the single-field form of the fields the batched aliases are built from
+        self.assertEqual(threads.REPLY, "mutation($id: ID!, $body: String!) { " + threads.REPLY_FIELD + " }")
+        self.assertEqual(threads.RESOLVE_THREAD, "mutation($id: ID!) { " + threads.RESOLVE_FIELD + " }")
+        self.assertEqual(threads.UNRESOLVE_THREAD, "mutation($id: ID!) { " + threads.UNRESOLVE_FIELD + " }")
+
+    def test_threads_batched_mutation_is_reported_unchecked(self):
+        names = [n for n, _ in gqlcheck.fragments_in((SCRIPTS / "threads").read_text())]
+        self.assertIn("batched", names)
+
+    def test_a_page_size_int_is_filled_with_one_not_the_pr_number(self):
+        """#704: GitHub caps a connection at 100, so `last: $limit` with the PR number (699) fails the gate."""
+        q = ("query($owner: String!, $name: String!, $limit: Int!) "
+             "{ repository(owner: $owner, name: $name) { pullRequests(last: $limit) { nodes { id } } } }")
+        args, why = gqlcheck.fixtures(q, 699)
+        self.assertEqual(why, "")
+        self.assertEqual(args, ["-F", "owner={owner}", "-F", "name={repo}", "-F", "limit=1"])
+
+    def test_an_int_that_is_not_a_page_size_keeps_the_pr_number(self):
+        q = ("query($owner: String!, $name: String!, $n: Int!) "
+             "{ repository(owner: $owner, name: $name) { pullRequest(number: $n) { title } } }")
+        args, why = gqlcheck.fixtures(q, 699)
+        self.assertEqual(why, "")
+        self.assertEqual(args, ["-F", "owner={owner}", "-F", "name={repo}", "-F", "n=699"])
+
+    def test_an_int_used_as_a_number_and_a_page_size_is_filled_with_one(self):
+        q = "query($n: Int!) { pullRequest(number: $n) { reviews(first: $n) { nodes { id } } } }"
+        args, _ = gqlcheck.fixtures(q, 699)
+        self.assertEqual(args, ["-F", "n=1"])
+
+    def test_a_page_size_inside_a_string_literal_does_not_make_an_int_a_page_size(self):
+        q = 'query($n: Int!) { pullRequest(number: $n) { title(label: "last: $n") } }'
+        args, _ = gqlcheck.fixtures(q, 699)
+        self.assertEqual(args, ["-F", "n=699"])
+
 
 
 if __name__ == "__main__":

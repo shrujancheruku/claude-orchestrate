@@ -28,7 +28,7 @@ class GateTest(unittest.TestCase):
 
     def prime(self, title="feat(x): add y", mergeable="MERGEABLE", behind=0, head="br", base="main", body="",
               diff=CLEAN_DIFF, blockers=0, ticket=270, others=(), behind_reply=None, view_reply=None, issues=(),
-              ticket_body="", body_blocked_by=()):
+              ticket_body="", body_blocked_by=(), first=()):
         """Canned gh replies for the gate and for the `holds --pr` subprocess it runs: one PR view serves both."""
         view = {"title": title, "mergeable": mergeable, "baseRefName": base, "headRefName": head, "headRefOid": HEAD,
                 "body": body}
@@ -39,6 +39,7 @@ class GateTest(unittest.TestCase):
                           "blockedBy": {"nodes": [{"number": 900 + i, "state": "OPEN"} for i in range(blockers)]}})
             nodes += [{"number": n} for n in body_blocked_by]
         self.env.set_gh([
+            *first,  # more specific replies (a GraphQL probe) must come before the snapshot's `api graphql`
             view_reply or {"args": ["api", PULL], "stdout": json.dumps(rest_pull(**view))},
             {"args": ["api", "~" + PULL + "/files"], "stdout": json.dumps([{"filename": "src/a.py"}])},
             *[{"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{o['number']}/files"],
@@ -549,6 +550,18 @@ class GateTest(unittest.TestCase):
         self.assertIsInstance(out, str)
         self.assertIn("holds could not run: boom", out)
 
+    def test_an_unlisted_holds_exception_is_could_not_run_not_a_traceback(self):
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        from importlib.util import module_from_spec, spec_from_loader
+        loader = SourceFileLoader("gate_under_test2", str(Path(__file__).resolve().parent.parent / "scripts" / "gate"))
+        gate = module_from_spec(spec_from_loader("gate_under_test2", loader))
+        loader.exec_module(gate)
+        with mock.patch.object(gate.holds, "find", side_effect=RuntimeError("boom")), \
+                mock.patch.object(gate.repo, "main_checkout", return_value=str(self.env.repo)):
+            out = gate.overlap_check(7, str(self.env.repo), mock.Mock())
+        self.assertEqual(out, "holds could not run: RuntimeError: boom")
+
     def test_run_gate_exit_codes_are_pinned(self):
         """main() maps 0, 1 and 3 to a verdict and every other code to could-not-run: a new code must be added to
         both on purpose, so this fails when run_gate returns one the mapping doesn't know (#453)."""
@@ -674,6 +687,157 @@ class GateTest(unittest.TestCase):
     def test_manifest_in_another_directory_does_not_count(self):
         self.prime(diff=added_file("a/package-lock.json", "{}") + added_file("b/package.json", "{}"))
         self.failed_only(self.gate(), "lockfile changes have a manifest change")
+
+    # --- changed GraphQL queries (#663) ---
+    QUERY = 'Q = """query($owner: String!, $name: String!, $number: Int!, $after: String) {\n  repository(owner: $owner, name: $name) { pullRequest(number: $number) { %s } }\n}"""\n'
+
+    def query_pr(self, field, reply):
+        """A PR whose script adds the query selecting `field`; `reply` is the canned answer to running it."""
+        (self.env.repo / "scripts").mkdir(exist_ok=True)
+        (self.env.repo / "scripts" / "q.py").write_text(self.QUERY % field)
+        probe = {"args": ["api", "graphql", "-f", "~query=query($owner: String!, $name: String!, $number: Int!"], **reply}
+        self.prime(diff=added_file("scripts/q.py"), first=[probe])
+
+    def probes(self):
+        return [c for c in self.env.gh_calls() if any(a.startswith("query=") and "pullRequest(number" in a for a in c)]
+
+    def test_a_valid_changed_query_is_run_once_with_fixtures_and_passes(self):
+        self.query_pr("title", {"stdout": '{"data": {}}'})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("graphql query: query($owner", r.stdout)
+        calls = self.probes()
+        self.assertEqual(len(calls), 1)
+        for want in ("owner={owner}", "name={repo}", "number=7"):
+            self.assertIn(want, calls[0])
+        self.assertFalse(any(a.startswith("after=") for a in calls[0]))  # the optional cursor is left out
+
+    def test_a_wrong_field_name_sends_the_pr_back_with_the_error(self):
+        self.query_pr("titel", {"stderr": "gh: Field 'titel' doesn't exist on type 'PullRequest'", "exit": 1})
+        r = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Field 'titel' doesn't exist", r.stdout)
+        self.assertEqual(r.stdout.splitlines()[-1], "next: send-back 7")
+
+    def test_an_unchanged_query_is_not_run(self):
+        self.env.commit("scripts/q.py", self.QUERY % "title", "feat: add query")
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=self.env.repo, check=True)
+        subprocess.run(["git", "fetch", "-q", "origin"], cwd=self.env.repo, check=True)
+        self.prime(diff=added_file("scripts/q.py"))
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.probes(), [])
+
+    def test_a_missing_node_is_not_a_schema_error(self):
+        self.query_pr("title", {"stderr": "gh: Could not resolve to a PullRequest with the number of 7.", "exit": 1})
+        self.assertEqual(self.gate().returncode, 0)
+
+    def source_pr(self, text, reply=None):
+        """A PR adding scripts/s.py with `text`; `reply` answers any query that opens with the `$number` variables."""
+        (self.env.repo / "scripts").mkdir(exist_ok=True)
+        (self.env.repo / "scripts" / "s.py").write_text(text)
+        probe = {"args": ["api", "graphql", "-f", "~query=query($owner: String!, $name: String!, $number: Int!"],
+                 **(reply or {"stdout": '{"data": {}}'})}
+        anon = {"args": ["api", "graphql", "-f", "~query={ repository"], **(reply or {"stdout": '{"data": {}}'})}
+        self.prime(diff=added_file("scripts/s.py"), first=[probe, anon])
+
+    def test_the_left_half_of_a_concatenated_query_is_not_run(self):
+        self.source_pr('Q = "query($id: ID!) { " + FIELD + " }"\n')
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("graphql query", r.stdout)
+
+    def test_an_anonymous_brace_query_is_run(self):
+        self.source_pr('Q = "{ repository(owner: \\"o\\", name: \\"r\\") { titel } }"\n',
+                       {"stderr": "gh: Field 'titel' doesn't exist on type 'Repository'", "exit": 1})
+        r = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("graphql query: { repository", r.stdout)
+
+    def test_a_format_string_in_braces_is_not_a_query(self):
+        self.source_pr('P = "{owner}/{repo}"\n')
+        self.assertNotIn("graphql query", self.gate().stdout)
+
+    def test_a_server_error_from_the_query_call_is_could_not_run_not_a_send_back(self):
+        self.query_pr("title", {"stderr": "gh: HTTP 502: Bad Gateway", "exit": 1})
+        r = self.gate()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines()[-1], "next: could-not-run")
+
+    def test_a_missing_token_scope_is_not_a_send_back(self):
+        self.query_pr("title", {"stderr": "gh: Your token has not been granted the required scopes: read:project", "exit": 1})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("gate: graphql not run (", r.stdout)
+
+    def test_a_forbidden_reply_is_a_not_run_note_and_the_gate_passes(self):
+        self.query_pr("title", {"stderr": "gh: FORBIDDEN: Resource not accessible by personal access token", "exit": 1})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("gate: graphql not run (", r.stdout)
+        self.assertNotIn("fail", r.stdout)
+
+    def typed_pr(self, variable, *replies):
+        """A PR adding a query with one required `variable` (`$v: Type!`); `replies` answer, in order, the schema
+        introspection and the run."""
+        (self.env.repo / "scripts").mkdir(exist_ok=True)
+        (self.env.repo / "scripts" / "t.py").write_text(
+            f'Q = "query Typed($owner: String!, $name: String!, {variable}) {{ repository(owner: $owner, name: $name) {{ id }} }}"\n')
+        schema = {"args": ["api", "graphql", "-f", "~query={ __type(name:"], **replies[0]}
+        probe = {"args": ["api", "graphql", "-f", "~query=query Typed("], **replies[1]}
+        self.prime(diff=added_file("scripts/t.py"), first=[schema, probe])
+
+    def run_calls(self):
+        return [c for c in self.env.gh_calls() if any(a.startswith("query=query Typed") for a in c)]
+
+    def test_an_enum_variable_gets_its_first_value_from_the_schema(self):
+        info = {"stdout": json.dumps({"data": {"__type": {"kind": "ENUM", "enumValues": [{"name": "OPEN"}, {"name": "MERGED"}]}}})}
+        self.typed_pr("$v: PullRequestState!", info, {"stdout": '{"data": {}}'})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.run_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("v=OPEN", calls[0])
+
+    def test_a_boolean_variable_gets_false(self):
+        self.typed_pr("$v: Boolean!", {"stdout": "{}"}, {"stdout": '{"data": {}}'})
+        self.assertEqual(self.gate().returncode, 0)
+        self.assertIn("v=false", self.run_calls()[0])
+        self.assertNotIn("v=gate-fixture", self.run_calls()[0])
+
+    def test_an_input_object_variable_skips_the_query_with_a_note(self):
+        info = {"stdout": json.dumps({"data": {"__type": {"kind": "INPUT_OBJECT", "enumValues": None}}})}
+        self.typed_pr("$v: CreateIssueInput!", info, {"stdout": '{"data": {}}'})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("gate: graphql skipped scripts/t.py:Typed (variable $v: variable type CreateIssueInput is input object, not an enum)", r.stdout)
+        self.assertEqual(self.run_calls(), [])
+
+    def test_a_query_built_at_run_time_is_reported_unchecked_and_does_not_fail(self):
+        self.source_pr('def build(n):\n    return "mutation(" + ", ".join(f"$id{i}: ID!" for i in range(n)) + ") { "\n')
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("gate: graphql unchecked scripts/s.py:build", r.stdout)
+
+    def test_at_most_eight_queries_run_and_the_rest_are_reported(self):
+        text = "".join(f'Q{i} = "query($owner: String!, $name: String!, $number: Int!) {{ f{i} }}"\n' for i in range(9))
+        self.source_pr(text)
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len([c for c in self.env.gh_calls() if any(a.startswith("query=query($owner: String!, $name: String!, $number") for a in c)]), 8)
+        self.assertIn("1 more changed queries not run", r.stdout)
+
+    def test_a_mutation_is_never_executed_and_its_fields_are_checked(self):
+        (self.env.repo / "scripts").mkdir(exist_ok=True)
+        text = 'M = """mutation($id: ID!) { addStar(input: {starrableId: $id}) { clientMutationId } bogus: noSuchField(input: {}) { x } }"""\n'
+        (self.env.repo / "scripts" / "m.py").write_text(text)
+        schema = {"args": ["api", "graphql", "-f", "~query={ __type"],
+                  "stdout": json.dumps({"data": {"__type": {"fields": [{"name": "addStar"}]}}})}
+        self.prime(diff=added_file("scripts/m.py"), first=[schema])
+        r = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("noSuchField", r.stdout)
+        self.assertFalse([c for c in self.env.gh_calls() if any(a.startswith("query=mutation") for a in c)])
 
 
 if __name__ == "__main__":

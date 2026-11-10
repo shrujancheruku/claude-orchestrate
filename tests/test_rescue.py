@@ -88,6 +88,24 @@ class Rescue(unittest.TestCase):
         self.assertEqual(files, ["a.txt"])
         self.assertFalse(self.wt.exists())  # a lone pr-body.md goes with the tree
 
+    def test_a_pr_body_at_the_worktree_root_is_not_committed_and_goes_with_the_tree(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        (self.wt / "pr-body.md").write_text("body\n")
+        r = self.rescue("--title", "Fix the thing")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"committed 1 paths [0-9a-f]+")
+        files = git(self.env.origin, "diff", "--name-only", f"main..{BRANCH}").split()
+        self.assertEqual(files, ["a.txt"])
+        self.assertFalse(self.wt.exists())
+
+    def test_a_worktree_holding_only_a_root_pr_body_is_removed(self):
+        self.worktree()
+        (self.wt / "pr-body.md").write_text("body\n")
+        r = self.rescue("--title", "Fix the thing")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.wt.exists())
+
     def test_without_title_the_message_names_the_ticket(self):
         self.worktree()
         (self.wt / "a.txt").write_text("a\n")
@@ -569,6 +587,14 @@ class Rescue(unittest.TestCase):
             code = mod.overlap(Path("."), ["a.py"], 42)
         self.assertEqual(code, 0)
         out.assert_called_with("overlap: unchecked (rate limited; re-run holds before dispatching into these files)")
+
+    def test_an_unlisted_holds_exception_is_an_overlap_that_could_not_be_checked(self):
+        mod = self.load_rescue()
+        with unittest.mock.patch.object(mod.tracker.Snapshot, "open", side_effect=RuntimeError("boom")), \
+                unittest.mock.patch.object(mod, "say") as out:
+            code = mod.overlap(Path("."), ["a.py"], 42)
+        self.assertEqual(code, 1)
+        out.assert_called_with("overlap: could not check (RuntimeError: boom)")
 
     def test_a_failure_after_the_branch_was_created_switches_back_and_deletes_it(self):
         self.harness_worktree()

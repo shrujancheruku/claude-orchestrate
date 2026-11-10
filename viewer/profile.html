@@ -197,6 +197,12 @@ function tile(label, value, detail) {
   if (detail) d.append(el("div", { class: "detail" }, detail));
   return d;
 }
+const perHour = (x) => (x == null ? "–" : x.toFixed(2));
+// Merged tickets per hour of the span (session gaps left out): the same span and merged count as $ per merged ticket.
+function throughputTile(p) {
+  const m = p.metrics;
+  return tile("Throughput", m.throughput_per_hour == null ? "–" : perHour(m.throughput_per_hour) + " merged/hour", `${m.tickets_merged} merged over ${fmtDur(m.span_s)}`);
+}
 function legend(items) {
   const l = el("div", { class: "legend" });
   for (const [label, key, cls] of items) {
@@ -222,6 +228,33 @@ function table(head, rows, numeric) {
 }
 
 // Timeline: one row per slot. Each ticket's bar is building (series 1) then review/merge (series 2).
+function subtitleText(p) {
+  const gap = p.metrics.session_gap;
+  return `Session ${p.session.slice(0, 8)} · ${new Date(t(p.start)).toLocaleString()} · ${fmtDur(p.metrics.span_s)}` +
+    (gap && gap.intervals.length ? ` · session gap ${fmtDur(gap.total_s)}, outside the span` : "") +
+    ` · ${p.slots} slots${p.greedy ? " (greedy)" : ""}`;
+}
+
+// An unexplained transcript silence (a hand `claude --resume` logs no event) is a warning: it stays inside the span.
+function silenceBanners(p) {
+  const box = el("div");
+  for (const [s0, s1] of p.metrics.unexplained_silences || []) {
+    box.append(el("div", { class: "advice status-critical" }, `No transcript entry for ${fmtDur((t(s1) - t(s0)) / 1000)} (${clock(t(s0))} → ${clock(t(s1))}) and no resume event: a hand resume? This time is inside the span, not excluded.`));
+  }
+  return box;
+}
+
+// A Session gap is a muted band: the run was not running there, and the span leaves it out.
+function gapBands(s, p, x, y1, y2) {
+  for (const [gs, ge] of (p.metrics.session_gap || {}).intervals || []) {
+    const g = sv("g", { class: "gap-band" });
+    g.append(sv("rect", { x: x(t(gs)), y: y1, width: Math.max(x(t(ge)) - x(t(gs)), 2), height: y2 - y1, fill: "var(--muted)", "fill-opacity": 0.22 }));
+    g.append(sv("text", { x: x(t(gs)) + 4, y: y2 - 6, style: "fill:var(--muted)" }, "session gap"));
+    hover(g, "Session gap", [["not running", fmtDur((t(ge) - t(gs)) / 1000)], [`${clock(t(gs))} → ${clock(t(ge))}`, ""]]);
+    s.append(g);
+  }
+}
+
 function timeline(p) {
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Slots over time"));
@@ -238,6 +271,7 @@ function timeline(p) {
     s.append(sv("line", { x1: x(v), x2: x(v), y1: TOP, y2: H - 22, stroke: "var(--grid)", "stroke-width": 1 }));
     s.append(sv("text", { x: x(v), y: H - 6, "text-anchor": "middle" }, clock(v)));
   }
+  gapBands(s, p, x, TOP, H - 22);
   for (let i = 0; i < rows; i++) {
     s.append(sv("text", { x: 0, y: TOP + i * ROW + ROW / 2 + 4, class: "ink" }, `Slot ${i + 1}`));
   }
@@ -550,6 +584,7 @@ function usage(p) {
     s.append(sv("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, v + "%"));
   }
   for (const v of timeTicks(a, b, 8)) s.append(sv("text", { x: x(v), y: H - 6, "text-anchor": "middle" }, clock(v)));
+  gapBands(s, p, x, T, H - B);
   s.append(sv("line", { x1: L, x2: W - R, y1: y(p.threshold), y2: y(p.threshold), stroke: "var(--muted)", "stroke-width": 1, "stroke-opacity": 0.6 }));
   // Step lines: a sample holds until the next one changes it.
   const step = (key) => {
@@ -598,13 +633,14 @@ function usage(p) {
   return card;
 }
 
-function compare() {
+function compare(list = profiles) {
+  const rows = Array.isArray(list) ? list : [list];
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Sessions compared"));
-  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Peak 5-hour", "Limit hits"],
-    profiles.map((p) => [p.session.slice(0, 8), new Date(t(p.start)).toLocaleString(), fmtDur(p.metrics.span_s), String(p.slots), pct(p.metrics.occupancy),
-      String(p.metrics.tickets_merged), usd(p.metrics.cost.per_merged_ticket), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
-      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 10]));
+  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "Merged / hour", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Peak 5-hour", "Limit hits"],
+    rows.map((p) => [p.session.slice(0, 8), new Date(t(p.start)).toLocaleString(), fmtDur(p.metrics.span_s), String(p.slots), pct(p.metrics.occupancy),
+      String(p.metrics.tickets_merged), perHour(p.metrics.throughput_per_hour), usd(p.metrics.cost.per_merged_ticket), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
+      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 10, 11]));
   return card;
 }
 
@@ -619,19 +655,21 @@ function render() {
   const p = profiles[Math.min(Number(pick.value) || 0, profiles.length - 1)];
   const repo = p.repo ? p.repo.split("/").pop() : "repo";
   $("title").textContent = `Orchestrate profile · ${repo}`;
-  $("subtitle").textContent = `Session ${p.session.slice(0, 8)} · ${new Date(t(p.start)).toLocaleString()} · ${fmtDur(p.metrics.span_s)} · ${p.slots} slots${p.greedy ? " (greedy)" : ""}`;
+  $("subtitle").textContent = subtitleText(p);
   const m = p.metrics;
   const tiles = el("div", { class: "tiles" });
   tiles.append(
     tile("Proxy $ per merged ticket", usd(m.cost.per_merged_ticket), `${usd(m.cost.total)} in all`),
     tile("Slots occupied", pct(m.occupancy), `building ${pct(m.building_share)}`),
     tile("Tickets merged", String(m.tickets_merged), m.tokens_per_merged_ticket ? `${fmtTok(m.tokens_per_merged_ticket)} tokens each` : ""),
+    throughputTile(p),
     tile("Tokens", fmtTok(m.tokens_total), `orchestrator ${pct(m.orchestrator_share)}`),
     tile("Peak 5-hour usage", m.five_hour_peak == null ? "–" : Math.round(m.five_hour_peak) + "%", m.five_hour_start == null ? "no samples" : `${Math.round(m.five_hour_start)}% → ${Math.round(m.five_hour_end)}%`),
     tile("Limit hits", String(m.limit_hits), p.orchestrator.compactions ? `${p.orchestrator.compactions} compaction${p.orchestrator.compactions === 1 ? "" : "s"}` : "no compactions"),
   );
   view.append(tiles);
   if (p.recommendation) view.append(el("div", { class: "advice" }, p.recommendation));
+  view.append(silenceBanners(p));
   if (p.warnings && p.warnings.length) for (const w of p.warnings) view.append(el("div", { class: "advice status-critical" }, w));
   view.append(cost(p), orchestrator(p), quality(p), timeline(p), tokens(p), usage(p));
   if (profiles.length > 1) view.append(compare());

@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 CLIS = sorted(p.name for p in SCRIPTS.iterdir() if p.suffix == "" and p.is_file())
-LIBRARIES = {"common", "checks", "replay", "github", "runlog", "session", "config", "repo", "claims", "tracker", "touchmap", "holds"}
+LIBRARIES = {"common", "checks", "replay", "github", "runlog", "session", "config", "repo", "claims", "tracker", "touchmap", "holds", "gqlcheck"}
 STANDALONE = {"profile.py"}
 
 
@@ -84,10 +84,31 @@ class Invocation(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("guard_names", ROOT / "hooks" / "guard.py")
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
-        named = {"merge", "board", "threads"} | set(guard.CHAIN_SCRIPTS)
-        for name in sorted(named):
+        for name in sorted(guard.FORM_SCRIPTS):
             with self.subTest(name):
                 self.assertIn("allow_abbrev=False", (SCRIPTS / name).read_text())
+
+    def test_the_guards_forms_table_and_the_scripts_agree(self):
+        # Every row of ORCHESTRATOR_FORMS names a script that exists and flags that script really takes (its --help
+        # lists them), so a renamed flag or script fails here instead of silently leaving the call unapproved (#545).
+        spec = importlib.util.spec_from_file_location("guard_forms", ROOT / "hooks" / "guard.py")
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+        helps = {}
+        for form in guard.ORCHESTRATOR_FORMS:
+            self.assertTrue((SCRIPTS / form.script).is_file(), form.script)
+            if form.script not in helps:
+                argv = [sys.executable, "-I", str(SCRIPTS / form.script)] if form.script.endswith(".py") else [str(SCRIPTS / form.script)]
+                helps[form.script] = run(argv + ["--help"], env=env, cwd=tempfile.gettempdir()).stdout
+                if form.script == "profile.py":  # its subcommand parser has its own help
+                    helps[form.script] += run([sys.executable, "-I", str(SCRIPTS / form.script), "record", "--help"], env=env,
+                                              cwd=tempfile.gettempdir()).stdout
+            for flag in form.flags:
+                with self.subTest(f"{form.script} {flag}"):
+                    self.assertIn(flag, helps[form.script])
+            self.assertLessEqual(set(form.need), set(form.flags), form.script)
+            self.assertLessEqual(set(form.repeat), set(form.flags), form.script)
 
     def test_docs_follow_the_convention(self):
         # Every doc line that runs a script uses `python3 -I` for a standalone .py script and no interpreter otherwise.

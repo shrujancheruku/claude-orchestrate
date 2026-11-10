@@ -36,6 +36,8 @@ import config
 
 
 def parse(argv):
+    # Flags are matched whole, never by prefix (the guarantee allow_abbrev=False gives elsewhere): the guard
+    # approves `verify --config --cwd <dir>` for the orchestrator by flag name (#624).
     cwd = None
     branch = None
     timeout = checks.DEFAULT_TIMEOUT

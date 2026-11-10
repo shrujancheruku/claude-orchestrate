@@ -196,8 +196,8 @@ CASES = [
     ("orchestrate:reviewer", "gh pr merge 12", "deny"),
     # Reading the posted review back (a GET) is how a reviewer finds the review URL.
     ("orchestrate:reviewer", "gh api repos/o/r/pulls/5/reviews --jq '.[-1].html_url'", "allow"),
-    # Targeted run: a detached scratch checkout, then one narrow test command in it.
-    ("orchestrate:reviewer", "git worktree add --detach /tmp/scratch/pr-5 FETCH_HEAD && cd /tmp/scratch/pr-5 && python3 -m unittest tests.test_guard", "allow"),
+    # A scratch checkout is added by scripts/scratch only (#545): the hand `git worktree add` is refused.
+    ("orchestrate:reviewer", "git worktree add --detach /tmp/scratch/pr-5 FETCH_HEAD && cd /tmp/scratch/pr-5 && python3 -m unittest tests.test_guard", "deny"),
     ("orchestrate:reviewer", "cd /tmp/scratch/pr-5 && npm install", "deny"),
     ("orchestrate:reviewer", "cd /tmp/scratch/pr-5 && make", "deny"),
     # Reviewer git: reads allowed (a PR head, history, branch listing, a detached scratch checkout),
@@ -225,8 +225,6 @@ CASES = [
             "git log --grep='git branch x' FETCH_HEAD",
             "git fetch https://x/y.git pull/71/head",
             "git worktree list",
-            "git worktree add --detach /tmp/scratch/pr-71 FETCH_HEAD",
-            "git worktree add --detach ~/scratch/pr-71",
             "git -C /repo worktree list",
             "git -C /tmp/scratch/pr-71 log --oneline",
         )
@@ -620,7 +618,9 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(decide("orchestrate:worker", command, background=True), "deny")
                 self.assertEqual(decide("orchestrate:worker", command, background=False, timeout=600000), "allow")
                 self.assertEqual(decide("orchestrate:worker", command, timeout=600000), "allow")
-                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
+                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "deny")  # #687
+                self.assertEqual(decide("orchestrate:reviewer", command, background=False, timeout=600000), "allow")
+                self.assertEqual(decide("orchestrate:scout", command, background=True), "allow")
                 self.assertEqual(decide(None, command, background=True), "allow")
 
     def test_worker_verify_needs_a_bash_timeout_of_600000(self):
@@ -635,8 +635,12 @@ class GuardTest(unittest.TestCase):
         # only a worker's verify call: other commands and other roles are as before
         self.assertEqual(decide("orchestrate:worker", "ls"), "allow")
         self.assertEqual(decide("orchestrate:worker", "grep -n x scripts/verify"), "allow")
-        for role in ("orchestrate:reviewer", "orchestrate:scout", None, "other:worker"):
+        for role in ("orchestrate:scout", None, "other:worker"):
             self.assertEqual(decide(role, quoted), "allow")
+        # a reviewer's verify call is held to the same timeout (#687)
+        for timeout in (None, 300000, 599999):
+            self.assertEqual(decide("orchestrate:reviewer", quoted, timeout=timeout), "deny")
+        self.assertEqual(decide("orchestrate:reviewer", quoted, timeout=600000), "allow")
         reason = self.run_guard({"agent_type": "orchestrate:worker", "tool_input": {"command": quoted}})
         self.assertIn("timeout of 600000", reason)
 
@@ -655,7 +659,7 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(decide("orchestrate:worker", command, background=True), "deny")
                 self.assertEqual(decide("orchestrate:worker", command, background=False), "allow")
                 self.assertEqual(decide("orchestrate:worker", command), "allow")
-                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
+                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "deny")  # #687
                 self.assertEqual(decide("orchestrate:scout", command, background=True), "allow")
                 # The orchestrator's own hand-made waits are refused (#407), whatever else it runs.
                 self.assertEqual(decide(None, command, background=True, transcript=self.run_transcript()), "deny" if command == "sleep 5" else "allow")
@@ -704,35 +708,17 @@ class GuardTest(unittest.TestCase):
                 self.assertIn("couldn't parse or check", reason)
         self.assertIsNone(self.run_guard({"agent_type": "other:x", "tool_input": {"command": 5}}))
 
-    def test_reviewer_worktree_inside_main_repo_from_a_linked_worktree(self):
+    def test_reviewer_hand_worktree_add_is_refused_in_every_form_and_names_scratch(self):
+        # The hand `git worktree add --detach` allowance is gone (#545): scripts/scratch is the one way.
         with tempfile.TemporaryDirectory() as tmp:
-            main = Path(tmp).resolve() / "main"
-            linked = Path(tmp).resolve() / "linked"
-            (main / ".git" / "worktrees" / "linked").mkdir(parents=True)
-            (main / ".git" / "worktrees" / "linked" / "commondir").write_text("../..\n")
-            linked.mkdir()
-            (linked / ".git").write_text(f"gitdir: {main}/.git/worktrees/linked\n")
-            add = "git worktree add --detach {} FETCH_HEAD"
-            for target, expected in ((main / "sub", "deny"), (linked / "sub", "deny"), (Path(tmp).resolve() / "scratch", "allow")):
-                with self.subTest(target=target):
-                    self.assertEqual(decide("orchestrate:reviewer", add.format(target), cwd=linked), expected)
-
-    def test_reviewer_worktree_add_fails_closed_on_an_unreadable_git_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            broken = Path(tmp).resolve() / "broken"
-            broken.mkdir()
-            (broken / ".git").write_text("not a gitdir line\n")
-            command = f"git worktree add --detach {Path(tmp).resolve()}/scratch FETCH_HEAD"
-            self.assertEqual(decide("orchestrate:reviewer", command, cwd=broken), "deny")
-            missing = Path(tmp).resolve() / "missing"
-            missing.mkdir()
-            (missing / ".git").write_text(f"gitdir: {tmp}/nowhere\n")
-            self.assertEqual(decide("orchestrate:reviewer", command, cwd=missing), "deny")
-            nocommon = Path(tmp).resolve() / "nocommon"
-            (nocommon / "x").mkdir(parents=True)
-            (Path(tmp) / "g" / "worktrees" / "w").mkdir(parents=True)
-            (nocommon / ".git").write_text(f"gitdir: {tmp}/g/worktrees/w\n")
-            self.assertEqual(decide("orchestrate:reviewer", command, cwd=nocommon), "deny")
+            outside, inside = Path(tmp).resolve() / "scratch", Path(tmp).resolve() / "linked" / "sub"
+            for command in (f"git worktree add --detach {outside} FETCH_HEAD", f"git worktree add --detach {inside}",
+                            "git worktree add --detach /tmp/scratch/pr-71 FETCH_HEAD", "git worktree add --detach ~/scratch/pr-71",
+                            "git worktree add /tmp/scratch/pr-71"):
+                with self.subTest(command):
+                    self.assertEqual(decide("orchestrate:reviewer", command), "deny")
+                    self.assertIn("scripts/scratch", self.run_guard({"agent_type": "orchestrate:reviewer",
+                                                                     "tool_input": {"command": command}}))
 
     def test_reviewer_writes_list_is_git_writes_minus_branch(self):
         import importlib.util
@@ -1031,8 +1017,8 @@ class RoutineApprovalTest(unittest.TestCase):
                                 for c in ("/orchestrate:run", "/orchestrate:lead")))
         self.assertIsNone(raw(None, "sleep 20", self.main, transcript=both))
 
-    def test_the_wait_chain_of_lead_route_is_in_the_chain_list(self):
-        self.assertIn("lead-route", GUARD_MODULE.CHAIN_SCRIPTS)
+    def test_the_wait_chain_of_lead_route_is_in_the_forms_table(self):
+        self.assertIn("lead-route", GUARD_MODULE.FORM_SCRIPTS)
 
     def test_the_allow_json_shape(self):
         out = raw("orchestrate:worker", "gh pr ready", self.work)
@@ -1244,11 +1230,11 @@ class RoutineApprovalTest(unittest.TestCase):
                 self.assertTrue(approved("orchestrate:worker", command, self.work))
 
     def test_board_accepts_exactly_repo_dot_once(self):
-        for command in (f"{SCRIPTS}/board --repo .", f"{SCRIPTS}/board --repo . --dry-run"):
+        for command in (f"{SCRIPTS}/board --repo .", f"{SCRIPTS}/board --repo . --dry-run", f"{SCRIPTS}/board --repo=.",
+                        f"{SCRIPTS}/board --dry-run --repo ."):
             with self.subTest(command):
                 self.assertTrue(approved(None, command, self.main))
-        for command in (f"{SCRIPTS}/board --repo ..", f"{SCRIPTS}/board --repo /x", f"{SCRIPTS}/board --repo=.",
-                        f"{SCRIPTS}/board --repo . --repo .", f"{SCRIPTS}/board --dry-run --repo ."):
+        for command in (f"{SCRIPTS}/board --repo ..", f"{SCRIPTS}/board --repo /x", f"{SCRIPTS}/board --repo . --repo ."):
             with self.subTest(command):
                 self.assertFalse(approved(None, command, self.main))
 
@@ -1305,7 +1291,7 @@ class RoutineApprovalTest(unittest.TestCase):
                 f"{SCRIPTS}/snapshot --repo /tmp",
                 f"{SCRIPTS}/claims --state /tmp/x",
                 f"{SCRIPTS}/frontier --fix-drift",
-                f"{SCRIPTS}/lead-brief --checkpoint 5",
+                f"{SCRIPTS}/lead-brief --checkpoint x",
                 f"S={SCRIPTS}; printf -v S %s /tmp/evil; $S/snapshot",
                 f"{SCRIPTS}/snapshot | sort --out=/tmp/x",
                 f"{SCRIPTS}/snapshot | sort --compress-program=sh",
@@ -1354,10 +1340,21 @@ class RoutineApprovalTest(unittest.TestCase):
                 out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
                 self.assertEqual(out["permissionDecision"], "deny")
                 self.assertIn("git internals or a settings file", out["permissionDecisionReason"])
-        for rel in (".claude/pr-body.md", "settings.json", ".claude/agents/x.md"):
+        for rel in ("settings.json", ".claude/orchestration.md", "docs/.claude/x.md"):
             with self.subTest(rel):
                 out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
                 self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_a_stray_write_under_the_worktrees_claude_dir_is_refused_like_one_outside_it(self):
+        # #404: a `.claude/pr-body.md` left in the worktree blocked its removal; only the plugin's config is its own there.
+        outside = raw("orchestrate:worker", None, self.work, "Write", {"file_path": "/tmp/elsewhere/x.md"})
+        for rel in (".claude/pr-body.md", ".claude/agents/x.md", ".claude/worktrees/agent-x/y"):
+            with self.subTest(rel):
+                out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("it is outside your worktree", out["permissionDecisionReason"])
+                self.assertIn("pass a PR body with `--body-file -`", out["permissionDecisionReason"])
+        self.assertIn("it is outside your worktree", outside["permissionDecisionReason"])
 
     def test_https_push_url_must_name_origin(self):
         (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
@@ -1525,7 +1522,7 @@ class ReadOnlyCompoundTest(unittest.TestCase):
         self.check(None, self.main, yes=(
             f"cd {self.main} && {SCRIPTS}/snapshot --repo . 2>&1 | tail -n 40",
             f'S="{SCRIPTS}"; "$S/claims" --repo . ; echo "exit $?"',
-            f'S="{SCRIPTS}"; printf "%s\\n" x | "$S/worker-report"',
+            f'S="{SCRIPTS}"; printf "%s\\n" x | "$S/worker-report" 5 --reviewer',
             f"{SCRIPTS}/snapshot --repo . || echo no",
             f"{SCRIPTS}/snapshot --repo . 2>/dev/null",
             "for n in 5 6; do gh issue view $n --json title --jq .title; done",
@@ -1629,6 +1626,22 @@ class ReadBoundTest(unittest.TestCase):
               "git ls-remote /etc", "git ls-remote", "git ls-remote upstream", "git ls-remote --heads ../x")
         for role, cwd in self.roles():
             self.check(role, cwd, no=no)
+
+    def test_the_scout_read_forms_of_run_ac790f0d_are_approved(self):
+        # #624: refused with the generic reason in a real run; each is a read inside the bound.
+        yes = ("git ls-tree -r --name-only origin/main", "git ls-tree -r --name-only origin/main -- scripts hooks",
+               "git grep -n -E 'foo|bar' origin/main -- scripts", "git grep -n foo origin/main", "ls scripts", "cat a.py | head -n 5",
+               "for n in 1 2 3; do gh issue view $n --json title --jq .title; done | head -c 2000",
+               "gh api graphql -f query='query{viewer{login}}' --jq .data",
+               "gh api graphql -f query='{ viewer { login } }'",
+               "diff -r --no-dereference a.py a.py", "/usr/bin/diff a.py a.py", "/usr/bin/diff -r --no-dereference a.py a.py")
+        no = ("gh api graphql -f query='mutation{x}'", "gh api graphql -f query='query{x}' -f query='mutation{y}'",
+              "gh api graphql -f query=@/etc/hosts", "git ls-tree -r origin/main /etc/hosts", "git grep -n foo origin/main -- /etc",
+              "for n in 1 2; do gh issue edit $n --add-label x; done", "for n in 1 2; do gh issue view $n; done > out.txt",
+              "diff /etc/hosts a.py")
+        for role in ("orchestrate:scout", "orchestrate:reviewer", "orchestrate:worker"):
+            cwd = self.work if role.endswith("worker") else self.main
+            self.check(role, cwd, yes=yes, no=no)
 
     def test_a_leaked_secret_cannot_leave_through_a_pipe_either(self):
         self.check("orchestrate:worker", self.work, no=("cat ~/.aws/credentials | head", "grep x a.py; cat /etc/hosts"))
@@ -2080,10 +2093,628 @@ class OrchestratorChainTest(unittest.TestCase):
                 self.assertFalse(approved(None, command, self.root))
 
     def test_the_run_skills_monitor_forms_are_approved(self):
-        for command in ('"${CLAUDE_SKILL_DIR}/../../scripts/watch-ci" 5 abc1234', f"{SCRIPTS}/watch-ci 5 abc1234 --timeout 600"):
+        for command in ('"${CLAUDE_SKILL_DIR}/../../scripts/watch-ci" 5 abc1234', f"{SCRIPTS}/watch-ci 5 abc1234 --interval 30"):
             with self.subTest(command):
                 out = raw(None, command, self.root, tool_name="Monitor")
                 self.assertEqual(out["permissionDecision"], "allow")
+
+
+class ScriptFormsTest(unittest.TestCase):
+    """The script rows #545 adds to ORCHESTRATOR_FORMS: ci-rerun, scratch, threads followup, worker-report's risk notes,
+    issue and profile.py, the `ME=` assignment, and the exact shapes each refuses."""
+
+    SID = "00000000-0000-0000-0000-0000000000aa"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.main = self.root / "main"
+        (self.main / ".git" / "worktrees" / "agent-abc").mkdir(parents=True)
+        (self.main / ".git" / "worktrees" / "agent-abc" / "commondir").write_text("../..\n")
+        self.work = self.main / ".claude" / "worktrees" / "agent-abc"
+        self.work.mkdir(parents=True)
+        (self.work / ".git").write_text(f"gitdir: {self.main}/.git/worktrees/agent-abc\n")
+        (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** yes\n")
+        (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
+        self.pad = f"/private/tmp/claude-0/-proj/{self.SID}/scratchpad"
+
+    def ok(self, command, role=None, cwd=None, session=None):
+        return approved(role, command, cwd or self.main, session_id=session or self.SID)
+
+    def test_gate_and_verify_run_in_a_scratch_tree_the_scratch_script_made(self):
+        tree = f"{self.pad}/pr-12"
+        for command in (f"{SCRIPTS}/verify --config --cwd {tree}", f"{SCRIPTS}/verify --config --cwd {self.pad}/pr-12b",
+                        f"{SCRIPTS}/gate 12 --cwd {tree}", f"{SCRIPTS}/gate 12 --session {self.SID} --cwd {self.pad}/x/pr-3"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))  # a directory below the pad is the pad (as scratch's --under)
+        for command in (f"{SCRIPTS}/verify --config --cwd {self.pad}/../pr-12", f"{SCRIPTS}/verify --config --cwd {self.pad}/other",
+                        f"{SCRIPTS}/verify --config --cwd {self.main}/pr-12", f"{SCRIPTS}/verify --config --cwd /tmp/pr-12",
+                        f"{SCRIPTS}/verify --config --cwd pr-12", f"{SCRIPTS}/verify --cwd {tree} make test",
+                        f"{SCRIPTS}/verify --config", f"{SCRIPTS}/gate 12 --cwd /tmp/claude-0/-proj/{self.SID}/scratchpad/../pr-12"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+        self.assertFalse(approved(None, f"{SCRIPTS}/verify --config --cwd {tree}", self.main))  # no session id
+        self.assertTrue(self.ok(f"{SCRIPTS}/verify --config --cwd {self.work}"))
+
+    def test_rescue_is_the_orchestrators_in_its_two_documented_forms(self):
+        for command in (f'{SCRIPTS}/rescue 666 --title "ci: skip draft PRs" --repo . --pr 668',
+                        f'{SCRIPTS}/rescue 666-ci-skip-draft-prs --title "ci: skip draft PRs" --repo . --pr 668',
+                        f'{SCRIPTS}/rescue 666-ci-skip-draft-prs --title "ci: skip draft PRs" --repo .',
+                        f'{SCRIPTS}/rescue 666 --title "ci: skip draft PRs" --repo .',
+                        f"{SCRIPTS}/rescue 666 --repo . --title t"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in (f'{SCRIPTS}/rescue 666 --title t --repo . --force', f'{SCRIPTS}/rescue 666 --title t --repo . ; ls',
+                        f'{SCRIPTS}/rescue 666 --title t --repo . && ls', f'{SCRIPTS}/rescue 666 --repo .',
+                        f'{SCRIPTS}/rescue 666 --title t', f'{SCRIPTS}/rescue 666 --title t --repo /other',
+                        f'{SCRIPTS}/rescue 666 --title t --repo . --pr x', f'{SCRIPTS}/rescue main --title t --repo .',
+                        f'{SCRIPTS}/rescue 666 --title "$(id)" --repo .', f'FOO=1 {SCRIPTS}/rescue 666 --title t --repo .',
+                        f'env {SCRIPTS}/rescue 666 --title t --repo .', f'{SCRIPTS}/rescue 666 --title t --repo . --pr 5 --pr 6'):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_rescue_is_denied_to_every_subagent_and_a_bad_shape_names_the_forms(self):
+        command = f'{SCRIPTS}/rescue 666 --title t --repo .'
+        for role in ("worker", "reviewer", "scout"):
+            with self.subTest(role):
+                self.assertFalse(self.ok(command, role=f"orchestrate:{role}", cwd=self.work))
+        os.environ["ORCHESTRATE_ROLE"] = "orchestrator"
+        self.addCleanup(os.environ.pop, "ORCHESTRATE_ROLE", None)
+        out = raw(None, f"{SCRIPTS}/rescue 666 --title t --repo . --force", self.main, full=True, session_id=self.SID)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("rescue takes exactly one of", out["permissionDecisionReason"])
+
+    def test_each_new_orchestrator_row_is_approved_in_its_exact_shape(self):
+        for command in (f"{SCRIPTS}/ci-rerun 12", f"{SCRIPTS}/ci-rerun 12 --job 111 222", f"{SCRIPTS}/ci-rerun 12 --repo .",
+                        f"{SCRIPTS}/park-pr 12 --why 'waits on #13'", f"{SCRIPTS}/park-pr 12 --unpark",
+                        f"{SCRIPTS}/park-pr 12 --unpark --repo .",
+                        f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}", f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}/x",
+                        f"{SCRIPTS}/threads 12 followup", f"{SCRIPTS}/threads 12 followup T1 T2",
+                        f"{SCRIPTS}/threads 12 followup T1 --gist 'a.py:3 the gist'",
+                        f"{SCRIPTS}/issue 7 --repo .", f"{SCRIPTS}/issue 7",
+                        f"printf x | {SCRIPTS}/worker-report 12 --reviewer --post-risk-notes",
+                        f"printf x | {SCRIPTS}/worker-report 12 --reviewer",
+                        f"{SCRIPTS}/watch-ci 12 abc1234 13 '?'"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+
+    def test_each_new_row_refuses_what_is_not_its_exact_shape(self):
+        for command in (f"{SCRIPTS}/park-pr 12", f"{SCRIPTS}/park-pr 12 --why", f"{SCRIPTS}/park-pr 12 --why x --unpark",
+                        f"{SCRIPTS}/park-pr 12 --unpark --why x", f"{SCRIPTS}/park-pr --unpark", f"{SCRIPTS}/park-pr 12 --unpark 13",
+                        f"{SCRIPTS}/park-pr 12 --unpark --repo /x", f"{SCRIPTS}/park-pr 12 --unp"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+        for command in (f"{SCRIPTS}/ci-rerun", f"{SCRIPTS}/ci-rerun 12 --job 111", f"{SCRIPTS}/ci-rerun 12 --job a b",
+                        f"{SCRIPTS}/ci-rerun 12 --repo /x", f"{SCRIPTS}/ci-rerun 12 --jo 1 2", f"{SCRIPTS}/ci-rerun 12 13",
+                        f"{SCRIPTS}/scratch 12 abc1234", f"{SCRIPTS}/scratch 12 main --under {self.pad}",
+                        f"{SCRIPTS}/scratch 12 abc1234 --under /tmp/elsewhere", f"{SCRIPTS}/scratch 12 abc1234 --under {self.main}/x",
+                        f"{SCRIPTS}/scratch 12 abc1234 --under /private/tmp/claude-0/-proj/other-session/scratchpad",
+                        f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}/../../elsewhere",
+                        f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad} --repo /x",
+                        f"{SCRIPTS}/threads followup", f"{SCRIPTS}/threads 12 followup T1 --fixed abc1234",
+                        f"{SCRIPTS}/threads 12 followup --gist", f"{SCRIPTS}/threads 12 followup --gist=x",
+                        f"{SCRIPTS}/issue", f"{SCRIPTS}/issue 7 --repo /x", f"{SCRIPTS}/issue 7 8",
+                        f"{SCRIPTS}/worker-report 12 --post-risk-notes", f"{SCRIPTS}/worker-report 12"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_scratch_under_needs_a_session_id(self):
+        command = f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}"
+        self.assertTrue(self.ok(command))
+        self.assertFalse(approved(None, command, self.main))  # no session id: nothing is a scratchpad
+
+    def test_scratch_under_accepts_the_background_jobs_tmp_directory(self):
+        jobs = os.path.join(os.path.realpath(os.path.expanduser("~")), ".claude", "jobs", self.SID, "tmp")
+        self.assertTrue(self.ok(f"{SCRIPTS}/scratch 12 abc1234 --under {jobs}"))
+        self.assertFalse(self.ok(f"{SCRIPTS}/scratch 12 abc1234 --under {jobs}/../../x"))
+
+    def test_the_reviewer_adds_its_scratch_worktree_with_the_script_and_enters_it(self):
+        command = f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}"
+        self.assertTrue(self.ok(command, "orchestrate:reviewer"))
+        self.assertFalse(self.ok(f"{SCRIPTS}/scratch 12 abc1234 --under /tmp/x", "orchestrate:reviewer"))
+        self.assertFalse(self.ok("git worktree add --detach /tmp/scratch/pr-5 abc1234", "orchestrate:reviewer"))
+        # The hand form is a deny now, with the script named; a worker and a scout get no scratch script.
+        self.assertFalse(self.ok(command, "orchestrate:worker", cwd=self.work))
+        self.assertFalse(self.ok(command, "orchestrate:scout"))
+
+    def test_every_role_reads_a_ticket_with_the_issue_script(self):
+        for role, cwd in (("orchestrate:worker", self.work), ("orchestrate:reviewer", self.main), ("orchestrate:scout", self.main)):
+            with self.subTest(role):
+                self.assertTrue(self.ok(f"{SCRIPTS}/issue 7 --repo .", role, cwd))
+                self.assertTrue(self.ok(f"{SCRIPTS}/issue 7 --repo . | head -n 40", role, cwd))
+                self.assertFalse(self.ok(f"{SCRIPTS}/issue 7 --repo /other", role, cwd))
+                self.assertFalse(self.ok("/tmp/x/scripts/issue 7", role, cwd))
+
+    def test_profile_record_and_build_are_approved_alone_and_in_a_chain_with_and_without_the_role(self):
+        record = (f'python3 -I {SCRIPTS}/profile.py record --repo . --session {self.SID} --idle overlap=1 gate=1 '
+                  '--dispatched 355 357 --merged 329 --suggestion "2 → 3" --scope wake')
+        build = f"python3 -I {SCRIPTS}/profile.py {self.SID} --repo ."
+        chain = f'S="{SCRIPTS}"; "$S/rebuild-state" {self.SID} --repo . && python3 -I "$S/profile.py" record --repo . --session {self.SID} --nudged 5 6'
+        for command in (record, build, chain):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+                os.environ["ORCHESTRATE_ROLE"] = "orchestrator"
+                try:
+                    self.assertTrue(self.ok(command))  # the strict orchestrator is approved too, never denied
+                finally:
+                    os.environ.pop("ORCHESTRATE_ROLE", None)
+        for command in (f"python3 {SCRIPTS}/profile.py record --repo . --session {self.SID}",
+                        f"python3 -I {SCRIPTS}/profile.py record --repo . ",
+                        f"python3 -I {SCRIPTS}/profile.py record --repo /x --session {self.SID}",
+                        f"python3 -I {SCRIPTS}/profile.py record --repo . --sess {self.SID}",
+                        f"python3 -I {SCRIPTS}/profile.py record --repo . --session {self.SID} --state /tmp/x",
+                        f"python3 -I {SCRIPTS}/profile.py compare a.json b.json",
+                        f"python3 -I /tmp/x/profile.py record --repo . --session {self.SID}",
+                        f"python3 -I {SCRIPTS}/common.py", f"python3 -I {SCRIPTS}/profile.py {self.SID} --repo . --out /tmp/x",
+                        f"python3 -I -c 'print(1)' {SCRIPTS}/profile.py"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_the_session_id_assignment_me_is_approved_only_for_this_hooks_session(self):
+        good = f'ME={self.SID}; S="{SCRIPTS}"; "$S/holds" --session $ME --ticket 5; "$S/gate" 12 --session $ME'
+        self.assertTrue(self.ok(good))
+        for command in (f'ME=other; S="{SCRIPTS}"; "$S/holds" --session $ME', f'ME=$(id); S="{SCRIPTS}"; "$S/holds" --session $ME',
+                        f'S="{SCRIPTS}"; "$S/holds" --session $ME', f'ME=/tmp/x; S="{SCRIPTS}"; "$S/snapshot" --out $ME'):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+        self.assertFalse(approved(None, good, self.main))  # no session id in the hook input
+
+    def test_the_hand_built_followup_chain_and_the_hand_ci_kick_are_not_approved(self):
+        for command in (
+                "url=$(gh issue create --title t --body-file -); n=${url##*/}; "
+                f"{SCRIPTS}/threads 12 resolve T1 --left why --followup $n",
+                "gh pr close 12 && gh pr reopen 12", "gh pr comment 12 --body-file -",
+                "body=$(gh pr view 12 --json body --jq .body); printf '%s' \"$body\" | gh pr edit 12 --body-file -",
+                "git worktree add --detach /tmp/pr-12 abc1234"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_a_strict_orchestrators_denial_names_the_script_that_covers_the_hand_run_form(self):
+        os.environ["ORCHESTRATE_ROLE"] = "orchestrator"
+        try:
+            for command, script in (("gh pr close 12", "scripts/park-pr"), ("gh pr reopen 12", "scripts/park-pr"),
+                                    ("gh pr ready 12 --undo", "scripts/park-pr"), ("gh pr close 12", "scripts/ci-rerun"),
+                                    ("gh pr comment 12 --body x", "--post-risk-notes"),
+                                    ("git worktree add --detach /tmp/pr-12 abc1234", "scripts/scratch")):
+                with self.subTest(command):
+                    out = raw(None, command, self.main, session_id=self.SID, full=True)
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    self.assertIn(script, out["permissionDecisionReason"])
+        finally:
+            os.environ.pop("ORCHESTRATE_ROLE", None)
+
+
+class GhCallLogTest(unittest.TestCase):
+    """The guard appends a gh_call row for an agent's own `gh` command and never changes the decision (#445)."""
+
+    def rows(self, agent_type, command):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / ".git").mkdir()
+            (root / ".claude").mkdir()
+            (root / ".claude" / "orchestrate-state.json").write_text(json.dumps({"session": "s1"}))
+            with unittest.mock.patch.dict(os.environ, {}, clear=False), \
+                    unittest.mock.patch.object(GUARD_MODULE, "approval", return_value=True):  # these cases are about the log, not the approval table
+                for name in ("ORCHESTRATE_SESSION", "ORCHESTRATE_GH_LOG", "ORCHESTRATE_ROLE"):
+                    os.environ.pop(name, None)
+                decision = decide(agent_type, command, cwd=root)
+            log = root / ".claude" / "orchestrate-profiles" / "events.jsonl"
+            lines = log.read_text().splitlines() if log.exists() else []
+            return decision, [json.loads(line) for line in lines]
+
+    def test_a_gh_pr_view_writes_one_read_row_with_the_role(self):
+        _, rows = self.rows("orchestrate:worker", "gh pr view 12 --json state")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["kind"], row["role"], row["script"], row["path"], row["write"], row["graphql"]),
+                         ("gh_call", "worker", "agent:worker", "pr view", False, True))
+
+    def test_a_write_and_a_rest_call_are_told_apart(self):
+        _, rows = self.rows("orchestrate:reviewer", "gh pr view 3 && gh api repos/o/r/pulls/3")
+        self.assertEqual([(r["role"], r["write"], r["graphql"]) for r in rows], [("reviewer", False, True), ("reviewer", False, False)])
+
+    def test_a_non_gh_command_writes_nothing(self):
+        _, rows = self.rows("orchestrate:worker", "git status && echo gh")
+        self.assertEqual(rows, [])
+
+    def test_a_denied_command_is_not_logged(self):
+        decision, rows = self.rows("orchestrate:worker", "gh pr merge 5")
+        self.assertEqual((decision, rows), ("deny", []))
+
+    def test_the_main_session_is_labelled_orchestrator_and_a_foreign_agent_is_not_logged(self):
+        _, rows = self.rows(None, "gh pr view 1")
+        self.assertEqual([r["role"] for r in rows], ["orchestrator"])
+        _, rows = self.rows("other:agent", "gh pr view 1")
+        self.assertEqual(rows, [])
+
+    def test_the_decision_is_unchanged_by_logging(self):
+        with_log, _ = self.rows("orchestrate:worker", "gh pr merge 5")
+        self.assertEqual(with_log, "deny")
+
+
+class SubagentScriptBoundaryTest(unittest.TestCase):
+    """The plugin scripts a worker, reviewer or scout may run are pinned through the whole hook (#624): the
+    scripts the orchestrator or the lead runs are denied to every subagent in every spelling, and the denial
+    names the scripts that role may run."""
+
+    ROLES = ("worker", "reviewer", "scout")
+    SCRIPTS_DENIED = ("rescue", "board", "rebuild-state", "frontier --fix-drift", "launch", "sandbox-git", "merge")
+
+    def setUp(self):
+        UnapprovedCallsAreDeniedTest.setUp(self)
+        (self.work / "scripts").mkdir()
+        for name in ("rescue", "board", "rebuild-state", "frontier", "launch", "sandbox-git", "merge", "holds"):
+            (self.work / "scripts" / name).write_text("#!/bin/sh\n")
+        (self.work / "scripts" / "holds.py").write_text("")
+
+    def deny(self, role, command):
+        out = raw(f"orchestrate:{role}", command, self.work, full=True)
+        self.assertEqual(out and out["permissionDecision"], "deny", (role, command))
+        return out["permissionDecisionReason"]
+
+    def test_every_other_script_is_denied_in_every_spelling(self):
+        for role in self.ROLES:
+            for script in self.SCRIPTS_DENIED:
+                name, _, rest = script.partition(" ")
+                tail = f" {rest}" if rest else ""
+                for spelling in (f"{SCRIPTS}/{name}{tail}", f"scripts/{name}{tail}", f"python3 {SCRIPTS}/{name}{tail}",
+                                 f"python3 -I {SCRIPTS}/{name}{tail}", f"./scripts/{name}{tail}"):
+                    with self.subTest((role, spelling)):
+                        self.deny(role, spelling)
+
+    def test_the_denial_of_an_unapproved_script_lists_the_roles_scripts(self):
+        for role in self.ROLES:
+            for command in (f"{SCRIPTS}/rescue 5 --title t --repo .", f"python3 {SCRIPTS}/board", "scripts/launch"):
+                with self.subTest((role, command)):
+                    reason = self.deny(role, command)
+                    noun = {"worker": "a worker", "reviewer": "a reviewer", "scout": "a scout"}[role]
+                    self.assertTrue(reason.startswith(f"orchestrate guard: not approved for {noun}: "), reason)
+                    self.assertIn("plugin script this role doesn't run", reason)
+                    self.assertIn(f"{SCRIPTS}/threads", reason)
+        self.assertIn(f"{SCRIPTS}/verify --config --branch <branch>", self.deny("worker", f"{SCRIPTS}/board"))
+        self.assertIn("test a change to a script with `python3 -m unittest`", self.deny("worker", f"{SCRIPTS}/board"))
+        self.assertIn(f"{SCRIPTS}/verify --config --cwd <scratch checkout>", self.deny("reviewer", f"{SCRIPTS}/board"))
+        self.assertNotIn("verify", self.deny("scout", f"{SCRIPTS}/board"))
+        self.assertIn("(list only)", self.deny("scout", f"{SCRIPTS}/board"))
+
+    def test_a_scout_may_read_the_claims_and_no_other_role_may(self):
+        self.assertTrue(approved("orchestrate:scout", f"{SCRIPTS}/claims --repo .", self.work))
+        self.assertTrue(approved("orchestrate:scout", f"{SCRIPTS}/claims --repo . | head -n 20", self.work))
+        for role in ("worker", "reviewer"):
+            self.assertIn("doesn't run", self.deny(role, f"{SCRIPTS}/claims --repo ."))
+        self.assertFalse(approved("orchestrate:scout", f"{SCRIPTS}/claims --repo /other", self.work))
+
+    def test_every_script_the_reason_lists_has_an_approved_form(self):
+        # ROLE_SCRIPT_FORMS is text kept beside the approval rules: a key with no approved form would advise a denied call.
+        forms = {
+            ("worker", "verify"): f"{SCRIPTS}/verify --config --branch 567-x",
+            ("worker", "threads"): f"{SCRIPTS}/threads",
+            ("reviewer", "threads"): f"{SCRIPTS}/threads 12",
+            ("scout", "threads"): f"{SCRIPTS}/threads 12",
+            ("scout", "claims"): f"{SCRIPTS}/claims --repo .",
+        }
+        for role, names in GUARD_MODULE.ROLE_SCRIPT_FORMS.items():
+            for name in names:
+                if (role, name) in forms:
+                    with self.subTest((role, name)):
+                        out = raw(f"orchestrate:{role}", forms[(role, name)], self.work, tool_input={
+                            "command": forms[(role, name)], "timeout": 600000})
+                        self.assertTrue(out and out["permissionDecision"] == "allow")
+                else:
+                    self.assertEqual((role, name), ("reviewer", name), "add the approved form of this key to the test")
+
+    def test_a_scout_has_no_verify(self):
+        self.assertIn("doesn't run", self.deny("scout", f"{SCRIPTS}/verify --config"))
+
+    def test_a_workers_numbered_threads_call_says_to_drop_the_number(self):
+        self.assertIn("Drop the number", self.deny("worker", f"{SCRIPTS}/threads 648"))
+
+    def test_each_refused_shape_names_its_nearest_approved_form(self):
+        for role, command, expect in (
+            ("worker", "git push", "git push -u origin <your-branch>"),
+            ("worker", "git push origin", "git push -u origin <your-branch>"),
+            ("worker", "gh pr comment 5 --body hi", "put the text in the PR body"),
+            ("worker", "until curl -s example.com; do sleep 5; done", "workers never wait"),
+            ("reviewer", "python3 -c 'print(1)'", f"{'<plugin>'}/scripts/verify --config --cwd <scratch checkout>"),
+            ("scout", "python3 -c 'print(1)'", "you write no file and run no inline script"),
+            ("worker", "cat <<'EOF' >> notes.md\nx\nEOF", "edit files with the Edit or Write tool"),
+            ("worker", "printf x >> notes.md", "edit files with the Edit or Write tool"),
+        ):
+            with self.subTest((role, command)):
+                reason = self.deny(role, command)
+                self.assertTrue(reason.startswith("orchestrate guard: not approved for "), reason)
+                self.assertIn(expect, reason)
+
+    def test_a_reviewers_mkdir_says_no_mkdir_is_needed(self):
+        reason = self.deny("reviewer", "mkdir -p /tmp/scratch")
+        self.assertIn("`mkdir` is not needed", reason)
+
+    def test_a_non_draft_pr_create_says_to_add_draft(self):
+        self.assertIn("add `--draft`", self.deny("worker", "gh pr create --title t --body b"))
+
+    def test_a_workers_wrong_threads_shape_names_the_approved_one(self):
+        for command in (f"{SCRIPTS}/threads list", f"{SCRIPTS}/threads --help"):
+            with self.subTest(command):
+                self.assertIn(f"Run `{SCRIPTS}/threads` with no other words", self.deny("worker", command))
+
+    def test_a_script_named_only_as_an_argument_keeps_its_ordinary_reason(self):
+        reason = self.deny("worker", "python3 -m py_compile /etc/x.py scripts/holds.py")
+        self.assertNotIn("plugin script this role doesn't run", reason)
+        self.assertTrue(reason.endswith(GUARD_MODULE.GENERIC_REASON), reason)
+
+    def test_a_calls_without_a_plugin_script_keep_their_reasons_byte_for_byte(self):
+        for role in self.ROLES:
+            self.assertEqual(self.deny(role, "foo --bar"),
+                             f"orchestrate guard: not approved for {'a ' + role}: {GUARD_MODULE.GENERIC_REASON}")
+
+    def test_a_workers_own_script_work_stays_allowed(self):
+        (self.work / "scripts" / "holds.py").write_text("x = 1\n")
+        for command in ("python3 -m py_compile scripts/holds.py", "python3 -m unittest tests.test_holds -v",
+                        "sed -i 's/a/b/' scripts/holds"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+
+class WorkerOwnBranchFormsTest(unittest.TestCase):
+    """A worker recovers from a push rejected after the sweep, and cleans up after itself, with forms the guard
+    approves only for its own branch and files (#624). Real git repository: `rm` asks git what is tracked."""
+
+    BRANCH = "624-x"
+
+    def git(self, *args, cwd=None):
+        subprocess.run(["git", *args], cwd=cwd or self.main, check=True, capture_output=True,
+                       env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"})
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.main = Path(tmp.name).resolve() / "main"
+        self.main.mkdir()
+        self.git("init", "-q", "-b", "main")
+        (self.main / "tracked.txt").write_text("a\n")
+        (self.main / ".claude").mkdir()
+        (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** no\n")
+        self.git("add", "tracked.txt")
+        self.git("commit", "-q", "-m", "init")
+        self.work = self.main / ".claude" / "worktrees" / "agent-abc"
+        self.git("worktree", "add", "-q", "-b", self.BRANCH, str(self.work))
+        (self.work / "untracked.txt").write_text("u\n")
+        (self.work / "pr-body.md").write_text("b\n")
+        (self.main / "outside.txt").write_text("o\n")
+
+    def ok(self, command):
+        return approved("orchestrate:worker", command, self.work)
+
+    def test_a_merge_or_pull_of_its_own_branch_is_approved(self):
+        for command in (f"git merge --no-edit origin/{self.BRANCH}", f"git merge --ff-only origin/{self.BRANCH}",
+                        f"git pull --no-rebase origin {self.BRANCH}", f"git pull --ff-only origin {self.BRANCH}"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+
+    def test_the_default_branch_is_merged_into_its_own_branch_in_its_own_worktree_only(self):
+        for command in ("git merge --no-edit origin/main", "git merge --ff-only origin/main", "git merge --no-edit -q origin/main",
+                        f"cd {self.work} && git merge --no-edit origin/main"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for cwd in (self.main, self.main / ".claude"):  # the main checkout, or any directory that is not its worktree
+            with self.subTest(cwd=str(cwd)):
+                self.assertFalse(approved("orchestrate:worker", "git merge --no-edit origin/main", cwd))
+        # The ticket branch is the only one it merges into: on a default branch's worktree nothing is approved.
+        self.git("worktree", "add", "-q", "-b", "master", str(self.main / ".claude" / "worktrees" / "agent-def"))
+        self.assertFalse(approved("orchestrate:worker", "git merge --no-edit origin/main",
+                                  self.main / ".claude" / "worktrees" / "agent-def"))
+
+    def test_another_branch_main_a_rebase_and_a_reset_are_not(self):
+        for command in ("git merge --no-edit origin/other", f"git merge origin/{self.BRANCH}", "git merge origin/main",
+                        "git merge --no-edit main", f"git merge --no-edit origin/{self.BRANCH} origin/main",
+                        "git merge --no-edit origin/main origin/other", "git merge --no-edit --squash origin/main",
+                        "git merge --no-edit origin/main^", "git merge --no-edit upstream/main", "git pull --no-rebase origin main",
+                        f"git pull --rebase origin {self.BRANCH}", "git pull --no-rebase origin main",
+                        "git pull --ff-only", "git pull", f"git reset --hard origin/{self.BRANCH}",
+                        f"git push --force origin {self.BRANCH}", f"git merge --no-edit origin/{self.BRANCH} && git push origin {self.BRANCH}"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_rm_of_an_untracked_file_in_its_own_worktree_is_approved(self):
+        for command in ("rm untracked.txt", "rm -f pr-body.md", "rm untracked.txt pr-body.md"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+
+    def test_rm_of_a_tracked_file_a_directory_or_a_path_outside_is_not(self):
+        (self.work / "d").mkdir()
+        for command in ("rm tracked.txt", "rm -rf d", "rm d", "rm ../../../outside.txt", f"rm {self.main}/outside.txt",
+                        "rm missing.txt", "rm untracked.txt tracked.txt", "rm *.txt", "rm .git"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_git_rm_of_a_tracked_file_inside_its_worktree(self):
+        for command in ("git rm tracked.txt", "git rm -q tracked.txt"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in ("git rm ../../../outside.txt", "git rm --cached tracked.txt", "git rm -rf tracked.txt",
+                        f"git rm {self.main}/outside.txt", "git rm -r ."):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_restoring_a_file_from_a_ref_inside_its_worktree(self):
+        for command in ("git checkout origin/main -- tracked.txt", "git checkout HEAD -- tracked.txt",
+                        "git restore -- tracked.txt", "git restore --source origin/main -- tracked.txt"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in ("git checkout origin/main", "git checkout -- ../../../outside.txt", "git checkout origin/main -- /etc/hosts",
+                        "git checkout -b other", "git restore --source=origin/main tracked.txt", "git restore --staged tracked.txt",
+                        "git checkout -f origin/main -- tracked.txt", "git restore --source $X -- tracked.txt"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_the_config_is_editable_in_its_own_worktree_only(self):
+        (self.work / ".claude").mkdir(exist_ok=True)
+        for tool in ("Edit", "Write"):
+            own = raw("orchestrate:worker", None, self.work, tool_name=tool,
+                      tool_input={"file_path": str(self.work / ".claude" / "orchestration.md")}, full=True)
+            self.assertEqual(own["permissionDecision"], "allow", tool)
+            other = raw("orchestrate:worker", None, self.work, tool_name=tool,
+                        tool_input={"file_path": str(self.main / ".claude" / "orchestration.md")}, full=True)
+            self.assertEqual(other["permissionDecision"], "deny", tool)
+
+    def test_a_leading_cd_into_its_own_worktree_before_an_approved_call(self):
+        for command in (f"cd {self.work} && git push origin {self.BRANCH}", f"cd {self.work} && git fetch origin {self.BRANCH}",
+                        f"cd {self.work} && git grep -n foo HEAD", f"cd {self.work} && git merge --no-edit origin/{self.BRANCH}"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in (f"cd {self.main} && git push origin {self.BRANCH}", f"cd /tmp && git push origin {self.BRANCH}"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_only_a_workers_forms_are_approved(self):
+        for role in ("reviewer", "scout"):
+            self.assertFalse(approved(f"orchestrate:{role}", f"git merge --no-edit origin/{self.BRANCH}", self.work))
+            self.assertFalse(approved(f"orchestrate:{role}", "rm untracked.txt", self.work))
+
+
+class ScratchpadWritesTest(unittest.TestCase):
+    """A reviewer's and a scout's writes inside their own session scratchpad (#687); the session id comes from the
+    hook input, so a missing or other id approves nothing."""
+    SID = "00000000-0000-0000-0000-000000000000"
+    PAD = f"/private/tmp/claude-0/-proj/{SID}/scratchpad"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+
+    def ok(self, role, command, sid=SID):
+        return approved(f"orchestrate:{role}", command, self.cwd, session_id=sid)
+
+    def refused(self, role, command, sid=SID):
+        out = raw(f"orchestrate:{role}", command, self.cwd, session_id=sid, full=True)
+        return bool(out) and out["permissionDecision"] == "deny"
+
+    def test_writes_whose_every_target_is_in_the_scratchpad_are_approved(self):
+        for role in ("reviewer", "scout"):
+            for command in (f"cp src/a.py {self.PAD}/a.py", f"cp -r src {self.PAD}/pr-1b", f"mkdir -p {self.PAD}/a/b",
+                            f"git show HEAD:a.py | tee {self.PAD}/a.py", f"echo x > {self.PAD}/n.txt",
+                            f"gh pr diff 5 >> {self.PAD}/d.diff", f"mkdir -p {self.PAD}/a && cp src/a.py {self.PAD}/a/b.py && diff {self.PAD}/a/b.py src/a.py"):
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(self.ok(role, command))
+
+    def test_a_target_outside_the_scratchpad_stays_refused(self):
+        for role in ("reviewer", "scout"):
+            for command in (f"cp {self.PAD}/a.py {self.cwd}/a.py", "cp a b", f"mkdir -p {self.PAD}/a {self.cwd}/x", f"mkdir -p {self.PAD}/../x",
+                            f"tee {self.cwd}/x", f"echo x > {self.cwd}/x", f"echo x > {self.PAD}/../x", "echo x > /tmp/x",
+                            f"cp -t {self.cwd} a", f"cp a {self.PAD}/$X", f"echo x > {self.PAD}/*", f"rm {self.PAD}/a",
+                            f"mv a {self.PAD}/b", f"touch {self.PAD}/a", f"sed -i s/a/b/ {self.PAD}/a"):
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(self.refused(role, command))
+
+    def test_the_session_id_must_match_and_be_present(self):
+        command = f"cp a.py {self.PAD}/a.py"
+        for role in ("reviewer", "scout"):
+            self.assertFalse(self.ok(role, command, sid="other-session"))
+            self.assertTrue(self.refused(role, command, sid="other-session"))
+            self.assertTrue(self.refused(role, command, sid=None))
+
+    def test_a_symlink_out_of_the_scratchpad_is_followed(self):
+        pad = self.cwd / "claude-0" / "-proj" / self.SID / "scratchpad"
+        pad.mkdir(parents=True)
+        (pad / "link").symlink_to(self.cwd)
+        # a real temp root is needed for the pattern, so only the refusal of the link's target is asserted here
+        self.assertTrue(self.refused("reviewer", f"cp a {pad}/link/x"))
+
+    def test_a_worker_is_not_given_these_writes(self):
+        self.assertFalse(approved("orchestrate:worker", f"mkdir -p {self.PAD}/a", self.cwd, session_id=self.SID))
+
+
+class CorpusDenyReasonsTest(unittest.TestCase):
+    """The deny rows the corpus pins for #624's forms (and this ticket's) each carry the reason that names the approved way (#687);
+    a corpus row asserts the decision, this asserts what the agent is told."""
+    SID = "00000000-0000-0000-0000-000000000000"
+
+    def setUp(self):
+        UnapprovedCallsAreDeniedTest.setUp(self)
+
+    def reason(self, role, command):
+        return UnapprovedCallsAreDeniedTest.reason(self, role, command)
+
+    def test_a_worker_pull_or_merge_of_another_ref_says_no_rule_approves_it(self):
+        for command in ("git pull --ff-only origin main", "git pull --ff-only", "git pull --rebase origin 567-x",
+                        "git merge --ff-only origin/other-branch"):
+            with self.subTest(command):
+                reason = self.reason("orchestrate:worker", command)
+                self.assertTrue(reason.startswith("orchestrate guard: not approved for a worker: "), reason)
+
+    def test_another_roles_script_names_the_scripts_that_role_runs(self):
+        self.assertIn("orchestrate guard: not approved for a scout", self.reason("orchestrate:scout", f"{SCRIPTS}/claims --repo /other"))
+        for role in ("worker", "reviewer"):
+            reason = self.reason(f"orchestrate:{role}", f"{SCRIPTS}/claims --repo .")
+            self.assertIn("plugin script this role doesn't run", reason)
+        reason = self.reason("orchestrate:scout", f"{SCRIPTS}/rescue 666 --title t --repo .")
+        self.assertIn("plugin script this role doesn't run", reason)
+
+    def test_a_scout_mutation_through_graphql_is_refused_by_name(self):
+        reason = self.reason("orchestrate:scout", "gh api graphql -f query='mutation { addStar(input: {}) { id } }'")
+        self.assertIn("scout", reason)
+        self.assertIn("mutation", reason.lower())
+
+    def test_a_scratchpad_write_outside_the_scratchpad_names_the_write_and_the_next_step(self):
+        for role in ("reviewer", "scout"):
+            for command, what in (("cp a.py /repo/a.py", "writes files or runs a build"), ("echo x > /repo/n.txt", "redirects output into a file")):
+                with self.subTest(role=role, command=command):
+                    out = raw(f"orchestrate:{role}", command, self.work, session_id=self.SID, full=True)
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    self.assertIn(what, out["permissionDecisionReason"])
+
+    def test_a_reviewer_background_call_and_a_verify_without_a_timeout_say_foreground(self):
+        out = raw("orchestrate:reviewer", "ls", self.work, tool_input={"command": "ls", "run_in_background": True}, full=True)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("reviewer is woken", out["permissionDecisionReason"])
+        verify = f"{SCRIPTS}/verify --config --cwd {self.root}"
+        out = raw("orchestrate:reviewer", verify, self.work, full=True)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("timeout of 600000", out["permissionDecisionReason"])
+
+
+class PrCreateFlagsTest(unittest.TestCase):
+    """A worker's `gh pr create` carries only the allowed flags (#687); `--web` is refused, `--template` is left unapproved."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        main = Path(tmp.name).resolve() / "main"
+        (main / ".git" / "worktrees" / "agent-abc").mkdir(parents=True)
+        (main / ".git" / "worktrees" / "agent-abc" / "commondir").write_text("../..\n")
+        (main / ".git" / "worktrees" / "agent-abc" / "HEAD").write_text("ref: refs/heads/687-ticket\n")
+        self.work = main / ".claude" / "worktrees" / "agent-abc"
+        self.work.mkdir(parents=True)
+        (self.work / ".git").write_text(f"gitdir: {main}/.git/worktrees/agent-abc\n")
+
+    def test_the_allowed_flags_pass(self):
+        for command in ("gh pr create --draft --title t --body b --base main --head 687-x",
+                        "gh pr create -d -t t -b b -B main -H 687-x -l bug -a me -r them",
+                        "gh pr create --draft --fill --label a --label b --assignee @me --reviewer o/team",
+                        "gh pr create --draft --title=t --body=b --base=main --head=687-x",
+                        "gh pr create --draft --title t --body-file - <<'EOF'\nbody\nEOF",
+                        "gh pr create --draft --title t -tb"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+    def test_another_flag_is_left_unapproved(self):
+        for command in ("gh pr create --draft --title t --body b --template x.md", "gh pr create --draft -T x.md --title t",
+                        "gh pr create --draft --title t --body b --milestone 1", "gh pr create --draft --title t --project p",
+                        "gh pr create --draft --title t --body b --no-maintainer-edit", "gh pr create --draft --title t --body b extra",
+                        "gh pr create --draft --fill=true", "gh pr create --draft -df", "gh pr create --draft --title"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+                self.assertIsNone(raw("orchestrate:worker", command, self.work))  # asks: no rule refuses it
+
+    def test_web_is_refused(self):
+        for command in ("gh pr create --draft --web", "gh pr create --draft --title t --body b -w", "gh pr create --draft --web=true"):
+            with self.subTest(command):
+                out = raw("orchestrate:worker", command, self.work)
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("--web", out["permissionDecisionReason"])
 
 
 if __name__ == "__main__":

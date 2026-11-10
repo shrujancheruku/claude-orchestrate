@@ -4,7 +4,8 @@ from pathlib import Path
 import unittest
 
 from harness import ScriptEnv, git
-from transcripts import completion, dispatch, main_path, reply, write_session
+from transcripts import T0, completion, dispatch, main_path, reply, write_session
+from repo import iso, parse_ts
 
 import claims  # noqa: E402 - harness puts scripts/ on sys.path
 
@@ -61,6 +62,8 @@ class RebuildState(unittest.TestCase):
         self.assertEqual(t["last_report"], "2026-11-04T09:30:00.500000Z")
         self.assertEqual(state["tickets"]["12"]["model"], "sonnet")
         self.assertEqual(state["tickets"]["12"]["last_report"], "2026-11-04T10:00:00Z")
+        # `dispatched` is the Agent call's own timestamp (the latest dispatch wins, as for the rest of the record).
+        self.assertEqual(t["dispatched"], iso(parse_ts(T0)))
         self.assertIn("#183 aaa111", res.stdout)
 
     def test_other_dispatches_are_ignored(self):

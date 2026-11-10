@@ -1,7 +1,10 @@
 """scripts/launch through its CLI: the orchestrator's launch and resume line, with a fake `claude` on PATH (#403)."""
 
+import importlib.machinery
+import importlib.util
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -21,6 +24,8 @@ def settings_arg(snap, auto=True, inbound=False):
         body["disableAutoMode"] = "disable"
     if inbound:
         body["crossSessionInbound"] = "accept"
+    if auto:  # the orchestrator's lines carry the role in the settings env too (#628); the lead's never do
+        body["env"] = {"ORCHESTRATE_ROLE": "orchestrator"}
     body["permissions"] = {"allow": [f"Read(/{snap}/**)"]}
     return "'" + json.dumps(body, separators=(",", ":")) + "'"
 
@@ -34,6 +39,37 @@ CONFIG = """# Orchestration config
 | Orchestrator | %s | |
 | Worker | sonnet | medium |
 """
+
+
+class SnapshotCoverage(unittest.TestCase):
+    """The snapshot carries every plugin-root directory a script or prompt reads (#628)."""
+
+    # Development tools never run inside a session: guard-corpus reads hooks/ and writes into tests/.
+    DEV_ONLY = {"guard-corpus"}
+    FROM_ROOT = re.compile(r'\.parent\.parent\s*/\s*"([A-Za-z._-]+)"')
+    PLUGIN_REF = re.compile(r'CLAUDE_PLUGIN_ROOT\}?/([A-Za-z._-]+)|CLAUDE_SKILL_DIR\}/\.\./\.\./([A-Za-z._-]+)')
+
+    def test_every_plugin_root_directory_read_is_in_snapshot_dirs(self):
+        loader = importlib.machinery.SourceFileLoader("launch_mod", str(LAUNCH))
+        spec = importlib.util.spec_from_loader("launch_mod", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        found = {}
+        for sub in ("scripts", "skills", "agents", "hooks"):
+            for path in sorted((ROOT / sub).rglob("*")):
+                if not path.is_file() or path.name in self.DEV_ONLY or "__pycache__" in path.parts:
+                    continue
+                try:
+                    text = path.read_text()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                for m in self.FROM_ROOT.finditer(text):
+                    found.setdefault(m.group(1), path)
+                for m in self.PLUGIN_REF.finditer(text):
+                    found.setdefault(m.group(1) or m.group(2), path)
+        self.assertIn("viewer", found)  # the scan sees profile.py's read: it would miss new gaps otherwise
+        missing = {d: str(p.relative_to(ROOT)) for d, p in found.items() if d not in mod.SNAPSHOT_DIRS}
+        self.assertEqual(missing, {}, "read from the plugin root but absent from launch's SNAPSHOT_DIRS")
 
 
 class Launch(unittest.TestCase):
@@ -65,7 +101,7 @@ class Launch(unittest.TestCase):
 
     def commit_plugin(self, text):
         """Commit the plugin dirs (and a file outside them) with `text` in each, push to origin/main; return the sha."""
-        for d in (".claude-plugin", "hooks", "agents", "skills", "scripts"):
+        for d in (".claude-plugin", "hooks", "agents", "skills", "scripts", "viewer"):
             (self.checkout / d).mkdir(exist_ok=True)
             (self.checkout / d / "f.txt").write_text(text)
         (self.checkout / "README.md").write_text(text)
@@ -123,7 +159,7 @@ class Launch(unittest.TestCase):
         r = self.launch("--print")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(f"plugin snapshot {self.sha[:12]}", r.stderr)
-        for d in (".claude-plugin", "hooks", "agents", "skills", "scripts"):
+        for d in (".claude-plugin", "hooks", "agents", "skills", "scripts", "viewer"):
             self.assertEqual((self.snap / d / "f.txt").read_text(), "v1")
         self.assertFalse((self.snap / "README.md").exists())
         marker = self.snap / "marker"
@@ -269,6 +305,94 @@ class Launch(unittest.TestCase):
         r = self.launch("--resume-latest")
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "ROLE:orchestrator"), r.stderr)
 
+    def test_the_role_rides_in_the_settings_env_of_every_orchestrator_line_and_never_the_lead(self):
+        # `claude --bg` hands the session to a pre-spawned daemon that never sees the line's own variable (#628).
+        for mode in [(), ("--bg",), ("--resume", "abc"), ("--permission-mode", "bypassPermissions")]:
+            self.assertEqual(self.settings_of(*mode)["env"], {"ORCHESTRATE_ROLE": "orchestrator"}, mode)
+        self.assertNotIn("env", self.settings_of("--lead"))
+
+    def test_launch_from_a_snapshot_reuses_it_instead_of_refusing(self):
+        self.assertEqual(self.launch("--print").returncode, 0)  # exports the snapshot
+        (self.snap / "marker").write_text("kept")
+        for mode in [("--bg", "--greedy=4"), ("--lead",), ()]:
+            r = self.launch("--print", *mode, root=self.snap)
+            self.assertEqual(r.returncode, 0, (mode, r.stderr))
+            self.assertIn(f"--plugin-dir {self.snap} ", r.stdout + " ", mode)
+            self.assertIn(f"plugin snapshot {self.sha[:12]}", r.stderr)
+        r = self.launch("--bg", "--greedy=4", root=self.snap)  # a real launch from a snapshot
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"ARG:--plugin-dir\nARG:{self.snap}\n", r.stdout)
+        self.assertTrue((self.snap / "marker").exists())
+        self.assertTrue((self.snap / "viewer" / "f.txt").exists())
+
+    def test_launch_from_an_old_snapshot_exports_the_newer_origin(self):
+        self.assertEqual(self.launch("--print").returncode, 0)  # snapshot of v1, with its .source
+        newer = self.commit_plugin("v2")
+        r = self.launch("--bg", "--greedy=4", root=self.snap)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        new_snap = self.cache / "orchestrate" / "plugin" / newer
+        self.assertIn(f"ARG:--plugin-dir\nARG:{new_snap}\n", r.stdout)
+        self.assertEqual((new_snap / "hooks" / "f.txt").read_text(), "v2")
+
+    def test_launch_from_a_snapshot_without_a_usable_source_reuses_it(self):
+        self.assertEqual(self.launch("--print").returncode, 0)
+        self.commit_plugin("v2")
+        (self.snap / ".source").unlink()  # a snapshot exported before the file existed
+        r = self.launch("--bg", "--greedy=4", root=self.snap)
+        self.assertIn(f"ARG:--plugin-dir\nARG:{self.snap}\n", r.stdout)
+        (self.snap / ".source").write_text(str(self.tmp / "gone") + "\n")  # its checkout is gone
+        r = self.launch("--bg", "--greedy=4", root=self.snap)
+        self.assertIn(f"ARG:--plugin-dir\nARG:{self.snap}\n", r.stdout)
+
+    def test_a_directory_in_the_cache_that_is_not_a_sha_is_still_refused(self):
+        odd = self.cache / "orchestrate" / "plugin" / "not-a-sha"
+        odd.mkdir(parents=True)
+        self.assertEqual(self.launch("--print", root=odd).returncode, 2)
+
+    def loaded_snapshot(self, sid, sha):
+        """A saved transcript that names the snapshot the session loaded: agent rows carry no plugin dir (#628)."""
+        d = self.claude_dir / "projects" / "-repo"
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {"type": "attachment", "text": f"loaded plugin from {self.cache}/orchestrate/plugin/{sha}/skills/run"}
+        (d / f"{sid}.jsonl").write_text(json.dumps(rec) + "\n")
+
+    def test_a_bg_resume_says_when_its_snapshot_is_older_than_origin(self):
+        self.assertEqual(self.launch("--print").returncode, 0)  # snapshot of v1
+        self.loaded_snapshot("b1", self.sha)
+        newer = self.commit_plugin("v2")
+        self.live(self.bg_row())
+        r = self.launch("--resume", "b1", "--print")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr.count("resume keeps snapshot"), 0)  # --print launches nothing
+        self.live(self.bg_row())
+        r = self.launch("--resume", "b1")  # from the checkout: the snapshot comes from the transcript, not the runtime root
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"launch: resume keeps snapshot {self.sha[:12]}; origin/main is {newer[:12]}: a fresh launch picks it up", r.stderr)
+
+    def test_a_bg_resume_is_quiet_when_the_plugin_tree_is_unchanged(self):
+        self.assertEqual(self.launch("--print").returncode, 0)
+        (self.checkout / "README.md").write_text("docs only")
+        self.git(self.checkout, "commit", "-qam", "docs")
+        self.git(self.checkout, "push", "-q", "origin", "HEAD:main")
+        self.git(self.checkout, "fetch", "-q", "origin")
+        self.loaded_snapshot("b1", self.sha)
+        self.live(self.bg_row())
+        r = self.launch("--resume", "b1", root=self.snap)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("resume keeps snapshot", r.stderr)
+
+    def test_a_bg_resume_with_no_snapshot_in_its_transcript_says_so_in_one_line(self):
+        self.assertEqual(self.launch("--print").returncode, 0)
+        self.live(self.bg_row())  # no transcript at all
+        r = self.launch("--resume", "b1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = [l for l in r.stderr.splitlines() if "cannot tell which snapshot" in l]
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertIn("cannot tell which snapshot b1 keeps", lines[0])
+        self.live(self.bg_row())  # a marketplace install has no snapshot to be stale
+        r = self.launch("--resume", "b1", root=self.claude_dir / "plugins" / "market")
+        self.assertNotIn("cannot tell which snapshot", r.stderr)
+
     def test_the_printed_orchestrator_line_carries_the_variable_and_the_lead_line_does_not(self):
         self.assertTrue(self.launch("--print").stdout.startswith("ORCHESTRATE_ROLE=orchestrator claude "))
         self.assertNotIn("ORCHESTRATE_ROLE", self.launch("--print", "--lead").stdout)
@@ -296,6 +420,23 @@ class Launch(unittest.TestCase):
         r = self.launch("--resume", "s1")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("ARG:--resume\nARG:s1\n", r.stdout)
+
+    def resume_events(self):
+        path = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_resume_appends_one_resume_event_for_the_session(self):
+        self.live({"name": "orchestrator", "pid": None, "sessionId": "s1"})
+        self.assertEqual(self.launch("--resume", "s1").returncode, 0)
+        (event,) = self.resume_events()
+        self.assertEqual((event["kind"], event["outcome"], event["session"]), ("resume", "resumed", "s1"))
+
+    def test_no_resume_event_for_a_fresh_launch_a_print_or_a_refused_resume(self):
+        self.assertEqual(self.launch().returncode, 0)
+        self.assertEqual(self.launch("--print", "--resume", "s1").returncode, 0)
+        self.live({"name": "orchestrator", "pid": 4242, "sessionId": "s1"})
+        self.assertEqual(self.launch("--resume", "s1").returncode, 2)
+        self.assertEqual(self.resume_events(), [])
 
     def test_agents_listing_that_cannot_be_trusted_fails_closed(self):
         for body in ("not json", '{"agents": []}', "3"):

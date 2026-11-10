@@ -10,11 +10,16 @@ The state, decided in this order:
               progress marker, not a review request: it counts as no PR here (ADR 0011), so the ticket is
               building (or stalled, or elsewhere) and `Claim.pr` still names the draft to link it
   done        the ticket's branch has a merged PR, or the ticket is in the state file but not among the open issues
+  parked      no open PR, and the ticket's newest `park` event is `parked` (scripts/park-pr closed its PR to let a newer
+              PR's fix land first): the branch and the claim are kept, nothing is rescued, redispatched or held for it
   building    a worker record from this session in the state file, or no record but the worktree's lock is this
               session's own live worker (`worker unknown`: a dispatch the state file couldn't join)
-  idle        a building claim whose worker is not live (the lock is not `ours <live pid>`) and has made no
-              worker-report since its last commit. `since` is that commit's time; `nudged` is the time of the pass log's
-              `record --nudged` for it, when that is not older than `since`. A pass nudges it once, then hands it back
+  idle        a building claim whose newest non-duplicate worker-report is an `interim` one, newer than the worker's
+              `dispatched` time in its record: the worker ended its turn with a report nobody acts on, and a stopped
+              subagent is never re-invoked unless messaged. The lock plays no part (it is always `ours`, ADR 0009). A
+              record with no `dispatched` is never idle. `since` is that report's time; `nudged` is the time of the pass
+              log's `record --nudged` after that dispatch, kept until a real completion (a later interim does not clear it).
+              A pass nudges it once, then hands it back
   waiting     replaces building and stalled (never a ready PR): the ticket's newest worker-report event is a
               `permission-denied` stop or an `exhausted` transient one. The developer must act; it never expires, and
               only a newer report ends it. `reason` is `permission-denied` or `exhausted`, `since` the report's time
@@ -57,8 +62,8 @@ class Claim:
     draft: bool = False            # `pr` is a draft: the ticket is building, not in review
     pending_branch: bool = False   # the worktree is on a `worktree-agent-*` branch: the worker never made the ticket branch
     reason: str | None = None      # waiting only: `permission-denied` | `exhausted`
-    since: str | None = None       # waiting and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report, or of the last commit
-    nudged: str | None = None      # idle only: the same, of the pass's nudge, when it is not older than `since`
+    since: str | None = None       # waiting and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report
+    nudged: str | None = None      # idle only: the same, of the pass's nudge after the dispatch, kept until a real completion
     escalate: str | None = None    # the model to escalate to: a haiku worker whose PR hit a mechanical trigger (see escalation)
 
 
@@ -172,19 +177,40 @@ def fmt_ts(dt) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def last_commit_time(path):
-    """The committer time of HEAD in the worktree at `path`, or None when git can't say (no commits, no directory)."""
-    r = common.run("git", "log", "-1", "--format=%cI", cwd=path)
-    return parse_ts(r.stdout.strip()) if r.code == 0 else None
+CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK)  # the only kinds a claim's state reads
 
 
-def _reports(repo) -> dict:
-    """{ticket as text: its newest worker-report event}, a duplicate passed over, from the run log."""
+def _parked(events) -> set:
+    """The tickets whose newest `park` event is `parked` (scripts/park-pr), from the run-log events."""
+    last = {}
+    for e in events:
+        if e.get("kind") == runlog.PARK and e.get("ticket") is not None:
+            last[str(e["ticket"])] = e.get("outcome")
+    return {int(t) for t, outcome in last.items() if outcome == "parked" and t.isdigit()}
+
+
+def _reports(events) -> dict:
+    """{ticket as text: its newest worker-report event}, a duplicate passed over, from the run-log events."""
     out = {}
-    for e in common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG)):
+    for e in events:
         if e.get("kind") == runlog.WORKER_REPORT and e.get("outcome") != "duplicate":
             out[str(e.get("ref"))] = e
     return out
+
+
+class _LazyConfig:
+    """The config, parsed on the first attribute read: only a haiku worker's escalation reads it, and most calls
+    have none."""
+
+    def __init__(self, repo):
+        self._repo, self._cfg = repo, None
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if self._cfg is None:
+            self._cfg = config.Config.load(self._repo)
+        return getattr(self._cfg, name)
 
 
 def _nudges(repo) -> dict:
@@ -213,15 +239,13 @@ def escalation(events, pr, worker, cfg) -> str | None:
     return (cfg.worker_model or config.DEFAULT_WORKER_MODEL) if len(fails) >= 2 or changes else None
 
 
-def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None,
-           commit_time=last_commit_time) -> dict:
+def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None) -> dict:
     """{ticket: Claim} for each claimed open issue and each state-file ticket that is no longer open (done).
 
     issues: [{"number", "claimed", "labels"}] open issues. prs: [{"number", "headRefName", ...}] open PRs.
     merged: [{"headRefName", ...}] merged PRs. worktrees: `git worktree list`'s (default: asked of `repo`); changes:
     (path, branch) -> (dirty, unpushed), swappable so a pure test needs no repository. session: this caller's own id
-    (`--session`); without it the session that rebuilt last is the current one. commit_time: path -> the HEAD commit's
-    datetime | None, swappable like `changes`; a caller whose answer is always None never sees an idle claim."""
+    (`--session`); without it the session that rebuilt last is the current one."""
     state = read_state(state_file, session)
     other = read_other_state(state_file, session)
     # A worktree git still lists but whose directory is gone (prunable) is gone: git commands in it can't run.
@@ -241,8 +265,9 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     records = {int(k): v for k, v in state.items() if str(k).isdigit()}
     foreign = {int(k): v for k, v in other.items() if str(k).isdigit() and int(k) not in records}
     tickets = sorted({n for n, i in open_issues.items() if i.get("claimed")} | (set(records) - set(open_issues)))
-    reports, nudges = _reports(repo), _nudges(repo)
-    events, cfg = list(common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG))), config.Config.load(repo)
+    # One pass over the events log, parsing only the kinds a claim reads (it grows with every `gh_call` line, #683).
+    events, nudges = runlog.read_kinds(repo, CLAIM_EVENT_KINDS), _nudges(repo)
+    reports, cfg, parked = _reports(events), _LazyConfig(repo), _parked(events)
     out = {}
     for n in tickets:
         record = records.get(n) if isinstance(records.get(n), dict) else None
@@ -261,6 +286,8 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.state = "in-review"
         elif n in merged_branch or n not in open_issues:
             claim.state = "done"
+        elif n in parked:
+            claim.state = "parked"
         elif record is not None:
             claim.state = "building"
         elif claim.lock and claim.lock[0] == "ours":
@@ -277,11 +304,15 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.reason = "permission-denied" if report.get("stop_reason") == "permission-denied" else "exhausted"
             claim.since = fmt_ts(reported) if reported else None
             claim.state = "waiting"
-        elif claim.state == "building" and wt and not (claim.lock and claim.lock[0] == "ours"):
-            committed = commit_time(wt["path"])
-            if committed and not (reported and reported > committed):
-                claim.state, claim.since = "idle", fmt_ts(committed)
-                if n in nudges and nudges[n] >= committed:
+        elif claim.state == "building" and record is not None and report and report.get("outcome") == "interim":
+            # The worker ended its turn without handing back. Only an interim newer than this worker's own dispatch
+            # counts, so a redispatch never reads an older worker's interim as its own.
+            dispatched = parse_ts(record.get("dispatched"))
+            if dispatched and reported and reported > dispatched:
+                claim.state, claim.since = "idle", fmt_ts(reported)
+                # A nudge stays on until a real completion (that ends idle above), so a second interim after a nudge
+                # reads `idle nudged` and the pass hands it back (#690). Only this dispatch's own nudge counts.
+                if n in nudges and nudges[n] > dispatched:
                     claim.nudged = fmt_ts(nudges[n])
         if wt and pr is None and claim.state in ("building", "idle", "stalled", "waiting", "elsewhere"):
             claim.changes = changes(wt["path"], wt["branch"])
