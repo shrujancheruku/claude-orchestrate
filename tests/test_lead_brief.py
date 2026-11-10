@@ -259,5 +259,126 @@ class LeadBrief(unittest.TestCase):
         self.assertIn("end-of-run summary", text)
 
 
+class Watch(unittest.TestCase):
+    """`lead-brief --watch`: the baseline, each hit kind, the poll interval and the rate limit, with a fake snapshot,
+    clock and sleep (run_watch's seams) and, for the CLI, a fake gh."""
+
+    def setUp(self):
+        self.env = ScriptEnv()
+        self.addCleanup(self.env.close)
+
+    def watch(self, reads, interval=300):
+        """Run the watch over `reads` (lists of raw nodes, or an exception to raise); returns (code, stdout, sleeps)."""
+        reads, sleeps, now = list(reads), [], [0.0]
+
+        def read():
+            r = reads.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        def sleep(s):
+            sleeps.append(s)
+            now[0] += s
+
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = lead_brief.run_watch(self.env.repo, interval, read=read, clock=lambda: now[0], sleep=sleep)
+        return code, out.getvalue(), sleeps
+
+    BASE = [issue_node(3, "Q", ["needs-lead"]), issue_node(8, "Plain")]
+
+    def test_a_new_issue_ends_the_watch_with_its_number_title_and_labels(self):
+        code, out, _ = self.watch([self.BASE, self.BASE, [*self.BASE, issue_node(9, "Fresh", ["needs-triage", "lead"])]])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "new: #9 Fresh [lead, needs-triage]\nnext: settled\n")
+
+    def test_a_ticket_that_gains_needs_lead_after_start_is_a_hit_and_one_already_there_is_not(self):
+        grown = [issue_node(3, "Q", ["needs-lead"]), issue_node(8, "Plain", ["needs-lead"])]
+        code, out, _ = self.watch([self.BASE, self.BASE, grown])
+        self.assertEqual((code, out), (0, "needs-lead: #8 Plain\nnext: settled\n"))
+
+    def test_a_takeable_ticket_whose_blocked_by_line_names_only_closed_issues_is_stale(self):
+        body = "Blocked by: #4, #5\n"
+        stale = dict(issue_node(8, "Plain", ["ready-for-agent"]), body=body)
+        code, out, _ = self.watch([self.BASE, [self.BASE[0], stale]])
+        self.assertEqual((code, out), (0, "stale: #8 Plain blocked-by #4 #5\nnext: settled\n"))
+
+    def test_a_blocker_still_open_or_a_claimed_ticket_is_not_stale(self):
+        held = dict(issue_node(6, "Held", ["ready-for-agent"]), body="Blocked by: #3\n")
+        claimed = dict(issue_node(7, "Claimed", ["ready-for-agent"]), body="Blocked by: #4\n",
+                       assignees={"totalCount": 1})
+        # the first poll has no hit, so the watch polls again and only the second read ends it
+        quiet = [self.BASE[0], held, claimed]
+        code, out, sleeps = self.watch([self.BASE, quiet, [*quiet, issue_node(10, "N")]])
+        self.assertEqual(out, "new: #10 N []\nnext: settled\n")
+        self.assertEqual(len(sleeps), 2)
+
+    def test_reads_are_never_closer_than_the_interval(self):
+        # a slow read (the clock moves 100s inside it) shortens the next sleep, never below the interval in total
+        now, sleeps, calls = [0.0], [], [0]
+
+        def read():
+            calls[0] += 1
+            now[0] += 100
+            return self.BASE if calls[0] < 4 else [*self.BASE, issue_node(9, "N")]
+
+        def sleep(s):
+            sleeps.append(s)
+            now[0] += s
+
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            lead_brief.run_watch(self.env.repo, 300, read=read, clock=lambda: now[0], sleep=sleep)
+        self.assertEqual(sleeps, [300, 200, 200])
+
+    def test_a_rate_limit_ends_the_watch_with_retry_after(self):
+        err = lead_brief.github.GhError(lead_brief.github.RATELIMITED, "rate limit until 2026-11-10T13:00:00Z")
+        code, out, _ = self.watch([self.BASE, err])
+        self.assertEqual((code, out), (2, "next: retry-after 2026-11-10T13:00:00Z\n"))
+
+    def test_another_failure_is_could_not_run(self):
+        code, out, _ = self.watch([self.BASE, lead_brief.Unavailable("gh failed: HTTP 500")])
+        self.assertEqual((code, out), (2, "next: could-not-run\n"))
+
+    def test_the_cli_watches_through_the_issues_snapshot_and_writes_nothing_to_the_tracker(self):
+        pages = [{"stdout": issues_page(self.BASE, more=False)},
+                 {"stdout": issues_page([*self.BASE, issue_node(9, "Fresh", ["lead"])], more=False)}]
+        self.env.set_gh([gh_repo_rest({"owner": {"login": "o"}, "name": "r"}),
+                         {"args": ["api", "graphql", "-f", "query=" + lead_brief.github.ISSUES_QUERY], "seq": pages}])
+        r = self.env.run("lead-brief", "--watch", "--interval", "0")
+        self.assertEqual(r.stdout, "new: #9 Fresh [lead]\nnext: settled\n")
+        for call in self.env.gh_calls():
+            self.assertNotIn("POST", call)
+            self.assertNotIn("PATCH", call)
+
+
+class LeadPassReports(unittest.TestCase):
+    """The prompt side (ADR-0006: the wording, not a restated script rule)."""
+
+    def test_run_sends_the_report_and_the_asks_to_the_lead(self):
+        step = next(l for l in SKILL.read_text().splitlines() if l.startswith("5. **Report and yield.**"))
+        for text in ("With `Lead: live`, after printing the report, SendMessage it to the session named `lead`",
+                     "`parents-closed:`", "`ready-for-human:`", "`drift:`", "the URL of every ticket you filed",
+                     "A held or refused delivery is one line"):
+            self.assertIn(text, step)
+
+    def test_the_lead_starts_and_rearms_the_watch_and_grooms_every_digest(self):
+        text = (ROOT / "skills" / "lead" / "SKILL.md").read_text()
+        self.assertIn("lead-brief\" --repo . --watch", text)
+        self.assertIn("then start it again", text)
+        self.assertIn("On every pass digest, scan the takeable backlog", text)
+        self.assertNotIn("Every few passes", text)
+        self.assertNotIn("After every pass table", text)
+
+    def test_the_guide_describes_both(self):
+        guide = (ROOT / "docs" / "guide.md").read_text()
+        self.assertIn("lead-brief --watch", guide)
+        self.assertIn("sends the lead each pass report", guide)
+
+
 if __name__ == "__main__":
     unittest.main()

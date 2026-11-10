@@ -39,7 +39,7 @@ import session  # noqa: E402
 from repo import iso, parse_ts  # noqa: E402
 from session import TOKEN_KEYS, Transcript  # noqa: E402
 
-SCHEMA = 2
+SCHEMA = 3
 PROFILES = runlog.PROFILES  # saved profiles sit beside the run log
 VIEWER = Path(__file__).resolve().parent.parent / "viewer" / "profile.html"
 # Proxy prices: USD per million tokens at API list, per model version and token type.
@@ -1266,8 +1266,13 @@ def load_profile(path: Path) -> dict:
         p = json.loads(path.read_text())
     except (OSError, ValueError) as e:
         common.die(f"profile compare: can't read {path}: {e}")
-    if not isinstance(p, dict) or p.get("schema", 0) < 2 or "tiers" not in p.get("metrics", {}):
-        common.die(f"profile compare: {path} has no per-tier figures; regenerate it with the current profile.py")
+    if not isinstance(p, dict) or not isinstance(p.get("metrics"), dict):
+        common.die(f"profile compare: {path} is not an orchestrate profile")
+    if p.get("schema") != SCHEMA:
+        common.die(f"profile compare: {path} is schema {p.get('schema')}, not {SCHEMA}; re-profile it with the current profile.py")
+    # Without a pass log there are no idle reasons, lead lookup or stop starts from `claimed`.
+    if not ((p["metrics"].get("context") or {}).get("idle_wakes") or {}).get("passes"):
+        common.die(f"profile compare: {path} is not a profiled run: it has no pass log")
     return p
 
 

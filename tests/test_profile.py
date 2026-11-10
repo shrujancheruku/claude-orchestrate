@@ -341,9 +341,9 @@ class ProfileTest(unittest.TestCase):
         self.assertIn("partial", p["warnings"][0])
         self.assertIn("WARNING", prof.summary(p, Path("x.json")))
 
-    def test_schema_2_keeps_slot_efficiency_fields(self):
+    def test_schema_3_keeps_slot_efficiency_fields(self):
         p = self.fx.run()
-        self.assertEqual(p["schema"], 2)
+        self.assertEqual(p["schema"], 3)
         for key in ("occupancy", "building_share", "review_share", "idle_s", "windows"):
             self.assertIn(key, p["metrics"])
 
@@ -622,19 +622,12 @@ class QualityTest(unittest.TestCase):
         self.assertGreater(d["tokens"], 0)
         self.assertTrue(any("depth 2" in w for w in self.p["warnings"]))
 
-    def test_viewer_survives_a_profile_without_the_new_metrics(self):
+    def test_viewer_skips_depth_2_without_the_key(self):
         if not shutil.which("node"):
             self.skipTest("node not installed")
-        old = json.loads(json.dumps(self.p))
-        for k in ("review", "worker_models", "escalations", "depth2"):
-            del old["metrics"][k]
         path = Path(self.tmp.name) / "old.json"
-        path.write_text(json.dumps(old))
         run = lambda f: subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(f)],
                                        capture_output=True, text=True)
-        out = run(path)
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("predates", out.stdout)
         # Reviews present but no depth-2 key: that section is skipped, not reported as clean.
         del self.p["metrics"]["depth2"]
         path.write_text(json.dumps(self.p))
@@ -795,13 +788,6 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         for want in ("Orchestrator turns by job", "Context per turn", "160k", "Shared-file hand-back rate", "100%"):
             self.assertIn(want, out.stdout)
-        old = json.loads(json.dumps(p))
-        for k in ("jobs", "context", "events"):
-            del old["metrics"][k]
-        path.write_text(json.dumps(old))
-        out = run()
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("predates", out.stdout)
         # Events missing alone, or no compactions, must not crash either.
         partial = json.loads(json.dumps(p))
         partial["metrics"]["events"] = {"available": False}
@@ -996,6 +982,8 @@ class CommandTest(unittest.TestCase):
     def test_viewer_shows_a_banner_for_rejected_files(self):
         html = prof.VIEWER.read_text()
         self.assertIn("regenerate it with scripts/profile.py", html)
+        self.assertIn(f"data.schema !== {prof.SCHEMA}", html)
+        self.assertNotIn("This profile predates", html)
         self.assertNotIn("console.warn", html)
 
     def test_html_escapes_script_close(self):
@@ -1014,7 +1002,7 @@ class CompareTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def profile(self, name, tiers, orchestrator=0.5, changes=(10, 20), outright=5, rounds=1.5):
+    def profile(self, name, tiers, orchestrator=0.5, changes=(10, 20), outright=5, rounds=1.5, schema=3, passes=3):
         """tiers: {tier: (merged tickets, $ per merged ticket)}. The orchestrator's $ is the only overhead."""
         merged = sum(n for n, _ in tiers.values())
         tier_rows = {t: {"merged": n, "cost": n * c, "reviewed_prs": n, "rounds": round(n * rounds),
@@ -1023,7 +1011,8 @@ class CompareTest(unittest.TestCase):
                      for t, (n, c) in tiers.items()}
         per = sum(r["cost"] for r in tier_rows.values()) / merged + orchestrator
         path = self.root / name
-        path.write_text(json.dumps({"schema": 2, "metrics": {
+        path.write_text(json.dumps({"schema": schema, "metrics": {
+            "context": {"idle_wakes": {"passes": passes, "idle": 0}},
             "tickets_merged": merged,
             "cost": {"per_merged_ticket": per, "per_merged_ticket_by_role": {"orchestrator": orchestrator}},
             "review": {"round1_changes_rate": changes[0] / changes[1], "round1_outright_rate": outright / changes[1],
@@ -1120,7 +1109,23 @@ class CompareTest(unittest.TestCase):
         new = self.profile("a.json", {"L": (20, 1.0)})
         r = self.compare(old, new)
         self.assertEqual(r.returncode, 2)
-        self.assertIn("regenerate it", r.stderr)
+        self.assertIn("schema 1", r.stderr)
+
+    def test_a_schema_2_profile_is_refused_on_either_side(self):
+        old = self.profile("old.json", {"L": (20, 1.0)}, schema=2)
+        new = self.profile("a.json", {"L": (20, 1.0)})
+        for args in ((old, new), (new, old)):
+            r = self.compare(*args)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("schema 2", r.stderr)
+            self.assertIn("re-profile", r.stderr)
+
+    def test_a_profile_with_no_pass_log_is_refused(self):
+        bare = self.profile("bare.json", {"L": (20, 1.0)}, passes=0)
+        new = self.profile("a.json", {"L": (20, 1.0)})
+        r = self.compare(new, bare)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not a profiled run", r.stderr)
 
 
 class TierTest(unittest.TestCase):
