@@ -2,8 +2,8 @@
 """worker-report <ticket> --branch <branch> [--repo DIR] : classify a worker's completion (ADR 0006)
 worker-report <pr> --reviewer                                : classify a reviewer's completion (#416)
 
-Reads the worker's whole completion text (the harness notice plus the report) on stdin, prints one verdict
-line and appends a `worker-report` event to the run log. The orchestrator applies the line word for word:
+Reads the worker's whole completion text (the harness notice plus the report) on stdin, ends with one
+`next: <verdict>` line (ADR-0014; the verdicts below are the `next:` words, applied word for word) and appends a `worker-report` event to the run log. The orchestrator applies the line word for word:
     valid pr-opened <pr> <head>      `status: pr-opened` and an open non-draft PR exists; <pr> and <head> are the host's
     valid stopped <stop-reason>      `status: stopped` with a `stop-reason:` on the list below
     valid stopped transient exhausted  the third `transient` in a row on the same failed command (TRANSIENT_RETRIES retries done)
@@ -25,7 +25,7 @@ sends an incomplete report back to the reviewer once.
 `--reviewer --post-risk-notes` also posts the report's `risk-notes:` lines (`path:line-range — what to look at`, word for
 word) as one PR comment whose first line is `> *Risk notes (review not posted).*`, when the report says `posted: off` or
 `posted: failed...`, and never twice: a trusted author's comment with that first line already on the PR is left alone. It
-prints a second line after the verdict: `risk-notes posted`, `risk-notes exists` or `risk-notes none` (a posted review
+prints a line before the verdict: `risk-notes posted`, `risk-notes exists` or `risk-notes none` (a posted review
 carries them, or there are none) or `risk-notes unparsed` (the report has a `risk-notes:` line that holds no
 `path:line-range — what to look at` note; the orchestrator posts nothing and tells the user). A failed post is exit 2.
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
@@ -34,7 +34,8 @@ no-primary-source, worktree-gone, transient (a host failure nobody decides: the 
 reclassified `transient`), permission-denied (which also needs the exact denied command in `denied-command:`; the event
 carries it). A report's `refused:` lines (one per tool call the harness or guard refused) ride in the event as
 `refused: [...]` (`refused: none` is `[]`, no line leaves the field out); the verdict never depends on them. A `followup-needed: <gist>` line (the worker's request for the one follow-up ticket of the threads it left) rides in the event as `followup_needed`, and never changes the verdict. Exit codes: 0 printed a verdict; 2 could not run (no `gh`, a failed PR lookup, an unwritable
-run log): one line on stderr, run it again on the next wake. Stdlib only, Python 3.9+.
+run log): one line on stderr and `next: could-not-run` (`next: retry-after <time>` on a rate limit), run it again on the next wake.
+With `--post-risk-notes` the `risk-notes <word>` line comes before the `next:` line. Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
@@ -278,7 +279,16 @@ def post_risk_notes(repo, pr, text) -> str:
     return "posted"
 
 
+VERDICT: list = []  # the words of the last classification: the `next:` line of the run
+
+
 def main(argv=None) -> int:
+    """Run, then end with the one `next:` line, which is the classification word for word (ADR-0014)."""
+    VERDICT.clear()
+    return common.finish(run, argv, {0: lambda: tuple(VERDICT)})
+
+
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("ticket", help="the ticket number")
     ap.add_argument("--branch", help="the ticket's branch (required unless --reviewer)")
@@ -294,9 +304,9 @@ def main(argv=None) -> int:
     if args.reviewer:
         words = classify_reviewer(text)
         record_review(args.repo, ticket, words, text)
-        print(" ".join(words))
         if args.post_risk_notes:
             print("risk-notes " + post_risk_notes(args.repo, ticket, text))
+        VERDICT.extend(words)
         return 0
     if not args.branch:
         common.die("worker-report: --branch is required (unless --reviewer)")
@@ -320,7 +330,7 @@ def main(argv=None) -> int:
         print(e, file=sys.stderr)  # the verdict line below is the answer
     except OSError as e:
         common.die(f"worker-report: cannot write the run log: {e.strerror or e}")
-    print(" ".join(words))
+    VERDICT.extend(words)
     return 0
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git, verdict_runs  # noqa: E402
 
 import claims  # noqa: E402
 import common  # noqa: E402
@@ -419,7 +419,7 @@ class Liveness(unittest.TestCase):
 
 class Cli(unittest.TestCase):
     def setUp(self):
-        self.env = ScriptEnv()
+        self.env = verdict_runs(ScriptEnv(), "claims")  # claims ends in exactly one `next:` line, checked on every run
         self.addCleanup(self.env.close)
         self.wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.wt_dir.cleanup)
@@ -646,6 +646,24 @@ class Cli(unittest.TestCase):
         import shutil
         shutil.rmtree(path)
         self.assertEqual(self.line("1"), "#1 stalled no-branch pr none worker none worktree gone lock none")
+
+    def test_success_ends_next_done(self):
+        self.nodes = [(1, True)]
+        self.serve()
+        r = self.cli()
+        self.assertEqual((r.returncode, r.verdict), (0, "next: done"))
+
+    def test_a_program_error_ends_could_not_run(self):
+        self.serve(stderr="HTTP 500", exit=1)
+        r = self.cli()
+        self.assertEqual((r.returncode, r.stdout, r.verdict), (2, "", "next: could-not-run"))
+
+    def test_a_rate_limit_ends_retry_after_with_the_reset_time(self):
+        self.serve(stderr="gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n", exit=1)
+        with tempfile.TemporaryDirectory() as cache:
+            r = self.cli(extra_env={"XDG_CACHE_HOME": cache})
+        self.assertEqual((r.returncode, r.stdout), (2, ""))
+        self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
     def test_exit_2_outside_a_repository(self):
         with tempfile.TemporaryDirectory() as d:

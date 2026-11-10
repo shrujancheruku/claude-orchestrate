@@ -17,7 +17,8 @@ event of round 2 or later that requested changes): hand the ticket to a new work
 `claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line.
 Reads the run log and the pass log (a missing one is no events), the tracker as one Snapshot (scripts/tracker.py; `--snapshot FILE` reads a file `snapshot` wrote instead of fetching), the state file (a missing one means no workers) and
 `git worktree list`. Exit codes: 0 printed; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository, an
-unreadable state file), one line on stderr; a rate limit it would not sleep through also ends `next: retry-after <time>`.
+unreadable state file), one line on stderr. Every run ends with exactly one `next:` line (ADR-0014): `done` (0), `retry-after <time>`
+(a rate limit it would not sleep through) or `could-not-run [<Class>: <message>]` (2).
 Stdlib only, Python 3.9+.
 """
 
@@ -56,6 +57,11 @@ def line(c) -> str:
 
 
 def main(argv=None) -> int:
+    """Run, then end with the one `next:` line (ADR-0014): `done`, `retry-after <time>` or `could-not-run`."""
+    return common.finish(run, argv, {0: ("done",)})
+
+
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("ticket", nargs="?", type=int, help="print only this ticket")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
@@ -74,10 +80,6 @@ def main(argv=None) -> int:
         snap = tracker.Snapshot.open(args.snapshot, root)
         found = claims.claims(root, state_file, snap.issues, snap.prs, snap.merged, session=args.session)
     except github.GhError as e:
-        until = common.rate_limit_time(e.message)
-        if until:  # a rate limit is the one word everywhere
-            print(f"claims: cannot run: gh failed: {e.message}", file=sys.stderr)
-            return common.verdict("retry-after", until, exit_code=2)
         common.die(f"claims: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError) as e:
         common.die(f"claims: cannot run: {e}")

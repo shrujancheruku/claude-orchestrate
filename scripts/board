@@ -32,7 +32,9 @@ card left alone), then `<n> writes planned`, and makes none. A real sync prints 
 succeeded (`add #462 → Done`, `#443 In review`, `delete #12`, `archive #330`); `--quiet` suppresses them. `--verbose` prints `writes: <n>` on stderr: the writes
 made (planned, with `--dry-run`).
 Exit codes: 0 synced or no board; 1 any failure, one line on stderr; 2 the owner lookup got no owner (`board: owner lookup
-failed: <gh message>`). `run` carries on: the board never fails a pass.
+failed: <gh message>`). `run` carries on: the board never fails a pass. Every run ends with exactly one `next:` line
+(ADR-0014): `done` (0), `retry-after <time>` (a rate limit it gave up on, exit 1 or 2) or `could-not-run [<why>]` (a
+sync it could not finish, so the board's drift stays; exit 1 or 2).
 Stdlib only, Python 3.9+.
 """
 
@@ -461,7 +463,25 @@ def sync(owner, number, repo, writes=None):
         print(f"{writes.count} write{'' if writes.count == 1 else 's'} planned")
 
 
+FAILURE: list = []  # the stderr line of the last failed sync: the `could-not-run` message of the verdict
+
+
+def failed():
+    """The verdict of a sync that did not finish (exit 1 or 2): the board stays as it was, a drift it could not fix.
+    A rate limit it gave up on is the one word `retry-after <time>`, whatever the exit code."""
+    if github.rate_limited_until:
+        return ("retry-after", github.rate_limited_until)
+    return ("could-not-run", *FAILURE[-1:])
+
+
 def main(argv=None) -> int:
+    """Run, then end with the one `next:` line (ADR-0014): `done`, `retry-after <time>` or `could-not-run <why>`.
+    Exit codes keep their numbers (1 any failure, 2 no owner)."""
+    FAILURE.clear()
+    return common.finish(run, argv, {0: ("done",), 1: failed})
+
+
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--repo", default=".", help="repo root: the config is read and gh runs there")
     ap.add_argument("--dry-run", action="store_true",
@@ -475,7 +495,8 @@ def main(argv=None) -> int:
         return 0
     m = PROJECT_URL.match(url)
     if not m:
-        print(f"board: cannot read the Board URL: {url}", file=sys.stderr)
+        FAILURE.append(f"cannot read the Board URL: {url}")
+        print(f"board: {FAILURE[-1]}", file=sys.stderr)
         return 1
     try:
         writes = Writes(args.dry_run, quiet=args.quiet)
@@ -485,10 +506,12 @@ def main(argv=None) -> int:
             if args.verbose:
                 print(f"writes: {writes.count}", file=sys.stderr)
     except github.GhError as e:
-        print(f"board: {common.one_line(e.message)}", file=sys.stderr)
+        FAILURE.append(common.one_line(e.message))
+        print(f"board: {FAILURE[-1]}", file=sys.stderr)
         return 2 if isinstance(e, OwnerLookupError) else 1
     except (KeyError, TypeError, ValueError, AttributeError):
-        print("board: gh returned an unexpected reply", file=sys.stderr)
+        FAILURE.append("gh returned an unexpected reply")
+        print(f"board: {FAILURE[-1]}", file=sys.stderr)
         return 1
     return 0
 

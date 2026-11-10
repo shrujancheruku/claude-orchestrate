@@ -1511,7 +1511,9 @@ def cmd_compare(argv: list) -> None:
 
 def main(argv: list) -> None:
     if argv and argv[0] == "record":
-        cmd_record(argv[1:])
+        # `record` is orchestrator-facing, so it ends with the one `next: recorded` line (ADR-0014); exit 2 is the
+        # usual `could-not-run`, or `retry-after <time>` on a rate limit. The profile and compare commands are reports.
+        sys.exit(common.finish(lambda a: cmd_record(a) or 0, argv[1:], {0: ("recorded",)}))
     elif argv and argv[0] == "compare":
         cmd_compare(argv[1:])
     else:
