@@ -60,9 +60,12 @@ REPLY_FIELD = ("addPullRequestReviewThreadReply(input: {pullRequestReviewThreadI
                "{ comment { id } }")
 RESOLVE_FIELD = "resolveReviewThread(input: {threadId: $id}) { thread { id } }"
 UNRESOLVE_FIELD = "unresolveReviewThread(input: {threadId: $id}) { thread { id } }"
-REPLY = "mutation($id: ID!, $body: String!) { " + REPLY_FIELD + " }"
-RESOLVE_THREAD = "mutation($id: ID!) { " + RESOLVE_FIELD + " }"
-UNRESOLVE_THREAD = "mutation($id: ID!) { " + UNRESOLVE_FIELD + " }"
+# The single-thread mutations are whole literals, so gate's GraphQL check (gqlcheck, #682) reads each one; a test
+# keeps them equal to their *_FIELD. Only the batched aliases are assembled at run time (gate reports those unchecked).
+REPLY = ("mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: "
+         "{pullRequestReviewThreadId: $id, body: $body}) { comment { id } } }")
+RESOLVE_THREAD = "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }"
+UNRESOLVE_THREAD = "mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { id } } }"
 REPLIES = ("fixed in ", "left:", "reopened:")
 MIN_SHA = 7
 
@@ -104,13 +107,12 @@ def graphql(query, cwd, **variables):
     github.call(*args, cwd=cwd)
 
 
-def batched(field, ids, cwd, bodies=None) -> None:
+def batched(field, single, ids, cwd, bodies=None) -> None:
     """One GraphQL request applying the mutation `field` to every id: an alias (`m0`, `m1`, ...) per thread, so the
     rate limit sees one write however many threads. bodies: the reply text per id (the reply mutation); None for
-    resolve and unresolve. One id sends the plain single-mutation text."""
+    resolve and unresolve. One id sends `single`, the field's whole-literal mutation."""
     if len(ids) == 1:
-        graphql("mutation($id: ID!" + (", $body: String!" if bodies else "") + ") { " + field + " }", cwd,
-                id=ids[0], **({"body": bodies[0]} if bodies else {}))
+        graphql(single, cwd, id=ids[0], **({"body": bodies[0]} if bodies else {}))
         return
     decls, calls, variables = [], [], {}
     for i, tid in enumerate(ids):
@@ -272,16 +274,16 @@ def main(argv=None) -> int:
                 reply = f"fixed in {args.fixed}"
             else:
                 reply = f"left: {args.left} (follow-up #{args.followup.lstrip('#')})" if args.followup else f"left: {args.left} (no follow-up)"
-            outcome, field = "resolved", RESOLVE_FIELD
+            outcome, field, single = "resolved", RESOLVE_FIELD, RESOLVE_THREAD
         else:
-            reply, outcome, field = f"reopened: {args.why}", "reopened", UNRESOLVE_FIELD
+            reply, outcome, field, single = f"reopened: {args.why}", "reopened", UNRESOLVE_FIELD, UNRESOLVE_THREAD
         # A retry after a failed mutation must not post the same reply twice.
         todo = [t for t in chosen if not (t["comments"] and t["comments"][-1]["body"].strip() == reply)]
         if todo:
             sent += 1
-            batched(REPLY_FIELD, [t["id"] for t in todo], cwd, [reply] * len(todo))
+            batched(REPLY_FIELD, REPLY, [t["id"] for t in todo], cwd, [reply] * len(todo))
         sent += 1
-        batched(field, [t["id"] for t in chosen], cwd)
+        batched(field, single, [t["id"] for t in chosen], cwd)
     except github.GhError as e:
         common.die(f"threads: gh failed: {e.message}")
     finally:
