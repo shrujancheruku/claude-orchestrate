@@ -49,6 +49,7 @@ class Config(NamedTuple):
     worker_small_model: str | None = None  # the Worker row's `; <model> for S tickets` clause; None when absent or unparsed
     ci_wait_limit: int | None = None  # minutes: the optional `**CI wait limit:**` line; None when absent or not a number
     board: str | None = None  # the `- **Board:** <project URL>` line setup writes; None when absent
+    board_bad: str | None = None  # the Board line's text when it is present but names no URL; None when it parses or is absent (#738)
     trusted_authors: tuple = ()  # logins on the optional `- **Trusted authors:**` line (Backlog): trusted besides OWNER, MEMBER, COLLABORATOR (ADR-0015)
     idle_window: int = 10  # minutes: the Velocity section's `**Idle window:**`; how long a slot may sit idle with work waiting before the lead is woken (#716)
     hold_threshold: int = 3  # the Velocity section's `**Expensive hold:**`: takeable tickets one held PR blocks before the digest asks the developer
@@ -108,6 +109,7 @@ class Config(NamedTuple):
             worker_small_model=_worker_small_model(common.section_of(text, "Models")),
             ci_wait_limit=_ci_wait_limit(text),
             board=_board(text),
+            board_bad=_board_bad(text),
             trusted_authors=_trusted_authors(common.section_of(text, "Backlog")),
             problems=tuple(problems),
             **_velocity(common.section_of(text, "Velocity")),
@@ -321,13 +323,29 @@ def _ci_wait_limit(text):
     return int(m.group(1)) if m else None
 
 
-_BOARD = re.compile(r"^-\s+\*\*Board:\*\*\s*(https?://\S+)", re.M)
+_BOARD_LINE = re.compile(r"^-[ \t]+\*\*Board:\*\*[ \t]*(.*)$", re.M)
+_BOARD_URL = re.compile(r"<?(https?://[^\s<>]+)>?")
+
+
+def _board_line(text):
+    """The text after `- **Board:**` on the config's Board line, or None when the line is absent. An HTML comment is
+    no line (the template shows the line inside one)."""
+    m = _BOARD_LINE.search(re.sub(r"<!--.*?-->", "", text, flags=re.S))
+    return m.group(1).strip() if m else None
 
 
 def _board(text):
-    """The Projects board URL from the line `- **Board:** <url>` (a top-level bullet; setup writes it), or None."""
-    m = _BOARD.search(text)
-    return m.group(1).rstrip(".,;") if m else None
+    """The Projects board URL from the line `- **Board:** <url>` (a top-level bullet; setup writes it), bare or as an
+    `<url>` autolink (#738), else None. A line that is present but names no URL is `_board_bad`'s."""
+    line = _board_line(text)
+    m = _BOARD_URL.fullmatch(line.rstrip(".,;")) if line else None
+    return m.group(1) if m else None
+
+
+def _board_bad(text):
+    """The Board line when it is present but does not parse (so a caller can tell it from no line at all), else None."""
+    line = _board_line(text)
+    return None if line is None or _board(text) else line
 
 
 _TRUSTED_LINE = re.compile(r"^[-*]\s+\*\*Trusted authors:?\*\*:?(.*)$", re.IGNORECASE | re.MULTILINE)

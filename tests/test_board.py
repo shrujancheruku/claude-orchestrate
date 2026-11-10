@@ -42,10 +42,24 @@ def ticket(n, labels=(), claimed=False, blocked_by=()):
             "blockedBy": {"nodes": [{"number": b, "state": "OPEN"} for b in blocked_by]}}
 
 
-def card(n, stage=None, item="I", repository="acme/r", type="Issue"):
+# The built-in Status field, which board mirrors from Stage (#738).
+STATUS_OPTIONS = ["Todo", "In Progress", "Done"]
+STATUS_FIELD = {"id": "SF1", "name": "Status", "options": [{"id": "s" + str(i), "name": n} for i, n in enumerate(STATUS_OPTIONS)]}
+SOPT = {n: "s" + str(i) for i, n in enumerate(STATUS_OPTIONS)}
+STATUS_OF = {"Backlog": "Todo", "Building": "In Progress", "In review": "In Progress", "Needs lead": "In Progress",
+             "Waiting on you": "In Progress", "Done": "Done"}
+
+
+def card(n, stage=None, item="I", repository="acme/r", type="Issue", status="mirrored"):
+    """A project card. status: the card's built-in Status; by default the one board mirrors from its stage, so a card
+    that is in step makes no Status write."""
     c = {"id": f"{item}{n}", "content": {"type": type, "number": n, "repository": repository, "title": f"t{n}"}}
     if stage:
         c["stage"] = stage
+    if status == "mirrored":
+        status = STATUS_OF.get(stage)
+    if status:
+        c["status"] = status
     return c
 
 
@@ -74,20 +88,21 @@ class Board(unittest.TestCase):
     LOOKUP_Q = "~query=query {"
     MUTATION_Q = "~query=mutation {"
 
-    def project_reply(self, cards, fields, owner="User"):
+    def project_reply(self, cards, fields, owner="User", status_field=STATUS_FIELD):
         nodes = []
         for c in cards:
             content = c["content"]
             node_content = {"__typename": content["type"], "title": content.get("title")}
             if content["type"] == "Issue":
                 node_content.update(number=content["number"], repository={"nameWithOwner": content["repository"]})
-            nodes.append({"id": c["id"], "content": node_content, "stage": {"name": c["stage"]} if c.get("stage") else None})
-        project = {"id": "P1", "field": fields[0] if fields else None,
+            nodes.append({"id": c["id"], "content": node_content, "stage": {"name": c["stage"]} if c.get("stage") else None,
+                          "status": {"name": c["status"]} if c.get("status") else None})
+        project = {"id": "P1", "field": fields[0] if fields else None, "statusField": status_field,
                    "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}
         return out({"data": {"repositoryOwner": {"__typename": owner, "projectV2": project}}})
 
     def gh(self, tickets=(), prs=(), cards=(), fields=(FIELD,), extra=(), new_ids=("NEW",), graphql=(), owner="User",
-           project=None):
+           project=None, status_field=STATUS_FIELD):
         """Canned gh. Each GraphQL call is told by its query: the tracker's issues, the one project read, the
         content ids of new cards, and the mutations. `graphql` are the replies to a field create or upgrade, the
         first mutation; the next is the adds' reply (the item ids in `new_ids`), then an empty one for the rest."""
@@ -99,7 +114,7 @@ class Board(unittest.TestCase):
             *extra,
             gh_repo_rest(REPO),
             {"args": ["api", "graphql", "-f", self.ISSUES_Q], **issues},
-            {"args": ["api", "graphql", "-f", self.PROJECT_Q], **(project or self.project_reply(cards, fields, owner))},
+            {"args": ["api", "graphql", "-f", self.PROJECT_Q], **(project or self.project_reply(cards, fields, owner, status_field))},
             {"args": ["api", "graphql", "-f", self.LOOKUP_Q], **lookup},
             {"args": ["api", "graphql", "-f", self.MUTATION_Q], "seq": [*created, *graphql, adds, out({"data": {}})]},
             gh_pr_list([p for p in prs if p.get("state") == "OPEN"], "--state", "open"),
@@ -147,8 +162,15 @@ class Board(unittest.TestCase):
         names = names or {v: k for k, v in OPT.items()}
         found = {}
         for f in self.fragments("updateProjectV2ItemFieldValue"):
-            found[re.search(r'itemId: "([^"]+)"', f).group(1)] = names[re.search(r'singleSelectOptionId: "([^"]+)"', f).group(1)]
+            if 'fieldId: "F1"' in f:  # the Stage field; the Status mirror is status_edits
+                found[re.search(r'itemId: "([^"]+)"', f).group(1)] = names[re.search(r'singleSelectOptionId: "([^"]+)"', f).group(1)]
         return found
+
+    def status_edits(self):
+        """{item id: Status name} for each write to the built-in Status field."""
+        names = {v: k for k, v in SOPT.items()}
+        return {re.search(r'itemId: "([^"]+)"', f).group(1): names[re.search(r'singleSelectOptionId: "([^"]+)"', f).group(1)]
+                for f in self.fragments("updateProjectV2ItemFieldValue") if 'fieldId: "SF1"' in f}
 
     def writes(self):
         return self.fragments() + self.field_writes()
@@ -413,6 +435,67 @@ class Board(unittest.TestCase):
         self.assertIn("project", r.stderr)
         self.assertRegex(r.verdict, r"^next: could-not-run .*project")  # exit 1 stays 1; the verdict carries the line
 
+    def test_an_autolink_board_line_syncs_like_a_bare_url(self):
+        self.config(f"- **Board:** <{URL}>\n")
+        self.gh(tickets=[ticket(1, claimed=True)], cards=[card(1, "Building")])
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertTrue(self.queries())  # the board was read: the sync did not take the "no board" path
+
+    def test_a_board_line_naming_no_url_is_an_error_not_no_board(self):
+        for line in ("<project URL>", "TBD", "see https://github.com/orgs/acme/projects/7"):
+            with self.subTest(line):
+                self.config(f"- **Board:** {line}\n")
+                r = self.env.run("board", check=False)
+                self.assertEqual(r.returncode, 1)
+                self.assertEqual(r.stderr.strip(), f"board: cannot read the Board line: {line}")
+                self.assertEqual(r.verdict, "next: could-not-run bad Board line")
+                self.assertEqual(self.env.gh_calls(), [])
+
+    def test_a_missing_board_line_stays_silent(self):
+        self.config("- **Trusted authors:** `x`\n")
+        r = self.env.run("board", check=False)
+        self.assertEqual((r.returncode, r.stdout, r.stderr, r.verdict), (0, "", "", "next: done"))
+
+    def test_status_mirrors_stage_by_name_on_a_new_card_and_on_a_move(self):
+        self.config()
+        tickets = [ticket(1, claimed=True), ticket(2, ["ready-for-human"]), ticket(3, claimed=True)]
+        self.gh(tickets=tickets, cards=[card(2, "Waiting on you", status="Todo"), card(3, "Building", status="Done")],
+                new_ids=["N1"])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        # #1 is new (no Status yet), #2 is in step on Stage but not Status, #3 is in step on Stage and wrong on Status.
+        self.assertEqual(self.status_edits(), {"N1": "In Progress", "I2": "In Progress", "I3": "In Progress"})
+
+    def test_every_stage_maps_to_its_status(self):
+        self.config()
+        # Backlog -> Todo; Building, Needs lead and Waiting on you -> In Progress (In review shares In Progress, Done -> Done).
+        # Every card starts with a Status that is wrong for its stage, so each gets exactly one mirror write.
+        self.gh(tickets=[ticket(1, ["ready-for-agent"]), ticket(2, claimed=True), ticket(3, ["needs-lead"], True),
+                         ticket(4, ["ready-for-human"])],
+                cards=[card(1, "Backlog", status="Done"), card(2, "Building", status="Todo"),
+                       card(3, "Needs lead", status="Done"), card(4, "Waiting on you", status="Done")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual(self.status_edits(), {"I1": "Todo", "I2": "In Progress", "I3": "In Progress", "I4": "In Progress"})
+        self.assertEqual(self.edits(), {})
+
+    def test_a_missing_status_option_is_one_stderr_line_and_no_status_write_but_stage_is_set(self):
+        self.config()
+        no_progress = {**STATUS_FIELD, "options": [o for o in STATUS_FIELD["options"] if o["name"] != "In Progress"]}
+        self.gh(tickets=[ticket(1, claimed=True), ticket(2, claimed=True)], cards=[card(1, "Done"), card(2, "Done")],
+                status_field=no_progress)
+        r = self.env.run("board", check=False)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1)
+        self.assertIn("In Progress", r.stderr)
+        self.assertEqual(self.status_edits(), {})
+        self.assertEqual(self.edits(), {"I1": "Building", "I2": "Building"})
+
+    def test_a_matching_stage_and_status_make_no_write(self):
+        self.config()
+        self.gh(tickets=[ticket(1, claimed=True)], cards=[card(1, "Building", status="In Progress")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual(self.mutations(), [])
+
     def test_an_unreadable_board_url_fails_in_one_line(self):
         self.config("- **Board:** https://example.com/nope\n")
         r = self.env.run("board", check=False)
@@ -427,7 +510,7 @@ class Board(unittest.TestCase):
 
     def test_three_changed_rows_are_one_mutation_with_three_aliases(self):
         self.config()
-        self.gh(tickets=[ticket(n, claimed=True) for n in (1, 2, 3)], cards=[card(n, "Done") for n in (1, 2, 3)])
+        self.gh(tickets=[ticket(n, claimed=True) for n in (1, 2, 3)], cards=[card(n, "Done", status="In Progress") for n in (1, 2, 3)])
         r = self.env.run("board", "--verbose", check=False)
         self.assertEqual((r.returncode, r.stderr.strip()), (0, "writes: 3"))
         mutations = self.mutations()
@@ -438,7 +521,7 @@ class Board(unittest.TestCase):
     def test_a_mutation_holds_at_most_twenty_rows(self):
         self.config()
         numbers = range(1, 46)
-        self.gh(tickets=[ticket(n, claimed=True) for n in numbers], cards=[card(n, "Done") for n in numbers])
+        self.gh(tickets=[ticket(n, claimed=True) for n in numbers], cards=[card(n, "Done", status="In Progress") for n in numbers])
         self.assertEqual(self.env.run("board", check=False).returncode, 0)
         self.assertEqual([len(re.findall(r"\bm\d+: ", q)) for q in self.mutations()], [20, 20, 5])
         self.assertEqual(len(self.edits()), 45)
@@ -530,7 +613,7 @@ class Board(unittest.TestCase):
     def test_a_failed_batch_names_its_rows_and_says_the_later_ones_were_not_sent(self):
         self.config()
         numbers = range(1, 26)
-        self.gh(tickets=[ticket(n, claimed=True) for n in numbers], cards=[card(n, "Done") for n in numbers],
+        self.gh(tickets=[ticket(n, claimed=True) for n in numbers], cards=[card(n, "Done", status="In Progress") for n in numbers],
                 extra=[{"args": ["api", "graphql", "-f", self.MUTATION_Q],
                         "seq": [out({"data": {}}), {"exit": 1, "stderr": "gh: boom"}]}])
         r = self.env.run("board", check=False)

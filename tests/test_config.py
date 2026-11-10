@@ -136,6 +136,28 @@ class ConfigTemplate(unittest.TestCase):
         self.assertIsNone(config.Config.parse(TEMPLATE).board)
         text = filled().replace("## Slots", f"- **Board:** {url}\n\n## Slots", 1)
         self.assertEqual(config.Config.parse(text).board, url)
+        self.assertIsNone(config.Config.parse(text).board_bad)
+
+    def test_board_line_as_an_autolink_is_the_url_without_brackets(self):
+        url = "https://github.com/users/acme/projects/1"
+        for line in (f"- **Board:** {url}", f"- **Board:** <{url}>", f"- **Board:**   <{url}>  "):
+            parsed = config.Config.parse(filled().replace("## Slots", f"{line}\n\n## Slots", 1))
+            with self.subTest(line):
+                self.assertEqual((parsed.board, parsed.board_bad), (url, None))
+
+    def test_a_board_line_that_names_no_url_is_bad_not_missing(self):
+        missing = config.Config.parse(filled())
+        self.assertEqual((missing.board, missing.board_bad), (None, None))
+        for line in ("<project URL>", "TBD", ""):
+            parsed = config.Config.parse(filled().replace("## Slots", f"- **Board:** {line}\n\n## Slots", 1))
+            with self.subTest(line):
+                self.assertIsNone(parsed.board)
+                self.assertEqual(parsed.board_bad, line)
+
+    def test_the_templates_board_example_is_a_comment_and_shows_the_bare_form(self):
+        self.assertIn("- **Board:** https://github.com/users/<owner>/projects/<n>", TEMPLATE)
+        parsed = config.Config.parse(TEMPLATE)
+        self.assertEqual((parsed.board, parsed.board_bad), (None, None))
 
     def test_ci_wait_limit_set_missing_and_unfilled(self):
         self.assertEqual(config.Config.parse(filled()).ci_wait_limit, 15)
