@@ -2299,6 +2299,34 @@ class SubagentScriptBoundaryTest(unittest.TestCase):
     def test_a_workers_numbered_threads_call_says_to_drop_the_number(self):
         self.assertIn("Drop the number", self.deny("worker", f"{SCRIPTS}/threads 648"))
 
+    def test_each_refused_shape_names_its_nearest_approved_form(self):
+        for role, command, expect in (
+            ("worker", "git push", "git push -u origin <your-branch>"),
+            ("worker", "git push origin", "git push -u origin <your-branch>"),
+            ("worker", "gh pr comment 5 --body hi", "put the text in the PR body"),
+            ("worker", "until curl -s example.com; do sleep 5; done", "workers never wait"),
+            ("reviewer", "python3 -c 'print(1)'", f"{'<plugin>'}/scripts/verify --config --cwd <scratch checkout>"),
+            ("scout", "python3 -c 'print(1)'", "you write no file and run no inline script"),
+            ("worker", "cat <<'EOF' >> notes.md\nx\nEOF", "edit files with the Edit or Write tool"),
+            ("worker", "printf x >> notes.md", "edit files with the Edit or Write tool"),
+        ):
+            with self.subTest((role, command)):
+                reason = self.deny(role, command)
+                self.assertTrue(reason.startswith("orchestrate guard: not approved for "), reason)
+                self.assertIn(expect, reason)
+
+    def test_a_reviewers_mkdir_says_no_mkdir_is_needed(self):
+        reason = self.deny("reviewer", "mkdir -p /tmp/scratch")
+        self.assertIn("`mkdir` is not needed", reason)
+
+    def test_a_non_draft_pr_create_says_to_add_draft(self):
+        self.assertIn("add `--draft`", self.deny("worker", "gh pr create --title t --body b"))
+
+    def test_a_workers_wrong_threads_shape_names_the_approved_one(self):
+        for command in (f"{SCRIPTS}/threads list", f"{SCRIPTS}/threads --help"):
+            with self.subTest(command):
+                self.assertIn(f"Run `{SCRIPTS}/threads` with no other words", self.deny("worker", command))
+
     def test_a_script_named_only_as_an_argument_keeps_its_ordinary_reason(self):
         reason = self.deny("worker", "python3 -m py_compile /etc/x.py scripts/holds.py")
         self.assertNotIn("plugin script this role doesn't run", reason)
@@ -2315,6 +2343,90 @@ class SubagentScriptBoundaryTest(unittest.TestCase):
                         "sed -i 's/a/b/' scripts/holds"):
             with self.subTest(command):
                 self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+
+class WorkerOwnBranchFormsTest(unittest.TestCase):
+    """A worker recovers from a push rejected after the sweep, and cleans up after itself, with forms the guard
+    approves only for its own branch and files (#624). Real git repository: `rm` asks git what is tracked."""
+
+    BRANCH = "624-x"
+
+    def git(self, *args, cwd=None):
+        subprocess.run(["git", *args], cwd=cwd or self.main, check=True, capture_output=True,
+                       env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"})
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.main = Path(tmp.name).resolve() / "main"
+        self.main.mkdir()
+        self.git("init", "-q", "-b", "main")
+        (self.main / "tracked.txt").write_text("a\n")
+        (self.main / ".claude").mkdir()
+        (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** no\n")
+        self.git("add", "tracked.txt")
+        self.git("commit", "-q", "-m", "init")
+        self.work = self.main / ".claude" / "worktrees" / "agent-abc"
+        self.git("worktree", "add", "-q", "-b", self.BRANCH, str(self.work))
+        (self.work / "untracked.txt").write_text("u\n")
+        (self.work / "pr-body.md").write_text("b\n")
+        (self.main / "outside.txt").write_text("o\n")
+
+    def ok(self, command):
+        return approved("orchestrate:worker", command, self.work)
+
+    def test_a_merge_or_pull_of_its_own_branch_is_approved(self):
+        for command in (f"git merge --no-edit origin/{self.BRANCH}", f"git merge --ff-only origin/{self.BRANCH}",
+                        f"git pull --no-rebase origin {self.BRANCH}", f"git pull --ff-only origin {self.BRANCH}"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+
+    def test_another_branch_main_a_rebase_and_a_reset_are_not(self):
+        for command in ("git merge --no-edit origin/main", "git merge --no-edit origin/other", f"git merge origin/{self.BRANCH}",
+                        "git merge --no-edit main", f"git merge --no-edit origin/{self.BRANCH} origin/main",
+                        f"git pull --rebase origin {self.BRANCH}", "git pull --no-rebase origin main",
+                        "git pull --ff-only", "git pull", f"git reset --hard origin/{self.BRANCH}",
+                        f"git push --force origin {self.BRANCH}", f"git merge --no-edit origin/{self.BRANCH} && git push origin {self.BRANCH}"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_rm_of_an_untracked_file_in_its_own_worktree_is_approved(self):
+        for command in ("rm untracked.txt", "rm -f pr-body.md", "rm untracked.txt pr-body.md"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+
+    def test_rm_of_a_tracked_file_a_directory_or_a_path_outside_is_not(self):
+        (self.work / "d").mkdir()
+        for command in ("rm tracked.txt", "rm -rf d", "rm d", "rm ../../../outside.txt", f"rm {self.main}/outside.txt",
+                        "rm missing.txt", "rm untracked.txt tracked.txt", "rm *.txt", "rm .git"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_git_rm_of_a_tracked_file_inside_its_worktree(self):
+        for command in ("git rm tracked.txt", "git rm -q tracked.txt"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in ("git rm ../../../outside.txt", "git rm --cached tracked.txt", "git rm -rf tracked.txt",
+                        f"git rm {self.main}/outside.txt", "git rm -r ."):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_restoring_a_file_from_a_ref_inside_its_worktree(self):
+        for command in ("git checkout origin/main -- tracked.txt", "git checkout HEAD -- tracked.txt",
+                        "git restore -- tracked.txt", "git restore --source origin/main -- tracked.txt"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in ("git checkout origin/main", "git checkout -- ../../../outside.txt", "git checkout origin/main -- /etc/hosts",
+                        "git checkout -b other", "git restore --source=origin/main tracked.txt", "git restore --staged tracked.txt",
+                        "git checkout -f origin/main -- tracked.txt", "git restore --source $X -- tracked.txt"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_only_a_workers_forms_are_approved(self):
+        for role in ("reviewer", "scout"):
+            self.assertFalse(approved(f"orchestrate:{role}", f"git merge --no-edit origin/{self.BRANCH}", self.work))
+            self.assertFalse(approved(f"orchestrate:{role}", "rm untracked.txt", self.work))
 
 
 if __name__ == "__main__":
