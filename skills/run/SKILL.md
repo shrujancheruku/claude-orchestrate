@@ -23,7 +23,7 @@ Then read the **tracker docs** the config's **Backlog** section points to, norma
 
 ## The backlog
 
-A ticket is **takeable** when `frontier` lists it: run `"${CLAUDE_SKILL_DIR}/../../scripts/frontier"` (with `--parent <n>` or `--ticket <n>` on a narrowed pass) and take its lines in order. Tickets labelled `ready-for-human` are never dispatched; report them as waiting on the user.
+A ticket is **takeable** when `frontier` lists it: run `"${CLAUDE_SKILL_DIR}/../../scripts/frontier"` (with `--parent <n>` or `--ticket <n>` on a narrowed pass) and take its lines in order. Tickets labelled `ready-for-human` are never dispatched; report them as waiting on the user. A `relaunch:` line in place of the tickets: dispatch nothing and report it as waiting on the developer.
 
 ## State lives outside you
 

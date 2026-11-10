@@ -199,6 +199,35 @@ class Frontier(unittest.TestCase):
         events = [e for e in self.env.events() if e["kind"] == "frontier"]
         self.assertEqual([(e["outcome"], e["takeable"]) for e in events], [("ran", 2)])
 
+    def snapshot_event(self, outcome, sha=None):
+        from runlog import append_event, SNAPSHOT
+        append_event(self.env.repo, SNAPSHOT, outcome, ref=7, **({"sha": sha} if sha else {}))
+
+    def test_a_standing_snapshot_stale_dispatches_nothing_and_asks_for_a_relaunch(self):
+        self.snapshot_event("stale", "a" * 40)
+        self.serve(page([node(1), node(2)]))
+        r = self.frontier()
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("#1 ", r.stdout)
+        lines = r.stdout.splitlines()
+        self.assertTrue(lines[0].startswith("relaunch: snapshot behind main at aaaaaaaaaaaa (PR #7)"), r.stdout)
+        self.assertEqual(len(lines), 1)
+        # the count the event logs is still the tracker's, so the profile stays honest
+        self.assertEqual([e["takeable"] for e in self.env.events() if e["kind"] == "frontier"], [2])
+
+    def test_a_fresh_launch_clears_snapshot_stale(self):
+        self.snapshot_event("stale")
+        self.snapshot_event("launched")
+        self.serve(page([node(1)]))
+        self.assertEqual(self.frontier().stdout, "#1 title 1 model sonnet\n")
+
+    def test_a_merge_after_the_relaunch_stales_it_again(self):
+        self.snapshot_event("stale")
+        self.snapshot_event("launched")
+        self.snapshot_event("stale")
+        self.serve(page([node(1)]))
+        self.assertTrue(self.frontier().stdout.startswith("relaunch:"))
+
     def test_a_failed_gh_exits_2_with_nothing_on_stdout(self):
         self.serve(graphql_exit=1)
         r = self.frontier(check=False)
