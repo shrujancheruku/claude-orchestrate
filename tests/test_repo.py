@@ -145,6 +145,24 @@ class WorktreeHelpers(unittest.TestCase):
         self.assertIn("removed", repo.remove_worktree(str(self.wt), self.root))
         self.assertFalse(self.wt.exists())
 
+    def test_a_mode_only_change_goes_with_the_worktree(self):
+        (self.wt / "a.txt").chmod(0o755)
+        (self.wt / "pr-body.md").write_text("body\n")
+        self.assertIn("removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertFalse(self.wt.exists())
+
+    def test_a_mode_change_plus_a_content_edit_keeps_the_worktree(self):
+        (self.wt / "a.txt").write_text("changed\n")
+        (self.wt / "a.txt").chmod(0o755)
+        self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertTrue(self.wt.exists())
+
+    def test_a_mode_change_beside_an_untracked_file_keeps_the_worktree(self):
+        (self.wt / "a.txt").chmod(0o755)
+        (self.wt / "u.txt").write_text("u\n")
+        self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertTrue(self.wt.exists())
+
     def test_another_untracked_file_is_named_in_the_refusal(self):
         (self.wt / "pr-body.md").write_text("body\n")
         (self.wt / "probe.py").write_text("x\n")

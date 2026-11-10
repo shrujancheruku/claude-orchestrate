@@ -911,11 +911,11 @@
 {"role": "orchestrate:orchestrator-run", "command": "gh pr close 12", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "gh pr reopen 12", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/a.py", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "cp -r /repo/src /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-1b", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp -r /repo/src /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-1b", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cp /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/a.py /repo/src/a.py", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /repo/.claude/worktrees/agent-x/a.py", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cp -t /repo /repo/src/a.py", "expected": "deny", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-1b/x", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-1b/x", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "mkdir -p /repo/x", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/x /repo/x", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "git show HEAD:a.py | tee /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/a.py", "expected": "approve", "source": "hand"}
@@ -966,3 +966,21 @@
 {"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/threads resolve 123 --fixed abc1234", "expected": "unapproved", "outside": true, "source": "hand"}
 {"role": "orchestrate:worker", "command": "git push origin 358-ticket", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git push origin 358-ticket", "expected": "unapproved", "outside": true, "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-5/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git show HEAD:a.py | tee /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-5/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-5/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-5/sub", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/PR-5b/sub", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/notes/../pr-5/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/reviewer-1/a.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/reviewer-1/n.txt", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/reviewer-1/sub", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-5/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git show HEAD:a.py | tee /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-5/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-5/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-5/sub", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/PR-5b/sub", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/notes/../pr-5/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/a.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/n.txt", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/sub", "expected": "approve", "source": "hand"}

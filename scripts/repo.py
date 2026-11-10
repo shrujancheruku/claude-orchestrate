@@ -125,12 +125,36 @@ PR_BODY_FILE = ".claude/pr-body.md"
 PR_BODY_FILES = (PR_BODY_FILE, "pr-body.md")
 
 
-def only_pr_body_untracked(path) -> bool:
-    """True when the one change in the worktree at `path` is an untracked `.claude/pr-body.md`: the file older
-    workers and briefs wrote for `gh pr create --body-file` (#404). Anything else, or a failed call, is False."""
+def only_leftovers(path) -> bool:
+    """True when every change in the worktree at `path` is harmless to discard: an untracked `pr-body.md` (the file
+    workers wrote for `gh pr create --body-file`, #404) or an unstaged mode-only change to a tracked file (no line
+    differs: `git diff --numstat` says `0 0`, #711). Anything else, no change at all or a failed call is False."""
     st = common.run("git", "status", "--porcelain", "-z", "--untracked-files=all", cwd=path)
     entries = [e for e in st.stdout.split("\0") if e]
-    return st.code == 0 and bool(entries) and all(e in {f"?? {f}" for f in PR_BODY_FILES} for e in entries)
+    if st.code != 0 or not entries:
+        return False
+    bodies = {f"?? {f}" for f in PR_BODY_FILES}
+    modified = set()
+    for e in entries:
+        if e in bodies:
+            continue
+        if not e.startswith(" M "):
+            return False
+        modified.add(e[3:])
+    if not modified:
+        return True
+    ns = common.run("git", "diff", "--numstat", "-z", cwd=path)
+    if ns.code != 0:
+        return False
+    # -z numstat records are `added<TAB>deleted<TAB>path`, NUL-separated; a mode-only change adds and deletes nothing
+    seen = set()
+    for rec in (r for r in ns.stdout.split("\0") if r):
+        added, _, rest = rec.partition("\t")
+        deleted, _, name = rest.partition("\t")
+        if added != "0" or deleted != "0":
+            return False
+        seen.add(name)
+    return seen == modified
 
 
 def untracked_names(path, limit=5) -> str:
@@ -147,16 +171,16 @@ def c_locale():
 
 
 def remove_worktree(path, cwd):
-    """Remove the merged PR's worktree and say what happened; never raises, and forces only past an untracked
-    `pr-body.md` (at the worktree root, or the older `.claude/pr-body.md`) that is the tree's only change
-    (`only_pr_body_untracked`): it goes with the tree. Any other untracked file is named in the refusal.
+    """Remove the merged PR's worktree and say what happened; never raises, and forces only past leftovers
+    (`only_leftovers`): an untracked `pr-body.md` (at the worktree root, or the older `.claude/pr-body.md`) and
+    mode-only changes go with the tree. Any other untracked file is named in the refusal.
 
     A harness-locked tree is unlocked first, then removed plainly, so a dirty tree is still refused;
     if that refusal comes after the unlock, the lock is put back so the tree is left as found."""
     def attempt():
         # LC_ALL=C: the refusal texts below are English, whatever the user's locale.
         w = common.run("git", "worktree", "remove", path, cwd=cwd, env=c_locale())
-        if w.code != 0 and "untracked" in w.stderr and only_pr_body_untracked(path):
+        if w.code != 0 and ("untracked" in w.stderr or "modified" in w.stderr) and only_leftovers(path):
             w = common.run("git", "worktree", "remove", "--force", path, cwd=cwd, env=c_locale())
         return w
 

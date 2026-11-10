@@ -8,6 +8,8 @@ JSON line to `.claude/orchestrate-prompts.jsonl` in the main checkout and prints
 and the developer's choice is unchanged. Whatever goes wrong (a bad payload, an unwritable file) is one
 line on stderr; the exit code is always 0 and the hook never blocks.
 
+A line has `"role"` only when ORCHESTRATE_ROLE is set, which scripts/launch does for the orchestrator's line (#642).
+
 Every line has `"source"`: `request` (PermissionRequest) or `notification`. A notification line has no tool: it
 holds `message`, `title` and `notification_type` (each cut to 500 characters) in place of `tool_name`/`tool_input`.
 scripts/prompts counts a prompt both events saw once.
@@ -81,6 +83,11 @@ def record(payload: dict) -> dict:
         "cwd": payload.get("cwd"),
         "permission_mode": payload.get("permission_mode"),
     }
+    # ORCHESTRATE_ROLE is set by scripts/launch on the orchestrator's line only (#579). The lead and a hand-started
+    # session are also the main session with no agent_type, so scripts/prompts needs this to tell them apart (#642).
+    role = os.environ.get("ORCHESTRATE_ROLE")
+    if role:
+        entry["role"] = role[:50]
     if payload.get("hook_event_name") == "Notification" or ("message" in payload and "tool_name" not in payload):
         # The prompt as the developer saw it. A Notification names no tool: the message is all there is
         # ("Claude requested permissions to edit <path> which is a sensitive file"). It fires for prompts that

@@ -7,7 +7,8 @@ notification line within 2 seconds of a request line of the same session is drop
 (a prompt PermissionRequest never sees, such as the sensitive-file check) counts on its own, listed with the
 tool `?` and the notification's message. Prints, in this order:
     prompts: <n>                    always, so a count of 0 shows
-    by role: <role> <n>, ...        only with prompts; roles are orchestrator (agent_type null), worker, reviewer, scout...
+    by role: <role> <n>, ...        only with prompts; roles are worker, reviewer, scout... (agent_type), orchestrator (the logged
+                                    `role`), lead (a session named lead), main (any other session with no agent_type)
     by tool: <tool> <n>, ...        only with prompts, most frequent first
     then one line per prompt, oldest first: `<time> <role> <tool> <first 200 characters of the command or path>`
 The list shows the newest 40 prompts, with a `... <n> earlier` line first when more matched; the counts cover all.
@@ -26,6 +27,7 @@ no usable argument), one line on stderr. Stdlib only, Python 3.9+.
 
 import argparse
 import json
+import shutil
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -42,12 +44,43 @@ DETAIL_WIDTH = 200
 PAIR_WINDOW = 2  # seconds between a notification and the request of the same prompt
 
 
+LEAD_NAME = "lead"  # the name scripts/launch --lead gives the lead's session
+_names = None
+
+
+def session_names() -> dict:
+    """sessionId -> name from `claude agents --json --all`, read once. {} when `claude` is missing or answers badly:
+    a count must not fail on it, so a session it cannot name falls back to `main`."""
+    global _names
+    if _names is None:
+        _names = {}
+        if shutil.which("claude"):
+            code, out, _ = common.run("claude", "agents", "--json", "--all")
+            try:
+                rows = json.loads(out) if code == 0 else None
+            except ValueError:
+                rows = None
+            for r in rows if isinstance(rows, list) else []:
+                if isinstance(r, dict) and isinstance(r.get("sessionId"), str) and isinstance(r.get("name"), str):
+                    _names[r["sessionId"]] = r["name"]
+    return _names
+
+
 def role(entry: dict) -> str:
+    """Whose prompt it is (#642): `agent_type` set -> that role; else the `role` field the hook logged from
+    ORCHESTRATE_ROLE (`orchestrator`); else a session named `lead` in `claude agents --json --all` -> `lead`; else
+    `main`, a hand-started session. Lines logged before the `role` field fall to the name lookup, then `main`."""
     agent = entry.get("agent_type")
-    if not isinstance(agent, str) or not agent:
-        # A notification of a worker's prompt may carry no agent_type, but its type says whose prompt it is.
-        return "worker" if entry.get("notification_type") == "worker_permission_prompt" else "orchestrator"
-    return agent.split(":", 1)[-1]
+    if isinstance(agent, str) and agent:
+        return agent.split(":", 1)[-1]
+    # A notification of a worker's prompt may carry no agent_type, but its type says whose prompt it is.
+    if entry.get("notification_type") == "worker_permission_prompt":
+        return "worker"
+    if entry.get("role") == "orchestrator":
+        return "orchestrator"
+    if session_names().get(entry.get("session_id")) == LEAD_NAME:
+        return LEAD_NAME
+    return "main"
 
 
 def is_notification(entry: dict) -> bool:
