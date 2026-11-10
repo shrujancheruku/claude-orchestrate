@@ -611,6 +611,31 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
         self.assertEqual((self.called(MERGE), self.gate_events()), ([], []))
 
+    # A merged change to the guard does nothing for a run that loaded its plugin before it (#727).
+    def snapshot_events(self):
+        return [(e["outcome"], e["ref"], bool(e.get("sha"))) for e in self.env.events() if e["kind"] == "snapshot"]
+
+    def test_a_hooks_change_merged_by_hand_logs_snapshot_stale(self):
+        p = self.merge(self.approved, files=("hooks/guard.py",), state="MERGED")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.snapshot_events(), [("stale", "7", True)])
+        self.assertIn("snapshot-stale", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+
+    def test_a_plugin_manifest_change_logs_snapshot_stale(self):
+        self.merge(self.approved, files=(".claude-plugin/plugin.json",), state="MERGED")
+        self.assertEqual(len(self.snapshot_events()), 1)
+
+    def test_a_merge_that_leaves_hooks_and_the_manifest_alone_logs_nothing(self):
+        self.merge(self.approved, files=("a.txt", "scripts/merge", "skills/run/SKILL.md"))
+        self.assertEqual(self.snapshot_events(), [])
+
+    def test_unreadable_files_after_the_merge_log_nothing_and_say_so(self):
+        p = self.merge(self.approved, files_reply={"exit": 1, "stderr": "gh: boom"}, state="MERGED")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.snapshot_events(), [])
+        self.assertIn("could not read the changed files", p.stdout)
+
     def test_an_ungated_pr_reads_the_files_and_merges(self):
         self.assertEqual(self.merge(self.approved, files=("a.txt", "docs/x.md")).returncode, 0)
         self.assertEqual(len(self.called(MERGE)), 1)
@@ -631,7 +656,12 @@ class ReadinessTest(unittest.TestCase):
     def test_no_configured_gate_reads_no_file_list(self):
         (self.repo / ".claude" / "orchestration.md").write_text(READY_CONFIG.split("## Gates")[0])
         self.assertEqual(self.merge(self.approved).returncode, 0)
-        self.assertEqual([c for c in self.env.gh_calls() if any("/pulls/7/files" in a for a in c)], [])
+        # The gate reads nothing; the one read is the snapshot note after the merge (#727), which follows the MERGE call.
+        calls = self.env.gh_calls()
+        reads = [i for i, c in enumerate(calls) if any("/pulls/7/files" in a for a in c)]
+        merges = [i for i, c in enumerate(calls) if c[: len(MERGE)] == list(MERGE)]
+        self.assertEqual(len(reads), 1)
+        self.assertGreater(reads[0], merges[0])
 
 
 if __name__ == "__main__":

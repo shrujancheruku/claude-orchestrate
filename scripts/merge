@@ -631,10 +631,33 @@ def run_merge(argv=None) -> int:
     log_event(cwd, "merge", "merged", ref=ref, branch=branch, branch_deleted=deleted,
               tickets=[int(t) for t in tickets if t.isdigit()])
     say(fast_forward_main(cwd, default))
+    note_snapshot(cwd, pr, default)
     handed = sweep(cwd, pr, branch, default, args.method)
     update_approved(cwd, pr, default, args.also_approved, min(HEAD_GAP, args.interval))
     verdict("merged")
     return 4 if handed else 0
+
+
+PLUGIN_LIVE = ("hooks/", ".claude-plugin/")  # a merged change here is what a running run's guard needs (#727)
+
+
+def note_snapshot(cwd, pr, default):
+    """After a merge: when the PR changed `hooks/**` or `.claude-plugin/**`, the run's plugin snapshot is behind main, so
+    log `snapshot stale <sha>` (frontier then dispatches nothing until a fresh launch). Best effort: a file list that
+    can't be read is said, not logged (a guess would stop the run on every unreadable merge)."""
+    try:
+        paths = github.pr_touched_paths(pr, cwd)
+    except github.GhError as e:
+        say(f"snapshot: could not read the changed files of PR #{pr} ({e.message}); if it touched hooks/ or .claude-plugin/, relaunch")
+        return
+    hit = next((p for p in paths if p.startswith(PLUGIN_LIVE)), None)
+    if hit is None:
+        return
+    tip = run("git", "rev-parse", f"origin/{default}", cwd=cwd) if default else None
+    sha = tip.stdout.strip() if tip is not None and tip.code == 0 else None
+    log_event(cwd, runlog.SNAPSHOT, "stale", ref=pr, sha=sha)
+    say(f"snapshot-stale {sha[:12] if sha else '?'}: PR #{pr} changed {hit}; the run's plugin snapshot is behind {default or 'main'}, "
+        "so no new worker is dispatched until a fresh `scripts/launch --bg` (a resume keeps the old snapshot)")
 
 
 def fast_forward_main(cwd, default):

@@ -32,7 +32,8 @@ REVIEW = "review"  # scripts/worker-report <pr> --reviewer: one per reviewer rep
 GH_CALL = "gh_call"  # scripts/github.py: one per `gh` attempt (ok|failed|ratelimited), or "wait" for a sleep
 SWEEP = "sweep"  # scripts/sweep: `ran` is the watermark `--due` counts merges from; `prompt-kind` (ref = the kind) is a prompt kind already reported
 PARK = "park"  # scripts/park-pr: a PR taken out of the merge queue (`parked`) or put back (`unparked`); ref = the PR; ticket, branch, why
-PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
+SNAPSHOT = "snapshot"  # scripts/merge: `stale` after a merged hooks/** or .claude-plugin/** change (sha = origin/<default>); scripts/launch: `launched` on a fresh launch, which clears it (#727)
+PASS, FAIL, UNKNOWN, MERGED,TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
     CI: (PASS, FAIL, "rerun"),  # "rerun": scripts/ci-rerun made the PR's CI run again (head; run and job for a job rerun)
@@ -47,6 +48,7 @@ OUTCOMES = {
     RESUME: ("resumed",),
     SWEEP: ("ran", "prompt-kind"),
     PARK: ("parked", "unparked"),
+    SNAPSHOT: ("stale", "launched"),
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"
@@ -248,6 +250,13 @@ def append_pass(repo, session: str, entry: dict) -> dict:
     entry = {"ts": _now(), "session": session, **entry}
     _append(repo, PASS_LOG, entry)
     return entry
+
+
+def snapshot_stale(repo) -> dict | None:
+    """The `snapshot` event that stands, else None: the newest one, when it is `stale`. A fresh launch writes `launched`,
+    which ends it; a resume writes nothing, since a resumed run keeps the snapshot it launched with (#727)."""
+    events = read_kinds(repo, [SNAPSHOT])
+    return events[-1] if events and events[-1].get("outcome") == "stale" else None
 
 
 def read_passes(repo, session: str) -> list:

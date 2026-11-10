@@ -15,6 +15,9 @@ risk path).
 --parent <n> limits every section to that parent's sub-issues, --ticket <n> to one ticket (its line, or its reason).
 --ticket <n> for a number absent from the open issues prints `#<n> not open` and exits 0.
 An unreadable docs/agents/triage-labels.md is exit 2 with one stderr line; a missing one keeps the default labels.
+While the run log holds a `snapshot stale` event that no fresh launch has cleared (`scripts/merge` writes it after a merged
+`hooks/**` or `.claude-plugin/**` change: the run's plugin snapshot is behind main, #727) it prints the one `relaunch:` line
+in place of every ticket line, so nothing is dispatched; the in-flight work drains and the developer relaunches.
 --fix-drift adds the native `blocked_by` edge for every `drift:` line in scope (the tracker doc's Blocking command), prints
 `added #<n> blocked by #<m>` for each, and then prints as usual with those lines gone from `drift:`; the orchestrator never runs it.
 The rules are in scripts/tracker.py. Reads the open issues through a Snapshot (every page of one `gh api graphql` query;
@@ -134,6 +137,11 @@ def run(argv=None) -> int:
         # A named ticket always answers: its line, or the reason it is not takeable.
         reason = tracker.why_not(scope[0], labels, issues) if labels["ready"] in scope[0]["labels"] else None
         lines = [f"#{args.ticket} {reason or 'not ' + labels['ready']}"]
+    stale = runlog.snapshot_stale(root)
+    if stale:  # a merged guard change the run has not loaded: dispatch nothing, let in-flight work drain (#727)
+        sha = stale.get("sha")
+        lines = [f"relaunch: snapshot behind main{' at ' + sha[:12] if sha else ''} (PR #{stale.get('ref')}): dispatch nothing; "
+                 "when in-flight work drains, ask the developer to stop and run a fresh `scripts/launch --bg`"]
     for line in lines:
         print(line)
     try:

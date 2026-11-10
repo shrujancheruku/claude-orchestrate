@@ -423,7 +423,23 @@ class Launch(unittest.TestCase):
 
     def resume_events(self):
         path = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [r for r in rows if r["kind"] == "resume"]
+
+    def snapshot_events(self):
+        path = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return [(r["outcome"], r["session"]) for r in rows if r["kind"] == "snapshot"]
+
+    def test_a_fresh_launch_logs_the_snapshot_it_loaded_and_a_resume_a_print_or_the_lead_do_not(self):
+        self.live({"name": "orchestrator", "pid": None, "sessionId": "s1"})
+        self.assertEqual(self.launch("--resume", "s1").returncode, 0)
+        self.assertEqual(self.launch("--print").returncode, 0)
+        self.assertEqual(self.launch("--lead").returncode, 0)
+        self.assertEqual(self.snapshot_events(), [])
+        self.live()
+        self.assertEqual(self.launch().returncode, 0)
+        self.assertEqual(self.snapshot_events(), [("launched", self.sha)])
 
     def test_resume_appends_one_resume_event_for_the_session(self):
         self.live({"name": "orchestrator", "pid": None, "sessionId": "s1"})

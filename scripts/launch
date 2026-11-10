@@ -541,6 +541,13 @@ def main(argv=None) -> int:
         # The printed line carries the variable as a shell prefix, so running it by hand starts the same session.
         print("".join(f"{k}={v} " for k, v in extra.items()) + render(cmd))
         return 0
+    if not args.resume and not args.lead and plugin_dir:
+        # A fresh orchestrator loads the current snapshot: it ends a `snapshot stale` that merge logged (#727).
+        # Best effort, like the resume event; a log that cannot be written leaves frontier holding, which is the safe side.
+        try:
+            runlog.append_event(args.repo, runlog.SNAPSHOT, "launched", session=sha)
+        except (OSError, ValueError, runlog.NoSession) as e:
+            print(f"launch: the snapshot event was not logged: {e}", file=sys.stderr)
     if args.resume and not args.lead:
         # The profile finds a Session gap from this event: the gap runs from the session's last transcript entry
         # before it up to its ts. Best effort: a log that cannot be written must not stop the resume.
