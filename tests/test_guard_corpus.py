@@ -15,7 +15,8 @@ call) and heredoc bodies (`BODY`) are shape checks, not the original command: th
 `unapproved` is a deny that only says no rule approves the call (#567): a worker, reviewer or scout never gets the
 permission prompt, so what `silent` was for them is `unapproved` now. `allow` stays "no rule refuses it" and also
 matches an `unapproved` actual; pin a new form as `approve` or `unapproved`.
-A line with `"background": true` is a call made with `run_in_background` set.
+A line with `"background": true` is a call made with `run_in_background` set, and `"timeout": N` one made with a Bash
+timeout of N ms. A line with `"outside": true` runs a worker from the main checkout, outside any worktree of its own.
 Lines with `"source": "hand"` are written by hand, not mined: they pin refusals no real session
 exercised (a worker pushing to main, a scout writing), so over-allowing shows up too.
 
@@ -101,7 +102,7 @@ class Decider:
             path.write_text(json.dumps({"message": {"role": "user", "content": content}}) + "\n")
             self.transcripts[role] = str(path)
 
-    def __call__(self, role, command, background=False, timeout=None):
+    def __call__(self, role, command, background=False, timeout=None, outside=False):
         # `orchestrate:orchestrator` is the main session, which has no agent type. An orchestrator row names the
         # plugin's scripts under the placeholder prefix every row uses; it is pointed at the real directory here,
         # because only the plugin's own script is approved.
@@ -110,7 +111,7 @@ class Decider:
         command = command.replace("/p/orchestrate/0.7.0/scripts/", f"{ROOT / 'scripts'}/")
         if self.scratch:
             command = command.replace("/tmp/scratch-559/pr-559", self.scratch)
-        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" else self.cwd, "session_id": SESSION}
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" and not outside else self.cwd, "session_id": SESSION}
         if background:
             payload["tool_input"]["run_in_background"] = True
         if timeout is not None:
@@ -177,18 +178,19 @@ class GuardCorpus(unittest.TestCase):
         self.assertGreater(len(self.rows), 400)
         for n, row in enumerate(self.rows, 1):
             with self.subTest(line=n):
-                self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source", "background", "timeout"})
+                self.assertLessEqual(set(row), {"role", "command", "expected", "gap", "source", "background", "timeout", "outside"})
                 self.assertTrue(row["role"].startswith("orchestrate:"), row["role"])
                 self.assertTrue(row["command"].strip())
                 self.assertIn(row["expected"], ("allow", "approve", "silent", "deny", "unapproved"))
                 if "gap" in row:
                     self.assertRegex(row["gap"], r"^#\d+$")
-        keys = [(r["role"], r["command"]) for r in self.rows]
+        keys = [(r["role"], r["command"], r.get("outside", False), r.get("background", False), r.get("timeout")) for r in self.rows]
         self.assertEqual([k for k, c in Counter(keys).items() if c > 1], [], "duplicate lines")
 
     def test_guard_decides_every_line_as_labelled(self):
         for n, row in enumerate(self.rows, 1):
-            actual = self.decide(row["role"], row["command"], row.get("background", False), row.get("timeout"))
+            actual = self.decide(row["role"], row["command"], row.get("background", False), row.get("timeout"),
+                                 row.get("outside", False))
             label = f"line {n} ({row['role']}): {row['command'][:100]!r}"
             with self.subTest(label):
                 # `allow` means the rules accept the call (silently or by an explicit approval); `approve` is

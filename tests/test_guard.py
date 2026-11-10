@@ -618,7 +618,9 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(decide("orchestrate:worker", command, background=True), "deny")
                 self.assertEqual(decide("orchestrate:worker", command, background=False, timeout=600000), "allow")
                 self.assertEqual(decide("orchestrate:worker", command, timeout=600000), "allow")
-                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
+                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "deny")  # #687
+                self.assertEqual(decide("orchestrate:reviewer", command, background=False, timeout=600000), "allow")
+                self.assertEqual(decide("orchestrate:scout", command, background=True), "allow")
                 self.assertEqual(decide(None, command, background=True), "allow")
 
     def test_worker_verify_needs_a_bash_timeout_of_600000(self):
@@ -633,8 +635,12 @@ class GuardTest(unittest.TestCase):
         # only a worker's verify call: other commands and other roles are as before
         self.assertEqual(decide("orchestrate:worker", "ls"), "allow")
         self.assertEqual(decide("orchestrate:worker", "grep -n x scripts/verify"), "allow")
-        for role in ("orchestrate:reviewer", "orchestrate:scout", None, "other:worker"):
+        for role in ("orchestrate:scout", None, "other:worker"):
             self.assertEqual(decide(role, quoted), "allow")
+        # a reviewer's verify call is held to the same timeout (#687)
+        for timeout in (None, 300000, 599999):
+            self.assertEqual(decide("orchestrate:reviewer", quoted, timeout=timeout), "deny")
+        self.assertEqual(decide("orchestrate:reviewer", quoted, timeout=600000), "allow")
         reason = self.run_guard({"agent_type": "orchestrate:worker", "tool_input": {"command": quoted}})
         self.assertIn("timeout of 600000", reason)
 
@@ -653,7 +659,7 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(decide("orchestrate:worker", command, background=True), "deny")
                 self.assertEqual(decide("orchestrate:worker", command, background=False), "allow")
                 self.assertEqual(decide("orchestrate:worker", command), "allow")
-                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "allow")
+                self.assertEqual(decide("orchestrate:reviewer", command, background=True), "deny")  # #687
                 self.assertEqual(decide("orchestrate:scout", command, background=True), "allow")
                 # The orchestrator's own hand-made waits are refused (#407), whatever else it runs.
                 self.assertEqual(decide(None, command, background=True, transcript=self.run_transcript()), "deny" if command == "sleep 5" else "allow")
@@ -1334,10 +1340,21 @@ class RoutineApprovalTest(unittest.TestCase):
                 out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
                 self.assertEqual(out["permissionDecision"], "deny")
                 self.assertIn("git internals or a settings file", out["permissionDecisionReason"])
-        for rel in (".claude/pr-body.md", "settings.json", ".claude/agents/x.md"):
+        for rel in ("settings.json", ".claude/orchestration.md", "docs/.claude/x.md"):
             with self.subTest(rel):
                 out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
                 self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_a_stray_write_under_the_worktrees_claude_dir_is_refused_like_one_outside_it(self):
+        # #404: a `.claude/pr-body.md` left in the worktree blocked its removal; only the plugin's config is its own there.
+        outside = raw("orchestrate:worker", None, self.work, "Write", {"file_path": "/tmp/elsewhere/x.md"})
+        for rel in (".claude/pr-body.md", ".claude/agents/x.md", ".claude/worktrees/agent-x/y"):
+            with self.subTest(rel):
+                out = raw("orchestrate:worker", None, self.work, "Write", {"file_path": str(self.work / rel)})
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("it is outside your worktree", out["permissionDecisionReason"])
+                self.assertIn("pass a PR body with `--body-file -`", out["permissionDecisionReason"])
+        self.assertIn("it is outside your worktree", outside["permissionDecisionReason"])
 
     def test_https_push_url_must_name_origin(self):
         (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
@@ -2555,6 +2572,149 @@ class WorkerOwnBranchFormsTest(unittest.TestCase):
         for role in ("reviewer", "scout"):
             self.assertFalse(approved(f"orchestrate:{role}", f"git merge --no-edit origin/{self.BRANCH}", self.work))
             self.assertFalse(approved(f"orchestrate:{role}", "rm untracked.txt", self.work))
+
+
+class ScratchpadWritesTest(unittest.TestCase):
+    """A reviewer's and a scout's writes inside their own session scratchpad (#687); the session id comes from the
+    hook input, so a missing or other id approves nothing."""
+    SID = "00000000-0000-0000-0000-000000000000"
+    PAD = f"/private/tmp/claude-0/-proj/{SID}/scratchpad"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cwd = Path(tmp.name).resolve()
+
+    def ok(self, role, command, sid=SID):
+        return approved(f"orchestrate:{role}", command, self.cwd, session_id=sid)
+
+    def refused(self, role, command, sid=SID):
+        out = raw(f"orchestrate:{role}", command, self.cwd, session_id=sid, full=True)
+        return bool(out) and out["permissionDecision"] == "deny"
+
+    def test_writes_whose_every_target_is_in_the_scratchpad_are_approved(self):
+        for role in ("reviewer", "scout"):
+            for command in (f"cp src/a.py {self.PAD}/a.py", f"cp -r src {self.PAD}/pr-1b", f"mkdir -p {self.PAD}/a/b",
+                            f"git show HEAD:a.py | tee {self.PAD}/a.py", f"echo x > {self.PAD}/n.txt",
+                            f"gh pr diff 5 >> {self.PAD}/d.diff", f"mkdir -p {self.PAD}/a && cp src/a.py {self.PAD}/a/b.py && diff {self.PAD}/a/b.py src/a.py"):
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(self.ok(role, command))
+
+    def test_a_target_outside_the_scratchpad_stays_refused(self):
+        for role in ("reviewer", "scout"):
+            for command in (f"cp {self.PAD}/a.py {self.cwd}/a.py", "cp a b", f"mkdir -p {self.PAD}/a {self.cwd}/x", f"mkdir -p {self.PAD}/../x",
+                            f"tee {self.cwd}/x", f"echo x > {self.cwd}/x", f"echo x > {self.PAD}/../x", "echo x > /tmp/x",
+                            f"cp -t {self.cwd} a", f"cp a {self.PAD}/$X", f"echo x > {self.PAD}/*", f"rm {self.PAD}/a",
+                            f"mv a {self.PAD}/b", f"touch {self.PAD}/a", f"sed -i s/a/b/ {self.PAD}/a"):
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(self.refused(role, command))
+
+    def test_the_session_id_must_match_and_be_present(self):
+        command = f"cp a.py {self.PAD}/a.py"
+        for role in ("reviewer", "scout"):
+            self.assertFalse(self.ok(role, command, sid="other-session"))
+            self.assertTrue(self.refused(role, command, sid="other-session"))
+            self.assertTrue(self.refused(role, command, sid=None))
+
+    def test_a_symlink_out_of_the_scratchpad_is_followed(self):
+        pad = self.cwd / "claude-0" / "-proj" / self.SID / "scratchpad"
+        pad.mkdir(parents=True)
+        (pad / "link").symlink_to(self.cwd)
+        # a real temp root is needed for the pattern, so only the refusal of the link's target is asserted here
+        self.assertTrue(self.refused("reviewer", f"cp a {pad}/link/x"))
+
+    def test_a_worker_is_not_given_these_writes(self):
+        self.assertFalse(approved("orchestrate:worker", f"mkdir -p {self.PAD}/a", self.cwd, session_id=self.SID))
+
+
+class CorpusDenyReasonsTest(unittest.TestCase):
+    """The deny rows the corpus pins for #624's forms (and this ticket's) each carry the reason that names the approved way (#687);
+    a corpus row asserts the decision, this asserts what the agent is told."""
+    SID = "00000000-0000-0000-0000-000000000000"
+
+    def setUp(self):
+        UnapprovedCallsAreDeniedTest.setUp(self)
+
+    def reason(self, role, command):
+        return UnapprovedCallsAreDeniedTest.reason(self, role, command)
+
+    def test_a_worker_pull_or_merge_of_another_ref_says_no_rule_approves_it(self):
+        for command in ("git pull --ff-only origin main", "git pull --ff-only", "git pull --rebase origin 567-x",
+                        "git merge --ff-only origin/other-branch"):
+            with self.subTest(command):
+                reason = self.reason("orchestrate:worker", command)
+                self.assertTrue(reason.startswith("orchestrate guard: not approved for a worker: "), reason)
+
+    def test_another_roles_script_names_the_scripts_that_role_runs(self):
+        self.assertIn("orchestrate guard: not approved for a scout", self.reason("orchestrate:scout", f"{SCRIPTS}/claims --repo /other"))
+        for role in ("worker", "reviewer"):
+            reason = self.reason(f"orchestrate:{role}", f"{SCRIPTS}/claims --repo .")
+            self.assertIn("plugin script this role doesn't run", reason)
+        reason = self.reason("orchestrate:scout", f"{SCRIPTS}/rescue 666 --title t --repo .")
+        self.assertIn("plugin script this role doesn't run", reason)
+
+    def test_a_scout_mutation_through_graphql_is_refused_by_name(self):
+        reason = self.reason("orchestrate:scout", "gh api graphql -f query='mutation { addStar(input: {}) { id } }'")
+        self.assertIn("scout", reason)
+        self.assertIn("mutation", reason.lower())
+
+    def test_a_scratchpad_write_outside_the_scratchpad_names_the_write_and_the_next_step(self):
+        for role in ("reviewer", "scout"):
+            for command, what in (("cp a.py /repo/a.py", "writes files or runs a build"), ("echo x > /repo/n.txt", "redirects output into a file")):
+                with self.subTest(role=role, command=command):
+                    out = raw(f"orchestrate:{role}", command, self.work, session_id=self.SID, full=True)
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    self.assertIn(what, out["permissionDecisionReason"])
+
+    def test_a_reviewer_background_call_and_a_verify_without_a_timeout_say_foreground(self):
+        out = raw("orchestrate:reviewer", "ls", self.work, tool_input={"command": "ls", "run_in_background": True}, full=True)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("reviewer is woken", out["permissionDecisionReason"])
+        verify = f"{SCRIPTS}/verify --config --cwd {self.root}"
+        out = raw("orchestrate:reviewer", verify, self.work, full=True)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("timeout of 600000", out["permissionDecisionReason"])
+
+
+class PrCreateFlagsTest(unittest.TestCase):
+    """A worker's `gh pr create` carries only the allowed flags (#687); `--web` is refused, `--template` is left unapproved."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        main = Path(tmp.name).resolve() / "main"
+        (main / ".git" / "worktrees" / "agent-abc").mkdir(parents=True)
+        (main / ".git" / "worktrees" / "agent-abc" / "commondir").write_text("../..\n")
+        (main / ".git" / "worktrees" / "agent-abc" / "HEAD").write_text("ref: refs/heads/687-ticket\n")
+        self.work = main / ".claude" / "worktrees" / "agent-abc"
+        self.work.mkdir(parents=True)
+        (self.work / ".git").write_text(f"gitdir: {main}/.git/worktrees/agent-abc\n")
+
+    def test_the_allowed_flags_pass(self):
+        for command in ("gh pr create --draft --title t --body b --base main --head 687-x",
+                        "gh pr create -d -t t -b b -B main -H 687-x -l bug -a me -r them",
+                        "gh pr create --draft --fill --label a --label b --assignee @me --reviewer o/team",
+                        "gh pr create --draft --title=t --body=b --base=main --head=687-x",
+                        "gh pr create --draft --title t --body-file - <<'EOF'\nbody\nEOF",
+                        "gh pr create --draft --title t -tb"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+    def test_another_flag_is_left_unapproved(self):
+        for command in ("gh pr create --draft --title t --body b --template x.md", "gh pr create --draft -T x.md --title t",
+                        "gh pr create --draft --title t --body b --milestone 1", "gh pr create --draft --title t --project p",
+                        "gh pr create --draft --title t --body b --no-maintainer-edit", "gh pr create --draft --title t --body b extra",
+                        "gh pr create --draft --fill=true", "gh pr create --draft -df", "gh pr create --draft --title"):
+            with self.subTest(command):
+                self.assertFalse(approved("orchestrate:worker", command, self.work))
+                self.assertIsNone(raw("orchestrate:worker", command, self.work))  # asks: no rule refuses it
+
+    def test_web_is_refused(self):
+        for command in ("gh pr create --draft --web", "gh pr create --draft --title t --body b -w", "gh pr create --draft --web=true"):
+            with self.subTest(command):
+                out = raw("orchestrate:worker", command, self.work)
+                self.assertEqual(out["permissionDecision"], "deny")
+                self.assertIn("--web", out["permissionDecisionReason"])
 
 
 if __name__ == "__main__":

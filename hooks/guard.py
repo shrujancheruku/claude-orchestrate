@@ -827,8 +827,54 @@ def rule_gh_api_writes(p: Parsed, cwd: str) -> str | None:
     return None
 
 
-def rule_fs_writes(p: Parsed, cwd: str) -> str | None:
+def scratchpad_path_ok(value: str, base: str, session: str) -> bool:
+    """A path that, resolved against `base` with symlinks followed, sits inside this session's scratchpad
+    (`<tmp>/claude-<uid>/<project>/<session>/scratchpad/...`). With no session id nothing matches."""
+    if not value or not session:
+        return False
+    target = os.path.realpath(os.path.join(base or ".", value))
+    pad = scratchpad_pattern(session)
+    return any(target.startswith(t + "/") and pad.fullmatch(target[len(t):]) for t in TEMP_ROOTS)
+
+
+# The flags of the writes a reviewer or scout may make inside its own scratchpad (#687): `mkdir -p`, `tee -a`, and
+# `cp` without a target-directory option, so the last word is always the one target.
+SCRATCH_WRITE_FLAGS = {"mkdir": frozenset(("-p",)), "tee": frozenset(("-a",)),
+                       "cp": frozenset(("-r", "-R", "-p", "-a", "-f", "-n", "-v"))}
+
+
+def scratch_write_ok(cmd: Command, base: str, session: str) -> bool:
+    """One `mkdir -p`, `tee` or `cp` that is the first word of the command, written in plain words, whose every
+    target is inside the session scratchpad (#687). `cp` reads its sources from anywhere and writes only the last word;
+    `mkdir` and `tee` write every operand."""
+    words = cmd.words
+    if not words or any(w.dynamic or w.glob for w in words) or words[0].text not in SCRATCH_WRITE_FLAGS:
+        return False
+    name, rest = words[0].text, [w.text for w in words[1:]]
+    flags = [a for a in rest if a.startswith("-")]
+    operands = [a for a in rest if not a.startswith("-")]
+    if not operands or any(f not in SCRATCH_WRITE_FLAGS[name] for f in flags):
+        return False
+    if name == "cp":
+        return len(operands) >= 2 and scratchpad_path_ok(operands[-1], base, session)
+    return all(scratchpad_path_ok(a, base, session) for a in operands)
+
+
+def scratch_redirects_ok(cmd: Command, base: str, session: str) -> bool:
+    """Every redirect of the command is `2>&1`-style, `/dev/null`, or a `>`/`>>` into the session scratchpad (#687)."""
+    for op, target in cmd.redirects:
+        if target.dynamic or target.glob:
+            return False
+        ok_null = (op in (">", "&>") and target.text == "/dev/null") or (op == ">&" and target.text in ("1", "2"))
+        if not (ok_null or (op in (">", ">>") and scratchpad_path_ok(target.text, base, session))):
+            return False
+    return True
+
+
+def rule_fs_writes(p: Parsed, cwd: str, session: str = "") -> str | None:
     for cmd in p.cmds:
+        if scratch_write_ok(cmd, cwd, session):
+            continue
         words, program = cmd.words, command_index(cmd.words)
         for k, w in enumerate(words):
             # Quoted words are search text, except the one naming the program.
@@ -849,15 +895,23 @@ def rule_fs_writes(p: Parsed, cwd: str) -> str | None:
     return None
 
 
-def rule_redirects(p: Parsed, cwd: str) -> str | None:
+def rule_redirects(p: Parsed, cwd: str, session: str = "") -> str | None:
     for cmd in p.cmds:
         for op, target in cmd.redirects:
             if op not in WRITE_REDIRECTS:
                 continue
             if not target.dynamic and (target.text == "/dev/null" or (op == ">&" and re.fullmatch(r"\d+|-", target.text))):
                 continue
+            if op in (">", ">>") and not target.dynamic and not target.glob and scratchpad_path_ok(target.text, cwd, session):
+                continue
             return "redirects output into a file"
     return None
+
+
+SCRATCH_ROLES = ("reviewer", "scout")
+
+# The rules that take the session id: a reviewer's or scout's write inside its scratchpad is not a refusal (#687).
+SESSION_RULES = (rule_fs_writes, rule_redirects)
 
 
 def rule_gh_merge(p: Parsed, cwd: str) -> str | None:
@@ -916,6 +970,55 @@ def rule_pr_draft(p: Parsed, cwd: str) -> str | None:
                 "with `gh pr ready`. Only if `gh pr create --draft` itself failed twice, open it ready "
                 "with a body line `Draft unavailable: <reason>` (a `--body-file <path>` must already exist when this "
                 "runs: write it in an earlier call, or pass `--body-file -` with a heredoc, or a literal `--body`)")
+    return None
+
+
+# The flags of `gh pr create` a worker's routine call may carry (#687), long name -> (short name, takes a value).
+# `--template <path>` is left unapproved, and `--web` is refused.
+PR_CREATE_FLAGS = {
+    "--title": ("-t", True), "--body": ("-b", True), "--body-file": ("-F", True), "--base": ("-B", True),
+    "--head": ("-H", True), "--draft": ("-d", False), "--label": ("-l", True), "--assignee": ("-a", True),
+    "--reviewer": ("-r", True), "--fill": ("-f", False),
+}
+
+
+def pr_create_flags_ok(args: list) -> bool:
+    """Every word of a `gh pr create` call is an allowed flag (long, `--flag=value`, short, or short with its value
+    attached) or the value of one that takes a value. A positional word, a cluster of short flags and any other
+    flag fail closed."""
+    shorts = {short: takes for short, takes in PR_CREATE_FLAGS.values()}
+    j = 0
+    while j < len(args):
+        word = args[j]
+        j += 1
+        if word.startswith("--"):
+            name, eq, _ = word.partition("=")
+            if name not in PR_CREATE_FLAGS or (eq and not PR_CREATE_FLAGS[name][1]):
+                return False
+            takes = PR_CREATE_FLAGS[name][1]
+            if takes and not eq:
+                if j >= len(args):
+                    return False
+                j += 1
+        elif word.startswith("-") and len(word) >= 2 and word[:2] in shorts:
+            if shorts[word[:2]]:
+                if len(word) == 2:
+                    if j >= len(args):
+                        return False
+                    j += 1
+            elif len(word) > 2:
+                return False
+        else:
+            return False
+    return True
+
+
+def rule_pr_web(p: Parsed, cwd: str) -> str | None:
+    """`gh pr create --web` opens a browser, and a background agent has nobody to use it (#687)."""
+    for call in p.tool("gh"):
+        if call.is_sub("pr") and call.is_verb("create") and any(
+                a.text in ("--web", "-w") or a.text.startswith("--web=") for a in call.args if not a.dynamic):
+            return "opens a browser (`gh pr create --web`): create the PR from the terminal with `--title` and `--body`"
     return None
 
 
@@ -992,7 +1095,7 @@ READ_ONLY = [rule_expansion, rule_bare_expansion, rule_git_writes, rule_gh_write
 RULES = {
     "scout": READ_ONLY,
     "reviewer": [rule_expansion, rule_bare_expansion, rule_reviewer_git, *READ_ONLY[3:]],
-    "worker": [rule_expansion, rule_gh_merge, rule_pr_draft, rule_force_push, rule_push_default],
+    "worker": [rule_expansion, rule_gh_merge, rule_pr_draft, rule_pr_web, rule_force_push, rule_push_default],
 }
 
 NEXT_STEP = {
@@ -1299,29 +1402,32 @@ def threads_refusal(role: str, parsed: "Parsed") -> str | None:
     return f"this threads call is refused because {what}. The {role} may run {THREADS_FORMS[role]}."
 
 
-def verdict(role: str, command: str, cwd: str, background: bool = False, timeout: object = None) -> str | None:
+def verdict(role: str, command: str, cwd: str, background: bool = False, timeout: object = None,
+            session: str = "") -> str | None:
     """The reason to deny this command for this role, or None to let it run.
 
-    `background` is the call's `run_in_background`: a worker that leaves a command in the background is
-    woken by each completion and hands back again (#229, #255, #259), and has no command that needs it,
-    so every backgrounded worker call is refused. This only sees the flag the worker set; when the harness
-    itself moves a long foreground call to the background, the worker waits for it (see agents/worker.md).
-    `timeout` is the call's Bash `timeout`: a worker's verify call must carry one of VERIFY_TIMEOUT_MS or more
-    so the harness keeps it in the foreground (#301). Anything but a real number fails closed."""
+    `background` is the call's `run_in_background`: a worker or reviewer that leaves a command in the background
+    is woken by each completion and hands back again (#229, #255, #259), and has no command that needs it,
+    so every backgrounded call of theirs is refused. This only sees the flag the agent set; when the harness
+    itself moves a long foreground call to the background, the agent waits for it (see agents/worker.md).
+    `timeout` is the call's Bash `timeout`: a worker's or reviewer's verify call must carry one of VERIFY_TIMEOUT_MS
+    or more so the harness keeps it in the foreground (#301). Anything but a real number fails closed.
+    `session` is the hook input's `session_id`: the reviewer's and scout's writes are allowed inside that
+    session's scratchpad only, and with no session id nothing is (#687)."""
     who, role = role_label(role), rules_role(role)
     try:
         parsed = Parsed(parse(command))
     except ParseError as err:
         return (f"the guard couldn't parse this command ({err}), so it can't check it. "
                 f"Rewrite it with balanced quotes and brackets. {NEXT_STEP[role]}")
-    if background and role == "worker":
+    if background and role in ("worker", "reviewer"):
         if runs_verify(parsed):
             return (f"{who} can't run verify in the background (it would hand back before verify finishes). "
                     "Run it in the foreground and let it finish. If the harness moves it to the background "
                     "after a few minutes, wait for it to exit (a Monitor) before you go on.")
-        return (f"{who} can't run a command in the background (each time it reports, the worker is woken "
+        return (f"{who} can't run a command in the background (each time it reports, the {role} is woken "
                 "and hands back again). Run it in the foreground and wait for it to finish.")
-    if role == "worker" and runs_verify(parsed) and not (
+    if role in ("worker", "reviewer") and runs_verify(parsed) and not (
             isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout >= VERIFY_TIMEOUT_MS):
         return (f"{who} must run verify with a Bash timeout (the harness moves a call without one to the "
                 f"background after 180s, and verify would hand back before it finishes). Run it again in the "
@@ -1341,7 +1447,7 @@ def verdict(role: str, command: str, cwd: str, background: bool = False, timeout
         return (f"{who} can't run a command that merges a PR (merging belongs to the orchestrator). "
                 f"{NEXT_STEP[role]}")
     for rule in RULES[role]:
-        what = rule(parsed, cwd)
+        what = rule(parsed, cwd, session) if rule in SESSION_RULES else rule(parsed, cwd)
         if what:
             return f"{who} can't run a command that {what}. {NEXT_STEP[role]}"
     if role == "worker":
@@ -1412,6 +1518,8 @@ CREDENTIAL_OPTION = "credential.helper=!gh auth git-credential"
 PLUGIN_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 REPO_FLAG = re.compile(r"-R.*|--repo(?:=.*)?")
 SETTINGS_FILE = re.compile(r"settings[^/]*\.json")
+# The only file of `<worktree>/.claude/` a worker may write: the plugin's config. Run state lives in the main checkout.
+PLUGIN_OWNED_CLAUDE_FILES = frozenset(((".claude", "orchestration.md"),))
 
 
 def worker_worktree(cwd: str) -> Path | None:
@@ -1456,6 +1564,12 @@ def edit_decision(tool_name: str, tool_input: object, cwd: str) -> tuple | None:
         if parts[:1] == (".git",) or (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
             return "deny", (f"the worker role can't edit {path}: it is git internals or a settings file. "
                             "Change only your ticket's files.")
+        if parts[:1] == (".claude",) and parts not in PLUGIN_OWNED_CLAUDE_FILES:
+            # A stray file under `<worktree>/.claude/` (a `pr-body.md`) is left behind untracked and blocks the
+            # worktree's removal (#404): refused like a write outside the worktree.
+            return "deny", (f"the worker role can't edit {path}: it is outside your worktree ({worktree}). "
+                            "Write scratch files inside your worktree (stage by explicit path so they never ship), "
+                            "or pass a PR body with `--body-file -`.")
         # Only `default` mode reaches this allow (an Edit there would prompt). `acceptEdits` and `bypassPermissions`
         # pass the edit anyway, and under `auto` the classifier skips a subagent's edit before a hook allow
         # matters (#378, #407). Kept: it costs nothing and covers a worker run in `default`.
@@ -1720,7 +1834,7 @@ def routine_pr(call: Call, cwd: str = "", session: str = "") -> bool:
     if not body_files_ok(args, cwd, session):
         return False
     if call.is_verb("create"):
-        return "--draft" in args
+        return ("--draft" in args or "-d" in args) and pr_create_flags_ok(args)
     if call.is_verb("ready"):
         return args == []
     return call.is_verb("edit") and numberless_edit(args)
@@ -2887,7 +3001,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
         elif head.text == "done" and loop is not None and len(cmd.words) == 1 and not cmd.redirects:
             loop = None
             continue
-        if not allowed_redirects(cmd):
+        if not (allowed_redirects(cmd) or (role in SCRATCH_ROLES and scratch_redirects_ok(cmd, here, session))):
             return False
         cmd = Command(cmd.words, [], [], cmd.depth, cmd.joiner, cmd.ends)
         if k == 0 and cmd.words[0].text == "cd" and not cmd.words[0].dynamic and loop is None:
@@ -2930,6 +3044,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                 continue
             if not (read_command_ok(sub, here, cwd) or (plain is not None and routine_single(role, one, plain, cwd, session))
                     or (role == "worker" and worker_work_ok(sub, here, worktree))
+                    or (role in SCRATCH_ROLES and scratch_write_ok(sub, here, session))
                     or (role == "reviewer" and (reviewer_verify_ok(sub, here, cwd)
                                                 or plugin_script_command_ok(sub, here, session, "scratch")))
                     or (role == "scout" and plugin_script_command_ok(sub, here, session, "claims"))
@@ -3446,7 +3561,7 @@ def _hook(data: dict) -> None:
         if not isinstance(command, str):
             raise TypeError("command is not a string")
         reason = verdict(role, command, cwd, tool == "Bash" and tool_input.get("run_in_background") is True,
-                         tool_input.get("timeout") if tool == "Bash" else None)
+                         tool_input.get("timeout") if tool == "Bash" else None, session)
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
                   f"Rewrite it more simply. {NEXT_STEP[rules_role(role)]}")
