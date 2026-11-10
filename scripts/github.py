@@ -917,6 +917,7 @@ def issue_state(issue, cwd=None) -> str:
 
 # Check results that block a merge: failed ones, and ones still going (a missing result counts as going).
 CI_BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
+CI_SKIPPED = {"SKIPPED", "NEUTRAL"}  # a check that did not run: alone it is not a pass
 CI_PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
 
@@ -929,7 +930,7 @@ def ci_verdict(checks) -> tuple:
     refusal names the real reason."""
     if not checks:
         return "pending", []
-    bad, pending = [], []
+    bad, pending, skipped, ran = [], [], [], False
     for c in checks:
         name = str(c.get("name") or c.get("context") or "?")
         # A CheckRun has status+conclusion; a commit StatusContext has only state.
@@ -938,9 +939,19 @@ def ci_verdict(checks) -> tuple:
             pending.append(name)
         elif r in CI_BAD:
             bad.append(name)
+        elif r in CI_SKIPPED:
+            skipped.append(name)
+        else:
+            ran = True
     if bad:
         return "failed", bad
-    return ("pending", pending) if pending else ("pass", [])
+    if pending:
+        return "pending", pending
+    # Every check skipped or neutral proves nothing ran (ADR-0012): a push to a draft skips the `test` job, and
+    # until the ready_for_review run joins the rollup those skips are the head's only checks. A mix with a real
+    # result (SUCCESS beside SKIPPED) stays a pass, since path-filtered jobs skip legitimately. Same rule as
+    # `watch-ci`'s judge.
+    return ("pass", []) if ran else ("pending", skipped)
 
 
 def has_workflows(head: str, cwd=None) -> bool:

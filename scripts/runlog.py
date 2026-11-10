@@ -33,7 +33,8 @@ GH_CALL = "gh_call"  # scripts/github.py: one per `gh` attempt (ok|failed|rateli
 SWEEP = "sweep"  # scripts/sweep: `ran` is the watermark `--due` counts merges from; `prompt-kind` (ref = the kind) is a prompt kind already reported
 PARK = "park"  # scripts/park-pr: a PR taken out of the merge queue (`parked`) or put back (`unparked`); ref = the PR; ticket, branch, why
 SNAPSHOT = "snapshot"  # scripts/merge: `stale` after a merged hooks/** or .claude-plugin/** change (sha = origin/<default>); scripts/launch: `launched` on a fresh launch, which clears it (#727)
-PASS, FAIL, UNKNOWN, MERGED,TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
+RESCUE = "rescue"  # scripts/rescue: one per rescue that ran (ref = the ticket; branch, reason); `sweep` reports the failed ones
+PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
     CI: (PASS, FAIL, "rerun"),  # "rerun": scripts/ci-rerun made the PR's CI run again (head; run and job for a job rerun)
@@ -49,6 +50,7 @@ OUTCOMES = {
     SWEEP: ("ran", "prompt-kind"),
     PARK: ("parked", "unparked"),
     SNAPSHOT: ("stale", "launched"),
+    RESCUE: ("ok", "failed"),
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"

@@ -480,6 +480,15 @@ class ReadinessTest(unittest.TestCase):
                           {"name": "n", "status": "COMPLETED", "conclusion": "NEUTRAL"}]
         self.assertEqual(self.merge(head, checks=checks).returncode, 0)
 
+    def test_every_check_skipped_refuses_as_pending(self):
+        # A draft head whose ready_for_review run never started: only the draft-era skips are in the rollup.
+        head = self.push({"b.txt": "x\n"})
+        checks = [{"name": "test", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                  {"name": "n", "status": "COMPLETED", "conclusion": "NEUTRAL"}]
+        p = self.merge(head, checks=checks)
+        self.refused(p, "CI pending")
+        self.assertEqual(p.stdout.splitlines()[-1], f"next: wait-ci 7 {head}")
+
     def test_open_blocker_on_the_closing_reference_refuses(self):
         head = self.push({"b.txt": "x\n"})
         p = self.merge(head, closing=[9], blockers=[(1, "OPEN"), (2, "OPEN")])
