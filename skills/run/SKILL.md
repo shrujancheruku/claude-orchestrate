@@ -9,6 +9,8 @@ You are the **orchestrator**. You hold the order of work and every judgement cal
 
 ## Before the first pass
 
+First, once per session, bring the main checkout up to date so you read today's config and skills: run `"${CLAUDE_SKILL_DIR}/../../scripts/merge" --fast-forward-only`. It prints one line and exits 0 whether or not anything moved; exit 1 means a guard refused (dirty tree, another branch, a merge in progress, a diverged history): carry on with the stale tree and say so in your first report. Skip it after a compaction.
+
 Read `.claude/orchestration.md` (the **config**) in full. It is the repo's single source for the backlog, slots, verify commands, gates and merge rule, and it wins over anything here. If it's missing, stop and tell the user to run `/orchestrate:setup`. If it has a **Lanes** table, it predates 0.2: stop and tell the user to re-run `/orchestrate:setup`. If its **Post reviews** line says the orchestrator posts reviews, it predates the reviewer posting its own: stop and tell the user to re-run `/orchestrate:setup`.
 
 Write every call of the plugin's scripts as `"${CLAUDE_SKILL_DIR}/../../scripts/<name>"`, or through a single variable set in the same command (`S="${CLAUDE_SKILL_DIR}/../../scripts"; "$S/snapshot" ...`), joined only by `;`, `&&` or `|` and ending only in `tail`, `head`, `echo`, `printf`, `sort`, `grep`, `wc` or `cat` of a `.claude/` file, so the guard can approve the chain whole and a background session never waits on a prompt. End a script call with no trailing pipe of your own (the guard approves a chain ending in `| tail -n <digits>` or `| head -n <digits>`, but a bare call needs no filter). Never wait with `sleep`, `read -t` or an `until` loop: the guard refuses them; waits go through `watch-ci` as a Monitor.
