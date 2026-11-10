@@ -8,7 +8,9 @@ mutation is never executed: each field it selects is checked against the schema'
 
 Fixture values (the design call of #663, refined by #682): the repository's own owner and name (`gh` expands `{owner}`
 and `{repo}`), the PR's own number for an `Int`, and for any other required variable a value of its declared type: a
-placeholder for `String`/`ID`, `false` for `Boolean`, `0` for `Float`, an Enum's first value (schema introspection). An
+placeholder for `String`/`ID`, `false` for `Boolean`, `0` for `Float`, an Enum's first value (schema introspection), and
+for an `Int` the PR's own number, except one the query passes as a page size (`first:`/`last:`): that gets `1`, since a
+connection is capped at 100 and a PR number past 100 would fail the gate. An
 optional variable is left out. A required variable that cannot be filled (an input object, a list, a custom scalar)
 skips that query with a note, never a failure.
 
@@ -30,6 +32,9 @@ import github
 OPERATION = re.compile(r"\A\s*(?:(query|mutation)(\s+\w+)?\s*(\((?:[^()]|\([^()]*\))*\))?\s*)?\{")
 SHORTHAND = re.compile(r"\A\s*\{\s*[A-Za-z_]\w*\s*[({]")
 VARIABLE = re.compile(r"\$(\w+)\s*:\s*([^,)=$]+)")
+# A variable passed as a connection's page size (`first: $limit`, `last: $limit`); the scan runs on strip_strings' text,
+# so a `first:` inside a string literal never counts.
+PAGE_SIZE = re.compile(r"\b(?:first|last)\s*:\s*\$(\w+)")
 PLACEHOLDER = "gate-fixture"  # a required variable with no better fixture; a missing node is not a schema error
 MAX_QUERIES = 8  # one gate run never makes more calls than this (the rest are reported, not run)
 NOT_RESOLVED = re.compile(r"Could not resolve to|NOT_FOUND", re.I)  # the data is absent, the query is valid
@@ -160,6 +165,7 @@ def fixtures(query, pr, cwd=None):
     """(args, why): the `gh api` arguments that give the query its required variables, each filled from its declared
     type; `why` is non-empty (and args empty) when a variable cannot be filled, so the query is skipped."""
     args = []
+    sizes = set(PAGE_SIZE.findall(strip_strings(query)))
     for name, typ in variables(query):
         if not typ.endswith("!"):
             continue  # an optional variable (a cursor) is left out
@@ -169,7 +175,9 @@ def fixtures(query, pr, cwd=None):
         elif name in ("name", "repo"):
             args += ["-F", f"{name}={{repo}}"]
         elif base == "Int":
-            args += ["-F", f"{name}={pr}"]
+            # A page size gets 1: GitHub caps a connection at 100, so the PR number would fail past #100. Any other Int
+            # keeps the PR number, so `pullRequest(number: $n)` still names a real PR.
+            args += ["-F", f"{name}={1 if name in sizes else pr}"]
         elif base in ("String", "ID"):
             args += ["-f", f"{name}={PLACEHOLDER}"]
         elif base == "Boolean":
