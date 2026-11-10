@@ -15,7 +15,9 @@ import github  # noqa: E402
 
 READY_CONFIG = ("## Review\n\n- **Risk paths** (any PR touching them is reviewed as L): `auth/*`\n"
                 "- **Tiers:** S is at most <10> changed lines in at most <2> files, none on a risk path; "
-                "L touches a risk path or changes more than <400> lines; M is everything else.\n")
+                "L touches a risk path or changes more than <400> lines; M is everything else.\n\n"
+                "## Gates\n\n- **Merge gates:** PRs touching `hooks/**` or `gated.txt` are merged by the developer. "
+                "release-please's `chore(main): release` PRs are never merged by the orchestrator.\n")
 
 GREEN = [{"name": "verify", "status": "COMPLETED", "conclusion": "SUCCESS"},
          {"context": "lint", "state": "SUCCESS"}]
@@ -70,13 +72,18 @@ class ReadinessTest(unittest.TestCase):
         return sha
 
     def merge(self, head, behind="0", update=None, approved="", flag=True, checks=GREEN, blockers=(),
-              branch="feat-br", closing=(), ticket=9, threads=None, issues=None, workflows=None, fork=False, after_head=None):
+              branch="feat-br", closing=(), ticket=9, threads=None, issues=None, workflows=None, fork=False, after_head=None,
+              files=("a.txt",), title=None, state="OPEN", files_reply=None, more=()):
         pr_json = {"state": "OPEN", "headRefName": branch, "headRefOid": head, "statusCheckRollup": checks,
                    "isCrossRepository": fork, "closingIssuesReferences": [{"number": n} for n in closing]}
-        view = {"stdout": pr_graphql_reply(pr_json)}
+        view = {"stdout": pr_graphql_reply(dict(pr_json, state=state))}
         merged = {"stdout": pr_graphql_reply(dict(pr_json, state="MERGED"))}
         self.env.set_gh([
             {"args": PR_GRAPHQL, "seq": [view, merged]},
+            {"args": ["api", "~repos/{owner}/{repo}/pulls/7/files"],
+             **(files_reply or {"stdout": json.dumps([{"filename": f} for f in files])})},
+            *([{"args": ["api", "repos/{owner}/{repo}/pulls/7"], "stdout": json.dumps(rest_pull(title=title))}]
+              if title and not after_head else []),
             *([{"args": ["api", "repos/{owner}/{repo}/pulls/7"],
                 "seq": [{"stdout": json.dumps(rest_pull(headRefOid=h))}
                         for h in ([after_head] if isinstance(after_head, str) else after_head)]}] if after_head else []),
@@ -94,7 +101,7 @@ class ReadinessTest(unittest.TestCase):
             {"args": ["api", "-X", "DELETE"], "exit": 0},
         ])
         extra = ["--approved-head", approved or self.approved] if flag else []
-        return self.env.run("merge", "7", "--interval", "0", "--timeout", "5", *extra, check=False)
+        return self.env.run("merge", "7", "--interval", "0", "--timeout", "5", *extra, *more, check=False)
 
     def called(self, prefix):
         return [c for c in self.env.gh_calls() if c[: len(prefix)] == prefix]
@@ -569,6 +576,62 @@ class ReadinessTest(unittest.TestCase):
         p = self.merge(self.approved, flag=False, threads=threads_reply((False, False, "rev", "u")))
         self.assertEqual(p.returncode, 0)
         self.assertEqual([c for c in self.called(["api", "graphql"]) if "reviewThreads" in c[3]], [])
+
+    # Merge gates (#656): a PR touching one is never merged by a script.
+    def gate_events(self):
+        return [e for e in self.env.events() if e["kind"] == "merge" and e["outcome"] == "gate-hold"]
+
+    def test_a_gated_pr_is_refused_logged_and_refused_again(self):
+        for _ in range(2):  # a rerun gives the same answer and logs again
+            p = self.merge(self.approved, files=("hooks/guard.py", "a.txt"))
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user gate hooks/**")
+            self.assertEqual(self.called(MERGE), [])
+        self.assertEqual([(e["ref"], e["gate"]) for e in self.gate_events()], [("7", "hooks/**")] * 2)
+
+    def test_a_gated_pr_is_refused_without_the_approved_head_flag_too(self):
+        p = self.merge(self.approved, flag=False, files=("gated.txt",))
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (1, "next: ask-user gate gated.txt"), p.stdout + p.stderr)
+        self.assertEqual(self.called(MERGE), [])
+
+    def test_a_rename_out_of_a_gated_path_is_gated(self):
+        rows = [{"filename": "elsewhere/guard.py", "previous_filename": "hooks/guard.py", "status": "renamed"}]
+        p = self.merge(self.approved, files_reply={"stdout": json.dumps(rows)})
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (1, "next: ask-user gate hooks/**"), p.stdout + p.stderr)
+        self.assertEqual(self.called(MERGE), [])
+
+    def test_a_release_pr_says_so(self):
+        p = self.merge(self.approved, files=(".release-please-manifest.json", "hooks/x"), title="chore(main): release 1.2.3")
+        self.assertIn("a release PR", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user gate hooks/**")
+
+    def test_a_gated_pr_the_developer_merged_by_hand_is_only_cleaned_up(self):
+        p = self.merge(self.approved, files=("hooks/guard.py",), state="MERGED")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+        self.assertEqual((self.called(MERGE), self.gate_events()), ([], []))
+
+    def test_an_ungated_pr_reads_the_files_and_merges(self):
+        self.assertEqual(self.merge(self.approved, files=("a.txt", "docs/x.md")).returncode, 0)
+        self.assertEqual(len(self.called(MERGE)), 1)
+
+    def test_unreadable_files_do_not_merge(self):
+        p = self.merge(self.approved, files_reply={"exit": 1, "stderr": "gh: boom"})
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn("merge gate", p.stdout)
+        self.assertEqual(self.called(MERGE), [])
+
+    def test_the_gate_is_the_main_checkouts_not_the_prs(self):
+        other = self.repo / "wt"
+        (other / ".claude").mkdir(parents=True)
+        (other / ".claude" / "orchestration.md").write_text("## Gates\n\n- **Merge gates:** none\n")
+        p = self.merge(self.approved, files=("hooks/guard.py",), more=("--cwd", str(other)))
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (1, "next: ask-user gate hooks/**"), p.stdout + p.stderr)
+
+    def test_no_configured_gate_reads_no_file_list(self):
+        (self.repo / ".claude" / "orchestration.md").write_text(READY_CONFIG.split("## Gates")[0])
+        self.assertEqual(self.merge(self.approved).returncode, 0)
+        self.assertEqual([c for c in self.env.gh_calls() if any("/pulls/7/files" in a for a in c)], [])
 
 
 if __name__ == "__main__":
