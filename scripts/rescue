@@ -84,7 +84,7 @@ def undo_branch() -> str:
 CTX: list = []
 
 
-def record(outcome, reason) -> None:
+def log_outcome(outcome, reason) -> None:
     """Append the `rescue` event. The log is a record, never a reason to fail: a missing session falls back to `lead`
     like `sweep`'s, and a write error is dropped."""
     if not CTX:
@@ -98,7 +98,7 @@ def record(outcome, reason) -> None:
 
 
 def fail(msg) -> int:
-    record("failed", msg)
+    log_outcome("failed", msg)
     if CREATED:
         msg += undo_branch()
     for lroot, path, reason in LIFTED:
@@ -343,7 +343,7 @@ def run(argv=None) -> int:
             say(f"scratch {line}")
 
     CTX[:] = [root, ticket, branch]  # the branch it ended on, when step 1 created one
-    record("ok", f"saved {branch}")
+    log_outcome("ok", f"saved {branch}")
     return overlap(root, changed, ticket)
 
 
