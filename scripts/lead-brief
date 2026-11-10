@@ -58,8 +58,8 @@ MERGED_QUERY = """query($owner: String!, $name: String!, $limit: Int!) {
       nodes { number title url body mergedAt
         labels(first: 20) { nodes { name } }
         closingIssuesReferences(first: 1) { nodes { number } }
-        reviews(last: 30) { nodes { url body authorAssociation author { login } } }
-        comments(last: 50) { nodes { url body authorAssociation author { login } } } } } } }"""
+        reviews(last: 30) { nodes { url body authorAssociation author { __typename login } } }
+        comments(last: 50) { nodes { url body authorAssociation author { __typename login } } } } } } }"""
 
 
 class Unavailable(Exception):
@@ -170,7 +170,7 @@ def section_roadmap(issues) -> list:
 def trusted_only(nodes, trusted) -> list:
     """The reviews or comments a trusted author wrote (ADR-0015): `tier:`, risk notes and discovered work are read from
     these alone, so a stranger's review or comment cannot set a tier or plant a finding."""
-    return [n for n in nodes or [] if github.is_trusted(n.get("authorAssociation"), (n.get("author") or {}).get("login"), trusted)]
+    return [n for n in nodes or [] if github.is_trusted(n.get("authorAssociation"), github.actor_login(n.get("author")), trusted)]
 
 
 def pr_of(node, trusted=()) -> dict:
