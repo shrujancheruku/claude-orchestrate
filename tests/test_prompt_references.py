@@ -230,7 +230,8 @@ class GlossaryTerms(unittest.TestCase):
 class VerdictLines(unittest.TestCase):
     """`gate` and `merge` end with one `next:` verdict line; the run skill names every word and no exit code (#347)."""
 
-    GATE = ("review <head>", "send-back <pr>", "rerun-after-ci", "wait-older <pr> <older>", "retry-after <time>",
+    GATE = ("review <head>", "send-back <pr>", "rerun-after-ci", "wait-older <pr> <older>", "wait-ticket <pr> <ticket>",
+            "retry-after <time>",
             "could-not-run")
     MERGE = ("merged", "wait-ci <pr> <head>", "re-review <pr>", "send-back <pr>", "ask-user <why>", "retry",
              "retry-after <time>", "could-not-run [<Class>: <message>]")

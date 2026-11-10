@@ -164,13 +164,13 @@ class Holds(unittest.TestCase):
             "b.py (held by open PR #10)", "c.py (held by building #11)", "overlap: none"])
 
     def test_pre_merge_check_uses_the_prs_diff(self):
-        # PR 9 is mine; building #11 holds b.py too, so the overlap is real whatever the PR order.
+        # PR 9 is mine; the younger PR 10 and building #11 hold b.py too: nothing the PR must fix, it waits for #11 (#535).
         self.gh({9: ["a.py", "b.py"], 10: ["b.py"]}, branches={9: "7-mine", 10: "8-other"}, open_tickets=[7, 11])
         self.state({7: ["a.py"], 11: ["b.py"]})
         r = self.holds("--pr", "9")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 3)
         self.assertEqual(r.stdout.splitlines(), [
-            "b.py (held by open PR #10, building #11)", "overlap: b.py (held by open PR #10, building #11)"])
+            "b.py (held by open PR #10, building #11)", "waits for #11 (still building) to merge: b.py"])
 
     def test_the_younger_of_two_open_prs_waits_for_the_older_and_exits_3(self):
         self.gh({9: ["a.py", "b.py"], 5: ["b.py", "c.py"]}, branches={9: "7-mine", 5: "4-older"})
@@ -184,12 +184,11 @@ class Holds(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(r.stdout.splitlines()[-2:], ["younger PR (not counted): b.py (held by open PR #10)", "overlap: none"])
 
-    def test_waiting_on_a_pr_while_a_building_ticket_holds_the_path_is_an_overlap(self):
+    def test_an_older_pr_and_a_building_ticket_on_one_path_wait_for_the_older_pr(self):
         self.gh({9: ["b.py"], 5: ["b.py"]}, branches={9: "7-mine", 5: "4-older"}, open_tickets=[11])
         self.state({11: ["b.py"]})
         r = self.holds("--pr", "9")
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertNotIn("waits for", r.stdout)
+        self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (3, "waits for #4 (PR #5) to merge: b.py"), r.stdout)
 
     def test_dispatch_time_check_still_counts_an_open_pr_holder(self):
         self.gh({5: ["b.py"]}, branches={5: "4-older"})
@@ -659,11 +658,20 @@ class HoldsLibrary(unittest.TestCase):
         self.assertEqual([o.kind for o in older], ["younger"])
         self.assertEqual(self.holds.Result([], older).code, 0)
 
-    def test_a_non_pr_holder_makes_it_a_real_overlap_whatever_the_prs(self):
+    def test_an_exclusive_hold_makes_it_a_real_overlap_whatever_the_prs_and_tickets(self):
         held = self.held(prs={5: ["a.py"]}, tickets={12: ["a.py"]})
+        held[0] = self.holds.Held("a.py", (*held[0].holders, "an exclusive hold"))
         got = self.holds.overlaps(held, ["a.py"], self.Cfg(), own_pr=9)
         self.assertEqual([o.kind for o in got], ["counted"])
         self.assertEqual(self.holds.Result(held, got).code, 1)
+
+    def test_a_building_ticket_with_a_pr_on_one_path_waits_on_the_older_pr_else_the_ticket(self):
+        held = self.held(prs={5: ["a.py"]}, tickets={12: ["a.py"]})
+        got = self.holds.overlaps(held, ["a.py"], self.Cfg(), own_pr=9)
+        self.assertEqual([(o.kind, o.pr) for o in got], [("waits-for", 5)])
+        held = self.held(prs={12: ["a.py"]}, tickets={11: ["a.py"]})
+        got = self.holds.overlaps(held, ["a.py"], self.Cfg(), own_pr=9)
+        self.assertEqual([(o.kind, o.ticket) for o in got], [("waits-ticket", 11)])
 
     def test_a_directory_candidate_covers_the_held_file_under_it(self):
         got = self.holds.overlaps(self.held(prs={9: ["db/a.sql"]}), ["db/"], self.Cfg())

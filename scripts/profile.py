@@ -135,7 +135,7 @@ def repo_of(main: Transcript) -> Path | None:
 
 
 def config_slots(repo: Path | None) -> int | None:
-    return config.Config.load(repo).slots if repo else None
+    return config.for_checkout(repo).slots if repo else None
 
 
 def merge_intervals(intervals: list) -> list:
@@ -1214,7 +1214,7 @@ def derive_pass(args) -> dict:
     root = args.repo.resolve()
     if args.greedy and args.slots is None:
         common.die("profile record: --greedy needs --slots <the greedy cap>")
-    slots = args.slots if args.slots is not None else config.Config.load(root).slots
+    slots = args.slots if args.slots is not None else config.for_checkout(root).slots
     if slots is None:
         common.die("profile record: no slot count: the config has no Slots line; pass --slots")
     idle = {}

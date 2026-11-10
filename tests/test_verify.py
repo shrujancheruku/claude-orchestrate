@@ -94,6 +94,15 @@ class VerifyConfigTest(unittest.TestCase):
     def verify(self, *args):
         return self.env.run("verify", *args, check=False)
 
+    def test_the_branchs_own_verify_section_wins_over_the_main_checkouts(self):
+        # The one deliberate exception to "read the main checkout's config" (#535): a worker verifies its own branch.
+        self.config("## Verify\n\n- `exit 1`\n")
+        wt = self.env.repo / "wt"
+        (wt / ".claude").mkdir(parents=True)
+        (wt / ".claude" / "orchestration.md").write_text("## Verify\n\n- `true`\n")
+        r = self.env.run("verify", "--config", cwd=wt, check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_command_with_substitution_and_quotes_runs_once_as_written(self):
         # The $(...) prints a newline then a second command; run as one command it only feeds echo.
         self.config("## Verify\n\n- `echo $(printf 'x\\ntouch planted.txt') > out.txt`\n")

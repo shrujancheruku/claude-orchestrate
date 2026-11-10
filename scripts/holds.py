@@ -40,6 +40,9 @@ RELEASE_PLEASE_PREFIX = tracker.RELEASE_PLEASE_PREFIX
 # Overlap kinds. COUNTED fails the check; the rest do not. YOUNGER is a candidate whose only holders are open PRs
 # that all have a higher number than the checked PR: they will wait for it, it does not wait for them.
 COUNTED, SHARED, YOUNGER, WAITS_FOR = "counted", "shared", "younger", "waits-for"
+# The gate's check only: every holder of the path is a ticket still building (or in another session), so the PR is fine and
+# waits for that ticket to merge; a send-back is for an overlap the PR itself must fix (#535).
+WAITS_TICKET = "waits-ticket"
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,7 @@ class Overlap:
     path: str  # the candidate
     holders: tuple
     pr: int = None  # WAITS_FOR: the older open PR to wait for
-    ticket: int = None  # WAITS_FOR: that PR's ticket, when its branch names one
+    ticket: int = None  # WAITS_FOR: that PR's ticket, when its branch names one; WAITS_TICKET: the lowest building ticket
 
     def render(self) -> str:
         shown = f"{self.path} (held by {', '.join(self.holders)})"
@@ -79,12 +82,17 @@ class Result:
         return [o for o in self.overlaps if o.kind == WAITS_FOR]
 
     @property
+    def ticket_waits(self) -> list:
+        return [o for o in self.overlaps if o.kind == WAITS_TICKET]
+
+    @property
     def code(self) -> int:
-        """The CLI's exit code: 1 a counted overlap, 3 only an older open PR in the way, else 0."""
-        return 1 if self.counted else 3 if self.waits else 0
+        """The CLI's exit code: 1 a counted overlap, 3 only an older open PR or a building ticket in the way, else 0."""
+        return 1 if self.counted else 3 if self.waits or self.ticket_waits else 0
 
     def wait_lines(self) -> list:
-        """One `waits for #<ticket> (PR #<n>) to merge: <paths>` line per older PR, in PR order."""
+        """One `waits for #<ticket> (PR #<n>) to merge: <paths>` line per older PR, in PR order, then one
+        `waits for #<ticket> (still building) to merge: <paths>` line per building ticket."""
         by_pr: dict = {}
         for o in self.waits:
             by_pr.setdefault(o.pr, []).append(o)
@@ -92,16 +100,21 @@ class Result:
         for n, rows in sorted(by_pr.items()):
             who = f"#{rows[0].ticket} (PR #{n})" if rows[0].ticket is not None else f"PR #{n}"
             lines.append(f"waits for {who} to merge: {', '.join(sorted({o.path for o in rows}))}")
+        by_ticket: dict = {}
+        for o in self.ticket_waits:
+            by_ticket.setdefault(o.ticket, []).append(o)
+        for n, rows in sorted(by_ticket.items()):
+            lines.append(f"waits for #{n} (still building) to merge: {', '.join(sorted({o.path for o in rows}))}")
         return lines
 
     def lines(self) -> list:
         """The CLI's stdout: the held paths (or `none`), each overlap that is not an ordering, then the verdict lines."""
         out = [h.render() for h in self.held] or ["none"]
-        out += [o.render() for o in self.overlaps if o.kind != WAITS_FOR]
+        out += [o.render() for o in self.overlaps if o.kind not in (WAITS_FOR, WAITS_TICKET)]
         if self.counted:
             return out
         out += self.wait_lines()
-        return out if self.waits else out + ["overlap: none"]
+        return out if self.waits or self.ticket_waits else out + ["overlap: none"]
 
 
 def plain(entry) -> str:
@@ -217,6 +230,7 @@ def held_paths(cfg, prs: dict, tickets: dict, others: dict, off_map: dict = None
 
 
 PR_HOLDER = re.compile(r"open PR #(\d+)(?: file)?$")
+TICKET_HOLDER = re.compile(r"(?:building|elsewhere) #(\d+)$")
 
 
 def overlaps(held: list, candidates: list, cfg, own_pr=None, pr_tickets=None) -> list:
@@ -232,10 +246,15 @@ def overlaps(held: list, candidates: list, cfg, own_pr=None, pr_tickets=None) ->
                 continue
             if cfg.is_shared(c) or cfg.is_shared(h.path):  # a directory candidate overlaps the held file under it
                 out.append(Overlap(SHARED, c, h.holders))
-            elif own_pr is not None and all(PR_HOLDER.match(w) for w in h.holders):
-                older = [n for n in (int(PR_HOLDER.match(w).group(1)) for w in h.holders) if n < own_pr]
+            elif own_pr is not None and all(PR_HOLDER.match(w) or TICKET_HOLDER.match(w) for w in h.holders):
+                # Only PRs and tickets still being built hold it, so the PR is not at fault: it waits on the older open PR
+                # if there is one, else on the lowest building ticket; with only younger PRs it is the one they wait for.
+                older = [n for n in (int(m.group(1)) for m in map(PR_HOLDER.match, h.holders) if m) if n < own_pr]
+                building = [int(m.group(1)) for m in map(TICKET_HOLDER.match, h.holders) if m]
                 if older:
                     out.append(Overlap(WAITS_FOR, c, h.holders, pr=min(older), ticket=pr_tickets.get(min(older))))
+                elif building:
+                    out.append(Overlap(WAITS_TICKET, c, h.holders, ticket=min(building)))
                 else:
                     out.append(Overlap(YOUNGER, c, h.holders))
             else:
@@ -253,7 +272,7 @@ def find(snap, repo, state_file=None, candidates=None, ticket=None, pr=None, cfg
     (an unreadable state file); the caller maps them. A PR file list the Snapshot cached is served from it; fetched ones
     are written back through `snap.save_cache` when the caller set `snap.use_cache`."""
     repo = Path(repo)
-    cfg = cfg or config.Config.load(repo)
+    cfg = cfg or config.for_checkout(repo)
     state_file = Path(state_file) if state_file else repo / STATE
     base = snap.default_branch
     own_pr, own_ticket = None, ticket

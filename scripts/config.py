@@ -159,6 +159,18 @@ class Config(NamedTuple):
         return [p for p in self.problems if p.kind == kind]
 
 
+def for_checkout(cwd) -> "Config":
+    """The config of the main checkout that owns `cwd` (a worktree, a subdirectory or the checkout itself).
+
+    The one lookup every script uses (#535): a PR that edits `.claude/orchestration.md` must not edit the gate, the
+    tiers or the shared-file list that judge it, so the trusted copy is the main checkout's, never the PR's worktree.
+    Two deliberate exceptions: `verify --config` searches upward from its cwd, because a worker verifies its own
+    branch's Verify section on purpose, and the guard has its own file reader (`python3 -I`).
+    """
+    import repo  # here, not at the top: `repo` imports `common` as this module does, and only this function needs it
+    return Config.load(repo.main_checkout(cwd))
+
+
 def shared_match(path: str, patterns) -> bool:
     """The one Shared files rule: a path equals a pattern or matches it as a glob, case-sensitively (not fnmatch.fnmatch, which folds case on macOS and Windows)."""
     return any(path == p or fnmatch.fnmatchcase(path, p) for p in patterns)

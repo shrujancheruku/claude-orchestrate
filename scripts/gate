@@ -26,7 +26,10 @@ only raises it); the orchestrator dispatches the reviewer at that tier.
 Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word:
 `review <head>` (exit 0) | `send-back <pr>` (exit 1; the lines above it are what the worker gets) |
 `rerun-after-ci` (exit 3, mergeability still UNKNOWN) | `wait-older <pr> <older>` (exit 3, the PR waits for the older
-PR to merge) | `retry-after <time>` (exit 2, a rate limit) | `could-not-run` (exit 2, the reason on stderr).
+PR to merge) | `wait-ticket <pr> <ticket>` (exit 3, the only overlap is with a ticket still building or in another
+session: the PR is fine; run the gate again when that ticket opens its PR or merges, whichever comes first) | `retry-after <time>` (exit 2, a rate limit) | `could-not-run` (exit 2, the reason on stderr).
+The config (checks, tiers, shared files) is read from the main checkout, never from --cwd: a PR that edits
+`.claude/orchestration.md` must not edit the gate that judges it (#535). The `run:` commands still run in --cwd.
 Stdlib only, Python 3.9+.
 """
 
@@ -107,7 +110,7 @@ def changed_lines(diff) -> int:
 def review_tier(view, changed, diff, snap, cwd) -> str:
     """The reviewer tier `S|M|L` of the PR (Config.tier_for): its diff against the config's thresholds, a risk path
     as L, and the ticket's `size:` label as a floor. The ticket is the branch's, else the body's `Closes #n`."""
-    cfg = config.Config.load(cwd)
+    cfg = config.for_checkout(cwd)  # the main checkout's config, not the PR's (#535)
     ticket = repo.ticket_of_branch(view.get("headRefName"))
     if ticket is None:
         m = CLOSES.search(view.get("body") or "")
@@ -174,7 +177,10 @@ def overlap_check(pr, cwd, snap):
         return check("no overlap with held paths", True)
     if result.code == 1:
         return check("no overlap with held paths", False, "\n".join(result.lines()))
-    NEXT["older"] = sorted({o.pr for o in result.waits})[0]  # the verdict names the oldest PR to wait for
+    if result.waits:
+        NEXT["older"] = sorted({o.pr for o in result.waits})[0]  # the verdict names the oldest PR to wait for
+    else:  # only tickets still building hold the paths: a hold naming the lowest one, not a send-back (#535)
+        NEXT["ticket"] = sorted({o.ticket for o in result.ticket_waits})[0]
     return checks.Result("no overlap with held paths: " + "; ".join(result.wait_lines()), WAIT, 0.0, None, "")
 
 
@@ -271,6 +277,8 @@ def main(argv=None) -> int:
     if code == 3:  # waiting for an older PR is its own word; an UNKNOWN mergeability is a rerun after CI
         if NEXT.get("older") is not None and not NEXT.get("unknown"):
             return common.verdict("wait-older", pr, NEXT["older"], exit_code=code)
+        if NEXT.get("ticket") is not None and not NEXT.get("unknown"):
+            return common.verdict("wait-ticket", pr, NEXT["ticket"], exit_code=code)
         return common.verdict("rerun-after-ci", exit_code=code)
     until = github.rate_limit_verdict(code)
     if until:
@@ -304,7 +312,9 @@ def run_gate(argv=None) -> int:
         return 2
     behind, unknown, head = extra
     NEXT["head"] = head
-    cfg = config.Config.load(args.cwd)
+    # The config is the main checkout's copy, so a PR that edits `.claude/orchestration.md` does not edit the checks that
+    # judge it (#535); the `run:` commands still run in --cwd, the PR's tree.
+    cfg = config.for_checkout(args.cwd)
     malformed = cfg.problems_of(config.RUN)  # only a bad `run:` fails the gate; other problems are not its business
     results += checks.run_stages([list(cfg.check_commands)], args.cwd, args.timeout)
     if malformed:

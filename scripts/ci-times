@@ -128,7 +128,7 @@ def main(argv=None) -> int:
     if code != 0:
         common.die("ci-times: cannot run: not inside a git repository")
     root = main_checkout(".").resolve()
-    cfg = config.Config.load(root)
+    cfg = config.for_checkout(root)
     limit, source = (cfg.ci_wait_limit, "config") if cfg.ci_wait_limit else (DEFAULT_LIMIT_MINUTES, "default")
     try:
         prs = merged_prs(args.since, root)
