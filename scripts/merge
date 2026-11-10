@@ -644,7 +644,19 @@ PLUGIN_LIVE = ("hooks/", ".claude-plugin/")  # a merged change here is what a ru
 def note_snapshot(cwd, pr, default):
     """After a merge: when the PR changed `hooks/**` or `.claude-plugin/**`, the run's plugin snapshot is behind main, so
     log `snapshot stale <sha>` (frontier then dispatches nothing until a fresh launch). Best effort: a file list that
-    can't be read is said, not logged (a guess would stop the run on every unreadable merge)."""
+    can't be read is said, not logged (a guess would stop the run on every unreadable merge).
+
+    Only for the repo the running snapshot was exported from: the newest `launched` event names that checkout (`source`),
+    and with no such event (a marketplace install, no launch) or another repo there is no snapshot to be behind. And not
+    when the loaded sha already holds origin/<default>'s plugin tree (a PR merged before the relaunch, cleaned up after)."""
+    launched = next((e for e in reversed(runlog.read_kinds(cwd, [runlog.SNAPSHOT])) if e.get("outcome") == "launched"), None)
+    if launched is None or launched.get("source") != str(repo.main_checkout(cwd)):
+        return
+    tip = run("git", "rev-parse", f"origin/{default}", cwd=cwd) if default else None
+    sha = tip.stdout.strip() if tip is not None and tip.code == 0 else None
+    loaded = launched.get("sha")
+    if sha and loaded and run("git", "diff", "--quiet", loaded, sha, "--", "hooks", ".claude-plugin", cwd=cwd).code == 0:
+        return
     try:
         paths = github.pr_touched_paths(pr, cwd)
     except github.GhError as e:
@@ -653,8 +665,6 @@ def note_snapshot(cwd, pr, default):
     hit = next((p for p in paths if p.startswith(PLUGIN_LIVE)), None)
     if hit is None:
         return
-    tip = run("git", "rev-parse", f"origin/{default}", cwd=cwd) if default else None
-    sha = tip.stdout.strip() if tip is not None and tip.code == 0 else None
     log_event(cwd, runlog.SNAPSHOT, "stale", ref=pr, sha=sha)
     say(f"snapshot-stale {sha[:12] if sha else '?'}: PR #{pr} changed {hit}; the run's plugin snapshot is behind {default or 'main'}, "
         "so no new worker is dispatched until a fresh `scripts/launch --bg` (a resume keeps the old snapshot)")

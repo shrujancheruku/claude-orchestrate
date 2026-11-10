@@ -69,6 +69,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import config  # noqa: E402
 import runlog  # noqa: E402
+from repo import main_checkout  # noqa: E402
 
 NAME = "orchestrator"
 MODES = ("acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan")
@@ -544,8 +545,16 @@ def main(argv=None) -> int:
     if not args.resume and not args.lead and plugin_dir:
         # A fresh orchestrator loads the current snapshot: it ends a `snapshot stale` that merge logged (#727).
         # Best effort, like the resume event; a log that cannot be written leaves frontier holding, which is the safe side.
+        # `source` is the checkout the snapshot was exported from: merge stales the run only for a repo that is that
+        # checkout, since only then does a merged hooks/ change belong to the plugin the run loaded. `session` stays
+        # a marker, not the sha (the launch has no Claude session id yet).
         try:
-            runlog.append_event(args.repo, runlog.SNAPSHOT, "launched", session=sha)
+            src = (plugin_dir / SOURCE_FILE).read_text().strip()
+        except OSError:
+            src = None
+        try:
+            runlog.append_event(args.repo, runlog.SNAPSHOT, "launched", session="launch", sha=sha,
+                                source=str(main_checkout(src)) if src else None)
         except (OSError, ValueError, runlog.NoSession) as e:
             print(f"launch: the snapshot event was not logged: {e}", file=sys.stderr)
     if args.resume and not args.lead:

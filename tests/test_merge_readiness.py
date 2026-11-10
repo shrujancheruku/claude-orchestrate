@@ -624,7 +624,31 @@ class ReadinessTest(unittest.TestCase):
     def snapshot_events(self):
         return [(e["outcome"], e["ref"], bool(e.get("sha"))) for e in self.env.events() if e["kind"] == "snapshot"]
 
+    def launched(self, source=None, sha="f" * 40):
+        """A fresh launch's event: the snapshot `sha` it loaded, exported from the checkout `source` (default: this repo)."""
+        import repo as repo_mod
+        import runlog
+        runlog.append_event(self.env.repo, runlog.SNAPSHOT, "launched", session="launch", sha=sha,
+                            source=source or str(repo_mod.main_checkout(self.env.repo)))
+
+    def test_no_snapshot_launch_means_nothing_to_be_behind(self):
+        # a marketplace install, or a repo with its own hooks/ directory: no `launched` event, no stale record
+        p = self.merge(self.approved, files=("hooks/pre-commit",), state="MERGED")
+        self.assertEqual((p.returncode, self.snapshot_events()), (0, []), p.stdout + p.stderr)
+
+    def test_a_repo_that_is_not_the_snapshots_source_is_left_alone(self):
+        self.launched(source="/somewhere/else/claude-orchestrate")
+        p = self.merge(self.approved, files=("hooks/pre-commit",), state="MERGED")
+        self.assertEqual((p.returncode, self.snapshot_events()), (0, []), p.stdout + p.stderr)
+
+    def test_a_pr_merged_before_the_relaunch_does_not_stale_the_new_run(self):
+        tip = git(self.repo, "rev-parse", "origin/main")
+        self.launched(sha=tip)  # the run loaded a snapshot that already holds origin/main's plugin tree
+        p = self.merge(self.approved, files=("hooks/guard.py",), state="MERGED")
+        self.assertEqual((p.returncode, self.snapshot_events()), (0, []), p.stdout + p.stderr)
+
     def test_a_hooks_change_merged_by_hand_logs_snapshot_stale(self):
+        self.launched()
         p = self.merge(self.approved, files=("hooks/guard.py",), state="MERGED")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.snapshot_events(), [("stale", "7", True)])
@@ -632,14 +656,17 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
 
     def test_a_plugin_manifest_change_logs_snapshot_stale(self):
+        self.launched()
         self.merge(self.approved, files=(".claude-plugin/plugin.json",), state="MERGED")
         self.assertEqual(len(self.snapshot_events()), 1)
 
     def test_a_merge_that_leaves_hooks_and_the_manifest_alone_logs_nothing(self):
+        self.launched()
         self.merge(self.approved, files=("a.txt", "scripts/merge", "skills/run/SKILL.md"))
         self.assertEqual(self.snapshot_events(), [])
 
     def test_unreadable_files_after_the_merge_log_nothing_and_say_so(self):
+        self.launched()
         p = self.merge(self.approved, files_reply={"exit": 1, "stderr": "gh: boom"}, state="MERGED")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.snapshot_events(), [])
@@ -665,12 +692,7 @@ class ReadinessTest(unittest.TestCase):
     def test_no_configured_gate_reads_no_file_list(self):
         (self.repo / ".claude" / "orchestration.md").write_text(READY_CONFIG.split("## Gates")[0])
         self.assertEqual(self.merge(self.approved).returncode, 0)
-        # The gate reads nothing; the one read is the snapshot note after the merge (#727), which follows the MERGE call.
-        calls = self.env.gh_calls()
-        reads = [i for i, c in enumerate(calls) if any("/pulls/7/files" in a for a in c)]
-        merges = [i for i, c in enumerate(calls) if c[: len(MERGE)] == list(MERGE)]
-        self.assertEqual(len(reads), 1)
-        self.assertGreater(reads[0], merges[0])
+        self.assertEqual([c for c in self.env.gh_calls() if any("/pulls/7/files" in a for a in c)], [])
 
 
 if __name__ == "__main__":
