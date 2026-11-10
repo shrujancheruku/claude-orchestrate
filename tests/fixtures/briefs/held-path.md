@@ -6,6 +6,7 @@ Held paths: config.txt (held by open PR #9). Changing one means stop and report
 Branch: 3-retry-limit. If it exists on the remote, continue from it.
 Merged dependencies: none
 Verify: `grep -q "retries=5" config.txt` from the repo root (the current directory)
+Plugin root: none (this fixture calls no plugin script).
 Shared files: none
 Commits: Conventional Commits (`type(scope): description`). No attribution lines or trailers. Stage files by explicit path.
 PR: title Conventional Commits; body includes "Closes #3"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain.

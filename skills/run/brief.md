@@ -12,6 +12,7 @@ Held paths: <the held-path lines of `holds --touch-map`'s output, word for word,
 Branch: <number>-<slug>. If it exists on the remote, continue from it.
 Merged dependencies: <ticket → PR, one per line | none>
 Verify: '<absolute path of scripts/verify in the plugin, from the base directory of this skill>' --config --branch <the Branch line's name>
+Plugin root: <the plugin's root as an absolute path: this skill's base directory (${CLAUDE_SKILL_DIR}) without its trailing `/skills/run`, the same directory `Verify:` points into>. Call the plugin's scripts only as `<Plugin root>/scripts/<name>`, never through the checkout's `scripts/`.
 Shared files: <the config's shared-file rules>
 Commits: <convention>. No attribution lines or trailers. Stage files by explicit path.
 PR: title <convention>; body includes "<closing reference>"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain; no attribution lines.
