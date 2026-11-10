@@ -233,7 +233,7 @@ class VerdictLines(unittest.TestCase):
     GATE = ("review <head>", "send-back <pr>", "rerun-after-ci", "wait-older <pr> <older>", "wait-ticket <pr> <ticket>",
             "retry-after <time>",
             "could-not-run")
-    MERGE = ("merged", "wait-ci <pr> <head>", "re-review <pr>", "send-back <pr>", "ask-user <why>", "retry",
+    MERGE = ("frontier", "wait-ci <pr> <head>", "re-review <pr>", "send-back <pr>", "ask-user <why>", "retry",
              "retry-after <time>", "could-not-run [<Class>: <message>]")
     ALSO = ("wait-ci <pr> <head>", "send-back <pr>", "left <pr> <why>")
 

@@ -293,6 +293,7 @@ Every mechanical rule the prompts once restated is a script under `scripts/`, fo
 | `ci-times` | lead, every ten merges | Push-to-green median and p90, and whether CI is over the limit |
 | `profile.py` | orchestrator with `--profile` | Records each pass and builds the JSON profile and HTML viewer |
 | `sandbox-git` | setup, with your yes | Lets `git fetch`, `pull` and `push` run outside the sandbox over SSH |
+| `setup-check` | setup | Flags PR workflows that run CI on draft PRs, so setup can suggest the draft-skip trigger (it never edits the workflow) |
 | `guard-corpus` | you, in development | Adds real sessions' commands to the guard's regression corpus |
 
 `gate`, `watch-ci`, `worker-report`, `threads`, `merge` and the sweep each append an event to `.claude/orchestrate-profiles/events.jsonl`, as does every `gh` call they make (a `gh_call` event, reported per pass as GitHub calls). The guard also logs the `gh` commands a worker, reviewer, scout or the orchestrator runs directly (a row with a `role`, script `agent:<role>`), and the profile splits the calls into scripts and agents. `--profile` records each pass beside it. The profile reads both with the session's transcripts to report cost per merged ticket by model and role, slot utilisation and why idle slots were idle, review rounds and round-1 approval rate, workers by model and escalations, and the orchestrator's context size at each turn with its compactions.

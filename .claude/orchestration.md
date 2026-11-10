@@ -6,7 +6,7 @@
 
 - **Tracker docs:** `docs/agents/issue-tracker.md` (operations, blocking, claiming) and `docs/agents/triage-labels.md` (label strings), from `/setup-matt-pocock-skills`. Takeable tickets are what `scripts/frontier` lists, in ascending issue number. Claim = assign to the user.
 - **Domain docs:** `docs/agents/domain.md` (the glossary and ADRs workers and reviewers follow).
-- **Board:** <https://github.com/users/shrujancheruku/projects/1>
+- **Board:** https://github.com/users/shrujancheruku/projects/1
 
 ## Slots
 

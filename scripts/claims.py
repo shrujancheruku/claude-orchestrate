@@ -11,7 +11,8 @@ The state, decided in this order:
               building (or stalled, or elsewhere) and `Claim.pr` still names the draft to link it
   done        the ticket's branch has a merged PR, or the ticket is in the state file but not among the open issues
   parked      no open PR, and the ticket's newest `park` event is `parked` (scripts/park-pr closed its PR to let a newer
-              PR's fix land first): the branch and the claim are kept, nothing is rescued, redispatched or held for it
+              PR's fix land first): the branch and the claim are kept, nothing is rescued, redispatched or held for it,
+              and it occupies no slot (`slot_use`, #716): the ticket stays taken, the slot is free for the next one
   building    a worker record from this session in the state file, or no record but the worktree's lock is this
               session's own live worker (`worker unknown`: a dispatch the state file couldn't join)
   idle        a building claim whose newest non-duplicate worker-report is an `interim` one, newer than the worker's
@@ -237,6 +238,22 @@ def escalation(events, pr, worker, cfg) -> str | None:
     changes = any(e.get("kind") == runlog.REVIEW and e.get("outcome") == "request-changes" and str(e.get("ref")) == str(pr)
                   and isinstance(e.get("round"), int) and e["round"] >= 2 for e in events)
     return (cfg.worker_model or config.DEFAULT_WORKER_MODEL) if len(fails) >= 2 or changes else None
+
+
+NO_SLOT = ("done", "with-lead", "parked")  # states that occupy no slot: nothing is being built (a parked claim keeps only the ticket, #716)
+
+
+def slot_use(found) -> tuple:
+    """(claims occupying a slot, parked claims) of `claims()`'s result: the one count `claims --slots`, `frontier --slots`,
+    the lead-brief watch and the profile all use, so a parked claim is listed everywhere but never counted against the cap."""
+    return (sum(1 for c in found.values() if c.state not in NO_SLOT),
+            sum(1 for c in found.values() if c.state == "parked"))
+
+
+def slots_line(found, cap) -> str:
+    """`slots: <building>/<cap> building, <k> parked` (the cap is `?` when the config has no Slots line)."""
+    building, parked = slot_use(found)
+    return f"slots: {building}/{cap if cap is not None else '?'} building, {parked} parked"
 
 
 def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None) -> dict:

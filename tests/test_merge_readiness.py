@@ -617,7 +617,7 @@ class ReadinessTest(unittest.TestCase):
     def test_a_gated_pr_the_developer_merged_by_hand_is_only_cleaned_up(self):
         p = self.merge(self.approved, files=("hooks/guard.py",), state="MERGED")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
         self.assertEqual((self.called(MERGE), self.gate_events()), ([], []))
 
     # A merged change to the guard does nothing for a run that loaded its plugin before it (#727).
@@ -653,7 +653,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.snapshot_events(), [("stale", "7", True)])
         self.assertIn("snapshot-stale", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[-1], "next: merged")
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
 
     def test_a_plugin_manifest_change_logs_snapshot_stale(self):
         self.launched()

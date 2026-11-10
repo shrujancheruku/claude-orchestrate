@@ -18,6 +18,9 @@ An unreadable docs/agents/triage-labels.md is exit 2 with one stderr line; a mis
 While the run log holds a `snapshot stale` event that no fresh launch has cleared (`scripts/merge` writes it after a merged
 `hooks/**` or `.claude-plugin/**` change: the run's plugin snapshot is behind main, #727) it prints the one `relaunch:` line
 in place of every ticket line, so nothing is dispatched; the in-flight work drains and the developer relaunches.
+--slots adds one `slots: <building>/<cap> building, <k> parked` line after the ticket lines (and the sections): the claims that occupy
+a slot against the config's Slots count (scripts/claims.py `slot_use`). A `parked` claim (#708) keeps its ticket claimed but is counted
+apart and never against the cap, so the run fills the slot it left. --state and --session are for --slots.
 --fix-drift adds the native `blocked_by` edge for every `drift:` line in scope (the tracker doc's Blocking command), prints
 `added #<n> blocked by #<m>` for each, and then prints as usual with those lines gone from `drift:`; the orchestrator never runs it.
 The rules are in scripts/tracker.py. Reads the open issues through a Snapshot (every page of one `gh api graphql` query;
@@ -33,12 +36,14 @@ import re
 import sys
 from pathlib import Path
 
+import claims
 import common
 import config
 import github
 import runlog
 import touchmap
 import tracker
+from repo import STATE
 
 def titled(i) -> str:
     return f"#{i['number']} {i['title']}"
@@ -100,6 +105,10 @@ def run(argv=None) -> int:
                     help="add the native blocked_by edge for each drift line (prints each edge added)")
     ap.add_argument("--touch-map", help="with --ticket: the scout's touch map; the line's model then follows it (a small, "
                     "risk-free map lets an unlabelled ticket take the small model)")
+    ap.add_argument("--slots", action="store_true",
+                    help="after the ticket lines, print `slots: <building>/<cap> building, <k> parked` (parked claims are not counted)")
+    ap.add_argument("--state", help="with --slots: the state file (default: <repo>/.claude/orchestrate-state.json)")
+    claims.add_session_arg(ap)
     ap.add_argument("--snapshot", help="read the tracker from this file (scripts/snapshot) instead of fetching")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
@@ -119,7 +128,8 @@ def run(argv=None) -> int:
     except ValueError as e:
         common.die(f"frontier: cannot run: {e}")
     try:
-        issues = tracker.Snapshot.open(args.snapshot, root).issues
+        snap = tracker.Snapshot.open(args.snapshot, root)
+        issues = snap.issues
     except github.GhError as e:
         common.die(f"frontier: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError, AttributeError) as e:
@@ -130,7 +140,8 @@ def run(argv=None) -> int:
             fix_drift(issues, scope, root)
     except github.GhError as e:
         common.die(f"frontier: cannot run: gh failed: {e.message}")
-    lines = render(issues, scope, labels, args.all, config.Config.load(root), touch_map)
+    cfg = config.Config.load(root)
+    lines = render(issues, scope, labels, args.all, cfg, touch_map)
     if args.ticket is not None and not scope:
         lines.insert(0, f"#{args.ticket} not open")
     if args.ticket is not None and not args.all and scope and not lines:
@@ -144,6 +155,15 @@ def run(argv=None) -> int:
                  "when in-flight work drains, ask the developer to stop and run a fresh `scripts/launch --bg`"]
     for line in lines:
         print(line)
+    if args.slots:  # the cap counts the claims that occupy a slot; a parked claim is listed by `claims`, never counted (#716)
+        try:
+            found = claims.claims(root, Path(args.state) if args.state else root / STATE, snap.issues, snap.prs, snap.merged,
+                                  changes=lambda path, branch: None, session=args.session)
+        except github.GhError as e:
+            common.die(f"frontier: cannot run: gh failed: {e.message}")
+        except (KeyError, TypeError, ValueError) as e:
+            common.die(f"frontier: cannot run: {e}")
+        print(claims.slots_line(found, cfg.slots))
     try:
         runlog.append_event(root, "frontier", "ran", takeable=len(tracker.takeable(issues, labels)))
     except runlog.NoSession as e:

@@ -267,8 +267,9 @@ class Watch(unittest.TestCase):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
-    def watch(self, reads, interval=300):
-        """Run the watch over `reads` (lists of raw nodes, or an exception to raise); returns (code, stdout, sleeps)."""
+    def watch(self, reads, interval=300, slots=None):
+        """Run the watch over `reads` (lists of raw nodes, or an exception to raise); returns (code, stdout, sleeps).
+        `slots` is run_watch's seam: a callable returning (building, cap, dispatchable tickets)."""
         reads, sleeps, now = list(reads), [], [0.0]
 
         def read():
@@ -285,10 +286,45 @@ class Watch(unittest.TestCase):
         import io
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            code = lead_brief.run_watch(self.env.repo, interval, read=read, clock=lambda: now[0], sleep=sleep)
+            code = lead_brief.run_watch(self.env.repo, interval, read=read, clock=lambda: now[0], sleep=sleep, slots=slots)
         return code, out.getvalue(), sleeps
 
     BASE = [issue_node(3, "Q", ["needs-lead"]), issue_node(8, "Plain")]
+    FRESH = [*BASE, issue_node(9, "Fresh", ["lead"])]
+
+    def test_an_idle_slot_with_a_dispatchable_ticket_past_the_window_prints_the_line_and_exits(self):
+        # polls at 300, 600, 900, 1200 s; the slot is seen idle from 300 s, so the 10 minute window is passed at 1200 s
+        code, out, _ = self.watch([self.BASE] * 5, slots=lambda: (1, 4, [12, 13]))
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "idle-slot: 1/4 building; dispatchable: #12 #13 (15m)\nnext: settled\n")
+
+    def test_a_slot_idle_for_less_than_the_window_prints_nothing(self):
+        code, out, _ = self.watch([self.BASE, self.BASE, self.BASE, self.FRESH], slots=lambda: (1, 4, [12]))
+        self.assertEqual(out, "new: #9 Fresh [lead]\nnext: settled\n")  # 300 s and 600 s idle: not past 600 s
+
+    def test_a_hold_or_a_full_set_of_slots_prints_nothing(self):
+        held = self.watch([self.BASE] * 4 + [self.FRESH], slots=lambda: (1, 4, []))  # frontier lists nothing no hold blocks
+        full = self.watch([self.BASE] * 4 + [self.FRESH], slots=lambda: (4, 4, [12]))
+        for _, out, _ in (held, full):
+            self.assertEqual(out, "new: #9 Fresh [lead]\nnext: settled\n")
+
+    def test_the_idle_clock_restarts_when_the_slot_fills(self):
+        # idle at 300 s and 600 s, full at 900 s, idle again from 1200 s: no stretch passes the 600 s window on its own
+        seen = iter([(1, 4, [12]), (1, 4, [12]), (4, 4, []), (1, 4, [12]), (1, 4, [12]), (1, 4, [12])])
+        _, out, _ = self.watch([self.BASE] * 5 + [self.FRESH], slots=lambda: next(seen))
+        self.assertEqual(out, "new: #9 Fresh [lead]\nnext: settled\n")
+
+    def test_velocity_watch_off_skips_the_idle_slot_check(self):
+        (self.env.repo / ".claude").mkdir(exist_ok=True)
+        (self.env.repo / ".claude" / "orchestration.md").write_text("## Velocity\n\n- **Velocity watch:** off\n")
+        _, out, _ = self.watch([self.BASE] * 5 + [self.FRESH], slots=lambda: (0, 4, [12]))
+        self.assertEqual(out, "new: #9 Fresh [lead]\nnext: settled\n")
+
+    def test_the_configured_idle_window_sets_how_long_a_slot_may_idle(self):
+        (self.env.repo / ".claude").mkdir(exist_ok=True)
+        (self.env.repo / ".claude" / "orchestration.md").write_text("## Velocity\n\n- **Idle window:** 2m\n")
+        _, out, _ = self.watch([self.BASE] * 3, slots=lambda: (1, 4, [12]))  # idle from 300 s; 600 s is past 120 s
+        self.assertEqual(out, "idle-slot: 1/4 building; dispatchable: #12 (5m)\nnext: settled\n")
 
     def test_a_new_issue_ends_the_watch_with_its_number_title_and_labels(self):
         code, out, _ = self.watch([self.BASE, self.BASE, [*self.BASE, issue_node(9, "Fresh", ["needs-triage", "lead"])]])
@@ -356,6 +392,62 @@ class Watch(unittest.TestCase):
             self.assertNotIn("PATCH", call)
 
 
+class Velocity(unittest.TestCase):
+    """The pass digest's slot read (`--velocity`), the Velocity config defaults and the `Lands in:` reader."""
+
+    def setUp(self):
+        self.env = ScriptEnv()
+        self.addCleanup(self.env.close)
+        self.real = lead_brief.velocity
+        self.addCleanup(setattr, lead_brief, "velocity", self.real)
+
+    def digest(self, holders, config=None):
+        lead_brief.velocity = lambda root, cfg=None: (1, 4, 2, [], holders)
+        if config is not None:
+            (self.env.repo / ".claude").mkdir(exist_ok=True)
+            (self.env.repo / ".claude" / "orchestration.md").write_text(config)
+        return lead_brief.section_velocity(self.env.repo)
+
+    def test_the_digest_carries_slot_use_and_a_held_pr_at_the_threshold_but_not_one_ticket_below(self):
+        self.assertEqual(self.digest({12: [5, 6, 7]}),
+                         ["slots: 1/4 building, 2 parked", "expensive-hold: PR #12 holds #5 #6 #7"])
+        self.assertEqual(self.digest({12: [5, 6]}), ["slots: 1/4 building, 2 parked"])
+
+    def test_the_threshold_is_the_configs(self):
+        two = "## Velocity\n\n- **Expensive hold:** 2\n"
+        self.assertEqual(self.digest({12: [5, 6], 13: [8]}, two)[1:], ["expensive-hold: PR #12 holds #5 #6"])
+
+    def test_config_defaults_when_the_section_is_missing_and_the_values_when_it_is_there(self):
+        import config
+        missing = config.Config.parse("## Slots\n\n- **Slots:** 2.\n")
+        self.assertEqual((missing.idle_window, missing.hold_threshold, missing.velocity_watch), (10, 3, True))
+        template = config.Config.parse((ROOT / "skills" / "setup" / "config-template.md").read_text())
+        self.assertEqual((template.idle_window, template.hold_threshold, template.velocity_watch), (10, 3, True))
+        tuned = config.Config.parse("## Velocity\n\n- **Idle window:** 20m\n- **Expensive hold:** 5\n- **Velocity watch:** off\n")
+        self.assertEqual((tuned.idle_window, tuned.hold_threshold, tuned.velocity_watch), (20, 5, False))
+        junk = config.Config.parse("## Velocity\n\n- **Idle window:** soon\n- **Velocity watch:** maybe\n")
+        self.assertEqual((junk.idle_window, junk.velocity_watch), (10, True))
+
+    def test_lands_in_names_the_paths_a_ticket_declares(self):
+        import holds
+        body = "## What\n\nx\n\nLands in: `scripts/merge`, `scripts/claims`, plus their tests, `docs/guide.md`.\n\nSource: y `no/such`"
+        self.assertEqual(holds.ticket_paths(body), ["scripts/merge", "scripts/claims", "docs/guide.md"])
+        self.assertEqual(holds.ticket_paths("**Lands in:** `a.py`\n`b.py`\n\n`c.py`"), ["a.py", "b.py"])
+        self.assertEqual(holds.ticket_paths("nothing declared"), [])
+        template = "## Lands in\n\n- Module: `scripts/merge` (the verdict)\n- Docs: `docs/guide.md`\n\n## Notes\n`x/y.py`"
+        self.assertEqual(holds.ticket_paths(template), ["scripts/merge", "docs/guide.md"])
+
+    def test_an_unreadable_state_file_ends_the_watch_could_not_run_with_a_next_line(self):
+        def boom():
+            raise OSError("state file unreadable")
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = lead_brief.run_watch(self.env.repo, 0, read=lambda: [], clock=lambda: 0.0, sleep=lambda s: None, slots=boom)
+        self.assertEqual((code, out.getvalue()), (2, "next: could-not-run\n"))
+
+
 class LeadPassReports(unittest.TestCase):
     """The prompt side (ADR-0006: the wording, not a restated script rule)."""
 
@@ -373,6 +465,17 @@ class LeadPassReports(unittest.TestCase):
         self.assertIn("On every pass digest, scan the takeable backlog", text)
         self.assertNotIn("Every few passes", text)
         self.assertNotIn("After every pass table", text)
+
+    def test_the_skills_apply_the_words_and_restate_no_rule(self):
+        lead = (ROOT / "skills" / "lead" / "SKILL.md").read_text()
+        run = SKILL.read_text()
+        self.assertIn("`idle-slot:` line goes to the orchestrator as a nudge", lead)
+        self.assertIn("lead-brief\" --repo . --velocity", lead)
+        self.assertIn("each `expensive-hold:` line under your asks for the developer", lead)
+        self.assertIn("`frontier`: step 7, then run steps 3 and 4 in this same turn", run)
+        self.assertIn("scripts/claims\" --slots", run)
+        for number in ("10m", "idle window"):  # the thresholds live in the config and the script, not in the prompts
+            self.assertNotIn(number, lead)
 
     def test_the_guide_describes_both(self):
         guide = (ROOT / "docs" / "guide.md").read_text()
