@@ -7,7 +7,7 @@ branch `none-yet`: the worktree is on the harness's `worktree-agent-*` branch, s
 worker `unknown`: a building claim with no state record, this session's own live worker that the state file couldn't join.
 state: with-lead | in-review | done | building | idle | waiting | elsewhere | stalled (`paused` is the orchestrator's own).
        `waiting <permission-denied | exhausted> since <ts>`: the newest worker-report needs the developer; it never expires.
-       `idle since <ts> [nudged <ts>]`: a building claim whose worker is not live and has reported nothing since its last commit;
+       `idle since <ts> [nudged <ts>]`: a building claim whose worker ended its turn with an `interim` report after its dispatch and has reported nothing since;
        `nudged` is the pass log's `record --nudged` time. Both timestamps are UTC, `YYYY-MM-DDTHH:MM:SSZ`.
 lock:  `ours <pid>` (this session's own worker); `foreign-live <pid>`; `foreign-live ?` (the line then ends ` (lock: <reason>)`: the reason doesn't parse, which counts as live;
        unlock the worktree if it is stale); `dead <pid>` (unlock it, then rescue it); `none` (no lock or no worktree).
