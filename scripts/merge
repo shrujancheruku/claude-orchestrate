@@ -379,6 +379,8 @@ def readiness(cwd, pr, v, approved, gap=HEAD_GAP):
             github.update_branch(pr, cwd)
         except github.GhError as e:
             say(f"PR #{pr} is behind {default} by {behind} and update-branch failed: {e.message}")
+            if e.kind == github.RATELIMITED:  # not the branch's fault: no verdict, so main ends `retry-after <time>`
+                return 2
             # A fork's branch can't be updated by the host or pushed to by the worker: sending it back would loop.
             verdict(f"ask-user PR #{pr} is a fork; its branch can't be updated" if v.get("isCrossRepository")
                     else f"send-back {pr}")
@@ -488,6 +490,7 @@ def run_merge(argv=None) -> int:
     refused = None
     while True:
         github.reset_wait_budget()  # a poll of a loop that can run for hours gets its own wait budget
+        github.rate_limited_until = None  # only a limit that ends the run counts for its verdict
         if attempt:
             try:
                 github.merge_pr(pr, args.method, head_oid, cwd)
@@ -495,6 +498,9 @@ def run_merge(argv=None) -> int:
             except github.GhError as e:
                 if e.kind == github.MISSING:  # gh vanished mid-run: not a refusal
                     print(f"merge: could not run gh: {e.message}", file=sys.stderr)
+                    return 2
+                if e.kind == github.RATELIMITED:  # not a refusal either: no verdict, so main ends `retry-after <time>`
+                    print(f"merge: rate limited: {e.message}", file=sys.stderr)
                     return 2
                 err = e.message
             if err is None:
