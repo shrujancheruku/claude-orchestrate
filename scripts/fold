@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""fold <from> <into> [--repo DIR] [--session ID] [--snapshot FILE] : widen ticket <into> with ticket <from>, then close <from> (GLOSSARY.md, Fold).
+
+The lead's and the orchestrator's fold, as one command. It refuses (`next: ask-user <why>`, exit 1, nothing written) when:
+    - either ticket is not open, or its body was last edited by an untrusted author (ADR-0015);
+    - either ticket is claimed (an assignee, or a `claims` state other than done);
+    - one ticket is gated and the other is not: a ticket is gated when its `Touch map:` line (the newest trusted `## Agent Brief`
+      comment's, else the body's) hits a config risk path (`hooks/**` is one), because the merge gate differs;
+    - the fold would close a blocking cycle (one ticket waits on the other through a third).
+Otherwise it writes, one line each:
+    folded: #<into> now holds #<from>'s body and trusted comments under `## Also, folded from #<from>`
+    commented: #<from> #<into>              a pointer comment on each
+    edges: <k> moved                        <from>'s open blockers become <into>'s (native edge and `Blocked by:` line), and every
+                                            ticket blocked by <from> is blocked by <into> instead (native edge and `Blocked by:` line)
+    left: #<n> body untrusted, Blocked by: line not rewritten   a dependent whose body an untrusted author last edited keeps its body (ADR-0015); only its native edge moves
+    closed: #<from> duplicate of #<into>    closed as `duplicate`, and `ready-for-agent` removed
+    next: folded <from> <into>
+The absorber's `## Agent Brief` comment is the caller's judgement and is not written here. It has no guard row yet, so a call prompts.
+Exit codes: 0 folded; 1 refused; 2 could not run (no `gh`, a failed `gh` call, not a repository), one line on stderr; a rate limit it
+would not sleep through also ends `next: retry-after <time>`. A failed `gh` write leaves the steps before it done; the donor is closed
+last, so a re-run finishes the fold (it appends and comments nothing twice: an absorber that already holds the `## Also, folded` heading is skipped). Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+
+import claims
+import common
+import config
+import github
+import runlog
+import session
+import touchmap
+import tracker
+from repo import STATE, main_checkout
+
+
+def touch_map_text(issue) -> str:
+    """The text whose `Touch map:` line counts: the newest trusted `## Agent Brief` comment that has one (the brief overrides
+    the body, the tracker doc says), else the body, else any trusted comment."""
+    briefs = [c["body"] for c in reversed(issue["comments"]) if c["body"].lstrip().startswith("## Agent Brief")]
+    others = [c["body"] for c in issue["comments"]]
+    for text in briefs + [issue["body"]] + others:
+        if session.brief_field(text, "Touch map") is not None:
+            return text
+    return ""
+
+
+def gated(issue, cfg):
+    """Whether the ticket's touch map hits a risk path (the merge gate line), or None when the map is unreadable."""
+    try:
+        paths = [e.path for e in session.touch_map(touch_map_text(issue))]
+    except touchmap.TouchMapError:
+        return None
+    return cfg.risk_hit(paths)
+
+
+def reaches(start, target, graph, seen=None) -> bool:
+    """Whether `target` is blocked, directly or through others, by `start` in `graph` ({ticket: [its open blockers]})."""
+    seen = seen if seen is not None else set()
+    for x in graph.get(start, ()):
+        if x == target:
+            return True
+        if x not in seen:
+            seen.add(x)
+            if reaches(x, target, graph, seen):
+                return True
+    return False
+
+
+def refusal(a, b, snap, found, cfg):
+    """The reason `a` (from) and `b` (into) cannot be folded, or None."""
+    by_number = {i["number"]: i for i in snap.issues}
+    for n, issue in ((a, by_number.get(a)), (b, by_number.get(b))):
+        if issue is None:
+            return f"#{n} is not an open ticket"
+        if not issue.get("body_trusted", True):
+            return f"#{n} body was last edited by an untrusted author"
+        c = found.get(n)
+        if issue["claimed"] or (c is not None and c.state != "done"):
+            return f"#{n} is claimed" + (f" ({c.state})" if c is not None else "")
+    # Folding makes <into> wait for <from>'s blockers and <from>'s dependents wait for <into>: a path of two or more edges
+    # between them in either direction (a direct edge is dropped by the fold) would close into a cycle.
+    open_numbers = set(by_number)
+    graph = {n: [m for m, _ in tracker.open_blockers(i, open_numbers)] for n, i in by_number.items()}
+    for x, y in ((a, b), (b, a)):
+        for mid in graph[x]:
+            if mid not in (a, b) and reaches(mid, y, graph):
+                return f"#{x} waits on #{y} through #{mid}: the fold would make a blocking cycle"
+    marks = [gated(by_number[n], cfg) for n in (a, b)]
+    if None in marks:
+        return f"#{(a, b)[marks.index(None)]} has a touch map the grammar rejects, so its merge gate is unknown"
+    if marks[0] != marks[1]:
+        return f"#{a} is {'gated' if marks[0] else 'ungated'} and #{b} is {'gated' if marks[1] else 'ungated'}: the merge gate differs"
+    return None
+
+
+def rewrite_blocked_lines(body, old, new) -> str:
+    """`body` with #old on its `Blocked by:` lines replaced by #new (and dropped when #new is already there)."""
+    out = []
+    for line in body.splitlines():
+        if tracker.BLOCKED_LINE.match(line):
+            refs = tracker.ISSUE_REF.findall(line)
+            if str(old) in refs:
+                line = re.sub(rf"#{old}\b", "" if str(new) in refs else f"#{new}", line)
+                line = re.sub(r",\s*,", ",", line).replace(": ,", ":").replace(",  ", ", ").rstrip(" ,")
+        out.append(line)
+    return "\n".join(out) + ("\n" if body.endswith("\n") else "")
+
+
+def post_comment(n, text, cwd):
+    github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{n}/comments", "-f", f"body={text}", cwd=cwd)
+
+
+def issue_id(n, cwd) -> str:
+    out = github.call("api", f"repos/{{owner}}/{{repo}}/issues/{n}", "--jq", ".id", cwd=cwd, idempotent=True).strip()
+    if not out.isdigit():
+        raise github.GhError(github.MALFORMED, f"issue id is not a number: {common.one_line(out) or 'empty reply'}")
+    return out
+
+
+def fold(root, snap, a, b, ready_label) -> list:
+    """Write the fold of ticket `a` into `b`; return the report lines."""
+    by_number = {i["number"]: i for i in snap.issues}
+    donor, absorber = by_number[a], by_number[b]
+    open_numbers = set(by_number)
+    mine = {n for n, _ in tracker.open_blockers(absorber, open_numbers)}
+    carried = [n for n, _ in tracker.open_blockers(donor, open_numbers) if n not in mine and n not in (a, b)]
+    heading = f"## Also, folded from #{a}"
+    # A whole line: `## Also, folded from #5` is a prefix of `... from #55`, and a false hit would skip the copy and lose the donor's scope.
+    if re.search(rf"^{re.escape(heading)}[ \t]*$", absorber["body"], re.M):  # a re-run after a failed write: the body and the pointer comments are already there
+        out = [f"folded: #{b} already holds #{a} (re-run)"]
+    else:
+        body = absorber["body"].rstrip("\n") + f"\n\n{heading}\n\n{donor['body'].strip()}\n"
+        for c in donor["comments"]:
+            body += f"\n{c['body'].strip()}\n"
+        if carried:
+            body += "\nBlocked by: " + ", ".join(f"#{n}" for n in carried) + "\n"
+        github.set_body("issues", b, body, cwd=root)
+        out = [f"folded: #{b} now holds #{a}'s body and trusted comments under `{heading}`"]
+        post_comment(a, f"Folded into #{b}: its scope now lives there. Closing this ticket as a duplicate.", root)
+        post_comment(b, f"Widened with #{a} (see `{heading}` in the body).", root)
+        out.append(f"commented: #{a} #{b}")
+    moved = 0
+    # Every donor blocker the absorber has no native edge to yet, not just the `carried` ones: on a re-run the body line is
+    # already there, so `carried` is empty, but the edge may be the write that failed.
+    for n in sorted({m for m, _ in tracker.open_blockers(donor, open_numbers)} - {a, b} - set(absorber["blockers"])):
+        github.add_blocked_by(b, n, cwd=root)
+        moved += 1
+    donor_id = issue_id(a, root)
+    for d in snap.issues:
+        if a not in d["blockers"] and a not in tracker.body_blockers(d):
+            continue
+        if d["number"] != b and b not in d["blockers"]:
+            github.add_blocked_by(d["number"], b, cwd=root)
+            moved += 1
+        if a in d["blockers"]:
+            github.call("api", "--method", "DELETE", f"repos/{{owner}}/{{repo}}/issues/{d['number']}/dependencies/blocked_by/{donor_id}",
+                        cwd=root, idempotent=True)
+        if d["number"] != b and a in tracker.body_blockers(d):
+            if d.get("body_trusted", True):
+                github.set_body("issues", d["number"], rewrite_blocked_lines(d["body"], a, b), cwd=root)
+            else:  # saving would make the developer the body's last editor and so launder untrusted text (ADR-0015)
+                out.append(f"left: #{d['number']} body untrusted, Blocked by: line not rewritten")
+    out.append(f"edges: {moved} moved")
+    if ready_label in donor["labels"]:
+        github.call("api", "--method", "DELETE", f"repos/{{owner}}/{{repo}}/issues/{a}/labels/{ready_label}", cwd=root, idempotent=True)
+    github.call("api", "--method", "PATCH", f"repos/{{owner}}/{{repo}}/issues/{a}", "-f", "state=closed", "-f", "state_reason=duplicate",
+                cwd=root, idempotent=True)
+    out.append(f"closed: #{a} duplicate of #{b}")
+    return out
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("source", type=int, metavar="from", help="the ticket folded away and closed")
+    ap.add_argument("into", type=int, help="the ticket that absorbs it")
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    ap.add_argument("--session", default=None, help="this session's id, for the claims it reads")
+    ap.add_argument("--snapshot", default=None, help="read the tracker from this file (scripts/snapshot) instead of fetching")
+    args = ap.parse_args(argv)
+    if args.session:
+        os.environ[runlog.SESSION_ENV] = args.session
+    root = Path(args.repo).resolve()
+    if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
+        common.die(f"fold: cannot run: {args.repo} is not in a git repository")
+    root = main_checkout(root)
+    if args.source == args.into:
+        common.die("fold: cannot run: <from> and <into> are the same ticket")
+    try:
+        snap = tracker.Snapshot.open(args.snapshot, root)
+        found = claims.claims(root, root / STATE, snap.issues, snap.prs, snap.merged, session=args.session)
+        why = refusal(args.source, args.into, snap, found, config.for_checkout(root))
+        if why:
+            return common.verdict("ask-user", why, exit_code=1)
+        lines = fold(root, snap, args.source, args.into, tracker.label_strings(root)["ready"])
+    except github.GhError as e:
+        until = common.rate_limit_time(e.message)
+        if until:
+            print(f"fold: cannot run: gh failed: {e.message}", file=sys.stderr)
+            return common.verdict("retry-after", until, exit_code=2)
+        common.die(f"fold: cannot run: gh failed: {e.message}")
+    except (KeyError, TypeError, ValueError) as e:
+        common.die(f"fold: cannot run: {e}")
+    for line in lines:
+        print(line)
+    return common.verdict("folded", args.source, args.into, exit_code=0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

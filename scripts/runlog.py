@@ -30,6 +30,7 @@ THREADS = "threads"
 RESUME = "resume"  # scripts/launch --resume: one per resumed run; the profile measures the Session gap up to its ts
 REVIEW = "review"  # scripts/worker-report <pr> --reviewer: one per reviewer report (ref = PR; round, head, suite, blocking, non_blocking, posted)
 GH_CALL = "gh_call"  # scripts/github.py: one per `gh` attempt (ok|failed|ratelimited), or "wait" for a sleep
+SWEEP = "sweep"  # scripts/sweep: `ran` is the watermark `--due` counts merges from; `prompt-kind` (ref = the kind) is a prompt kind already reported
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
@@ -43,6 +44,7 @@ OUTCOMES = {
     FRONTIER: ("ran",),  # scripts/frontier: the takeable count rides as an extra field
     GH_CALL: ("ok", "failed", "ratelimited", "wait"),
     RESUME: ("resumed",),
+    SWEEP: ("ran", "prompt-kind"),
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"
@@ -129,6 +131,29 @@ def latest_event(repo, kind: str, ref, skip_outcomes=()) -> dict | None:
         if e.get("kind") == kind and str(e.get("ref")) == str(ref) and e.get("outcome") not in skip_outcomes:
             found = e
     return found
+
+
+def read_kinds(repo, kinds) -> list:
+    """The events of the given kinds, oldest first, in one pass over the log. A line is parsed only when it holds one of
+    the kinds as a quoted word, so the `gh_call` lines (most of a long log) cost a substring test, not a `json.loads`.
+    The substring test is spacing-independent; the kind is then checked on the parsed event."""
+    kinds = set(kinds)
+    needles = [f'"{k}"' for k in kinds]
+    out = []
+    try:
+        with open(log_path(repo, EVENTS_LOG), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not any(n in line for n in needles):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("kind") in kinds:
+                    out.append(rec)
+    except FileNotFoundError:
+        pass
+    return out
 
 
 def read_events(repo, session: str, start: datetime, end: datetime) -> list | None:

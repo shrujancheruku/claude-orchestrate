@@ -6,8 +6,15 @@ with `query` or `mutation` and opens a selection set; an f-string is never read,
 runs each query once through `gh api graphql` with fixture values, and treats a GraphQL error as a failure. A
 mutation is never executed: each field it selects is checked against the schema's `Mutation` fields.
 
-Fixture values (the design call of #663): the repository's own owner and name (`gh` expands `{owner}` and `{repo}`),
-the PR's own number for an `Int`, and a placeholder for any other required variable. An optional variable is left out.
+Fixture values (the design call of #663, refined by #682): the repository's own owner and name (`gh` expands `{owner}`
+and `{repo}`), the PR's own number for an `Int`, and for any other required variable a value of its declared type: a
+placeholder for `String`/`ID`, `false` for `Boolean`, `0` for `Float`, an Enum's first value (schema introspection). An
+optional variable is left out. A required variable that cannot be filled (an input object, a list, a custom scalar)
+skips that query with a note, never a failure.
+
+Three outcomes are notes, not failures, and print as `gate: graphql ...` lines: `skipped` (a variable could not be
+filled), `not run` (the token may not read the query: a missing scope or FORBIDDEN, which the worker cannot fix) and
+`unchecked` (a query assembled at run time from pieces; the check never rebuilds queries, #564).
 Stdlib only, Python 3.9+.
 """
 
@@ -29,8 +36,19 @@ NOT_RESOLVED = re.compile(r"Could not resolve to|NOT_FOUND", re.I)  # the data i
 # The token may not read this query (a missing scope, e.g. `read:project`): the worker cannot fix it, so it is no failure.
 NO_ACCESS = re.compile(r"\bscopes?\b|FORBIDDEN|Resource not accessible|insufficient", re.I)
 
+# The start of a query built from pieces (`"mutation($id: ID!) { "`, `"mutation("`): the check names it, never runs it.
+FRAGMENT = re.compile(r"\A\s*(?:query|mutation)\s*(?:\w+\s*)?[({]")
+# A GraphQL string literal, block (`"""..."""`) or plain: its text may hold `)`, `}` or `{` that are not syntax.
+STRING = re.compile(r'"""(?:\\"""|[^"]|"(?!""))*"""|"(?:\\.|[^"\\\n])*"')
+
+
 def norm(text) -> str:
     return " ".join(text.split())
+
+
+def strip_strings(text) -> str:
+    """The query with each string literal emptied (`""`), so a scan for brackets never reads one inside a string."""
+    return STRING.sub('""', text)
 
 
 def is_operation(text) -> bool:
@@ -39,7 +57,7 @@ def is_operation(text) -> bool:
     if not m or (not m.group(1) and not SHORTHAND.match(text)):
         return False
     depth = 0
-    for c in text:
+    for c in strip_strings(text):
         depth += (c == "{") - (c == "}")
         if depth < 0:
             return False
@@ -72,6 +90,48 @@ def changed_queries(files) -> list:
     return out
 
 
+def fragments_in(source) -> list:
+    """[(name, text)] for each piece of a query built at run time: a string (or an f-string's literal start) that opens
+    an operation but is not a whole one. `name` is the variable or function the piece sits in, else its line."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+    out = []
+
+    def visit(node, name):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = node.name
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+            name = target.id if isinstance(target, ast.Name) else name
+        text = None
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value
+        elif isinstance(node, ast.JoinedStr) and node.values and isinstance(node.values[0], ast.Constant):
+            text = node.values[0].value  # the literal start of an f-string; the rest is run-time
+        if text is not None and FRAGMENT.match(text) and not (isinstance(node, ast.Constant) and is_operation(text)):
+            out.append((name or f"line {node.lineno}", text))
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, name)
+
+    visit(tree, None)
+    return out
+
+
+def changed_fragments(files) -> list:
+    """(path, name) for each run-time-built query piece the PR adds or changes, each once."""
+    out, seen = [], set()
+    for path, head, base in files:
+        old = {norm(t) for _, t in fragments_in(base or "")}
+        for name, text in fragments_in(head or ""):
+            if norm(text) not in old and (path, name) not in seen:
+                seen.add((path, name))
+                out.append((path, name))
+    return out
+
+
 def is_mutation(query) -> bool:
     return OPERATION.match(query).group(1) == "mutation"
 
@@ -82,8 +142,23 @@ def variables(query) -> list:
     return [(m.group(1), m.group(2).strip()) for m in VARIABLE.finditer(defs)]
 
 
-def fixtures(query, pr) -> list:
-    """The `gh api` arguments that give the query its variables: required ones only."""
+def enum_first_value(type_name, cwd):
+    """The first value of the Enum `type_name` by introspection, or (None, why) when it is no Enum or has no value.
+    Raises github.GhError when gh itself could not run."""
+    data = github.call_json("api", "graphql", "-f", f"query={{ __type(name: \"{type_name}\") {{ kind enumValues {{ name }} }} }}",
+                            cwd=cwd)
+    try:
+        info = data["data"]["__type"]
+        if info["kind"] == "ENUM" and info["enumValues"]:
+            return info["enumValues"][0]["name"], ""
+        return None, f"variable type {type_name} is {str(info['kind']).lower().replace('_', ' ')}, not an enum"
+    except (KeyError, TypeError):
+        return None, f"variable type {type_name} is not in the schema"
+
+
+def fixtures(query, pr, cwd=None):
+    """(args, why): the `gh api` arguments that give the query its required variables, each filled from its declared
+    type; `why` is non-empty (and args empty) when a variable cannot be filled, so the query is skipped."""
     args = []
     for name, typ in variables(query):
         if not typ.endswith("!"):
@@ -95,13 +170,25 @@ def fixtures(query, pr) -> list:
             args += ["-F", f"{name}={{repo}}"]
         elif base == "Int":
             args += ["-F", f"{name}={pr}"]
-        else:
+        elif base in ("String", "ID"):
             args += ["-f", f"{name}={PLACEHOLDER}"]
-    return args
+        elif base == "Boolean":
+            args += ["-F", f"{name}=false"]
+        elif base == "Float":
+            args += ["-F", f"{name}=0"]
+        elif base.startswith("["):
+            return [], f"variable ${name} is a list ({typ})"
+        else:  # an Enum, an input object or a custom scalar: only the schema says which
+            value, why = enum_first_value(base, cwd)
+            if value is None:
+                return [], f"variable ${name}: {why}"
+            args += ["-f", f"{name}={value}"]
+    return args, ""
 
 
 def mutation_fields(query) -> list:
-    """The root field names a mutation selects (aliases resolved to the field, arguments skipped)."""
+    """The root field names a mutation selects (aliases resolved to the field, arguments and strings skipped)."""
+    query = strip_strings(query)
     body = query[query.index("{", OPERATION.match(query).end() - 1):]
     names, depth, paren, i = [], 0, 0, 0
     while i < len(body):
@@ -127,7 +214,8 @@ def mutation_fields(query) -> list:
 
 
 def run(query, pr, cwd=None):
-    """(ok, why) for one query. A query is run once; a mutation is checked against the schema and never sent.
+    """(outcome, why) for one query; outcome is "pass", "fail", "skipped" (a variable could not be filled) or "not run"
+    (the token may not read it). A query is run once; a mutation is checked against the schema and never sent.
     Raises github.GhError when gh itself could not run (the caller decides)."""
     if is_mutation(query):
         data = github.call_json("api", "graphql", "-f", f"query={github.MUTATION_FIELDS_QUERY}", cwd=cwd)
@@ -136,17 +224,23 @@ def run(query, pr, cwd=None):
         except (KeyError, TypeError):
             raise github.GhError(github.MALFORMED, "gh returned no Mutation fields") from None
         unknown = [f for f in mutation_fields(query) if f not in known]
-        return (not unknown, "mutation field(s) not in the schema's Mutation type: " + ", ".join(unknown)
-                if unknown else "")
+        if unknown:
+            return "fail", "mutation field(s) not in the schema's Mutation type: " + ", ".join(unknown)
+        return "pass", ""
+    args, why = fixtures(query, pr, cwd)
+    if why:
+        return "skipped", why
     try:
-        github.call("api", "graphql", "-f", f"query={query}", *fixtures(query, pr), cwd=cwd)
+        github.call("api", "graphql", "-f", f"query={query}", *args, cwd=cwd)
     except github.GhError as e:
         if github.could_not_run(e):
             raise
-        if NOT_RESOLVED.search(e.message) or NO_ACCESS.search(e.message):
-            return True, ""
-        return False, e.message
-    return True, ""
+        if NOT_RESOLVED.search(e.message):
+            return "pass", ""  # the data is absent, the query is valid
+        if NO_ACCESS.search(e.message):
+            return "not run", common.one_line(e.message)[:100]
+        return "fail", e.message
+    return "pass", ""
 
 
 def label(query) -> str:
@@ -154,10 +248,24 @@ def label(query) -> str:
     return f"graphql {kind}: {norm(query)[:70]}"
 
 
+def query_name(query) -> str:
+    return (OPERATION.match(query).group(2) or "").strip() or "anonymous"
+
+
 def check(files, pr, cwd=None) -> list:
-    """[(label, ok, why)] for every changed query, at most MAX_QUERIES run."""
+    """[(label, ok, why)] for every changed query, at most MAX_QUERIES run; a note (skipped, not run, unchecked) is
+    `ok` and its label is the whole `gate: graphql ...` line."""
     found = changed_queries(files)
-    out = [(label(q) + f" ({path})", *run(q, pr, cwd)) for path, q in found[:MAX_QUERIES]]
+    out = []
+    for path, q in found[:MAX_QUERIES]:
+        outcome, why = run(q, pr, cwd)
+        if outcome == "skipped":
+            out.append((f"gate: graphql skipped {path}:{query_name(q)} ({why})", True, ""))
+        elif outcome == "not run":
+            out.append((f"gate: graphql not run ({why}) {path}:{query_name(q)}", True, ""))
+        else:
+            out.append((label(q) + f" ({path})", outcome == "pass", why if outcome == "fail" else ""))
     if len(found) > MAX_QUERIES:
         out.append((f"graphql: {len(found) - MAX_QUERIES} more changed queries not run", True, ""))
+    out += [(f"gate: graphql unchecked {path}:{name}", True, "") for path, name in changed_fragments(files)]
     return out

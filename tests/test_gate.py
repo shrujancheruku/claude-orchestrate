@@ -766,7 +766,58 @@ class GateTest(unittest.TestCase):
 
     def test_a_missing_token_scope_is_not_a_send_back(self):
         self.query_pr("title", {"stderr": "gh: Your token has not been granted the required scopes: read:project", "exit": 1})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("gate: graphql not run (", r.stdout)
+
+    def test_a_forbidden_reply_is_a_not_run_note_and_the_gate_passes(self):
+        self.query_pr("title", {"stderr": "gh: FORBIDDEN: Resource not accessible by personal access token", "exit": 1})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("gate: graphql not run (", r.stdout)
+        self.assertNotIn("fail", r.stdout)
+
+    def typed_pr(self, variable, *replies):
+        """A PR adding a query with one required `variable` (`$v: Type!`); `replies` answer, in order, the schema
+        introspection and the run."""
+        (self.env.repo / "scripts").mkdir(exist_ok=True)
+        (self.env.repo / "scripts" / "t.py").write_text(
+            f'Q = "query Typed($owner: String!, $name: String!, {variable}) {{ repository(owner: $owner, name: $name) {{ id }} }}"\n')
+        schema = {"args": ["api", "graphql", "-f", "~query={ __type(name:"], **replies[0]}
+        probe = {"args": ["api", "graphql", "-f", "~query=query Typed("], **replies[1]}
+        self.prime(diff=added_file("scripts/t.py"), first=[schema, probe])
+
+    def run_calls(self):
+        return [c for c in self.env.gh_calls() if any(a.startswith("query=query Typed") for a in c)]
+
+    def test_an_enum_variable_gets_its_first_value_from_the_schema(self):
+        info = {"stdout": json.dumps({"data": {"__type": {"kind": "ENUM", "enumValues": [{"name": "OPEN"}, {"name": "MERGED"}]}}})}
+        self.typed_pr("$v: PullRequestState!", info, {"stdout": '{"data": {}}'})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.run_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("v=OPEN", calls[0])
+
+    def test_a_boolean_variable_gets_false(self):
+        self.typed_pr("$v: Boolean!", {"stdout": "{}"}, {"stdout": '{"data": {}}'})
         self.assertEqual(self.gate().returncode, 0)
+        self.assertIn("v=false", self.run_calls()[0])
+        self.assertNotIn("v=gate-fixture", self.run_calls()[0])
+
+    def test_an_input_object_variable_skips_the_query_with_a_note(self):
+        info = {"stdout": json.dumps({"data": {"__type": {"kind": "INPUT_OBJECT", "enumValues": None}}})}
+        self.typed_pr("$v: CreateIssueInput!", info, {"stdout": '{"data": {}}'})
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("gate: graphql skipped scripts/t.py:Typed (variable $v: variable type CreateIssueInput is input object, not an enum)", r.stdout)
+        self.assertEqual(self.run_calls(), [])
+
+    def test_a_query_built_at_run_time_is_reported_unchecked_and_does_not_fail(self):
+        self.source_pr('def build(n):\n    return "mutation(" + ", ".join(f"$id{i}: ID!" for i in range(n)) + ") { "\n')
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("gate: graphql unchecked scripts/s.py:build", r.stdout)
 
     def test_at_most_eight_queries_run_and_the_rest_are_reported(self):
         text = "".join(f'Q{i} = "query($owner: String!, $name: String!, $number: Int!) {{ f{i} }}"\n' for i in range(9))

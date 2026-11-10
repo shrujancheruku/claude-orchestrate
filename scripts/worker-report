@@ -232,6 +232,27 @@ def risk_notes(text: str) -> list:
     return []
 
 
+MAX_RISK_NOTES = 12  # the reviewer read an untrusted diff (ADR-0016): its text is bounded before it is posted
+MAX_NOTE_CHARS = 300
+
+
+def bound_risk_notes(notes: list) -> list:
+    """The notes as the comment posts them: at most MAX_RISK_NOTES, each at most MAX_NOTE_CHARS long, with no live
+    `@login` mention and no `> *` marker opener (a zero-width space breaks each), and a last line saying how many
+    notes were dropped and how many cut."""
+    kept = notes[:MAX_RISK_NOTES]
+    out, cut = [], 0
+    for n in kept:
+        n = n.replace("@", "@​").replace("> *", ">​*")  # first, so the cap counts what is posted
+        if len(n) > MAX_NOTE_CHARS:
+            n, cut = n[:MAX_NOTE_CHARS - 1] + "…", cut + 1
+        out.append(n)
+    dropped = len(notes) - len(kept)
+    if dropped or cut:
+        out.append(f"(notes dropped: {dropped}; notes cut to {MAX_NOTE_CHARS} characters: {cut})")
+    return out
+
+
 def post_risk_notes(repo, pr, text) -> str:
     """Post the report's risk notes as one PR comment when the review was not posted (`posted: off` or `failed`), once:
     `posted`, `exists` (the PR already has a trusted author's comment starting with RISK_MARKER) or `none` (a posted
@@ -251,7 +272,7 @@ def post_risk_notes(repo, pr, text) -> str:
                for c in github.conversation_comments(pr, cwd=repo)):
             return "exists"
         github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{pr}/comments", "-f",
-                    "body=" + "\n".join([RISK_MARKER, "", *notes]), cwd=repo)
+                    "body=" + "\n".join([RISK_MARKER, "", *bound_risk_notes(notes)]), cwd=repo)
     except github.GhError as e:
         common.die(f"worker-report: cannot post the risk notes: {e.message}")
     return "posted"
