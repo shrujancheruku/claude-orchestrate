@@ -107,6 +107,40 @@ class Rescue(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(self.wt.exists())
 
+    def rescue_events(self):
+        return [e for e in self.env.events() if e["kind"] == "rescue"]
+
+    def test_a_saved_rescue_writes_an_ok_event(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        r = self.rescue()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        (e,) = self.rescue_events()
+        self.assertEqual((e["ref"], e["outcome"], e["branch"]), (42, "ok", BRANCH))
+        self.assertTrue(e["session"])
+        self.assertIn(BRANCH, e["reason"])
+
+    def test_a_failed_rescue_writes_a_failed_event_with_the_reason(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        hook = self.env.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        r = self.rescue()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        (e,) = self.rescue_events()
+        self.assertEqual((e["ref"], e["outcome"], e["branch"]), (42, "failed", BRANCH))
+        self.assertIn("push of", e["reason"])
+
+    def test_nothing_to_rescue_and_a_live_foreign_lock_write_no_event(self):
+        self.assertEqual(self.rescue().returncode, 0)
+        self.worktree()
+        live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(live.kill)
+        self.lock(live_reason(live.pid))
+        self.assertEqual(self.rescue().returncode, 3)
+        self.assertEqual(self.rescue_events(), [])
+
     def test_without_title_the_message_names_the_ticket(self):
         self.worktree()
         (self.wt / "a.txt").write_text("a\n")

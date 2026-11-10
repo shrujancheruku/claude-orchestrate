@@ -58,11 +58,11 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
         labels(first: 30) { nodes { name } }
         assignees(first: 1) { totalCount }
         blockedBy(first: 20) { nodes { number state } }
-        editor { login }
-        author { login }
+        editor { __typename login }
+        author { __typename login }
         authorAssociation
         lastEditedAt
-        comments(last: 100) { nodes { body createdAt lastEditedAt authorAssociation author { login } } }
+        comments(last: 100) { nodes { body createdAt lastEditedAt authorAssociation author { __typename login } } }
       }
     }
   }
@@ -80,11 +80,11 @@ ISSUE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
       state
       body
       labels(first: 30) { nodes { name } }
-      editor { login }
-      author { login }
+      editor { __typename login }
+      author { __typename login }
       authorAssociation
       lastEditedAt
-      comments(last: 100) { totalCount nodes { body createdAt lastEditedAt authorAssociation author { login } } }
+      comments(last: 100) { totalCount nodes { body createdAt lastEditedAt authorAssociation author { __typename login } } }
     }
   }
 }"""
@@ -161,7 +161,7 @@ THREADS_QUERY = """query($owner: String!, $name: String!, $number: Int!, $after:
           id isResolved isOutdated path line originalLine
           comments(first: 50) {
             pageInfo { hasNextPage endCursor }
-            nodes { author { login } authorAssociation body url }
+            nodes { author { __typename login } authorAssociation body url }
           }
         }
       }
@@ -175,7 +175,7 @@ THREAD_COMMENTS_QUERY = """query($id: ID!, $after: String) {
     ... on PullRequestReviewThread {
       comments(first: 50, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { author { login } authorAssociation body url }
+        nodes { author { __typename login } authorAssociation body url }
       }
     }
   }
@@ -189,18 +189,23 @@ TRUSTED_ASSOCIATIONS = frozenset(("OWNER", "MEMBER", "COLLABORATOR"))
 
 def is_trusted(association, login=None, extra=()) -> bool:
     """True for a trusted author: an `author_association` of OWNER, MEMBER or COLLABORATOR, or a login in `extra` (the
-    config's `Trusted authors:` line, lowercase). A missing association is untrusted (fail closed). GraphQL's
-    `author.login` for a bot drops the `[bot]` suffix that the REST login and the config carry, so both sides are
-    compared without it."""
+    config's `Trusted authors:` line, lowercase). A missing association is untrusted (fail closed). The login is
+    matched exactly, ignoring case: a user `foo` and the App `foo[bot]` are separate namespaces, so `foo` on the config
+    line never trusts `foo[bot]`. GraphQL drops the `[bot]` suffix from a bot's `author.login`; pass the actor through
+    `actor_login` so a `Bot` is spelled the way REST and the config spell it."""
     if str(association or "").upper() in TRUSTED_ASSOCIATIONS:
         return True
-    return bool(login) and _bare(login) in {_bare(x) for x in extra}
+    return bool(login) and str(login).lower() in {str(x).lower() for x in extra}
 
 
-def _bare(login) -> str:
-    """A login lowercased and without a trailing `[bot]`."""
-    s = str(login).lower()
-    return s[:-5] if s.endswith("[bot]") else s
+def actor_login(actor) -> str:
+    """The login of a GraphQL actor (`{__typename, login}`) as REST spells it: a `Bot` gets its `[bot]` suffix back.
+    An actor with no `__typename` keeps its login as given, so it fails closed against a config that lists `foo[bot]`."""
+    actor = actor or {}
+    login = actor.get("login") or ""
+    if login and actor.get("__typename") == "Bot" and not login.lower().endswith("[bot]"):
+        return login + "[bot]"
+    return login
 
 
 def trusted_logins(cwd=None) -> tuple:
@@ -912,6 +917,7 @@ def issue_state(issue, cwd=None) -> str:
 
 # Check results that block a merge: failed ones, and ones still going (a missing result counts as going).
 CI_BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
+CI_SKIPPED = {"SKIPPED", "NEUTRAL"}  # a check that did not run: alone it is not a pass
 CI_PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
 
@@ -924,7 +930,7 @@ def ci_verdict(checks) -> tuple:
     refusal names the real reason."""
     if not checks:
         return "pending", []
-    bad, pending = [], []
+    bad, pending, skipped, ran = [], [], [], False
     for c in checks:
         name = str(c.get("name") or c.get("context") or "?")
         # A CheckRun has status+conclusion; a commit StatusContext has only state.
@@ -933,9 +939,19 @@ def ci_verdict(checks) -> tuple:
             pending.append(name)
         elif r in CI_BAD:
             bad.append(name)
+        elif r in CI_SKIPPED:
+            skipped.append(name)
+        else:
+            ran = True
     if bad:
         return "failed", bad
-    return ("pending", pending) if pending else ("pass", [])
+    if pending:
+        return "pending", pending
+    # Every check skipped or neutral proves nothing ran (ADR-0012): a push to a draft skips the `test` job, and
+    # until the ready_for_review run joins the rollup those skips are the head's only checks. A mix with a real
+    # result (SUCCESS beside SKIPPED) stays a pass, since path-filtered jobs skip legitimately. Same rule as
+    # `watch-ci`'s judge.
+    return ("pass", []) if ran else ("pending", skipped)
 
 
 def has_workflows(head: str, cwd=None) -> bool:
@@ -1102,7 +1118,7 @@ def _connection(query, variables, path, after=None, cwd=None, what: str = "revie
 
 
 def _comment(c: dict) -> dict:
-    return {"author": (c.get("author") or {}).get("login") or "ghost", "body": str(c.get("body") or ""),
+    return {"author": actor_login(c.get("author")) or "ghost", "body": str(c.get("body") or ""),
             "url": c.get("url"), "association": c.get("authorAssociation") or ""}
 
 

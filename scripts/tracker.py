@@ -83,10 +83,10 @@ def _body_trusted(n, trusted) -> bool:
     author can still edit the body afterwards. GraphQL's `Issue.editor` is an actor with no association, so: an editor
     other than the issue's author must have write access (only the author or a collaborator can edit), and the author
     as editor is trusted by the issue's own `authorAssociation` or the config's logins. Never edited, or no editor: trusted."""
-    editor = (n.get("editor") or {}).get("login")
+    editor = github.actor_login(n.get("editor"))
     if not editor:
         return True
-    author = (n.get("author") or {}).get("login")
+    author = github.actor_login(n.get("author"))
     if author and editor.lower() != author.lower():
         return True
     return github.is_trusted(n.get("authorAssociation"), editor, trusted)
@@ -99,7 +99,7 @@ def from_nodes(nodes, trusted=()) -> list:
     for n in nodes:
         every = (n.get("comments") or {}).get("nodes") or []
         kept = [c for c in every
-                if github.is_trusted(c.get("authorAssociation"), (c.get("author") or {}).get("login"), trusted)]
+                if github.is_trusted(c.get("authorAssociation"), github.actor_login(c.get("author")), trusted)]
         summary = n.get("subIssuesSummary") or {}
         parent = n.get("parent")
         out.append({
