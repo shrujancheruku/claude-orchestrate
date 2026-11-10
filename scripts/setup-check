@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""setup-check [--repo PATH] : find PR workflows that run CI on draft pull requests.
+
+Every orchestrate worker opens a draft PR at the end of Orient and pushes to it while it builds,
+so a workflow that runs on drafts spends a CI run per push that nothing reads until `gh pr ready`.
+/orchestrate:setup runs this and, for each flagged file, shows the developer the suggested change.
+
+A file under <repo>/.github/workflows/ (.yml or .yaml) is flagged when it has a `pull_request`
+trigger and mentions neither `draft` nor `ready_for_review` outside a comment. Push-only workflows
+are ignored, and it does not judge which jobs run tests. Detection is a text scan (no YAML library),
+so a file it cannot read is skipped. It only reads: the workflow is never written.
+
+Output: one `flag <path>` line per hit (path relative to the repo, sorted), then `next: advise`
+when any was flagged, `next: none` otherwise or when there is no workflows directory (ADR-0014).
+Exit 0 done, 2 bad usage or no such repo. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+WORKFLOWS = Path(".github") / "workflows"
+# `pull_request` as a key or list item, not `github.event.pull_request.x` and not `pull_request_target`.
+TRIGGER = re.compile(r"(?<![\w.])pull_request(?!\w)")
+DRAFT_AWARE = re.compile(r"draft|ready_for_review")
+
+
+def code_of(text):
+    """The text without whole-line and trailing comments, so a comment cannot flag or clear a file."""
+    return "\n".join(re.sub(r"(^|\s)#.*", "", line) for line in text.splitlines())
+
+
+def runs_on_drafts(text):
+    code = code_of(text)
+    return bool(TRIGGER.search(code)) and not DRAFT_AWARE.search(code)
+
+
+def flagged(repo):
+    folder = repo / WORKFLOWS
+    if not folder.is_dir():
+        return []
+    hits = []
+    for path in sorted(folder.iterdir()):
+        if path.suffix not in (".yml", ".yaml") or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if runs_on_drafts(text):
+            hits.append(path.relative_to(repo).as_posix())
+    return hits
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("--repo", default=".", help="the repo root (default: current directory)")
+    repo = Path(ap.parse_args(argv).repo)
+    if not repo.is_dir():
+        print(f"setup-check: {repo} is not a directory", file=sys.stderr)
+        return 2
+    hits = flagged(repo)
+    for h in hits:
+        print(f"flag {h}")
+    print("next: advise" if hits else "next: none")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
