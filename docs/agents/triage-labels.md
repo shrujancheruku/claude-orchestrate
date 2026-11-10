@@ -20,4 +20,6 @@ When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the 
 
 Setup creates both labels when they are missing.
 
+**Triage test for `ready-for-agent`** (ADR-0017): a ticket that adds prompt prose (a skill, an agent definition or the brief) names the judgement that prose carries in its `Lands in:` section (see `docs/agents/issue-tracker.md`), and names the module that owns any logic. A ticket without it stays `needs-triage` or `needs-info`.
+
 Edit the "Label in our tracker" column to match whatever vocabulary you actually use.

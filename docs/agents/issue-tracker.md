@@ -26,6 +26,20 @@ When set to `yes`, PRs run through the same labels and states as issues, using t
 
 GitHub shares one number space across issues and PRs, so a bare `#42` may be either: resolve with `gh pr view 42` and fall back to `gh issue view 42`.
 
+## Ticket template: `Lands in:`
+
+A ticket that changes the plugin's behaviour carries a `Lands in:` section (ADR-0017), beside the acceptance criteria:
+
+```
+## Lands in
+- Module: <the script or library that owns the new logic, e.g. scripts/gate>
+- Words: <its verdict words or actions, e.g. `next: <word>`>
+- Prose budget: <words added per prompt file, e.g. skills/run/SKILL.md +1 sentence, or 0>
+- Judgement: <what the prompt prose decides that no script can; required when the budget is above 0>
+```
+
+The module's interface (flags, output shape) stays under **Decide in the PR**. The prompt gets at most one sentence that applies the module's word. A PR that raises a word budget in `tests/prompt_budget.json` cites the ticket's `Judgement:`.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a GitHub issue.
