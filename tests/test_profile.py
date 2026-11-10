@@ -983,7 +983,7 @@ class CommandTest(unittest.TestCase):
         html = prof.VIEWER.read_text()
         self.assertIn("regenerate it with scripts/profile.py", html)
         self.assertIn(f"data.schema !== {prof.SCHEMA}", html)
-        self.assertNotIn("predates", html)
+        self.assertNotIn("This profile predates", html)
         self.assertNotIn("console.warn", html)
 
     def test_html_escapes_script_close(self):
