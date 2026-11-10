@@ -18,7 +18,7 @@
 -->
 
 <!-- Optional Projects board. Setup writes the line itself when you opt in; `scripts/board` syncs it every pass and does nothing without it:
-- **Board:** <project URL>
+- **Board:** https://github.com/users/<owner>/projects/<n>
 -->
 
 ## Slots

@@ -119,6 +119,7 @@ PROJECT_QUERY = """query($owner: String!, $number: Int!, $after: String) {
       projectV2(number: $number) {
         id
         field(name: "Stage") { ... on ProjectV2SingleSelectField { id options { id name color description } } }
+        statusField: field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
         items(first: 100, after: $after) {
           pageInfo { hasNextPage endCursor }
           nodes {
@@ -129,6 +130,7 @@ PROJECT_QUERY = """query($owner: String!, $number: Int!, $after: String) {
               ... on DraftIssue { title }
             }
             stage: fieldValueByName(name: "Stage") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+            status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
           }
         }
       }

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """board [--repo PATH] [--dry-run] [--verbose] : sync the opt-in GitHub Projects board from tracker and PR state.
 
-Reads the config's `- **Board:** <project URL>` line; with none it does nothing (exit 0, silent). Otherwise it
+Reads the config's `- **Board:** <project URL>` line (a bare URL or an `<url>` autolink); with no such line it does
+nothing (exit 0, silent); a line that names no URL is exit 1, `board: cannot read the Board line: <line>`. Otherwise it
 rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a second run changes nothing. The columns
 read left to right as a ticket's life:
     Backlog          open, unclaimed `ready-for-agent` tickets that are not parents, `lead` or `wayfinder:`: the
@@ -18,7 +19,9 @@ assigned: no PR is Building, a ready PR In review, as `lead-route`'s LEAD-TICKET
 whose ticket stops qualifying without being claimed (relabelled, closed) is deleted; one that gets claimed moves on. Cards in Backlog are put in order with `updateProjectV2ItemPosition`, writing only where a card's predecessor
 differs, so an ordered column makes no write.
 The column is the custom single-select field `Stage`, created on first sync: GitHub's built-in `Status` options
-are not editable through `gh`. A field that lacks an option, or has them out of order, is upgraded in place through
+are not editable through `gh`. Status is mirrored from Stage by name (Backlog → Todo; Building, In review, Needs lead,
+Waiting on you → In Progress; Done → Done), in the same diff and silently: a card whose Status already matches makes
+no write, and an option the project lacks is one stderr line (per option) with no Status write. A field that lacks an option, or has them out of order, is upgraded in place through
 `updateProjectV2Field`, keeping every existing option's id and color. Needs lead stays empty without a lead. The lead
 never reads or writes the board. One tracker Snapshot serves the whole sync (and `lead-route`): no per-ticket calls.
 Only cards whose content is an issue of this repository (repository plus number) are the board's: draft, hand-placed
@@ -58,6 +61,11 @@ FIELD = "Stage"
 BACKLOG, BUILDING, REVIEW = "Backlog", "Building", "In review"
 NEEDS_LEAD, WAITING, DONE = "Needs lead", "Waiting on you", "Done"
 STAGES = [BACKLOG, BUILDING, REVIEW, NEEDS_LEAD, WAITING, DONE]  # left to right on the board layout
+# The built-in Status field mirrors Stage (#738), so a view grouped by Status works too. Its options are the project's
+# own, found by name; the script never creates or edits one.
+STATUS_FIELD = "Status"
+STATUS_OF = {BACKLOG: "Todo", BUILDING: "In Progress", REVIEW: "In Progress", NEEDS_LEAD: "In Progress",
+             WAITING: "In Progress", DONE: "Done"}
 NEW_OPTION_COLOR = "GRAY"
 ARCHIVE_AFTER = timedelta(days=1)
 PROJECT_URL = re.compile(r"^https://[^/]+/(?:orgs|users)/([^/]+)/projects/(\d+)/?")
@@ -323,12 +331,13 @@ def read_project(owner, number, repo):
         for n in page["nodes"]:
             c = n.get("content") or {}
             items.append({"id": n["id"], "stage": (n.get("stage") or {}).get("name"),
+                          "status": (n.get("status") or {}).get("name"),
                           "content": {"type": c.get("__typename"), "number": c.get("number"), "title": c.get("title"),
                                       "repository": (c.get("repository") or {}).get("nameWithOwner")}})
         info = page.get("pageInfo") or {}
         after = info.get("endCursor") if info.get("hasNextPage") else None
         if not after:
-            return project["id"], field, items
+            return project["id"], field, items, project.get("statusField") or {}
         if after in seen:
             raise github.GhError(github.MALFORMED, "gh returned a repeated page cursor (board items)")
         seen.add(after)
@@ -369,7 +378,7 @@ def sync(owner, number, repo, writes=None):
     in_backlog = tracker.backlog(issues, labels)
     merged_at = github.merged_prs(None, cwd=repo, limit=100)
 
-    project_id, field, items = read_project(owner, number, repo)
+    project_id, field, items, status_field = read_project(owner, number, repo)
     if field is None:
         field = create_field(project_id, repo, writes)
     # A board made before a column existed is upgraded in place, never refused.
@@ -402,6 +411,26 @@ def sync(owner, number, repo, writes=None):
             + json.dumps(options[stage]) + "}}) { clientMutationId }"), idempotent=True,
             line=None if card_id.startswith("new:") else f"#{t} {stage}")
 
+    status_ids = {o["name"]: o["id"] for o in status_field.get("options") or []}
+    missing = set()
+
+    def mirror(card, t, stage):
+        """Set the built-in Status from the card's Stage, only when it differs. A Status option the project lacks is
+        one stderr line (once per option) and no write for that card; Stage is untouched."""
+        name = STATUS_OF[stage]
+        if card.get("status") == name:
+            return
+        if name not in status_ids:
+            if name not in missing:
+                missing.add(name)
+                print(f"board: no Status option {name!r}: Status not mirrored for those cards", file=sys.stderr)
+            return
+        writes.put(f"set card {card['id']} {STATUS_FIELD} to {name}", lambda r: (
+            "updateProjectV2ItemFieldValue(input: {projectId: " + json.dumps(project_id) + ", itemId: "
+            + json.dumps(r(card["id"])) + ", fieldId: " + json.dumps(status_field["id"])
+            + ", value: {singleSelectOptionId: " + json.dumps(status_ids[name]) + "}}) { clientMutationId }"),
+            idempotent=True)
+
     def delete(card_id, t):
         writes.put(f"delete card {card_id} (#{t})", lambda r: (
             "deleteProjectV2Item(input: {projectId: " + json.dumps(project_id) + ", itemId: " + json.dumps(r(card_id))
@@ -430,6 +459,7 @@ def sync(owner, number, repo, writes=None):
         ids[t] = card["id"]
         if card.get(FIELD.lower()) != stage:
             set_stage(card["id"], stage, t)
+        mirror(card, t, stage)
     now = datetime.now(timezone.utc)
     for t, at in sorted(merged.items()):
         card = cards.get(t)
@@ -437,8 +467,10 @@ def sync(owner, number, repo, writes=None):
             continue
         if now - at > ARCHIVE_AFTER:
             archive(card["id"], t)
-        elif card.get(FIELD.lower()) != DONE:
-            set_stage(card["id"], DONE, t)
+        else:
+            if card.get(FIELD.lower()) != DONE:
+                set_stage(card["id"], DONE, t)
+            mirror(card, t, DONE)
         cards.pop(t)
     open_numbers = {i["number"] for i in issues}
     for t, card in sorted(cards.items()):
@@ -490,7 +522,12 @@ def run(argv=None) -> int:
                     help="print no per-change lines on a real sync (for a caller that only wants the exit code)")
     ap.add_argument("--verbose", action="store_true", help="print `writes: <n>` (the writes made) on stderr")
     args = ap.parse_args(argv)
-    url = config.for_checkout(args.repo).board
+    cfg = config.for_checkout(args.repo)
+    if cfg.board_bad is not None:  # a Board line that names no URL is a broken config, not "no board" (#738)
+        FAILURE.append("bad Board line")
+        print(f"board: cannot read the Board line: {cfg.board_bad}", file=sys.stderr)
+        return 1
+    url = cfg.board
     if not url:
         return 0
     m = PROJECT_URL.match(url)
