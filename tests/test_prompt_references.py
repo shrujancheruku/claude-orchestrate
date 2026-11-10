@@ -292,7 +292,8 @@ class ReviewerChecksOutByHash(unittest.TestCase):
     def test_run_skill_reruns_a_stale_head_and_owns_the_reviewer_worktree(self):
         self.assertIn("is stale: run it again", self.RUN)
         self.assertIn("detached `pr-<n>` worktree under its scratchpad", self.RUN)
-        self.assertIn("until that lands, remove the `pr-<n>` trees", self.RUN)
+        # `merge` removes the scratch trees when the PR lands; the orchestrator never does (#540).
+        self.assertNotIn("remove the `pr-<n>` trees", self.RUN)
 
     def test_run_skill_classifies_every_reviewer_report_with_the_script(self):
         self.assertIn('scripts/worker-report" <pr> --reviewer', self.RUN)
