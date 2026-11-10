@@ -540,7 +540,7 @@
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a(s: \"#\") } mutation { x }' -f operationName=B", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a(s: \"\"\"#\"\"\") } mutation { x }'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a }' -F x=@/etc/passwd", "expected": "deny", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api graphql -F number=463 -f query='query($number: Int!) { repository(owner: \"o\", name: \"r\") { pullRequest(number: $number) { number } } }'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -F limit=100 -f query='query($n: Int!) { node(id: $n) { id } }'", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='{ __type(name: \"Mutation\") { fields { name } } }'", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh run watch 123 --exit-status", "expected": "deny", "background": true, "source": "hand"}
 {"role": "orchestrate:worker", "command": "scripts/watch-ci 12", "expected": "deny", "background": true, "source": "hand"}
