@@ -214,7 +214,7 @@ def append_pass(repo, session: str, entry: dict) -> dict:
     if not session:
         raise NoSession("runlog: no session, pass not written")
     validate_pass(entry)
-    entry ={"ts": _now(), "session": session, **entry}
+    entry = {"ts": _now(), "session": session, **entry}
     _append(repo, PASS_LOG, entry)
     return entry
 
