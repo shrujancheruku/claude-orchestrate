@@ -71,9 +71,32 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual(self.reviewer("suite:\n"), "incomplete suite-unrecognised")
         self.assertEqual(self.reviewer("suite:   \n"), "incomplete suite-unrecognised")
 
-    def test_reviewer_mode_needs_no_branch_and_writes_no_event(self):
-        self.reviewer("suite: pass\n")
-        self.assertEqual(self.env.events(), [])
+    REVIEW = ("verdict: changes\nround: 2\nhead: abc123\nsuite: fail 1\nblocking: 2\nnon-blocking: 3\n"
+              "posted: https://github.com/o/r/pull/494#pullrequestreview-9\n")
+
+    def reviews(self):
+        return [e for e in self.env.events() if e["kind"] == "review"]
+
+    def test_reviewer_mode_needs_no_branch_and_writes_a_review_event(self):
+        self.assertEqual(self.reviewer(self.REVIEW), "valid")
+        (e,) = self.reviews()
+        self.assertEqual((e["ref"], e["outcome"], e["round"], e["head"], e["suite"], e["blocking"], e["non_blocking"]),
+                         (494, "request-changes", 2, "abc123", "fail 1", 2, 3))
+        self.assertEqual(e["posted"], "https://github.com/o/r/pull/494#pullrequestreview-9")
+        self.assertEqual([e for e in self.env.events() if e["kind"] == "worker-report"], [])
+
+    def test_review_event_outcomes(self):
+        self.reviewer("verdict: approve\nround: 1\nhead: a1\nsuite: pass\nblocking: 0\nnon-blocking: 0\nposted: off\n")
+        self.reviewer("verdict: approve\nround: 1\nhead: a1\n")  # no suite: incomplete
+        self.assertEqual([e["outcome"] for e in self.reviews()], ["approve", "incomplete"])
+
+    def test_a_resent_review_report_writes_one_event(self):
+        self.reviewer(self.REVIEW)
+        self.reviewer(self.REVIEW)
+        self.assertEqual(len(self.reviews()), 1)
+        self.reviewer(self.REVIEW.replace("round: 2", "round: 3"))
+        self.reviewer(self.REVIEW.replace("abc123", "def456"))
+        self.assertEqual(len(self.reviews()), 3)
 
     def verdict(self, text, **kw):
         r = self.report(text, **kw)
