@@ -17,16 +17,33 @@ import re
 import common
 import github
 
-# A whole operation: `query`/`mutation`, an optional name, optional variable definitions, then the selection set.
-OPERATION = re.compile(r"\A\s*(query|mutation)(\s+\w+)?\s*(\((?:[^()]|\([^()]*\))*\))?\s*\{")
+# A whole operation: `query`/`mutation`, an optional name, optional variable definitions, then the selection set; or
+# the anonymous shorthand, a selection set whose first field has arguments or a sub-selection (`{ viewer { login } }`;
+# a `{owner}` format string is not one).
+OPERATION = re.compile(r"\A\s*(?:(query|mutation)(\s+\w+)?\s*(\((?:[^()]|\([^()]*\))*\))?\s*)?\{")
+SHORTHAND = re.compile(r"\A\s*\{\s*[A-Za-z_]\w*\s*[({]")
 VARIABLE = re.compile(r"\$(\w+)\s*:\s*([^,)=$]+)")
 PLACEHOLDER = "gate-fixture"  # a required variable with no better fixture; a missing node is not a schema error
 MAX_QUERIES = 8  # one gate run never makes more calls than this (the rest are reported, not run)
 NOT_RESOLVED = re.compile(r"Could not resolve to|NOT_FOUND", re.I)  # the data is absent, the query is valid
-
+# The token may not read this query (a missing scope, e.g. `read:project`): the worker cannot fix it, so it is no failure.
+NO_ACCESS = re.compile(r"\bscopes?\b|FORBIDDEN|Resource not accessible|insufficient", re.I)
 
 def norm(text) -> str:
     return " ".join(text.split())
+
+
+def is_operation(text) -> bool:
+    """A whole operation: it opens one and its braces balance (the left half of `"query { " + FIELD + " }"` does not)."""
+    m = OPERATION.match(text)
+    if not m or (not m.group(1) and not SHORTHAND.match(text)):
+        return False
+    depth = 0
+    for c in text:
+        depth += (c == "{") - (c == "}")
+        if depth < 0:
+            return False
+    return depth == 0
 
 
 def queries_in(source) -> list:
@@ -38,7 +55,7 @@ def queries_in(source) -> list:
     inside_fstring = {id(c) for n in ast.walk(tree) if isinstance(n, ast.JoinedStr) for c in ast.walk(n)}
     return [n.value for n in ast.walk(tree)
             if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in inside_fstring
-            and OPERATION.match(n.value)]
+            and is_operation(n.value)]
 
 
 def changed_queries(files) -> list:
@@ -126,7 +143,7 @@ def run(query, pr, cwd=None):
     except github.GhError as e:
         if github.could_not_run(e):
             raise
-        if NOT_RESOLVED.search(e.message):
+        if NOT_RESOLVED.search(e.message) or NO_ACCESS.search(e.message):
             return True, ""
         return False, e.message
     return True, ""

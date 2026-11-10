@@ -9,10 +9,9 @@ subprocess from --cwd: its exit 1 fails the check, its exit 2 is gate exit 2, an
 path and this is the younger: a `wait` line `waits for #<ticket> (PR #<n>) to merge: <paths>`, not a failure, gate exit 3); dependencies merged (the PR's
 ticket has no open blocker, native or on its body's `Blocked by:` line, read from the tracker Snapshot and the PR is based on the default branch; no ticket passes); no secrets added
 (env, key and credential paths, private-key and token lines in the diff); a changed lockfile has a changed
-manifest; and each command the config's `Repo-specific checks` entry carries (a `run: \`cmd\``-marked span).
-each GraphQL `query` string the diff adds or changes in a script or Python module, run once, read-only, through `gh api graphql` with fixture values (the
-repository's owner and name, the PR's number for an `Int`): a GraphQL error fails the check with the error as its output; a `mutation` is never run, its fields are
-checked against the schema's `Mutation` type (#663).
+manifest; each GraphQL `query` string the diff adds or changes in a script or Python module, run once, read-only, through `gh api graphql` with fixture values (the
+repository's owner and name, the PR's number for an `Int`: a GraphQL error fails the check with the error as its output; a `mutation` is never run, its fields are
+checked against the schema's `Mutation` type, #663); and each command the config's `Repo-specific checks` entry carries (a `run: \`cmd\``-marked span).
 CI is never checked: that is `watch-ci`'s. Appends one `gate` event (ref = the PR number, head = the PR's head
 commit, outcome pass|fail, failed = the names of the failed checks). Exit codes: 0 every check passed;
 1 a check failed (send the output to the worker); 2 the gate could not run (bad --cwd, `gh` missing or
