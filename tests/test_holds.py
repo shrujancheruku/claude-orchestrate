@@ -10,7 +10,7 @@ import unittest.mock
 from datetime import timedelta, timezone
 from pathlib import Path
 
-from harness import ScriptEnv, gh_pr_list, gh_repo_view, git, rest_pull
+from harness import ScriptEnv, gh_pr_list, gh_repo_view, git, rest_pull, verdict_runs
 
 import common
 
@@ -43,7 +43,7 @@ def dead_pid():
 
 class Holds(unittest.TestCase):
     def setUp(self):
-        self.env = ScriptEnv()
+        self.env = verdict_runs(ScriptEnv(), "holds")  # holds ends in exactly one `next:` line, checked on every run
         self.addCleanup(self.env.close)
         self.wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.wt_dir.cleanup)
@@ -345,7 +345,7 @@ class Holds(unittest.TestCase):
             r = self.holds("--touch-map", "a.py", "--ticket", "7")
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
             self.assertRegex(r.stderr, r"holds: gh: rate limit until \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
-            self.assertRegex(r.stdout.strip(), r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+            self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
             self.assertTrue(list(Path(cache).glob("orchestrate/github-ratelimit-*.json")))  # the others wait too
         self.assertEqual(len(self.env.gh_calls()), 1)
 
@@ -384,8 +384,16 @@ class Holds(unittest.TestCase):
 
     def test_gh_unavailable_could_not_run(self):
         r = self.env.run("holds", "--touch-map", "a.py", "--ticket", "7", check=False, no_gh=True)
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual((r.returncode, r.verdict), (2, "next: could-not-run"), r.stdout + r.stderr)
         self.assertNotIn("Traceback", r.stderr)
+
+    def test_every_outcome_ends_in_the_one_next_line(self):
+        # The Run wrapper fails a run with no closing `next:` line or a second one; the words are checked here.
+        self.gh(unclaimed=[12])
+        r = self.holds("--touch-map", "a.py", "--ticket", "7")  # success
+        self.assertEqual((r.returncode, r.verdict), (0, "next: done"))
+        r = self.holds("--touch-map", "a.py")  # a usage error is a program error
+        self.assertEqual((r.returncode, r.stdout, r.verdict), (2, "", "next: could-not-run"))
 
     def test_gh_failure_could_not_run(self):
         self.env.set_gh([{"args": ["api", "repos/{owner}/{repo}"], "stderr": "HTTP 502\n", "exit": 1}])

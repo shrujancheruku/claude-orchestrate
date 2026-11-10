@@ -47,6 +47,9 @@ class VerdictHelperTest(unittest.TestCase):
         ("parked", ("7",), 0), ("unparked", ("7",), 0), ("refused", ("PR #7 is closed, not open",), 1),
         ("clean", (), 0), ("findings", ("3",), 0), ("due", ("10",), 0), ("not-due", ("4",), 0), ("folded", ("7", "9"), 0),
         ("done", (), 0), ("elsewhere", (), 3),
+        ("valid", ("pr-opened", "7", "abc"), 0), ("interim", (), 0), ("not-a-stop", (), 0), ("not-a-pr-opened", (), 0),
+        ("duplicate", ("valid", "stopped", "held-path"), 0), ("missing-report", ("none",), 0), ("limit", (), 0),
+        ("error", ("overloaded",), 0), ("incomplete", ("suite-missing",), 0), ("recorded", (), 0),
     )
 
     def run_verdict(self, word, args, code):

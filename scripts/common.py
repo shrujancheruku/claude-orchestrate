@@ -109,6 +109,12 @@ VERDICT_WORDS = {
     "clean": "", "findings": "<n>", "due": "<n>", "not-due": "<n>", "folded": "<from> <into>",
     # frontier, snapshot, threads, lead-route, rescue: the run happened; rescue's live lock held by another session
     "done": "", "elsewhere": "",
+    # worker-report: the classification of a worker's or reviewer's report
+    "valid": "pr-opened <pr> <head> | stopped <stop-reason> [exhausted]", "interim": "", "not-a-stop": "",
+    "not-a-pr-opened": "", "duplicate": "<verdict>", "missing-report": "pr <pr> <head> | none",
+    "limit": "[<reset time>]", "error": "<gist>", "incomplete": "<why>",
+    # profile.py record
+    "recorded": "",
     # every script: a rate limit, and a run that could not happen
     "retry-after": "<time>", "could-not-run": "[<why>]",
 }

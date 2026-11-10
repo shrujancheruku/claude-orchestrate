@@ -27,7 +27,8 @@ Why the PR number: it is in the snapshot, and the `assigned` time would cost a t
 Exit codes: 0 nothing overlaps; 1 an overlap (and only that); 2 could not run (no `gh`, a failed `gh` or `git` call, an
 unreadable state file, `--repo` not in a git repository, any other error: `holds: could not run: <type>: <message>`); 3 `--pr` only: it waits for an older
 open PR. A rate limit it would not sleep through is exit 2 and ends `next: retry-after <time>` (the one rate-limit
-word of every script). Stdlib only, Python 3.9+.
+word of every script). Every run ends with exactly one `next:` line (ADR-0014): `done` (exit 0, 1 and 3: the lines
+above it are the answer), `retry-after <time>` or `could-not-run [<Class>: <message>]` (exit 2). Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ def run(argv=None) -> int:
     except github.GhError as e:
         print(f"holds: gh: {e.message}", file=sys.stderr)
         until = common.rate_limit_time(e.message)
-        return common.verdict("retry-after", until, exit_code=2) if until else 2  # a rate limit is the one word everywhere
+        return 2  # `main` ends `next: retry-after <time>` for a rate limit it gave up on
     except (KeyError, TypeError, ValueError) as e:
         print(f"holds: {e}", file=sys.stderr)
         return 2
@@ -96,15 +97,14 @@ def run(argv=None) -> int:
 
 
 def main(argv=None) -> int:
-    """`run`, with one catch-all: exit 1 means only "paths held" (#424), so an error nothing mapped (an unreadable
-    file, a bad config) is exit 2, never a traceback's exit 1 that the gate would read as an overlap."""
-    try:
-        return run(argv)
-    except SystemExit:
-        raise
-    except Exception as e:  # noqa: BLE001 - the point is to catch whatever escaped
+    """`run`, ended with the one `next:` line (ADR-0014): `done` for exit 0, 1 and 3 (the lines above it say which
+    paths are held), `retry-after <time>` or `could-not-run` for exit 2. One catch-all: exit 1 means only "paths held"
+    (#424), so an error nothing mapped (an unreadable file, a bad config) is exit 2, never a traceback's exit 1 that
+    the gate would read as an overlap."""
+    def crashed(e) -> int:
         print(f"holds: could not run: {type(e).__name__}: {common.one_line(str(e))}", file=sys.stderr)
         return 2
+    return common.finish(run, argv, {0: ("done",), 1: ("done",), 3: ("done",)}, on_error=crashed)
 
 
 if __name__ == "__main__":
