@@ -1,9 +1,12 @@
 """scripts/merge --approved-head: behind leads to exit 5, a change since the approved head to exit 6."""
 
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import PR_GRAPHQL, ScriptEnv, gh_repo_view, git, pr_graphql_reply, rest_pull  # noqa: E402
@@ -219,6 +222,17 @@ class ReadinessTest(unittest.TestCase):
         p = self.merge(head, behind="1", fork=True, update={"exit": 1, "stderr": "cannot push to fork"})
         self.assertEqual(p.returncode, 1)
         self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user PR #7 is a fork; its branch can't be updated")
+
+    def test_a_rate_limit_in_update_branch_ends_retry_after_its_time(self):
+        head = self.push({"b.txt": "x\n"})
+        # The limit is recorded in a cache shared by every agent on the machine: keep this one in a temp dir.
+        with tempfile.TemporaryDirectory() as cache, mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            p = self.merge(head, behind="1", update={
+                "exit": 1, "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"})
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertRegex(p.stdout.splitlines()[-1], r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertNotIn("send-back", p.stdout)
+        self.assertEqual(self.called(MERGE), [])
 
     def test_failing_update_exits_1_with_the_output(self):
         head = self.push({"b.txt": "x\n"})

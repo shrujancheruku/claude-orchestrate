@@ -272,6 +272,45 @@ class MergeTest(MergeMixin, unittest.TestCase):
             code = mod.main(["7"])
         self.assertEqual((code, out.getvalue().splitlines()[-1]), (2, "next: retry-after 2026-01-01T00:05:00Z"))
 
+    def test_a_rate_limit_in_merge_pr_ends_retry_after_its_time(self):
+        self.seq({PR_VIEW: [pr("OPEN")],
+                  PR_MERGE: [{"exit": 1, "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}]})
+        # The limit is recorded in a cache shared by every agent on the machine: keep this one in a temp dir.
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as cache, mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            p = self.merge()
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertRegex(p.stdout.splitlines()[-1], r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertNotIn("ask-user", p.stdout)
+
+    def test_a_rate_limit_seen_in_an_earlier_poll_leaves_no_retry_after_on_another_exit_2(self):
+        import importlib.machinery
+        import importlib.util
+        import io
+        import contextlib
+        from unittest import mock
+        loader = importlib.machinery.SourceFileLoader("merge_under_test3", str(Path(common.__file__).parent / "merge"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)
+        calls = []
+
+        def merge_pr(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                mod.github.rate_limited_until = "2026-01-01T00:05:00Z"  # a limit an earlier poll saw and got past
+                raise mod.github.GhError(mod.github.FAILED, "HTTP 502: Bad Gateway")
+            raise mod.github.GhError(mod.github.MISSING, "gh not found")
+
+        open_pr = {"state": "OPEN", "headRefName": "feat-br", "headRefOid": "abc123"}
+        out = io.StringIO()
+        with mock.patch.object(mod, "view", return_value=(open_pr, None)), \
+                mock.patch.object(mod.github, "merge_pr", merge_pr), mock.patch.object(mod.time, "sleep"), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = mod.main(["7", "--cwd", str(self.env.repo), "--interval", "0"])
+        self.assertEqual((code, len(calls)), (2, 2))
+        self.assertEqual(out.getvalue().splitlines()[-1], "next: could-not-run")
+
     def test_unreadable_pr(self):
         self.seq({PR_VIEW: [{"exit": 1, "stderr": "boom"}]})
         p = self.merge()
