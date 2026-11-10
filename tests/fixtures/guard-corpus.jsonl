@@ -806,8 +806,8 @@
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; cat <<EOF | \"$S/worker-report\" 5 --branch 5-x --repo .\nBODY\nEOF", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session 00000000-0000-0000-0000-000000000000 --watermark | head -n 5", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session 00000000-0000-0000-0000-000000000000 --mark", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session 11111111-1111-1111-1111-000000000000 --mark", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session 11111111-1111-1111-1111-000000000000 --watermark | head -n 5", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session other-session --mark", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session other-session --watermark | head -n 5", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/snapshot\" --repo . >/dev/null; \"$S/claims\" --repo . | head -n 20", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "until ! pgrep -f run_parallel >/dev/null; do sleep 3; done; echo done", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "until pgrep -f x; do sleep 3; touch y; done", "expected": "unapproved", "source": "hand"}
