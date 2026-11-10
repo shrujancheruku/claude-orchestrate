@@ -190,7 +190,7 @@ scripts/lead-brief [--repo .] [--now ISO] [--checkpoint <pr>] [--watch [--interv
 
 ## Running on a public repo
 
-On a public repo anyone can comment on a ticket or open a pull request from a fork, so orchestrate acts only on text from a **trusted author**: `author_association` `OWNER`, `MEMBER` or `COLLABORATOR`, or a login on the config's optional `- **Trusted authors:** `login`, `login`` line (Backlog section). Comments from anyone else are counted and never read:
+On a public repo anyone can comment on a ticket or open a pull request from a fork, so orchestrate acts only on text from a **trusted author**: `author_association` `OWNER`, `MEMBER` or `COLLABORATOR`, or a login on the config's optional `- **Trusted authors:** `login`, `login`` line (Backlog section). A login matches exactly, so list a bot with its suffix (`dependabot[bot]`); `dependabot` trusts only the user of that name. Comments from anyone else are counted and never read:
 
 - A worker and a reviewer read the ticket body and a trusted author's comments (the tracker doc's **Read an issue** filters them). A stranger's `## Agent Brief` is not the spec. The body is trusted once a collaborator has applied `ready-for-agent`, since only collaborators can label.
 - `lead-route` and `lead-brief` parse stop, ADR-hold and resend markers, risk notes, `tier:` and discovered work from trusted comments and reviews only.

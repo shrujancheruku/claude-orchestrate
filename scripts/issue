@@ -12,8 +12,8 @@ the config's `Trusted authors:` line, never in a hand-written `gh issue view --j
     untrusted comments dropped: <count>          (only when there are some)
     older comments not shown: <count>            (only when the issue has more than the newest 100)
 
-A comment is kept when its author is OWNER, MEMBER or COLLABORATOR or on the config's `Trusted authors:` line (a bot such
-as `dependabot` there counts); the others are counted, never shown. A body whose last editor is untrusted is withheld
+A comment is kept when its author is OWNER, MEMBER or COLLABORATOR or on the config's `Trusted authors:` line (a bot is
+listed with its suffix, `dependabot[bot]`); the others are counted, never shown. A body whose last editor is untrusted is withheld
 (`tracker.from_nodes` rule, #572), and an `## Agent Brief` in a stranger's comment is therefore never the spec. A long body
 or comment is cut at 20,000 characters with a `[truncated: <n> more characters]` line.
 Exit codes: 0 read; 2 could not run (no such issue, `gh` failed, a rate limit as `next: retry-after <time>`). Stdlib only,
