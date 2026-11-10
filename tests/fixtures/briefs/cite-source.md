@@ -6,6 +6,7 @@ Held paths: none
 Branch: 2-copilot-price. If it exists on the remote, continue from it.
 Merged dependencies: none
 Verify: `test -f PRICE.md` from the repo root (the current directory)
+Plugin root: none (this fixture calls no plugin script).
 Shared files: none
 Commits: Conventional Commits (`type(scope): description`). No attribution lines or trailers. Stage files by explicit path.
 PR: title Conventional Commits; body includes "Closes #2"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain.

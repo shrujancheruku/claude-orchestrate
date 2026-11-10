@@ -10,6 +10,9 @@ script (ADR-0006). The flags cannot live in settings: the session-only auto-mode
     --settings '{"disableAutoMode":"disable"[,"crossSessionInbound":"accept"]}'
                                 crossSessionInbound is added with --bg or bypassPermissions: without it a
                                 background orchestrator holds every message from the lead behind a dialog
+                                with a snapshot, the same JSON also carries "permissions":{"allow":["Read(//<snapshot>/**)"]} (#617):
+                                the skills and agents read their reference files from the snapshot, outside the
+                                working directories, and each read would prompt. Read only: no Edit, Write or Bash rule
     --model <m>                 only when the config's Models table names one in its Orchestrator row
     --plugin-dir <snapshot>     only when the plugin is a checkout (${CLAUDE_PLUGIN_ROOT}, else this script's parent;
                                 a root under <claude dir>/plugins/ is a marketplace install and gets no flag). The
@@ -144,6 +147,15 @@ def snapshot(root: Path, fetch: bool = True):
     return dest, sha
 
 
+def read_rule(plugin_dir) -> dict:
+    """The settings key that allows reads of the snapshot and nothing else (#617).
+
+    Claude Code writes an absolute path in a rule with a `//` prefix (a single `/` anchors at the settings source).
+    No Edit, Write or Bash rule: the snapshot holds the running hooks/guard.py. Not --add-dir, which would widen edits too.
+    """
+    return {"permissions": {"allow": [f"Read(/{plugin_dir}/**)"]}} if plugin_dir else {}
+
+
 def build(args, plugin_dir, model, start=None) -> list:
     """The argv of the launch, `claude` first, from parsed arguments, the plugin snapshot (None: none) and the Orchestrator model.
 
@@ -153,7 +165,7 @@ def build(args, plugin_dir, model, start=None) -> list:
     if getattr(args, "bg_resume", False):
         return argv + ["--resume", args.resume, "--bg"] + ([start] if start else [])
     if args.lead:
-        argv += ["--name", "lead", "--settings", json.dumps(INBOUND, separators=(",", ":"))]
+        argv += ["--name", "lead", "--settings", json.dumps({**INBOUND, **read_rule(plugin_dir)}, separators=(",", ":"))]
         if args.permission_mode:
             argv += ["--permission-mode", args.permission_mode]
         if model:
@@ -169,6 +181,7 @@ def build(args, plugin_dir, model, start=None) -> list:
     mode = args.permission_mode or "acceptEdits"
     if args.bg or mode == "bypassPermissions":
         settings.update(INBOUND)
+    settings.update(read_rule(plugin_dir))
     argv += ["--name", NAME, "--permission-mode", mode,
              "--settings", json.dumps(settings, separators=(",", ":"))]
     if model:
