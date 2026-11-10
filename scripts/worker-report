@@ -17,7 +17,8 @@ line and appends a `worker-report` event to the run log. The orchestrator applie
     limit [<reset time>]             no report, and the text names a usage limit
     error <gist>                     no report, and the text names another API error
 With `--reviewer` the text is a reviewer's short report and no PR is looked up, no `--branch` is needed and no event is
-written. It prints `valid` when the report has a `suite:` line that is `pass`, `fail <n>` or `not run (<reason>)`,
+written. It prints `valid` when the report has a `suite:` line that is `pass` or `fail` (alone or followed by free text,
+such as `pass (py_compile, run_parallel)` or `fail 2`) or `not run (<reason>)`,
 else `incomplete <why>` (`suite-missing`, `suite-not-run-without-reason` or `suite-unrecognised`): the orchestrator
 sends an incomplete report back to the reviewer once.
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
@@ -146,7 +147,8 @@ def _classify(text: str, branch: str, lookup) -> tuple:
 
 
 SUITE = re.compile(r"^[ \t>*-]*suite:[ \t]*`*(.*?)`*[ \t]*$", re.I | re.M)
-SUITE_OK = re.compile(r"pass|fail\s+\d+|not run\s*\(\s*\S[^)]*\)", re.I)
+# `pass` or `fail`, alone or followed by free text (`pass (py_compile, run_parallel)`, `fail 2`); `not run` needs a reason.
+SUITE_OK = re.compile(r"(?:pass|fail)(?![\w-])`*(?:[ \t,:(;.-].*)?|not run\s*\(\s*\S[^)]*\)", re.I)
 
 
 def classify_reviewer(text: str) -> tuple:

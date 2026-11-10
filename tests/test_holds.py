@@ -326,6 +326,7 @@ class Holds(unittest.TestCase):
             r = self.holds("--touch-map", "a.py", "--ticket", "7")
             self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
             self.assertRegex(r.stderr, r"holds: gh: rate limit until \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+            self.assertRegex(r.stdout.strip(), r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
             self.assertTrue(list(Path(cache).glob("orchestrate/github-ratelimit-*.json")))  # the others wait too
         self.assertEqual(len(self.env.gh_calls()), 1)
 
