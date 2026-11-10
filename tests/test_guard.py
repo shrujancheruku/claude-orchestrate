@@ -2150,6 +2150,8 @@ class ScriptFormsTest(unittest.TestCase):
 
     def test_each_new_orchestrator_row_is_approved_in_its_exact_shape(self):
         for command in (f"{SCRIPTS}/ci-rerun 12", f"{SCRIPTS}/ci-rerun 12 --job 111 222", f"{SCRIPTS}/ci-rerun 12 --repo .",
+                        f"{SCRIPTS}/park-pr 12 --why 'waits on #13'", f"{SCRIPTS}/park-pr 12 --unpark",
+                        f"{SCRIPTS}/park-pr 12 --unpark --repo .",
                         f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}", f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}/x",
                         f"{SCRIPTS}/threads 12 followup", f"{SCRIPTS}/threads 12 followup T1 T2",
                         f"{SCRIPTS}/threads 12 followup T1 --gist 'a.py:3 the gist'",
@@ -2161,6 +2163,11 @@ class ScriptFormsTest(unittest.TestCase):
                 self.assertTrue(self.ok(command))
 
     def test_each_new_row_refuses_what_is_not_its_exact_shape(self):
+        for command in (f"{SCRIPTS}/park-pr 12", f"{SCRIPTS}/park-pr 12 --why", f"{SCRIPTS}/park-pr 12 --why x --unpark",
+                        f"{SCRIPTS}/park-pr 12 --unpark --why x", f"{SCRIPTS}/park-pr --unpark", f"{SCRIPTS}/park-pr 12 --unpark 13",
+                        f"{SCRIPTS}/park-pr 12 --unpark --repo /x", f"{SCRIPTS}/park-pr 12 --unp"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
         for command in (f"{SCRIPTS}/ci-rerun", f"{SCRIPTS}/ci-rerun 12 --job 111", f"{SCRIPTS}/ci-rerun 12 --job a b",
                         f"{SCRIPTS}/ci-rerun 12 --repo /x", f"{SCRIPTS}/ci-rerun 12 --jo 1 2", f"{SCRIPTS}/ci-rerun 12 13",
                         f"{SCRIPTS}/scratch 12 abc1234", f"{SCRIPTS}/scratch 12 main --under {self.pad}",
@@ -2249,7 +2256,9 @@ class ScriptFormsTest(unittest.TestCase):
     def test_a_strict_orchestrators_denial_names_the_script_that_covers_the_hand_run_form(self):
         os.environ["ORCHESTRATE_ROLE"] = "orchestrator"
         try:
-            for command, script in (("gh pr close 12", "scripts/ci-rerun"), ("gh pr comment 12 --body x", "--post-risk-notes"),
+            for command, script in (("gh pr close 12", "scripts/park-pr"), ("gh pr reopen 12", "scripts/park-pr"),
+                                    ("gh pr ready 12 --undo", "scripts/park-pr"), ("gh pr close 12", "scripts/ci-rerun"),
+                                    ("gh pr comment 12 --body x", "--post-risk-notes"),
                                     ("git worktree add --detach /tmp/pr-12 abc1234", "scripts/scratch")):
                 with self.subTest(command):
                     out = raw(None, command, self.main, session_id=self.SID, full=True)
@@ -2467,9 +2476,24 @@ class WorkerOwnBranchFormsTest(unittest.TestCase):
             with self.subTest(command):
                 self.assertTrue(self.ok(command))
 
+    def test_the_default_branch_is_merged_into_its_own_branch_in_its_own_worktree_only(self):
+        for command in ("git merge --no-edit origin/main", "git merge --ff-only origin/main", "git merge --no-edit -q origin/main",
+                        f"cd {self.work} && git merge --no-edit origin/main"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for cwd in (self.main, self.main / ".claude"):  # the main checkout, or any directory that is not its worktree
+            with self.subTest(cwd=str(cwd)):
+                self.assertFalse(approved("orchestrate:worker", "git merge --no-edit origin/main", cwd))
+        # The ticket branch is the only one it merges into: on a default branch's worktree nothing is approved.
+        self.git("worktree", "add", "-q", "-b", "master", str(self.main / ".claude" / "worktrees" / "agent-def"))
+        self.assertFalse(approved("orchestrate:worker", "git merge --no-edit origin/main",
+                                  self.main / ".claude" / "worktrees" / "agent-def"))
+
     def test_another_branch_main_a_rebase_and_a_reset_are_not(self):
-        for command in ("git merge --no-edit origin/main", "git merge --no-edit origin/other", f"git merge origin/{self.BRANCH}",
+        for command in ("git merge --no-edit origin/other", f"git merge origin/{self.BRANCH}", "git merge origin/main",
                         "git merge --no-edit main", f"git merge --no-edit origin/{self.BRANCH} origin/main",
+                        "git merge --no-edit origin/main origin/other", "git merge --no-edit --squash origin/main",
+                        "git merge --no-edit origin/main^", "git merge --no-edit upstream/main", "git pull --no-rebase origin main",
                         f"git pull --rebase origin {self.BRANCH}", "git pull --no-rebase origin main",
                         "git pull --ff-only", "git pull", f"git reset --hard origin/{self.BRANCH}",
                         f"git push --force origin {self.BRANCH}", f"git merge --no-edit origin/{self.BRANCH} && git push origin {self.BRANCH}"):

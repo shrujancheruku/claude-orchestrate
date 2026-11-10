@@ -110,6 +110,26 @@ class Holds(unittest.TestCase):
             "src/x.py (held by building #12)", "y.py (held by building #12)",
             "overlap: src/x.py (held by building #12)"])
 
+    def park(self, ticket, outcome="parked"):
+        import runlog
+        runlog.append_event(self.env.repo, runlog.PARK, outcome, ref=100 + ticket, ticket=ticket, session="s")
+
+    def test_a_parked_pr_holds_nothing(self):
+        # park-pr closed PR #112 (so it is not among the open PRs) and its ticket kept the claim and the record.
+        self.gh(open_tickets=[12])
+        self.state({12: ["src/x.py:5"]})
+        self.park(12)
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertEqual((r.returncode, r.stdout.splitlines()), (0, ["none", "overlap: none"]))
+
+    def test_an_unparked_ticket_holds_its_touch_map_again(self):
+        self.gh(open_tickets=[12])
+        self.state({12: ["src/x.py:5"]})
+        self.park(12)
+        self.park(12, "unparked")
+        r = self.holds("--touch-map", "src/x.py", "--ticket", "7")
+        self.assertEqual(r.returncode, 1, r.stdout)
+
     def test_building_ticket_note_is_stripped_and_matches(self):
         self.gh(open_tickets=[12])
         self.state({12: ["scripts/gate:74 (main, new checks)"]})

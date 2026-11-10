@@ -265,6 +265,23 @@ class WaitingAndIdle(unittest.TestCase):
     def worker(self, dispatched="2026-01-01T10:00:00Z"):
         return dict(WORKER, dispatched=dispatched) if dispatched else dict(WORKER)
 
+    def park(self, n, outcome="parked"):
+        import runlog
+        runlog.append_event(self.tmp.name, runlog.PARK, outcome, ref=100 + n, ticket=n, session="s")
+
+    def test_a_parked_ticket_is_parked_not_building_or_stalled(self):
+        self.park(1)
+        self.assertEqual(self.one(1, state={"1": WORKER}).state, "parked")
+        self.park(2)
+        self.assertEqual(self.one(2).state, "parked")  # no record: not stalled, so never redispatched
+
+    def test_unparking_reopens_the_claim_and_an_open_pr_beats_parked(self):
+        self.park(1)
+        self.park(1, "unparked")
+        self.assertEqual(self.one(1, state={"1": WORKER}).state, "building")
+        self.park(3)
+        self.assertEqual(self.one(3, prs=[self.pr(3, "3-x")]).state, "in-review")
+
     def test_w_permission_denied_replaces_building(self):
         self.report(1, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
         c = self.one(1, state={"1": WORKER})

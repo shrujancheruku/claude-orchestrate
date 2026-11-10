@@ -898,3 +898,15 @@
 {"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo /elsewhere", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git merge --no-edit origin/main", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git merge --no-edit origin/other", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git merge --no-edit origin/main origin/other", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cd /tmp && git merge --no-edit origin/main", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git merge --no-edit origin/main", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/park-pr 12 --why 'waits on the fix in #13'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/park-pr 12 --unpark", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/park-pr 12", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/park-pr 12 --why x --unpark", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "gh pr ready 12 --undo", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "gh pr close 12", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "gh pr reopen 12", "expected": "unapproved", "source": "hand"}

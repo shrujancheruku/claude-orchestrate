@@ -44,6 +44,7 @@ class VerdictHelperTest(unittest.TestCase):
         ("rerun-after-ci", (), 3), ("wait-older", ("7", "5"), 3), ("wait-ticket", ("7", "9"), 3),
         ("settled", (), 0),("retry-after", ("2026-01-01T00:00:00Z",), 2),
         ("could-not-run", (), 2), ("rerun", ("7", "abc"), 0), ("already-running", ("7",), 1),
+        ("parked", ("7",), 0), ("unparked", ("7",), 0), ("refused", ("PR #7 is closed, not open",), 1),
         ("clean", (), 0), ("findings", ("3",), 0), ("due", ("10",), 0), ("not-due", ("4",), 0), ("folded", ("7", "9"), 0),
     )
 

@@ -1578,6 +1578,8 @@ def worker_branch_git_ok(call: Call, worktree: Path, cwd: str) -> bool:
     - `git merge --no-edit|--ff-only origin/<B>` and `git pull --no-rebase|--ff-only origin <B>`, with <B> the branch
       checked out in the worktree and not a default branch (the recovery from a push rejected after the
       orchestrator's sweep updated the branch; agents/worker.md). No other ref, no `--rebase`.
+    - `git merge --no-edit|--ff-only origin/<default>` (#708): bringing the default branch into its own branch, as a
+      conflict-list follow-up asks. Only a merge takes it: `git pull` stays on the worker's own branch.
     - `git rm [-q] <path>...` of a file inside the worktree (`-r` on a directory inside it).
     - `git checkout <ref> -- <path>...` and `git restore [--source <ref>] -- <path>...`, to bring back a file."""
     if any(a.dynamic or a.glob for a in call.args):
@@ -1590,7 +1592,8 @@ def worker_branch_git_ok(call: Call, worktree: Path, cwd: str) -> bool:
         flags = [a for a in args if a.startswith("-")]
         refs = [a for a in args if not a.startswith("-")]
         return (len(flags) <= 2 and all(f in ("--no-edit", "--ff-only", "-q", "--quiet") for f in flags)
-                and any(f in ("--no-edit", "--ff-only") for f in flags) and refs == [f"origin/{branch}"])
+                and any(f in ("--no-edit", "--ff-only") for f in flags)
+                and len(refs) == 1 and refs[0] in [f"origin/{b}" for b in (branch, *sorted(default_branches(cwd)))])
     if call.is_sub("pull"):
         flags = [a for a in args if a.startswith("-")]
         refs = [a for a in args if not a.startswith("-")]
@@ -1843,6 +1846,9 @@ ORCHESTRATOR_FORMS = (
     Form("rescue", ("ticket",), {"--title": "word", "--repo": "repo", "--pr": "num"}, need=("--title", "--repo")),
     # Making CI run again (once), and the scratch worktree add; scratch's `--under` is this session's scratchpad.
     Form("ci-rerun", ("pr",), {"--job": "num num", "--repo": "repo"}),
+    # Taking an open PR out of the merge queue (#708): `park-pr <pr> --why "<text>"` and `park-pr <pr> --unpark`, nothing else.
+    Form("park-pr", ("pr",), {"--why": "word", "--repo": "repo"}, need=("--why",)),
+    Form("park-pr", ("pr",), {"--unpark": "", "--repo": "repo"}, need=("--unpark",)),
     Form("scratch", ("pr", "hash"), {"--under": "under", "--repo": "repo"}, need=("--under",)),
     # worker-report: a worker's completion, and a reviewer's (which may post its risk notes once).
     Form("worker-report", ("n",), {"--branch": "word", "--repo": "repo"}, need=("--branch",)),
@@ -3241,8 +3247,11 @@ def hand_run_script(parsed: "Parsed") -> str | None:
             args = [a.text for a in call.args]
             if call.is_sub("pr") and call.is_verb("merge"):
                 return "scripts/merge"
+            if call.is_sub("pr") and call.is_verb("ready"):  # parse_gh drops flags, so `--undo` is not visible
+                return "scripts/park-pr <pr> --why \"<text>\" (it takes the PR out of the merge queue)"
             if call.is_sub("pr") and call.is_verb("close", "reopen"):
-                return "scripts/ci-rerun (it closes and reopens a PR whose head has no CI run, once)"
+                return ("scripts/park-pr <pr> --why \"<text>\" or --unpark (park a PR behind a newer PR's fix), or "
+                        "scripts/ci-rerun (it closes and reopens a PR whose head has no CI run, once)")
             if call.is_sub("pr") and call.is_verb("comment"):
                 return "scripts/worker-report <pr> --reviewer --post-risk-notes (the risk notes comment, once)"
             if call.is_sub("pr") and call.is_verb("edit"):

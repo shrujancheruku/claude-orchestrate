@@ -286,6 +286,7 @@ Every mechanical rule the prompts once restated is a script under `scripts/`, fo
 | `merge` | orchestrator, after approval | Readiness, merge, re-check, cleanup, then the sweep with shared-file replay |
 | `board` | orchestrator, each pass | Syncs the optional GitHub Projects board |
 | `ci-rerun` | orchestrator, on a `no-run` or `stuck` line | Makes a ready PR's CI run again, once per head or job: closes and reopens the PR, or reruns one job |
+| `park-pr` | orchestrator, when an older PR waits on a newer PR's fix | `park-pr <pr> --why "<text>"` closes the PR (branch and claim kept), comments the reason and logs a `park` event; `--unpark` reopens it. A parked ticket's claim is `parked` and `holds` ignores it |
 | `scratch` | lead and reviewer | The one way to add a PR's scratch worktree: a detached `pr-<n>` tree under the caller's scratchpad, outside every checkout |
 | `issue` | every agent | Reads one ticket and keeps only a trusted author's comments (the tracker doc's **Read an issue**) |
 | `lead-brief` | lead, at start-up | The lead's index, and the watermark it resumes from |
