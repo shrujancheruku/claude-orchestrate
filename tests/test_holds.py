@@ -48,7 +48,7 @@ class Holds(unittest.TestCase):
         self.wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.wt_dir.cleanup)
 
-    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=(), shas=None, forks=()):
+    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=(), shas=None, forks=(), blocked_by=None):
         """prs: {number: [paths]}; branches: {number: head branch}; issues: {ticket: state}, where CLOSED leaves the
         ticket out of the open issues and OPEN lists it; merged: head branches of merged PRs; unclaimed: open tickets with
         no assignee; open_tickets: open tickets assigned to the user (as is every other open ticket listed here);
@@ -58,7 +58,8 @@ class Holds(unittest.TestCase):
                     "isDraft": n in drafts, "headRefOid": (shas or {}).get(n)} for n in prs]
         open_nums = set(open_tickets) | set(unclaimed) | set(lead) | {n for n, st in (issues or {}).items() if st == "OPEN"}
         nodes = [{"number": n, "labels": {"nodes": [{"name": "lead"}] if n in lead else []},
-                  "assignees": {"totalCount": 0 if n in unclaimed else 1}}
+                  "assignees": {"totalCount": 0 if n in unclaimed else 1},
+                  "blockedBy": {"nodes": [{"number": b, "state": "OPEN"} for b in (blocked_by or {}).get(n, ())]}}
                  for n in sorted(open_nums)]
         responses = [
             gh_repo_view(),
@@ -209,6 +210,26 @@ class Holds(unittest.TestCase):
         self.state({11: ["b.py"]})
         r = self.holds("--pr", "9")
         self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (3, "waits for #4 (PR #5) to merge: b.py"), r.stdout)
+
+    def test_a_building_ticket_blocked_by_this_prs_ticket_is_waived_not_waited_for(self):
+        # #11 is building on b.py but waits on #7 (a native edge): PR 9 (ticket #7) goes first (#695).
+        self.gh({9: ["b.py"]}, branches={9: "7-mine"}, open_tickets=[7, 11], blocked_by={11: [7]})
+        self.state({11: ["b.py"]})
+        r = self.holds("--pr", "9")
+        self.assertEqual((r.returncode, r.stdout.splitlines()),
+                         (0, ["none", "overlap with #11 waived (#11 waits on #7)", "overlap: none"]), r.stdout + r.stderr)
+
+    def test_without_the_edge_the_building_ticket_still_holds(self):
+        self.gh({9: ["b.py"]}, branches={9: "7-mine"}, open_tickets=[7, 11])
+        self.state({11: ["b.py"]})
+        r = self.holds("--pr", "9")
+        self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (3, "waits for #11 (still building) to merge: b.py"), r.stdout)
+
+    def test_an_older_pr_whose_ticket_is_blocked_by_this_prs_ticket_is_waived(self):
+        self.gh({9: ["b.py"], 5: ["b.py"]}, branches={9: "7-mine", 5: "4-older"}, open_tickets=[4, 7], blocked_by={4: [7]})
+        r = self.holds("--pr", "9")
+        self.assertEqual((r.returncode, r.stdout.splitlines()[-2:]),
+                         (0, ["overlap with #4 (PR #5) waived (#4 waits on #7)", "overlap: none"]), r.stdout + r.stderr)
 
     def test_dispatch_time_check_still_counts_an_open_pr_holder(self):
         self.gh({5: ["b.py"]}, branches={5: "4-older"})
