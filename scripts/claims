@@ -12,6 +12,8 @@ state: with-lead | in-review | done | building | idle | waiting | elsewhere | st
 lock:  `ours <pid>` (this session's own worker); `foreign-live <pid>`; `foreign-live ?` (the line then ends ` (lock: <reason>)`: the reason doesn't parse, which counts as live;
        unlock the worktree if it is stale); `dead <pid>` (unlock it, then rescue it); `none` (no lock or no worktree).
 changes (only with a worktree and no PR): `clean`, `dirty <k>`, `unpushed <k>` or `dirty <k> unpushed <j>`.
+escalate: a line ends `escalate <model>` when the ticket's haiku worker met a mechanical trigger on its PR (a second `ci fail`, or a `review`
+event of round 2 or later that requested changes): hand the ticket to a new worker on that model. An unanswerable `stopped` report is the orchestrator's judgement, not this word's.
 `claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line.
 Reads the run log and the pass log (a missing one is no events), the tracker as one Snapshot (scripts/tracker.py; `--snapshot FILE` reads a file `snapshot` wrote instead of fetching), the state file (a missing one means no workers) and
 `git worktree list`. Exit codes: 0 printed; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository, an
@@ -48,6 +50,8 @@ def line(c) -> str:
         out += " " + " ".join(parts or ["clean"])
     if c.lock and len(c.lock) == 3:
         out += f" (lock: {c.lock[2]})"
+    if c.escalate:
+        out += f" escalate {c.escalate}"
     return out
 
 

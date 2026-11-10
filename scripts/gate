@@ -20,6 +20,9 @@ and nothing else failed, or the PR waits for an older open PR on a shared path t
 that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's
 worktree, so they see the PR's code); default is the current directory. Each runs for at most --timeout
 seconds (default 1800); one that outlives it is killed and fails with "timed out after Ns".
+On a pass (exit 0), a `tier S|M|L` line comes just before `next: review <head>` (never above a `send-back`, whose lines go to the worker): the reviewer's tier (Config.tier_for: the
+diff's changed lines and files against the config's Tiers, a risk path as L, and the ticket's `size:` label as a floor that
+only raises it); the orchestrator dispatches the reviewer at that tier.
 Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word:
 `review <head>` (exit 0) | `send-back <pr>` (exit 1; the lines above it are what the worker gets) |
 `rerun-after-ci` (exit 3, mergeability still UNKNOWN) | `wait-older <pr> <older>` (exit 3, the PR waits for the older
@@ -85,6 +88,32 @@ def parse_diff(diff):
     if current is not None and created:
         added.append(current)
     return changed, added, lines
+
+
+def changed_lines(diff) -> int:
+    """Added plus removed lines of a unified diff, counted inside hunks only (after an `@@` line, by first character), so
+    file headers are not lines but a removed `---` or an added `++x` is."""
+    n, inside = 0, False
+    for l in diff.splitlines():
+        if l.startswith("diff --git"):
+            inside = False
+        elif l.startswith("@@"):
+            inside = True
+        elif inside and l[:1] in ("+", "-"):
+            n += 1
+    return n
+
+
+def review_tier(view, changed, diff, snap, cwd) -> str:
+    """The reviewer tier `S|M|L` of the PR (Config.tier_for): its diff against the config's thresholds, a risk path
+    as L, and the ticket's `size:` label as a floor. The ticket is the branch's, else the body's `Closes #n`."""
+    cfg = config.Config.load(cwd)
+    ticket = repo.ticket_of_branch(view.get("headRefName"))
+    if ticket is None:
+        m = CLOSES.search(view.get("body") or "")
+        ticket = int(m.group(1)) if m else None
+    labels = next((i["labels"] for i in snap.issues if i["number"] == ticket), ())
+    return cfg.tier_for(changed_lines(diff), len(set(changed)), labels, cfg.risk_hit(changed))
 
 
 def secrets_found(added, lines):
@@ -210,6 +239,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
     except (KeyError, TypeError, ValueError) as e:  # a malformed issues reply: could not run, not a failed check
         return None, f"gh returned a malformed issues reply ({e!r})"
     changed, added, lines = parse_diff(diff)
+    NEXT["tier"] = review_tier(view, changed, diff, snap, cwd)
     found = secrets_found(added, lines)
     results.append(check("no secrets added", not found, "\n".join(found)))
     bad = lockfiles_without_manifest(changed)
@@ -232,6 +262,9 @@ def main(argv=None) -> int:
         code = e.code if isinstance(e.code, int) else 2
     pr, head = NEXT.get("pr", "?"), NEXT.get("head")
     if code == 0:
+        # the reviewer's tier, for the dispatch that follows `review <head>`; a send-back's lines go to the worker, so no tier there
+        if NEXT.get("tier"):
+            print(f"tier {NEXT['tier']}", flush=True)
         return common.verdict("review", head, exit_code=code)
     if code == 1:
         return common.verdict("send-back", pr, exit_code=code)

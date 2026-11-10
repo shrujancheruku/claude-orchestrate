@@ -128,7 +128,7 @@ class SnapshotTest(unittest.TestCase):
     def test_a_body_only_blocker_is_held_by_frontier_and_handed_back_by_lead_route(self):
         self.serve([node(1), node(5, claimed=True, body="Blocked by: #1")])
         self.env.run("snapshot", "--repo", ".")
-        self.assertEqual(self.env.run("frontier", "--snapshot", FILE).stdout, "#1 title 1\n")
+        self.assertEqual(self.env.run("frontier", "--snapshot", FILE).stdout, "#1 title 1 model sonnet\n")
         route = self.env.run("lead-route", "--lead", "none", "--cap", "2", "--snapshot", FILE).stdout
         self.assertIn("HANDBACK #5 blocked-by #1", route.splitlines())
 

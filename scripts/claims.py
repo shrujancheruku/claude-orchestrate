@@ -37,6 +37,7 @@ from pathlib import Path
 
 import common
 import github
+import config
 import runlog
 from repo import parse_ts, ticket_of_branch
 
@@ -58,6 +59,7 @@ class Claim:
     reason: str | None = None      # waiting only: `permission-denied` | `exhausted`
     since: str | None = None       # waiting and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report, or of the last commit
     nudged: str | None = None      # idle only: the same, of the pass's nudge, when it is not older than `since`
+    escalate: str | None = None    # the model to escalate to: a haiku worker whose PR hit a mechanical trigger (see escalation)
 
 
 def _sessions(path) -> tuple:
@@ -197,6 +199,20 @@ def _nudges(repo) -> dict:
     return out
 
 
+def escalation(events, pr, worker, cfg) -> str | None:
+    """The model a haiku worker escalates to, or None. Two mechanical triggers, both on the ticket's PR: a second CI
+    failure (two `ci fail` events, on two heads when they name one), or a `review` event of round 2 or later that asked
+    for changes. An unanswerable stop is a judgement and stays the orchestrator's. A worker whose model is not haiku, or
+    unknown, is never escalated (a sonnet worker once; a missing model counts as not haiku)."""
+    if pr is None or "haiku" not in str((worker or {}).get("model") or "").lower():
+        return None
+    fails = {(e.get("head") or i) for i, e in enumerate(events)
+             if e.get("kind") == runlog.CI and e.get("outcome") == runlog.FAIL and str(e.get("ref")) == str(pr)}
+    changes = any(e.get("kind") == runlog.REVIEW and e.get("outcome") == "request-changes" and str(e.get("ref")) == str(pr)
+                  and isinstance(e.get("round"), int) and e["round"] >= 2 for e in events)
+    return (cfg.worker_model or config.DEFAULT_WORKER_MODEL) if len(fails) >= 2 or changes else None
+
+
 def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None,
            commit_time=last_commit_time) -> dict:
     """{ticket: Claim} for each claimed open issue and each state-file ticket that is no longer open (done).
@@ -226,6 +242,7 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     foreign = {int(k): v for k, v in other.items() if str(k).isdigit() and int(k) not in records}
     tickets = sorted({n for n, i in open_issues.items() if i.get("claimed")} | (set(records) - set(open_issues)))
     reports, nudges = _reports(repo), _nudges(repo)
+    events, cfg = list(common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG))), config.Config.load(repo)
     out = {}
     for n in tickets:
         record = records.get(n) if isinstance(records.get(n), dict) else None
@@ -268,5 +285,7 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
                     claim.nudged = fmt_ts(nudges[n])
         if wt and pr is None and claim.state in ("building", "idle", "stalled", "waiting", "elsewhere"):
             claim.changes = changes(wt["path"], wt["branch"])
+        if claim.state in ("building", "in-review", "idle"):
+            claim.escalate = escalation(events, claim.pr, record, cfg)
         out[n] = claim
     return out

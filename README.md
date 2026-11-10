@@ -186,7 +186,7 @@ flowchart LR
 
 ### Choosing the worker model
 
-One size scale sets both the worker model and the review tier. A ticket whose title or body says "investigate" or "design" goes to Sonnet whatever its size. A `size:S` label routes to Haiku; `size:M` and `size:L` to Sonnet. An unlabelled ticket goes to Haiku when its touch map names at most the config's S file limit (3 by default) and touches no risk path.
+One size scale sets both the worker model and the review tier. A ticket whose title or body says "investigate" or "design" goes to Sonnet whatever its size. A `size:S` label routes to Haiku; `size:M` and `size:L` to Sonnet. An unlabelled ticket goes to Haiku when its touch map names at most the config's S file limit (3 by default) and touches no risk path. A risk path always routes to the default model. These are the scripts' answer, not the skill's: `frontier` prints `model <name>` on each takeable line, `gate` prints `tier S|M|L` before its `next:` line (a `size:` label only raises it), and `claims` ends a haiku worker's line with `escalate <model>` after a second CI failure or a round-2 review asking for changes again.
 
 A Haiku worker escalates once, to a fresh Sonnet worker on the same branch and PR, on any of: a stop that is not your decision and cannot be answered in one message, a second CI failure, or "changes" again in review round 2. The orchestrator reads the recorded model from the ticket's claims line, never from memory, so this survives a compaction. Before the hand-over it checks that line for a live lock, makes sure the old worker's work is pushed, and only then dispatches the new one. A Sonnet worker is never escalated again.
 

@@ -16,8 +16,9 @@ line and appends a `worker-report` event to the run log. The orchestrator applie
     missing-report none              a bare completion notice, and no open PR on --branch
     limit [<reset time>]             no report, and the text names a usage limit
     error <gist>                     no report, and the text names another API error
-With `--reviewer` the text is a reviewer's short report and no PR is looked up, no `--branch` is needed and no event is
-written. It prints `valid` when the report has a `suite:` line that is `pass` or `fail` (alone or followed by free text,
+With `--reviewer` the text is a reviewer's short report and no PR is looked up and no `--branch` is needed. It appends one
+`review` event (ref = the PR; outcome approve | request-changes | incomplete; round, head, suite, blocking, non_blocking, posted;
+nothing for a resent report with the same round, head and outcome), which `claims` reads for escalation. It prints `valid` when the report has a `suite:` line that is `pass` or `fail` (alone or followed by free text,
 such as `pass (py_compile, run_parallel)` or `fail 2`) or `not run (<reason>)`,
 else `incomplete <why>` (`suite-missing`, `suite-not-run-without-reason` or `suite-unrecognised`): the orchestrator
 sends an incomplete report back to the reviewer once.
@@ -164,6 +165,44 @@ def classify_reviewer(text: str) -> tuple:
     return ("incomplete", "suite-unrecognised")
 
 
+def _field(name, text):
+    """The last `<name>: value` line of a reviewer's report, backticks and blanks trimmed; None when there is none."""
+    found = re.findall(rf"^[ \t>*-]*{name}:[ \t]*`*(.*?)`*[ \t]*$", text, re.I | re.M)
+    return found[-1].strip() if found and found[-1].strip() else None
+
+
+def _count(name, text):
+    value = _field(name, text)
+    m = re.match(r"\d+", value or "")
+    return int(m.group()) if m else None
+
+
+def review_fields(words, text) -> tuple:
+    """(outcome, event fields) of a reviewer's report: `approve | request-changes | incomplete`, then the round, the head
+    reviewed, the suite line, the blocking and non-blocking counts and the `posted:` value (each None when absent)."""
+    verdict = (_field("verdict", text) or "").lower()
+    outcome = ("incomplete" if words[0] == "incomplete" else "approve" if verdict.startswith("approve")
+               else "request-changes" if verdict.startswith(("change", "request")) else "incomplete")
+    return outcome, {"round": _count("round", text), "head": _field("head", text), "suite": _field("suite", text),
+                     "blocking": _count("blocking", text), "non_blocking": _count("non-blocking", text),
+                     "posted": _field("posted", text)}
+
+
+def record_review(repo, pr, words, text) -> None:
+    """Append the `review` event for this report (ref = the PR), so review rounds are in the run log and `claims` can
+    count them. The same PR, round, head and outcome as the newest earlier event writes nothing (a resent report)."""
+    outcome, fields = review_fields(words, text)
+    last = runlog.latest_event(repo, runlog.REVIEW, pr)
+    if last and last.get("outcome") == outcome and all(last.get(k) == fields[k] for k in ("round", "head")):
+        return
+    try:
+        runlog.append_event(repo, runlog.REVIEW, outcome, ref=pr, **fields)
+    except runlog.NoSession as e:
+        print(e, file=sys.stderr)  # the verdict line is the answer; only its log line is lost
+    except OSError as e:
+        common.die(f"worker-report: cannot write the run log: {e.strerror or e}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("ticket", help="the ticket number")
@@ -174,7 +213,9 @@ def main(argv=None) -> int:
     _, ticket = common.pr_ref(args.ticket)
     text = sys.stdin.read()
     if args.reviewer:
-        print(" ".join(classify_reviewer(text)))
+        words = classify_reviewer(text)
+        record_review(args.repo, ticket, words, text)
+        print(" ".join(words))
         return 0
     if not args.branch:
         common.die("worker-report: --branch is required (unless --reviewer)")
