@@ -329,12 +329,53 @@ class WaitingAndIdle(unittest.TestCase):
         c = self.one(13, state={"13": self.worker()})
         self.assertEqual((c.state, c.nudged), ("idle", "2026-01-01T10:30:00Z"))
         self.report(14, "interim", ts="2026-01-01T10:05:00+00:00")
-        self.nudge(14, "2026-01-01T10:01:00+00:00")  # an older nudge: the worker has reported again since
+        self.nudge(14, "2026-01-01T09:00:00+00:00")  # before this dispatch: an older worker's nudge
         self.assertIsNone(self.one(14, state={"14": self.worker()}).nudged)
+
+    def test_i_a_second_interim_after_a_nudge_stays_nudged(self):  # #690
+        self.report(17, "interim", ts="2026-01-01T10:05:00+00:00")
+        self.nudge(17, "2026-01-01T10:10:00+00:00")
+        self.report(17, "interim", ts="2026-01-01T10:20:00+00:00")
+        c = self.one(17, state={"17": self.worker()})
+        self.assertEqual((c.state, c.since, c.nudged), ("idle", "2026-01-01T10:20:00Z", "2026-01-01T10:10:00Z"))
+
+    def test_i_a_completion_after_a_nudge_is_no_longer_idle(self):  # #690
+        self.report(18, "interim", ts="2026-01-01T10:05:00+00:00")
+        self.nudge(18, "2026-01-01T10:10:00+00:00")
+        self.report(18, "valid", ts="2026-01-01T10:20:00+00:00", status="stopped")
+        c = self.one(18, state={"18": self.worker()})
+        self.assertEqual((c.state, c.nudged), ("building", None))
 
     def test_i_a_ticket_with_a_ready_pr_is_never_idle(self):
         self.report(15, "interim", ts="2026-01-01T10:05:00+00:00")
         self.assertEqual(self.one(15, state={"15": self.worker()}, prs=[self.pr(15, "15-x")]).state, "in-review")
+
+
+class LongLog(WaitingAndIdle):
+    """#683: a 20,000-line events log, mostly `gh_call` lines, gives the states a short log gives. Inherits the
+    waiting and idle cases and runs each after the log is padded, as a long-lived project's log is."""
+
+    def setUp(self):
+        super().setUp()
+        import runlog
+        path = runlog.log_path(self.tmp.name, runlog.EVENTS_LOG)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        noise = json.dumps({"kind": "gh_call", "outcome": "ok", "ref": "pr", "session": "s", "ts": "2026-01-01T00:00:00+00:00",
+                            "argv": ["pr", "list", "--json", "number"]}, separators=(",", ":"))
+        path.write_text((noise + "\n") * 19_990 + "not json\n[]\n" + '{"kind":"worker-report","ref":' + "\n" * 2)
+
+    def test_the_log_is_20000_lines_and_a_report_after_it_still_counts(self):
+        import runlog
+        self.assertGreaterEqual(len(runlog.log_path(self.tmp.name, runlog.EVENTS_LOG).read_text().splitlines()), 19_990)
+        self.report(99, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
+        self.assertEqual(self.one(99).state, "waiting")
+
+    def test_read_kinds_parses_only_the_asked_kinds_whatever_the_spacing(self):
+        import runlog
+        path = runlog.log_path(self.tmp.name, runlog.EVENTS_LOG)
+        with open(path, "a") as f:
+            f.write('{"kind": "ci", "outcome": "fail", "ref": "7"}\n{"kind":"gh_call","note":"ci"}\n')
+        self.assertEqual([e["kind"] for e in runlog.read_kinds(self.tmp.name, ("ci",))], ["ci"])
 
 
 class Liveness(unittest.TestCase):

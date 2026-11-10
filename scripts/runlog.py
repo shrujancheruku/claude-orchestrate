@@ -131,6 +131,29 @@ def latest_event(repo, kind: str, ref, skip_outcomes=()) -> dict | None:
     return found
 
 
+def read_kinds(repo, kinds) -> list:
+    """The events of the given kinds, oldest first, in one pass over the log. A line is parsed only when it holds one of
+    the kinds as a quoted word, so the `gh_call` lines (most of a long log) cost a substring test, not a `json.loads`.
+    The substring test is spacing-independent; the kind is then checked on the parsed event."""
+    kinds = set(kinds)
+    needles = [f'"{k}"' for k in kinds]
+    out = []
+    try:
+        with open(log_path(repo, EVENTS_LOG), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not any(n in line for n in needles):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("kind") in kinds:
+                    out.append(rec)
+    except FileNotFoundError:
+        pass
+    return out
+
+
 def read_events(repo, session: str, start: datetime, end: datetime) -> list | None:
     """This session's events, or None when the log doesn't exist or holds none of this session's
     (no scripts ran, or an older plugin).
