@@ -5,6 +5,7 @@ import unittest
 from harness import PR_GRAPHQL, ScriptEnv, gh_repo_view, pr_graphql_reply
 
 HEAD = "abcdef1234567890abcdef1234567890abcdef12"
+PATCH = ["api", "--method", "PATCH", "repos/{owner}/{repo}/pulls/7"]
 
 
 class CiRerun(unittest.TestCase):
@@ -16,10 +17,17 @@ class CiRerun(unittest.TestCase):
         view = {"state": state, "headRefName": "7-x", "headRefOid": HEAD, "isCrossRepository": False,
                 "statusCheckRollup": list(checks)}
         self.env.set_gh([gh_repo_view(), {"args": PR_GRAPHQL, "stdout": pr_graphql_reply(view)},
-                         {"args": ["pr", "close"]}, {"args": ["pr", "reopen"]}, {"args": ["run", "rerun"]}, *extra])
+                         {"args": PATCH, "stdout": "{}"}, {"args": ["run", "rerun"]}, *extra])
 
     def writes(self):
-        return [c for c in self.env.gh_calls() if c[:2] in (["pr", "close"], ["pr", "reopen"], ["run", "rerun"])]
+        """The writes sent, as `close` / `reopen` (the PR's state PATCH) or the `run rerun` call."""
+        out = []
+        for c in self.env.gh_calls():
+            if c[:3] == ["api", "--method", "PATCH"]:
+                out.append(["close" if "state=closed" in c else "reopen", c[3].rsplit("/", 1)[1]])
+            elif c[:2] == ["run", "rerun"]:
+                out.append(c)
+        return out
 
     def rerun_events(self):
         return [e for e in self.env.events() if e["kind"] == "ci" and e["outcome"] == "rerun"]
@@ -28,7 +36,7 @@ class CiRerun(unittest.TestCase):
         self.gh()
         r = self.env.run("ci-rerun", 7)
         self.assertEqual(r.stdout.splitlines()[-1], f"next: rerun 7 {HEAD}")
-        self.assertEqual(self.writes(), [["pr", "close", "7"], ["pr", "reopen", "7"]])
+        self.assertEqual(self.writes(), [["close", "7"], ["reopen", "7"]])
         (event,) = self.rerun_events()
         self.assertEqual((event["ref"], event["head"]), (7, HEAD))
 
@@ -59,7 +67,8 @@ class CiRerun(unittest.TestCase):
         self.gh(extra=())
         self.env.set_gh([gh_repo_view(), {"args": PR_GRAPHQL, "stdout": pr_graphql_reply(
             {"state": "OPEN", "headRefName": "7-x", "headRefOid": HEAD, "statusCheckRollup": []})},
-            {"args": ["pr", "close"]}, {"args": ["pr", "reopen"], "stderr": "boom\n", "exit": 1}])
+            {"args": PATCH + ["-f", "state=closed"], "stdout": "{}"},
+            {"args": PATCH + ["-f", "state=open"], "stderr": "boom\n", "exit": 1}])
         r = self.env.run("ci-rerun", 7, check=False)
         self.assertEqual(r.returncode, 2)
         self.assertIn("gh pr reopen 7", r.stderr)

@@ -58,9 +58,9 @@ def run(args) -> int:
                 print(f"ci-rerun: PR #{pr} head {head[:7]} was already closed and reopened once", file=sys.stderr)
                 return common.verdict("ask-user", f"PR {pr} head {head[:7]} still has no CI run after a close and reopen",
                                       exit_code=1)
-            github.call("pr", "close", pr, cwd=cwd)
+            github.set_pr_state(pr, "closed", cwd=cwd)
             try:
-                github.call("pr", "reopen", pr, cwd=cwd)
+                github.set_pr_state(pr, "open", cwd=cwd)
             except github.GhError as e:
                 print(f"ci-rerun: PR #{pr} was closed and could not be reopened ({e.message}): run `gh pr reopen {pr}`",
                       file=sys.stderr)

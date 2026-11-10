@@ -807,6 +807,14 @@ def set_body(kind: str, number, body: str, cwd=None) -> None:
          cwd=cwd, idempotent=True)
 
 
+def set_pr_state(pr, state: str, cwd=None) -> None:
+    """Close (`closed`) or reopen (`open`) a pull request: one REST PATCH of `pulls/{n}`."""
+    if state not in ("open", "closed"):
+        raise ValueError(f"set_pr_state: {state!r} is not open or closed")
+    call("api", "--method", "PATCH", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}", "-f", f"state={state}", cwd=cwd,
+         idempotent=True)
+
+
 def pr_diff(pr, cwd=None) -> str:
     """The unified diff of a PR (`pulls/{n}` with the diff media type)."""
     return call("api", "-H", "Accept: application/vnd.github.diff", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}",
