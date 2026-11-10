@@ -882,6 +882,13 @@ class OrchestratorTest(unittest.TestCase):
         self.assertEqual((first["pass"], first["calls"], first["writes"]), (1, 4, 3))
         self.assertEqual((second["pass"], second["calls"], second["writes"]), (2, 1, 0))
 
+    def test_agent_rows_are_split_from_script_rows(self):
+        self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}])
+        agent = {"ts": at(2), "session": SESSION, "kind": "gh_call", "script": "agent:worker", "role": "worker", "write": False, "graphql": True}
+        self.fx.events(self.gh_events() + [agent, dict(agent, role="reviewer", script="agent:reviewer"), dict(agent)])
+        t = self.fx.run()["metrics"]["gh_calls"]["total"]
+        self.assertEqual((t["agent_calls"], t["script_calls"], t["by_role"]), (3, 5, {"worker": 2, "reviewer": 1}))
+
     def test_github_calls_appear_in_the_summary(self):
         self.fx.passes([{"ts": at(5), "slots": 2, "free": 1}, {"ts": at(10), "slots": 2, "free": 1}])
         self.fx.events(self.gh_events())

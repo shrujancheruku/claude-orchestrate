@@ -3132,6 +3132,36 @@ def allow(reason: str) -> None:
                                       "permissionDecisionReason": f"orchestrate guard: {reason}"}}, sys.stdout)
 
 
+def log_gh_calls(role: str | None, command: object, cwd: str) -> None:
+    """Append one `gh_call` row per `gh` command in this line, for the profile (#445). The scripts log their own
+    calls; this covers the direct `gh` calls of workers, reviewers, scouts and the orchestrator. Best effort:
+    the decision never depends on it, and any failure is swallowed."""
+    try:
+        if not isinstance(command, str) or "gh" not in command:
+            return
+        found = []
+        for cmd in Parsed(parse(command)).cmds:
+            k = command_index(cmd.words)
+            if k < len(cmd.words) and not cmd.words[k].dynamic and basename(cmd.words[k]) == "gh":
+                call = parse_gh(cmd.words, k)
+                if call.sub is None:
+                    continue
+                if call.sub.text == "api":
+                    found.append(["api"] + [w.text for w in call.args])
+                else:
+                    found.append([call.sub.text] + ([call.verb.text] if call.verb else []))
+        if not found:
+            return
+        scripts = str(PLUGIN_SCRIPTS)
+        if scripts not in sys.path:
+            sys.path.append(scripts)
+        import github  # the writer the scripts use, so the row has the same shape
+        for args in found:
+            github._log({"script": f"agent:{role or 'orchestrator'}", "role": role or "orchestrator"}, cwd or None, args)
+    except Exception:  # noqa: BLE001 - a log must never change the decision
+        pass
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -3150,6 +3180,8 @@ def main() -> None:
             (deny if decision[0] == "deny" else allow)(decision[1])
         return
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if data.get("tool_name") in ("Bash", "Monitor"):
+        log_gh_calls(role, command, cwd)
     orchestrator = role is None and not agent_type  # the main session: approved, and the orchestrator's refused for a hand-made wait
     if (role is None and not orchestrator) or command is None or command == "":
         return
