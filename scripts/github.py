@@ -736,6 +736,13 @@ def _pages(path: str, cwd=None, max_pages: int = 10) -> list:
     return rows
 
 
+def conversation_comments(pr, cwd=None) -> list:
+    """The comments on a PR's conversation (REST `issues/{n}/comments`, the `gh pr comment` ones), as the host's rows
+    (`body`, `user.login`, `author_association`), up to 1,000. A reader keeps a trusted author's only (ADR-0015)."""
+    return [c for c in _pages(f"repos/{{owner}}/{{repo}}/issues/{_pr_number(pr)}/comments?per_page=100", cwd)
+            if isinstance(c, dict)]
+
+
 def pr_diff(pr, cwd=None) -> str:
     """The unified diff of a PR (`pulls/{n}` with the diff media type)."""
     return call("api", "-H", "Accept: application/vnd.github.diff", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}",
