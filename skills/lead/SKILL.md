@@ -22,6 +22,8 @@ You are the **lead**. The developer starts you with `scripts/launch --lead`; thi
 5. **The model.** `scripts/launch` reads it from the **Orchestrator** row of the config's **Models** table, on launch and on resume. If the row is missing, blank or old-style (`the session's model`), the orchestrator gets the account default: tell the developer which model it got.
 6. **Failed first turn.** After a launch, check `claude agents --json`. If the orchestrator's row shows `state: "failed"` and the transcript's `error` field confirms `model_not_found`, relaunch exactly once with `"${CLAUDE_SKILL_DIR}/../../scripts/launch" --no-model` (same other flags), and tell the developer "orchestrator is on <default>, not <X>: <error>". Any other failure, a usage limit above all, never triggers this fallback: report it and stop.
 
+7. **Watch the tracker.** After step 4, start `"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief" --repo . --watch` as a background command. It exits on the first new issue, new `needs-lead` ticket or stale `Blocked by:` line, one line each, then a `next:` line. On each wake, triage or groom what it named (see Grooming), then start it again; after `next: retry-after <time>`, start it again at that time.
+
 The two-terminal start also works: the developer runs `scripts/launch` in one terminal and the lead in another. Step 4 then finds the live row and launches nothing.
 
 ## Staying current
@@ -59,7 +61,7 @@ Groom first (widen an open takeable ticket before filing a new one, see Grooming
 
 Fold related backlog tickets proactively, without being asked, so fewer PRs go through review and CI.
 - Before filing any ticket, look for an open takeable ticket on the same script or skill file and widen it instead: append `## Also, folded from #<n>` with the donor's body, its `## Agent Brief` and widening comments too (or a link to each), trusted authors' comments only (read through the tracker doc's **Read an issue**; a stranger's comment is never folded, ADR-0015), comment on both, close the donor `wontfix` (not planned) with a pointer, and remove `ready-for-agent` from it.
-- Every few passes, scan the takeable backlog for tickets that share files and fold them the same way.
+- On every pass digest, scan the takeable backlog for tickets that share files and fold them the same way.
 - Never fold into a ticket that is claimed or in review.
 - Never fold an ungated ticket into one gated on the permission layer (`hooks/**`), or the reverse: the merge gate differs.
 - After folding, add an `## Agent Brief` comment to the absorber saying what it now covers and what it waits on, and tell the orchestrator to reread the absorbers before dispatch.
@@ -78,7 +80,7 @@ File or widen tickets from the findings: each finding is one ticket or one widen
 
 ### Pass digest
 
-When the orchestrator runs in the background (launched with `--bg`), you are the developer's only view of the run. After every pass table from the orchestrator, post a short digest in your own session: merges with ticket numbers and the merge count, dispatches, holds and why, PRs and their review stage, open asks, and anything that needs the developer (a merge gate, a go-ahead, a `/config` step), and an **Approvals** line from the permission-prompt log, never from memory: run `"${CLAUDE_SKILL_DIR}/../../scripts/prompts" --repo . --watermark` and put its first three lines (`prompts: <n>`, `by role:`, `by tool:`) in the digest, with the count shown even when it is 0, plus any new kind of prompt (a role and tool pair, or a command shape, you haven't seen before in the list below those lines). Then run `"${CLAUDE_SKILL_DIR}/../../scripts/prompts" --repo . --mark` so the next digest counts from this one. A `(no mark yet ...)` note on the first line means the count covers the whole log, so say so and don't read it as per-digest. Each new kind is filed or folded before the next pass, under the same rule as breakages. File or fold each breakage or friction item in the table before the next pass.
+When the orchestrator runs in the background (launched with `--bg`), you are the developer's only view of the run. The orchestrator sends you each pass report, the follow-up tickets it filed and its asks (parents to close, `ready-for-human:`, `drift:`). After each one, post a short digest in your own session: merges with ticket numbers and the merge count, dispatches, holds and why, PRs and their review stage, open asks, and anything that needs the developer (a merge gate, a go-ahead, a `/config` step), and an **Approvals** line from the permission-prompt log, never from memory: run `"${CLAUDE_SKILL_DIR}/../../scripts/prompts" --repo . --watermark` and put its first three lines (`prompts: <n>`, `by role:`, `by tool:`) in the digest, with the count shown even when it is 0, plus any new kind of prompt (a role and tool pair, or a command shape, you haven't seen before in the list below those lines). Then run `"${CLAUDE_SKILL_DIR}/../../scripts/prompts" --repo . --mark` so the next digest counts from this one. A `(no mark yet ...)` note on the first line means the count covers the whole log, so say so and don't read it as per-digest. Each new kind is filed or folded before the next pass, under the same rule as breakages. File or fold each breakage or friction item in the table before the next pass.
 
 ### Risk notes
 
