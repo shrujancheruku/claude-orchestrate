@@ -1018,7 +1018,6 @@
 {"role": "orchestrate:orchestrator-run", "command": "git worktree list --porcelain", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "git worktree remove --force /tmp/x", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "git worktree add /tmp/x", "expected": "unapproved", "source": "hand"}
-||||||| c6bf84a
 {"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/claims\" --slots --session x --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/frontier\" --all --slots --session x --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/frontier\" --slots --state /etc/x", "expected": "silent", "source": "hand"}
