@@ -577,6 +577,32 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), new)
         self.assertIn(f"main checkout fast-forwarded to {new[:7]}", p.stdout)
 
+    def fast_forward_only(self):
+        self.seq({REPO_VIEW: [{"stdout": '{"default_branch":"main"}'}]})
+        return self.env.run("merge", "--fast-forward-only", check=False)
+
+    def test_fast_forward_only_moves_a_stale_checkout(self):
+        _, new = self.behind_main()
+        p = self.fast_forward_only()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), new)
+        self.assertIn(f"main checkout fast-forwarded to {new[:7]}", p.stdout)
+        self.assertEqual(self.called(list(PR_MERGE)), [])
+
+    def test_fast_forward_only_refuses_a_dirty_tree_with_exit_1(self):
+        old, _ = self.behind_main()
+        (self.env.repo / "README.md").write_text("local edit\n")
+        p = self.fast_forward_only()
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertEqual(git(self.env.repo, "rev-parse", "HEAD"), old)
+        self.assertEqual((self.env.repo / "README.md").read_text(), "local edit\n")
+        self.assertEqual(p.stdout.strip(), "main checkout not updated (uncommitted changes)")
+
+    def test_fast_forward_only_on_a_current_checkout_exits_0(self):
+        p = self.fast_forward_only()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("main checkout already up to date", p.stdout)
+
     def test_dirty_main_checkout_is_untouched(self):
         old, _ = self.behind_main()
         (self.env.repo / "README.md").write_text("local edit\n")
