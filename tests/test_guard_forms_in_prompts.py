@@ -29,26 +29,43 @@ def chain_forms(text):
     return set(re.findall(r"`([^`]+)`", joined.group(1))), plain
 
 
+def chain_mismatches(text, guard):
+    """Where the run skill's quoted chain forms and the guard's constants disagree."""
+    forms = chain_forms(text)
+    if forms is None:
+        return ["skills/run/SKILL.md no longer quotes the chain forms; update this pin"]
+    joiners, plain = forms
+    problems = []
+    # None is a chain's first or last command and "\n" a line break; neither is quoted as a joiner.
+    if joiners != {j for j in guard.CHAIN_JOINERS if j and j != "\n"}:
+        problems.append("CHAIN_JOINERS and skills/run/SKILL.md disagree; change both")
+    if plain != set(guard.CHAIN_PLAIN):
+        problems.append("CHAIN_PLAIN and skills/run/SKILL.md disagree; change both")
+    return problems
+
+
 class GuardFormsInPrompts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.guard = load_guard()
 
     def test_run_skill_chain_forms_match_the_guard(self):
-        forms = chain_forms((ROOT / "skills/run/SKILL.md").read_text())
-        self.assertIsNotNone(forms, "skills/run/SKILL.md no longer quotes the chain forms; update this pin")
-        joiners, plain = forms
-        # None is a chain's first or last command and "\n" a line break; neither is quoted as a joiner.
-        guard_joiners = {j for j in self.guard.CHAIN_JOINERS if j and j != "\n"}
-        self.assertEqual(joiners, guard_joiners, "CHAIN_JOINERS and skills/run/SKILL.md disagree; change both")
-        self.assertEqual(plain, set(self.guard.CHAIN_PLAIN), "CHAIN_PLAIN and skills/run/SKILL.md disagree; change both")
+        text = (ROOT / "skills/run/SKILL.md").read_text()
+        self.assertEqual(chain_mismatches(text, self.guard), [])
 
-    def test_chain_forms_pin_goes_red_when_a_joiner_changes(self):
-        stale = "joined only by `;`, `&&` or `|`, so the guard can approve; ending only in `tail`, `head` or `wc`"
-        joiners, plain = chain_forms(stale)
-        self.assertEqual(joiners, {";", "&&", "|"})
-        self.assertEqual(plain, {"tail", "head", "wc"})
-        self.assertNotEqual(plain, set(self.guard.CHAIN_PLAIN))  # a prompt that lags the guard is what the pin catches
+    def test_chain_pin_reports_a_changed_guard(self):
+        prompt = "joined only by `;`, `&&` or `|` and ending only in `tail`, `head` or `wc`"
+
+        class FakeGuard:
+            CHAIN_JOINERS = (None, ";", "&&", "||", "|", "\n")  # a joiner the prompt lacks
+            CHAIN_PLAIN = frozenset(("tail", "head", "wc"))
+
+        problems = chain_mismatches(prompt, FakeGuard)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("CHAIN_JOINERS", problems[0])
+        FakeGuard.CHAIN_PLAIN = frozenset(("tail", "head", "wc", "sort"))  # and a plain command it lacks
+        self.assertEqual(len(chain_mismatches(prompt, FakeGuard)), 2)
+        self.assertEqual(len(chain_mismatches("no forms here", FakeGuard)), 1)
 
     def test_reviewer_post_shape_is_a_guard_shape(self):
         text = (ROOT / "agents/reviewer.md").read_text()
