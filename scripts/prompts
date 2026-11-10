@@ -2,7 +2,10 @@
 """prompts [--repo DIR] [--session ID] [--since ISO | --watermark | --mark] : the permission prompts a run gave the developer.
 
 Reads `.claude/orchestrate-prompts.jsonl` in the main checkout, which hooks/prompt_log.py appends to on every
-PermissionRequest (#569). Prints, in this order:
+PermissionRequest (#569) and every permission Notification (#579). A prompt both events saw counts once: a
+notification line within 2 seconds of a request line of the same session is dropped; an unpaired notification
+(a prompt PermissionRequest never sees, such as the sensitive-file check) counts on its own, listed with the
+tool `?` and the notification's message. Prints, in this order:
     prompts: <n>                    always, so a count of 0 shows
     by role: <role> <n>, ...        only with prompts; roles are orchestrator (agent_type null), worker, reviewer, scout...
     by tool: <tool> <n>, ...        only with prompts, most frequent first
@@ -35,16 +38,49 @@ LOG = Path(".claude") / "orchestrate-prompts.jsonl"
 MARK = Path(".claude") / "orchestrate-prompts.mark"
 LIST_LIMIT = 40
 DETAIL_WIDTH = 200
+PAIR_WINDOW = 2  # seconds between a notification and the request of the same prompt
 
 
 def role(entry: dict) -> str:
     agent = entry.get("agent_type")
     if not isinstance(agent, str) or not agent:
-        return "orchestrator"
+        # A notification of a worker's prompt may carry no agent_type, but its type says whose prompt it is.
+        return "worker" if entry.get("notification_type") == "worker_permission_prompt" else "orchestrator"
     return agent.split(":", 1)[-1]
 
 
+def is_notification(entry: dict) -> bool:
+    return entry.get("source") == "notification"
+
+
+def dedupe(entries: list) -> list:
+    """Count a prompt once (#579). A prompt can be seen by PermissionRequest (a `request` line) and by the
+    Notification hook (a `notification` line); a notification within PAIR_WINDOW seconds of a request of the same
+    session is the same prompt and is dropped (a request pairs with one notification at most). An unpaired
+    notification is a prompt PermissionRequest never saw (the sensitive-file check) and counts on its own. A line
+    with no `source` is a request (the log before #579)."""
+    requests = [(repolib.parse_ts(e.get("time")), e.get("session_id"), i) for i, e in enumerate(entries) if not is_notification(e)]
+    used, drop = set(), set()
+    for i, e in enumerate(entries):
+        if not is_notification(e):
+            continue
+        t = repolib.parse_ts(e.get("time"))
+        best = None
+        for rt, session, j in requests:
+            if j in used or session != e.get("session_id") or t is None or rt is None:
+                continue
+            gap = abs((t - rt).total_seconds())
+            if gap <= PAIR_WINDOW and (best is None or gap < best[0]):
+                best = (gap, j)
+        if best:
+            used.add(best[1])
+            drop.add(i)
+    return [e for i, e in enumerate(entries) if i not in drop]
+
+
 def detail(entry: dict) -> str:
+    if is_notification(entry):
+        return common.one_line(str(entry.get("message") or entry.get("title") or ""), DETAIL_WIDTH)
     tool_input = entry.get("tool_input")
     if isinstance(tool_input, dict):
         for key in ("command", "file_path"):
@@ -117,15 +153,11 @@ def main(argv=None) -> int:
         cutoff = watermark(root, args.session)
         if cutoff is None:
             note = " (no mark yet: counted from the start of the log)"
-    entries = []
-    for e in common.read_jsonl(repolib.main_checkout(root) / LOG):
-        if args.session and e.get("session_id") != args.session:
-            continue
-        if cutoff is not None:
-            t = repolib.parse_ts(e.get("time"))
-            if t is None or t < cutoff:
-                continue
-        entries.append(e)
+    entries = [e for e in common.read_jsonl(repolib.main_checkout(root) / LOG)
+               if not args.session or e.get("session_id") == args.session]
+    entries = dedupe(entries)  # before the cutoff, so a pair straddling it is dropped whole
+    if cutoff is not None:
+        entries = [e for e in entries if (t := repolib.parse_ts(e.get("time"))) is not None and t >= cutoff]
     for line in render(entries, note):
         print(line)
     return 0

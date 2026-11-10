@@ -68,6 +68,7 @@ MODES = ("acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")  # a session id or model name: never starts with `-`, so never a flag
 DIGITS = re.compile(r"[0-9]+")  # ASCII only: str.isdigit() accepts other scripts
 RUN_PROMPT = re.compile(r"/orchestrate:(?:run|lead)(?: [A-Za-z0-9=#._-]+)*")  # a prompt safe inside double quotes
+ROLE_ENV = "ORCHESTRATE_ROLE"  # hooks/guard.py reads it: the orchestrator's calls it can't approve are denied, not prompted (#579)
 SETTINGS = {"disableAutoMode": "disable"}
 INBOUND = {"crossSessionInbound": "accept"}
 SNAPSHOT_DIRS = (".claude-plugin", "hooks", "agents", "skills", "scripts")  # what the plugin loads
@@ -191,6 +192,13 @@ def build(args, plugin_dir, model, start=None) -> list:
     if not args.resume:
         argv.append(prompt(args))
     return argv
+
+
+def role_env(args) -> dict:
+    """The variables the launched line adds to the environment: ORCHESTRATE_ROLE=orchestrator on every orchestrator line
+    (plain, --bg, --resume, --resume-latest) and never on the lead's. The orchestrator and the lead are both a main
+    session with no agent type; this is what lets the guard tell them apart (#579)."""
+    return {} if args.lead else {ROLE_ENV: NAME}
 
 
 def prompt(args, command="/orchestrate:run") -> str:
@@ -425,15 +433,20 @@ def main(argv=None) -> int:
         plugin_dir, sha = snapshot(root, fetch=not args.print)
         print(f"launch: plugin snapshot {sha[:12]} at {plugin_dir}", file=sys.stderr)
     cmd = build(args, plugin_dir, model, start)
+    extra = role_env(args)
     if args.print:
-        print(render(cmd))
+        # The printed line carries the variable as a shell prefix, so running it by hand starts the same session.
+        print("".join(f"{k}={v} " for k, v in extra.items()) + render(cmd))
         return 0
+    env = {**os.environ, **extra}
+    if args.lead:
+        env.pop(ROLE_ENV, None)  # an inherited orchestrator role must not make the lead's calls deny
     if args.bg:
-        code, out, err = common.run(*cmd)
+        code, out, err = common.run(*cmd, env=env)
         sys.stdout.write(out)
         sys.stderr.write(err)
         return code
-    os.execvp(cmd[0], cmd)
+    os.execvpe(cmd[0], cmd, env)
 
 
 if __name__ == "__main__":

@@ -1913,6 +1913,7 @@ def chain_approved(parsed: "Parsed", cwd: str) -> bool:
         if not first.dynamic and first.text in CHAIN_PLAIN:
             # The same read bound as the compound form (#566): `grep x ~/.ssh/id` is no routine step.
             if (not chain_plain_args(args) or not chain_flags_ok(first.text, args)
+                    or follows_symlinks(first.text, [a.text for a in args]) is not None
                     or not read_paths_ok(first.text, [a.text for a in args], cwd or ".", cwd)):
                 return False
         elif not first.dynamic and first.text == "cat":
@@ -2277,10 +2278,34 @@ def git_paths_ok(args: list, here: str, cwd: str) -> bool:
     return True
 
 
+def checkout_root(real: Path, cwd: str) -> bool:
+    """`real` is the root of a real checkout: the main checkout, a `.claude/worktrees/*` worktree or a reviewer's
+    scratch checkout, with a `.git` entry. Never a subdirectory of one: a hostile PR can commit `HEAD`, `objects/`
+    and `config` in a subdirectory, which git then treats as a bare repository and whose config can run a command
+    (`remote.origin.uploadpack`, `diff.external`) under `git -C <subdir> fetch|show` (#579)."""
+    if not (real / ".git").exists():
+        return False
+    roots = [Path(os.path.realpath(r)) for r in repo_roots(cwd)]
+    if real in roots or any(real.parent == r / ".claude" / "worktrees" for r in roots):
+        return True
+    return scratch_worktree(real, cwd)
+
+
 def git_read_ok(cmd: Command, cwd: str = "", here: str = ".") -> bool:
     call = parse_git(cmd.words, 0)
-    if call.options or call.sub is None or call.sub.dynamic:
+    if call.sub is None or call.sub.dynamic:
         return False
+    if call.options:
+        # `git -C <dir> <read>` (#579) is the same read run from <dir>, when <dir> is one the caller may read (#566).
+        # No other global option (`-c`, `--git-dir`, `--work-tree`...) is a plain read.
+        if len(call.options) != 1 or call.options[0][0] != "-C" or call.options[0][1] is None:
+            return False
+        target = call.options[0][1]
+        if target.dynamic or target.glob or target.text.startswith("-") or not in_read_bound(target.text, here, cwd):
+            return False
+        here = os.path.realpath(os.path.join(here, target.text))
+        if not checkout_root(Path(here), cwd):
+            return False
     sub, args = call.sub.text, [a.text for a in call.args]
     # A long flag that is a prefix of a writing one (`--outp`) counts as it: git accepts abbreviations.
     if any(a.startswith("--") and len(a.partition("=")[0]) >= 3 and any(u.startswith(a.partition("=")[0]) for u in GIT_UNSAFE_LONG)
@@ -2325,7 +2350,7 @@ def gh_read_ok(cmd: Command) -> bool:
 # the full name. A long option outside the command's list is therefore refused, abbreviated or not (#567).
 _COMMON_LONG = {"--help", "--version"}
 LONG_OPTIONS = {
-    "grep": {"--recursive", "--dereference-recursive", "--line-number", "--ignore-case", "--no-ignore-case", "--include",
+    "grep": {"--recursive", "--line-number", "--ignore-case", "--no-ignore-case", "--include",
              "--exclude", "--exclude-dir", "--files-with-matches", "--files-without-match", "--count", "--invert-match",
              "--word-regexp", "--line-regexp", "--fixed-strings", "--extended-regexp", "--perl-regexp", "--basic-regexp",
              "--only-matching", "--quiet", "--silent", "--no-messages", "--with-filename", "--no-filename", "--null",
@@ -2333,7 +2358,7 @@ LONG_OPTIONS = {
              "--regexp", "--file", "--byte-offset", "--initial-tab", "--binary-files", "--label", "--null-data",
              "--no-ignore", "--line-buffered", "--binary", "--directories", "--devices", "--exclude-from"},
     "ls": {"--all", "--almost-all", "--human-readable", "--recursive", "--reverse", "--directory", "--classify",
-           "--color", "--sort", "--time", "--size", "--inode", "--full-time", "--group-directories-first", "--dereference",
+           "--color", "--sort", "--time", "--size", "--inode", "--full-time", "--group-directories-first",
            "--literal", "--hide", "--ignore", "--indicator-style", "--format", "--numeric-uid-gid", "--width"},
     "cat": {"--number", "--show-all", "--squeeze-blank", "--number-nonblank", "--show-ends", "--show-tabs",
             "--show-nonprinting"},
@@ -2358,7 +2383,7 @@ LONG_OPTIONS = {
            "--heading", "--no-heading", "--sort", "--sortr", "--regexp", "--file", "--invert-match", "--max-count",
            "--no-messages", "--with-filename", "--no-filename", "--color", "--colour", "--multiline", "--pcre2",
            "--null", "--text", "--column", "--vimgrep", "--stats", "--max-filesize", "--no-config", "--unrestricted",
-           "--quiet", "--replace", "--trim", "--follow", "--glob-case-insensitive", "--no-ignore-vcs", "--pretty"},
+           "--quiet", "--replace", "--trim", "--glob-case-insensitive", "--no-ignore-vcs", "--pretty"},
 }
 LONG_OPTIONS["egrep"] = LONG_OPTIONS["grep"]
 GLOB_SAFE = re.compile(r"[A-Za-z0-9_./*?\[\]+@%:=,!^-]+")
@@ -2410,6 +2435,52 @@ def expand_words(words: list, here: str) -> list | None:
     return out
 
 
+# A recursive read that follows a symlink reads past the bound: the bound checks the directory argument's resolved
+# path, not what lies under it (#579). `grep -r`, `rg`, `find`, `ls -R` and `diff -r` don't follow a symlink met while
+# walking (macOS's grep takes `-S` to do so, GNU grep `-R`); each option below makes them. SYMLINK_SHORT maps a
+# command to the short flags that do, and SYMLINK_VALUE_FLAGS to the short flags whose value ends a cluster.
+SYMLINK_SHORT = {"grep": "RS", "egrep": "RS", "fgrep": "RS", "rg": "L", "find": "L", "ls": "L"}
+SYMLINK_VALUE_FLAGS = {"grep": "efmABCdD", "egrep": "efmABCdD", "fgrep": "efmABCdD", "rg": "efgmABCtTjMErd",
+                       "find": "", "ls": "IwT"}
+SYMLINK_LONG = {"grep": ("--dereference-recursive",), "egrep": ("--dereference-recursive",),
+                "fgrep": ("--dereference-recursive",), "rg": ("--follow",), "ls": ("--dereference",)}
+SYMLINK_ADVICE = {"grep": "use `grep -r`, which doesn't follow symlinks", "egrep": "use `grep -E -r`, which doesn't follow symlinks",
+                  "fgrep": "use `grep -F -r`, which doesn't follow symlinks",
+                  "rg": "drop `-L`/`--follow`: a symlink under the directory can lead outside what you may read",
+                  "find": "drop `-L`/`-follow`: a symlink under the directory can lead outside what you may read",
+                  "ls": "drop `-L`/`--dereference`: a symlink under the directory can lead outside what you may read",
+                  "diff": "pass `--no-dereference`, or diff the two directories file by file"}
+
+
+def follows_symlinks(name: str, args: list) -> str | None:
+    """The advice for a read command that follows symlinks while walking a directory (#579), or None."""
+    for a in args:
+        if a == "--":
+            break
+        if name == "diff":
+            continue
+        if name == "find":
+            if a in ("-follow", "-L") or re.fullmatch(r"-[HLP]*L[HLP]*", a):
+                return SYMLINK_ADVICE[name]
+        elif a.startswith("--"):
+            flag = a.partition("=")[0]
+            if len(flag) >= 3 and any(f.startswith(flag) for f in SYMLINK_LONG.get(name, ())):
+                return SYMLINK_ADVICE[name]
+        elif a.startswith("-") and name in SYMLINK_SHORT:
+            for ch in a[1:]:
+                if ch in SYMLINK_VALUE_FLAGS[name]:
+                    break
+                if ch in SYMLINK_SHORT[name]:
+                    return SYMLINK_ADVICE[name]
+    if name == "diff":
+        flags = [a for a in args if a.startswith("-") and a != "--"]
+        recursive = any(a.startswith("--") and len(a) >= 3 and "--recursive".startswith(a.partition("=")[0]) or
+                        (not a.startswith("--") and "r" in a[1:]) for a in flags)
+        if recursive and not any(a.startswith("--no-d") for a in flags):
+            return SYMLINK_ADVICE["diff"]
+    return None
+
+
 def read_command_ok(cmd: Command, here: str = ".", cwd: str = "") -> bool:
     """One simple command of plain words that only reads (the allowlist of #562), every path of it inside
     the read bound (#566). A relative glob is expanded and its matches are held to the bound (#567)."""
@@ -2417,6 +2488,9 @@ def read_command_ok(cmd: Command, here: str = ".", cwd: str = "") -> bool:
     name, words = first.text, cmd.words[1:]
     if first.dynamic or any(w.dynamic for w in words) or (first.glob and name != "["):
         return False
+    if name in SYMLINK_SHORT or name == "diff":
+        if follows_symlinks(name, [w.text for w in words]) is not None:
+            return False
     if name in ("git", "gh"):
         if any(w.glob for w in words):
             return False
@@ -2697,7 +2771,25 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
 def approval(role: str | None, command: str, cwd: str, session: str = "") -> bool:
     """True when this command, already accepted by the rules, is one of its role's routine writes. `role`
     None is the orchestrator's own session (no `agent_type`), in a repo that carries this plugin's config."""
-    parsed = Parsed(parse(command))
+    return parsed_approval(role, Parsed(parse(command)), cwd, session)
+
+
+def read_only_threads(role: str | None, parsed: "Parsed", cwd: str) -> bool:
+    """A reviewer's or scout's own read of the threads (#579): the plugin's `threads <pr>` or `threads <pr> --all`,
+    one command with plain words (agents/reviewer.md, agents/scout.md). `reopen` and `resolve` are not reads."""
+    if role not in ("reviewer", "scout") or len(parsed.cmds) != 1:
+        return False
+    found = script_call(parsed, THREADS_SCRIPT)
+    if found is None:
+        return False
+    cmd, args = found
+    return (len(cmd.words) - len(args) == 1 and only_plain_words(cmd) and not cmd.heredocs and not cmd.depth
+            and threads_form(args) == "list" and own_script(cmd, args, cwd, "threads"))
+
+
+def parsed_approval(role: str | None, parsed: "Parsed", cwd: str, session: str = "") -> bool:
+    if read_only_threads(role, parsed, cwd):
+        return True
     if role == "reviewer":
         if review_post(parsed) == "" and posting_enabled(cwd):
             return True
@@ -2800,6 +2892,10 @@ COMMIT_REASON = ("pass a multi-line commit message with several `-m` flags (`git
                  "a heredoc or `$(...)` in the message is not approved")
 MIXED_REASON ="run the write on its own, as a separate Bash call: a write chained with other commands is not approved"
 GENERIC_REASON = "find an approved form, or stop and report what you need"
+PR_BODY_REASON = ("pass a PR body as `gh pr edit --body-file - <<'EOF' ... EOF` (current-branch form: no PR number, a quoted "
+                  "heredoc, no redirect or pipe after it); the heredoc's text is data, not commands")
+CD_ADVICE = ("`cd` is approved only to your own worktree at the start of a chain: use absolute paths, "
+             "or `git -C <dir>` for a git read")
 MONITOR_REASON = "run the tests in the foreground, or wait with an approved loop (`until <read-only test>; do sleep N; done`)"
 SCRIPT_EDIT_FLAGS = re.compile(r"-[A-Za-z]*[ceEi][A-Za-z]*|--eval|--command")
 
@@ -2835,15 +2931,116 @@ def unknown_long_option(cmd: Command) -> tuple | None:
     return None
 
 
+def checkout_script_reason(parsed: "Parsed", cwd: str) -> str | None:
+    """The advice for a call of a plugin script through the checkout's copy (`<repo>/scripts/<name>`, or a bare
+    `scripts/<name>` from the main checkout): only the plugin's own copy is approved (#579)."""
+    for cmd in parsed.cmds:
+        k = command_index(cmd.words)
+        if k >= len(cmd.words) or cmd.words[k].dynamic:
+            continue
+        word = cmd.words[k].text
+        name = word.rpartition("/")[2]
+        if not re.search(r"(?:^|/)scripts/[\w.-]+$", word) or not (PLUGIN_SCRIPTS / name).is_file():
+            continue
+        if Path(os.path.realpath(os.path.join(cwd or ".", word))) != PLUGIN_SCRIPTS / name:
+            return f"call the plugin's copy: `{PLUGIN_SCRIPTS}/{name}`, not this checkout's `{word}`"
+    return None
+
+
+# --- The orchestrator never prompts either (#579). ---
+#
+# `scripts/launch` sets ORCHESTRATE_ROLE=orchestrator in the environment of the orchestrator's line only, never the
+# lead's. The orchestrator and the lead are both the main session with no `agent_type`; this variable tells them
+# apart, so the lead (and a developer's own session) keeps the fall-through to the prompt and the orchestrator is
+# denied with the approved way instead of hanging on a prompt nobody answers.
+
+ROLE_ENV = "ORCHESTRATE_ROLE"
+ORCHESTRATOR_HEAD = f"{UNAPPROVED_MARK} the orchestrator: "
+ORCHESTRATOR_GENERIC = ("use a `scripts/` entry point, or raise a `needs-lead` stop naming the command "
+                        "(the lead can run what the guard won't approve)")
+ORCHESTRATOR_MONITOR = ("a Monitor runs the plugin's `scripts/watch-ci <pr> <head>` (or another `scripts/` entry point); for "
+                        "anything else raise a `needs-lead` stop naming the command")
+ORCHESTRATOR_ALONE = "run the script on its own; its output is already bounded"
+TRAILING_NOISE = frozenset(("tail", "head", "echo", "printf", "wc", "cat"))
+
+
+def orchestrator_strict() -> bool:
+    return os.environ.get(ROLE_ENV) == "orchestrator"
+
+
+def without_trailing_noise(parsed: "Parsed") -> "Parsed | None":
+    """The line without its trailing `| tail -n`, `| head`, `; echo "exit $?"` and the like, or None when it ends
+    in none."""
+    cmds, dropped = list(parsed.cmds), False
+    while len(cmds) > 1 and not cmds[-1].depth and cmds[-1].joiner in ("|", ";", "&&", "||", "\n") and cmds[-1].words \
+            and not cmds[-1].words[0].dynamic and cmds[-1].words[0].text in TRAILING_NOISE:
+        cmds.pop()
+        dropped = True
+    if not dropped:
+        return None
+    last = cmds[-1]
+    cmds[-1] = Command(last.words, last.redirects, last.heredocs, last.depth, last.joiner, None)
+    return Parsed(cmds)
+
+
+def hand_run_script(parsed: "Parsed") -> str | None:
+    """The `scripts/` entry point that covers a hand-run `gh` or `git` call, or None."""
+    for call in parsed.calls:
+        if call.tool == "gh":
+            args = [a.text for a in call.args]
+            if call.is_sub("pr") and call.is_verb("merge"):
+                return "scripts/merge"
+            if (call.is_sub("pr") and call.is_verb("checks")) or call.is_sub("run"):
+                return "scripts/watch-ci"
+            if call.is_sub("api") and any(re.search(r"graphql|/reviews|/comments|reviewThreads|/merge", a) for a in args):
+                return "scripts/threads (review threads) or scripts/merge (merging)"
+            if call.is_sub("pr") and call.is_verb("view", "list", "status"):
+                return "scripts/snapshot, scripts/frontier or scripts/claims"
+        elif call.tool == "git" and call.is_sub("merge", "worktree", "pull", "reset", "checkout", "switch", "rebase"):
+            return "scripts/merge (it updates the main checkout and cleans up) or scripts/rescue"
+    return None
+
+
+def orchestrator_reason(parsed: "Parsed", cwd: str, tool: str = "Bash") -> str:
+    """Why the orchestrator's call got no approval, and the approved way (the orchestrator-only twin of
+    unapproved_reason)."""
+    if tool == "Monitor":
+        return ORCHESTRATOR_HEAD + ORCHESTRATOR_MONITOR
+    checkout = checkout_script_reason(parsed, cwd)
+    if checkout:
+        return ORCHESTRATOR_HEAD + checkout
+    try:
+        bare = without_trailing_noise(parsed)
+        if bare is not None and parsed_approval(None, bare, cwd):
+            return ORCHESTRATOR_HEAD + ORCHESTRATOR_ALONE
+    except Exception:
+        pass
+    script = hand_run_script(parsed)
+    if script:
+        return ORCHESTRATOR_HEAD + f"a hand-run `gh` or `git` form a script covers: use {script}"
+    return ORCHESTRATOR_HEAD + ORCHESTRATOR_GENERIC
+
+
 def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool: str = "Bash") -> str:
     """Why a background role's call got no approval, and what to do instead."""
     who = {"worker": "a worker", "reviewer": "a reviewer", "scout": "a scout"}.get(rules_role(role), "this role")
     head = f"{UNAPPROVED_MARK} {who}: "
     if tool == "Monitor":
         return head + MONITOR_REASON
+    for cmd in parsed.cmds:
+        if cmd.words and not cmd.words[0].dynamic:
+            advice = follows_symlinks(cmd.words[0].text, [w.text for w in cmd.words[1:]])
+            if advice:
+                return head + advice
+    checkout = checkout_script_reason(parsed, cwd)
+    if checkout:
+        return head + checkout
     if any(c.is_sub("commit") for c in parsed.tool("git")) and (
             any(c.heredocs for c in parsed.cmds) or any(c.depth for c in parsed.cmds)):
         return head + COMMIT_REASON
+    if any(c.heredocs and len(c.words) > 2 and not c.words[0].dynamic and c.words[0].text == "gh" and c.words[1].text == "pr"
+           for c in parsed.cmds):
+        return head + PR_BODY_REASON
     if is_script_edit(parsed):
         return head + EDIT_REASON
     for cmd in parsed.cmds:
@@ -2863,6 +3060,8 @@ def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool:
                     return head + MIXED_REASON
             except Exception:
                 pass
+    if any(c.words and not c.words[0].dynamic and c.words[0].text == "cd" for c in parsed.cmds):
+        return head + f"{GENERIC_REASON}. {CD_ADVICE}"
     return head + GENERIC_REASON
 
 
@@ -2903,8 +3102,16 @@ def main() -> None:
         try:
             if isinstance(command, str) and approval(None, command, cwd):
                 allow("routine orchestrator step")
+                return
         except Exception:
-            pass  # silence: the permission layer decides
+            pass  # silence: the permission layer decides (unless this is the orchestrator's line, below)
+        if orchestrator_strict():
+            # The orchestrator's line has nobody to answer a prompt (#579): deny with the approved way. Fail closed
+            # (ADR 0002): a crash while deciding is a deny too.
+            try:
+                deny(orchestrator_reason(Parsed(parse(command)), cwd, "Monitor" if data.get("tool_name") == "Monitor" else "Bash"))
+            except Exception:
+                deny(f"{ORCHESTRATOR_HEAD}{ORCHESTRATOR_GENERIC}")
         return
     tool = "Monitor" if data.get("tool_name") == "Monitor" else "Bash"
     try:

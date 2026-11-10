@@ -21,6 +21,14 @@
           { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt_log.py\"" }
         ]
       }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|worker_permission_prompt",
+        "hooks": [
+          { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt_log.py\"" }
+        ]
+      }
     ]
   }
 }
