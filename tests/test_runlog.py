@@ -42,6 +42,19 @@ class RunLogTest(unittest.TestCase):
         _vcs(self.repo, "worktree", "add", "-q", "-b", "w1", str(self.wt))
         return self.wt
 
+    def test_the_state_dir_override_stands_in_for_the_main_checkout(self):
+        """#710: $ORCHESTRATE_STATE_DIR holds the logs and the state file; an empty value is no override."""
+        state = self.repo.parent / "state"
+        (state / ".claude").mkdir(parents=True)
+        (state / ".claude" / "orchestrate-state.json").write_text('{"session": "override-run"}')
+        with mock.patch.dict("os.environ", {runlog.STATE_DIR_ENV: str(state)}):
+            runlog.append_event(self.repo, runlog.FRONTIER, "ran")
+            self.assertEqual(runlog.log_path(self.repo, runlog.EVENTS_LOG), state / runlog.PROFILES / runlog.EVENTS_LOG)
+        self.assertEqual(json.loads((state / runlog.PROFILES / runlog.EVENTS_LOG).read_text())["session"], "override-run")
+        self.assertFalse((self.repo / runlog.PROFILES / runlog.EVENTS_LOG).exists())
+        with mock.patch.dict("os.environ", {runlog.STATE_DIR_ENV: ""}):
+            self.assertEqual(runlog.log_path(self.repo, runlog.EVENTS_LOG), self.repo / runlog.PROFILES / runlog.EVENTS_LOG)
+
     def test_subdirectory_writes_to_the_checkout_log(self):
         sub = self.repo / "a" / "b"
         sub.mkdir(parents=True)
