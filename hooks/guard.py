@@ -2989,6 +2989,62 @@ def unknown_long_option(cmd: Command) -> tuple | None:
     return None
 
 
+# The plugin scripts each background role may run, and how (#624). Kept beside the approval rules they describe
+# (worker_work_ok, reviewer_verify_ok, read_only_threads, numberless_threads_form): the keys are the scripts that
+# have such a rule, and a denied call of any other plugin script gets the whole list as its reason.
+ROLE_SCRIPT_FORMS = {
+    "worker": {
+        "verify": "`{p}/verify --config --branch <branch>` (the brief's `Verify:` line, run once, in the foreground)",
+        "threads": "`{p}/threads` with no PR number (`threads`, `threads --all`, `threads resolve <id>... --fixed <sha>`, "
+                   "`threads resolve <id>... --left <why> --followup <n>`)",
+    },
+    "reviewer": {
+        "verify": "`{p}/verify --config --cwd <scratch checkout>`",
+        "threads": "`{p}/threads <pr>`, `threads <pr> --all` and `threads <pr> reopen <id>... --why <why>`",
+        "scratch": "`{p}/scratch <pr> <head> --under <your scratchpad>`",
+    },
+    "scout": {
+        "threads": "`{p}/threads <pr>` and `threads <pr> --all` (list only)",
+    },
+}
+PLUGIN_SCRIPT_WORD = re.compile(r"(?:^|/)scripts/([\w.-]+)$")
+
+
+def plugin_scripts_run(parsed: "Parsed") -> list:
+    """The names of the plugin scripts the line runs: a command word, or the script an interpreter runs
+    (`python3 <path>/scripts/rescue`), never a path given as an argument (`py_compile scripts/holds.py`)."""
+    names = []
+    for cmd in parsed.cmds:
+        found = script_call(Parsed([cmd]), PLUGIN_SCRIPT_WORD, dynamic_ok=True)
+        if found is None:
+            continue
+        word = found[0].words[len(found[0].words) - len(found[1]) - 1].text
+        name = PLUGIN_SCRIPT_WORD.search(word).group(1)
+        if (PLUGIN_SCRIPTS / name).is_file():
+            names.append(name)
+    return names
+
+
+def script_reason(role: str, parsed: "Parsed") -> str | None:
+    """The reason for a denied call that runs a plugin script this role has no form for, or whose form the call
+    got wrong: what the role may run (#624). None when the call runs no plugin script."""
+    names = plugin_scripts_run(parsed)
+    if not names:
+        return None
+    forms = ROLE_SCRIPT_FORMS.get(rules_role(role), {})
+    mine = [n for n in names if n in forms]
+    if mine and role == "worker" and "threads" in mine and any(
+            is_number(w.text) for c in parsed.cmds for w in c.words[1:]):
+        return "a worker's `threads` call has no PR number: it resolves the PR of your checked-out branch. Drop the number"
+    if mine and len(mine) == len(names):
+        return None  # the script is one the role runs, in a shape the more specific advice below covers
+    listing = "; ".join(f.format(p=PLUGIN_SCRIPTS) for f in forms.values())
+    extra = ("; test a change to a script with `python3 -m unittest`, never by running it" if role == "worker" else "")
+    bad = [n for n in names if n not in forms][0]
+    return (f"`{bad}` is a plugin script this role doesn't run. "
+            f"The only plugin scripts you may run: {listing}{extra}")
+
+
 def checkout_script_reason(parsed: "Parsed", cwd: str) -> str | None:
     """The advice for a call of a plugin script through the checkout's copy (`<repo>/scripts/<name>`, or a bare
     `scripts/<name>` from the main checkout): only the plugin's own copy is approved (#579)."""
@@ -3098,6 +3154,9 @@ def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool:
             advice = follows_symlinks(cmd.words[0].text, [w.text for w in cmd.words[1:]])
             if advice:
                 return head + advice
+    script = script_reason(role, parsed)
+    if script:
+        return head + script
     checkout = checkout_script_reason(parsed, cwd)
     if checkout:
         return head + checkout

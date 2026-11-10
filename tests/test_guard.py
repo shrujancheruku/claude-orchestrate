@@ -2248,5 +2248,74 @@ class GhCallLogTest(unittest.TestCase):
         self.assertEqual(with_log, "deny")
 
 
+class SubagentScriptBoundaryTest(unittest.TestCase):
+    """The plugin scripts a worker, reviewer or scout may run are pinned through the whole hook (#624): the
+    scripts the orchestrator or the lead runs are denied to every subagent in every spelling, and the denial
+    names the scripts that role may run."""
+
+    ROLES = ("worker", "reviewer", "scout")
+    SCRIPTS_DENIED = ("rescue", "board", "rebuild-state", "frontier --fix-drift", "launch", "sandbox-git", "merge")
+
+    def setUp(self):
+        UnapprovedCallsAreDeniedTest.setUp(self)
+        (self.work / "scripts").mkdir()
+        for name in ("rescue", "board", "rebuild-state", "frontier", "launch", "sandbox-git", "merge", "holds"):
+            (self.work / "scripts" / name).write_text("#!/bin/sh\n")
+        (self.work / "scripts" / "holds.py").write_text("")
+
+    def deny(self, role, command):
+        out = raw(f"orchestrate:{role}", command, self.work, full=True)
+        self.assertEqual(out and out["permissionDecision"], "deny", (role, command))
+        return out["permissionDecisionReason"]
+
+    def test_every_other_script_is_denied_in_every_spelling(self):
+        for role in self.ROLES:
+            for script in self.SCRIPTS_DENIED:
+                name, _, rest = script.partition(" ")
+                tail = f" {rest}" if rest else ""
+                for spelling in (f"{SCRIPTS}/{name}{tail}", f"scripts/{name}{tail}", f"python3 {SCRIPTS}/{name}{tail}",
+                                 f"python3 -I {SCRIPTS}/{name}{tail}", f"./scripts/{name}{tail}"):
+                    with self.subTest((role, spelling)):
+                        self.deny(role, spelling)
+
+    def test_the_denial_of_an_unapproved_script_lists_the_roles_scripts(self):
+        for role in self.ROLES:
+            for command in (f"{SCRIPTS}/rescue 5 --title t --repo .", f"python3 {SCRIPTS}/board", "scripts/launch"):
+                with self.subTest((role, command)):
+                    reason = self.deny(role, command)
+                    noun = {"worker": "a worker", "reviewer": "a reviewer", "scout": "a scout"}[role]
+                    self.assertTrue(reason.startswith(f"orchestrate guard: not approved for {noun}: "), reason)
+                    self.assertIn("plugin script this role doesn't run", reason)
+                    self.assertIn(f"{SCRIPTS}/threads", reason)
+        self.assertIn(f"{SCRIPTS}/verify --config --branch <branch>", self.deny("worker", f"{SCRIPTS}/board"))
+        self.assertIn("test a change to a script with `python3 -m unittest`", self.deny("worker", f"{SCRIPTS}/board"))
+        self.assertIn(f"{SCRIPTS}/verify --config --cwd <scratch checkout>", self.deny("reviewer", f"{SCRIPTS}/board"))
+        self.assertNotIn("verify", self.deny("scout", f"{SCRIPTS}/board"))
+        self.assertIn("(list only)", self.deny("scout", f"{SCRIPTS}/board"))
+
+    def test_a_scout_has_no_verify(self):
+        self.assertIn("doesn't run", self.deny("scout", f"{SCRIPTS}/verify --config"))
+
+    def test_a_workers_numbered_threads_call_says_to_drop_the_number(self):
+        self.assertIn("Drop the number", self.deny("worker", f"{SCRIPTS}/threads 648"))
+
+    def test_a_script_named_only_as_an_argument_keeps_its_ordinary_reason(self):
+        reason = self.deny("worker", "python3 -m py_compile /etc/x.py scripts/holds.py")
+        self.assertNotIn("plugin script this role doesn't run", reason)
+        self.assertTrue(reason.endswith(GUARD_MODULE.GENERIC_REASON), reason)
+
+    def test_a_calls_without_a_plugin_script_keep_their_reasons_byte_for_byte(self):
+        for role in self.ROLES:
+            self.assertEqual(self.deny(role, "foo --bar"),
+                             f"orchestrate guard: not approved for {'a ' + role}: {GUARD_MODULE.GENERIC_REASON}")
+
+    def test_a_workers_own_script_work_stays_allowed(self):
+        (self.work / "scripts" / "holds.py").write_text("x = 1\n")
+        for command in ("python3 -m py_compile scripts/holds.py", "python3 -m unittest tests.test_holds -v",
+                        "sed -i 's/a/b/' scripts/holds"):
+            with self.subTest(command):
+                self.assertTrue(approved("orchestrate:worker", command, self.work))
+
+
 if __name__ == "__main__":
     unittest.main()
