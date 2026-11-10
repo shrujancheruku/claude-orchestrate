@@ -793,10 +793,12 @@ def gh_block(events: list) -> dict:
     GraphQL points spent (the `cost` the helper records on a GraphQL call; a call without one adds nothing)."""
     calls = [e for e in events if e.get("outcome") != "wait"]
     waits = [e for e in events if e.get("outcome") == "wait"]
-    by_script = {}
+    by_script, by_role = {}, {}
     for e in calls:
         name = str(e.get("script") or "?")
         by_script[name] = by_script.get(name, 0) + 1
+        if e.get("role"):  # a row the guard wrote for an agent's own `gh` command (#445)
+            by_role[str(e["role"])] = by_role.get(str(e["role"]), 0) + 1
     remaining = [e["remaining"] for e in calls if isinstance(e.get("remaining"), int)]
     writes = sorted(t for t in (parse_ts(e.get("ts")) for e in calls if e.get("write")) if t)
     seconds = lambda es: round(sum(e.get("seconds") or 0 for e in es), 1)
@@ -806,6 +808,9 @@ def gh_block(events: list) -> dict:
         "graphql": sum(1 for e in calls if e.get("graphql")),
         "graphql_points": sum(e["cost"] for e in calls if e.get("graphql") and isinstance(e.get("cost"), int) and not isinstance(e["cost"], bool)),
         "by_script": dict(sorted(by_script.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "by_role": dict(sorted(by_role.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "agent_calls": sum(by_role.values()),
+        "script_calls": len(calls) - sum(by_role.values()),
         "retries": sum(1 for e in calls if (e.get("attempt") or 1) > 1),
         "rate_limited": sum(1 for e in calls if e.get("outcome") == "ratelimited"),
         "lowest_remaining": min(remaining) if remaining else None,
@@ -846,6 +851,9 @@ def gh_lines(g: dict) -> list:
     top = ", ".join(f"{k} {v}" for k, v in list(t["by_script"].items())[:4])
     # One line however long the run: the per-pass blocks live in the saved JSON (metrics.gh_calls.passes).
     out = [f"GitHub calls: {line(t)}" + (f" · top: {top}" if top else "")]
+    if t.get("agent_calls"):  # scripts vs the agents' own `gh` commands
+        roles = ", ".join(f"{k} {v}" for k, v in t["by_role"].items())
+        out.append(f"GitHub calls by source: {t['script_calls']} from scripts, {t['agent_calls']} from agents ({roles})")
     # Points per pass: each row's sum of GraphQL `cost` (calls outside any record form a row of their own).
     # Shown only when the log carries costs, so a log from before #490 keeps the old summary.
     # N is the pass records (a pass with no calls counts, the row for calls outside any pass does not).
