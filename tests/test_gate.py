@@ -486,6 +486,25 @@ class GateTest(unittest.TestCase):
         self.assertIn("waits for #12 (still building) to merge: src/a.py", r.stdout)
         self.assertEqual((self.event()["outcome"], self.event()["failed"]), ("unknown", []))
 
+    def test_a_building_ticket_and_a_younger_pr_on_one_path_is_a_hold_and_reruns_to_review_once_it_has_a_pr(self):
+        self.building()
+        r = self.gate()
+        self.assertEqual(self.next_lines(r), ["next: wait-ticket 7 12"], r.stdout + r.stderr)
+        # Ticket 12 opens PR 9 (younger): it stops being a building holder and this PR is the older one.
+        (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
+        self.prime(others=[{"number": 9, "headRefName": "12-thing"}])
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (0, ["next: review " + HEAD]), r.stdout + r.stderr)
+
+    def test_a_building_ticket_and_an_older_pr_on_one_path_waits_for_the_older_pr(self):
+        self.prime(others=[{"number": 5, "headRefName": "13-older"}], issues=[
+            {"number": 12, "labels": {"nodes": []}, "assignees": {"totalCount": 1}}])
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(exist_ok=True)
+        state.write_text(json.dumps({"session": "test-session", "tickets": {"12": {"touch_map": "src/a.py"}}}))
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: wait-older 7 5"]), r.stdout + r.stderr)
+
     def test_an_overlap_with_an_exclusive_hold_is_still_a_send_back(self):
         # An overlap the PR itself must fix: the path is held by no ticket that will merge.
         self.building()

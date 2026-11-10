@@ -42,7 +42,7 @@ class VerdictHelperTest(unittest.TestCase):
         ("merged", (), 0), ("cleaned", ("7",), 0), ("wait-ci", ("7", "abc"), 5), ("re-review", ("7",), 6),
         ("send-back", ("7",), 1), ("ask-user", ("an open blocker",), 1), ("retry", (), 3), ("review", ("abc",), 0),
         ("rerun-after-ci", (), 3), ("wait-older", ("7", "5"), 3), ("wait-ticket", ("7", "9"), 3),
-("settled", (), 0), ("retry-after", ("2026-01-01T00:00:00Z",), 2),
+        ("settled", (), 0),("retry-after", ("2026-01-01T00:00:00Z",), 2),
         ("could-not-run", (), 2),
     )
 

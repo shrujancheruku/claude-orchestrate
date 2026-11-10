@@ -246,15 +246,17 @@ def overlaps(held: list, candidates: list, cfg, own_pr=None, pr_tickets=None) ->
                 continue
             if cfg.is_shared(c) or cfg.is_shared(h.path):  # a directory candidate overlaps the held file under it
                 out.append(Overlap(SHARED, c, h.holders))
-            elif own_pr is not None and all(PR_HOLDER.match(w) for w in h.holders):
-                older = [n for n in (int(PR_HOLDER.match(w).group(1)) for w in h.holders) if n < own_pr]
+            elif own_pr is not None and all(PR_HOLDER.match(w) or TICKET_HOLDER.match(w) for w in h.holders):
+                # Only PRs and tickets still being built hold it, so the PR is not at fault: it waits on the older open PR
+                # if there is one, else on the lowest building ticket; with only younger PRs it is the one they wait for.
+                older = [n for n in (int(m.group(1)) for m in map(PR_HOLDER.match, h.holders) if m) if n < own_pr]
+                building = [int(m.group(1)) for m in map(TICKET_HOLDER.match, h.holders) if m]
                 if older:
                     out.append(Overlap(WAITS_FOR, c, h.holders, pr=min(older), ticket=pr_tickets.get(min(older))))
+                elif building:
+                    out.append(Overlap(WAITS_TICKET, c, h.holders, ticket=min(building)))
                 else:
                     out.append(Overlap(YOUNGER, c, h.holders))
-            elif own_pr is not None and all(TICKET_HOLDER.match(w) for w in h.holders):
-                # Only tickets still being built hold it: the PR is not at fault and waits for the lowest-numbered one.
-                out.append(Overlap(WAITS_TICKET, c, h.holders, ticket=min(int(TICKET_HOLDER.match(w).group(1)) for w in h.holders)))
             else:
                 out.append(Overlap(COUNTED, c, h.holders))
     return out

@@ -27,7 +27,7 @@ Every run ends with exactly one `next:` line, the verdict the orchestrator appli
 `review <head>` (exit 0) | `send-back <pr>` (exit 1; the lines above it are what the worker gets) |
 `rerun-after-ci` (exit 3, mergeability still UNKNOWN) | `wait-older <pr> <older>` (exit 3, the PR waits for the older
 PR to merge) | `wait-ticket <pr> <ticket>` (exit 3, the only overlap is with a ticket still building or in another
-session: the PR is fine and waits for that ticket to merge) | `retry-after <time>` (exit 2, a rate limit) | `could-not-run` (exit 2, the reason on stderr).
+session: the PR is fine; run the gate again when that ticket opens its PR or merges, whichever comes first) | `retry-after <time>` (exit 2, a rate limit) | `could-not-run` (exit 2, the reason on stderr).
 The config (checks, tiers, shared files) is read from the main checkout, never from --cwd: a PR that edits
 `.claude/orchestration.md` must not edit the gate that judges it (#535). The `run:` commands still run in --cwd.
 Stdlib only, Python 3.9+.
