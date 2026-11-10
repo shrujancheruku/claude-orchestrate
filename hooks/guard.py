@@ -1833,6 +1833,10 @@ ORCHESTRATOR_FORMS = (
          need=("--left",), inline=False),  # the script refuses a --left with neither (or both) of the follow-up flags
     Form("threads", ("pr", "followup", "word*"), {"--gist": "word", "--verbose": ""}, inline=False),
     Form("board", (), {"--repo": "repo", "--dry-run": "", "--verbose": ""}),
+    # The rescue of a stalled or stopped ticket (#624): `rescue <ticket | branch> --title <title> --repo . [--pr <num>]`, the
+    # two forms skills/run documents. --title is any one quoted string (the guard can't know the ticket's title; it only
+    # goes into a wip commit message and a branch slug). No other flag, so no `--pr` without a number.
+    Form("rescue", ("ticket",), {"--title": "word", "--repo": "repo", "--pr": "num"}, need=("--title", "--repo")),
     # Making CI run again (once), and the scratch worktree add; scratch's `--under` is this session's scratchpad.
     Form("ci-rerun", ("pr",), {"--job": "num num", "--repo": "repo"}),
     Form("scratch", ("pr", "hash"), {"--under": "under", "--repo": "repo"}, need=("--under",)),
@@ -1903,6 +1907,8 @@ def positional_ok(token: str, text: str) -> bool:
         return HEX.fullmatch(text) is not None
     if kind == "target":
         return WATCH_TARGET.fullmatch(text) is not None
+    if kind == "ticket":  # rescue's argument: a ticket number, or the branch grammar `<n>-<slug>`
+        return (text.isascii() and text.isdigit()) or BRANCH_NAME.fullmatch(text) is not None
     if kind == "sid":  # a session id: not one of profile.py's own subcommands
         return re.fullmatch(r"[A-Za-z0-9][\w-]*", text) is not None and text not in ("record", "compare")
     return text == kind
@@ -2927,6 +2933,8 @@ def read_only_threads(role: str | None, parsed: "Parsed", cwd: str) -> bool:
 
 
 def parsed_approval(role: str | None, parsed: "Parsed", cwd: str, session: str = "") -> bool:
+    if role is None and len(parsed.cmds) > 1 and "rescue" in plugin_scripts_run(parsed):
+        return False  # rescue commits, pushes and removes a worktree: it runs alone, never in a chain (#624)
     if read_only_threads(role, parsed, cwd):
         return True
     if role == "reviewer":
@@ -3237,6 +3245,11 @@ def orchestrator_reason(parsed: "Parsed", cwd: str, tool: str = "Bash") -> str:
     unapproved_reason)."""
     if tool == "Monitor":
         return ORCHESTRATOR_HEAD + ORCHESTRATOR_MONITOR
+    if "rescue" in plugin_scripts_run(parsed):
+        return ORCHESTRATOR_HEAD + (
+            f"rescue takes exactly one of `{PLUGIN_SCRIPTS}/rescue <branch> --title <title> --repo . [--pr <num>]` or "
+            f"`{PLUGIN_SCRIPTS}/rescue <ticket> --title <title> --repo .`: the script word first (no env or wrapper prefix), "
+            "a plain number or `<n>-<slug>` branch, one quoted title, no other flag, and nothing chained")
     checkout = checkout_script_reason(parsed, cwd)
     if checkout:
         return ORCHESTRATOR_HEAD + checkout

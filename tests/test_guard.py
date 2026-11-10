@@ -2089,6 +2089,34 @@ class ScriptFormsTest(unittest.TestCase):
     def ok(self, command, role=None, cwd=None, session=None):
         return approved(role, command, cwd or self.main, session_id=session or self.SID)
 
+    def test_rescue_is_the_orchestrators_in_its_two_documented_forms(self):
+        for command in (f'{SCRIPTS}/rescue 666 --title "ci: skip draft PRs" --repo . --pr 668',
+                        f'{SCRIPTS}/rescue 666-ci-skip-draft-prs --title "ci: skip draft PRs" --repo . --pr 668',
+                        f'{SCRIPTS}/rescue 666-ci-skip-draft-prs --title "ci: skip draft PRs" --repo .',
+                        f'{SCRIPTS}/rescue 666 --title "ci: skip draft PRs" --repo .',
+                        f"{SCRIPTS}/rescue 666 --repo . --title t"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in (f'{SCRIPTS}/rescue 666 --title t --repo . --force', f'{SCRIPTS}/rescue 666 --title t --repo . ; ls',
+                        f'{SCRIPTS}/rescue 666 --title t --repo . && ls', f'{SCRIPTS}/rescue 666 --repo .',
+                        f'{SCRIPTS}/rescue 666 --title t', f'{SCRIPTS}/rescue 666 --title t --repo /other',
+                        f'{SCRIPTS}/rescue 666 --title t --repo . --pr x', f'{SCRIPTS}/rescue main --title t --repo .',
+                        f'{SCRIPTS}/rescue 666 --title "$(id)" --repo .', f'FOO=1 {SCRIPTS}/rescue 666 --title t --repo .',
+                        f'env {SCRIPTS}/rescue 666 --title t --repo .', f'{SCRIPTS}/rescue 666 --title t --repo . --pr 5 --pr 6'):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_rescue_is_denied_to_every_subagent_and_a_bad_shape_names_the_forms(self):
+        command = f'{SCRIPTS}/rescue 666 --title t --repo .'
+        for role in ("worker", "reviewer", "scout"):
+            with self.subTest(role):
+                self.assertFalse(self.ok(command, role=f"orchestrate:{role}", cwd=self.work))
+        os.environ["ORCHESTRATE_ROLE"] = "orchestrator"
+        self.addCleanup(os.environ.pop, "ORCHESTRATE_ROLE", None)
+        out = raw(None, f"{SCRIPTS}/rescue 666 --title t --repo . --force", self.main, full=True, session_id=self.SID)
+        self.assertEqual(out["permissionDecision"], "deny")
+        self.assertIn("rescue takes exactly one of", out["permissionDecisionReason"])
+
     def test_each_new_orchestrator_row_is_approved_in_its_exact_shape(self):
         for command in (f"{SCRIPTS}/ci-rerun 12", f"{SCRIPTS}/ci-rerun 12 --job 111 222", f"{SCRIPTS}/ci-rerun 12 --repo .",
                         f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}", f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}/x",
