@@ -12,16 +12,20 @@ to the last TAIL lines like scripts/verify. A module that finds zero tests fails
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 TAIL = 40
+RUN_MARKER = "run-parallel-" + uuid.uuid4().hex  # this run's session for the guard modules (#710)
+HOOK_MODULES = ("test_guard", "test_guard_corpus")  # the modules that run hooks/guard.py in-process
 RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
 
 
@@ -31,10 +35,20 @@ def run_module(tests_dir, module):
     start = time.monotonic()
     # A temp XDG_CACHE_HOME per module: tests that reach scripts/github.py must never read or write the
     # developer's real rate-limit backoff file.
-    with tempfile.TemporaryDirectory() as cache:
+    with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as state:
         # error::DeprecationWarning: an API this Python already deprecates fails the module here, so a newer
         # Python (CI's) that removes it does not surprise us (#506 called SourceFileLoader.load_module).
         env = dict(os.environ, PYTHONPATH=path, XDG_CACHE_HOME=cache, PYTHONWARNINGS="error::DeprecationWarning")
+        # ORCHESTRATE_STATE_DIR (#710): the modules that run the guard in-process (it logs the `gh` calls it sees) write
+        # their run log to a temp dir, never to the events log of the checkout the tests run in, under the live run's
+        # session. The others build a temp repo and read its log back, so the override would hide it from them.
+        env.pop("ORCHESTRATE_STATE_DIR", None)
+        env.pop("ORCHESTRATE_SESSION", None)
+        if module in HOOK_MODULES:
+            env["ORCHESTRATE_STATE_DIR"] = state
+            # The row's `session` is this variable first: a row that reaches the real log despite the override
+            # carries this run's marker, so another run's rows (an older branch's test_guard) never count as ours.
+            env["ORCHESTRATE_SESSION"] = RUN_MARKER
         env.pop("CLAUDE_PLUGIN_ROOT", None)  # tests run the tree's own scripts, not an installed plugin's
         p = subprocess.run([sys.executable, "-m", "unittest", module], cwd=str(tests_dir), env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
@@ -81,6 +95,53 @@ def other_runners():
     return count_other_runners(out, os.getpid())
 
 
+# A live run, and other branches' test runs without this fix, write the real events log meanwhile, so a growth check on
+# the file's size, or on what the fixtures call themselves, would fail whenever one overlaps. Only a row whose session
+# is this run's RUN_MARKER is this run's own.
+
+
+def real_events_log(tests_dir):
+    """The events log of the checkout `tests_dir` belongs to, or None when it is not in a checkout that has the
+    plugin's scripts (a fixture directory of this runner's own tests)."""
+    scripts = Path(tests_dir).parent / "scripts"
+    if not (scripts / "runlog.py").is_file():
+        return None
+    sys.path.insert(0, str(scripts))
+    try:
+        import repo
+        import runlog
+        # `repo.main_checkout`, not `runlog.log_path`: the override must not point this check at the temp dir.
+        return repo.main_checkout(Path(tests_dir).parent) / runlog.PROFILES / runlog.EVENTS_LOG
+    finally:
+        sys.path.remove(str(scripts))
+
+
+def log_size(path):
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def leaked_rows(path, start):
+    """The rows of this run (session RUN_MARKER) appended to the events log at `path` after byte offset `start`."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    return [line for line in text.splitlines() if json.dumps(RUN_MARKER) in line and _session(line) == RUN_MARKER]
+
+
+def _session(line):
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    return row.get("session") if isinstance(row, dict) else None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("-j", "--jobs", type=int, default=None,
@@ -94,6 +155,8 @@ def main(argv=None):
     if not modules:
         print("no test_*.py modules in %s" % tests_dir)
         return 1
+    real_log = real_events_log(tests_dir)
+    before = log_size(real_log) if real_log else 0
     start = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         results = list(pool.map(lambda m: run_module(tests_dir, m), modules))
@@ -102,7 +165,11 @@ def main(argv=None):
         print("FAIL %s (%.1fs)" % (module, secs))
         print("\n".join(out.rstrip().splitlines()[-TAIL:]))
     print("%d/%d modules passed in %.1fs" % (len(results) - len(failed), len(results), time.monotonic() - start))
-    return 1 if failed else 0
+    leaked = leaked_rows(real_log, before) if real_log else []
+    if leaked:
+        print("FAIL: the tests wrote %d fixture row(s) into the real events log %s (#710); a test must point the run log "
+              "at ORCHESTRATE_STATE_DIR. First row: %s" % (len(leaked), real_log, leaked[0][:200]))
+    return 1 if failed or leaked else 0
 
 
 if __name__ == "__main__":

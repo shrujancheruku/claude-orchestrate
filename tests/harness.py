@@ -21,6 +21,23 @@ LEAKY_ENV = ("PYTHONPATH", "CLAUDE_PLUGIN_ROOT")
 sys.path.insert(0, str(SCRIPTS))
 import runlog  # noqa: E402
 
+def isolate_run_log():
+    """Point the run log at a fresh temp dir (ORCHESTRATE_STATE_DIR, #710) and return the function that undoes it.
+
+    For a test module that runs hooks/guard.py in-process: the guard logs a `gh_call` row for every `gh` command it
+    sees, and without this the row goes to the events log of the checkout the tests run in, under the live run's
+    session. Already set (run_parallel sets it for such a module): left as it is."""
+    if os.environ.get(runlog.STATE_DIR_ENV):
+        return lambda: None
+    state = tempfile.mkdtemp(prefix="orchestrate-state-")
+    os.environ[runlog.STATE_DIR_ENV] = state
+
+    def undo():
+        os.environ.pop(runlog.STATE_DIR_ENV, None)
+        shutil.rmtree(state, ignore_errors=True)
+    return undo
+
+
 # Stands in for `gh`: records every call, then replies with the first canned
 # response whose args are a prefix of the call (stdout, stderr, exit code). A response with a
 # "seq" list replies with its Nth step (the last repeats) on the Nth call it matches.

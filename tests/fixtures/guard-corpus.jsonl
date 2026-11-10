@@ -987,6 +987,44 @@
 {"role": "orchestrate:scout", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/a.py", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/n.txt", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/sub", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "sed -i s/a/b/ sub/.claude/Settings.json", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "sed -i s/a/b/ .claude/SETTINGS.json", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "sed -i s/a/b/ .claude/settings.local.JSON", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "sed -i s/a/b/ sub/.claude/notes.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/checkout/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/checkout/n.txt", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/checkout/sub", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/mine/a.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/checkout/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/checkout/n.txt", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/checkout/sub", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/mine/a.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git status -sb | head -3 && git log -1 --format=%H origin/main 2>/dev/null; sed -n '/Review/,/^## /p' .claude/orchestration.md | head -60", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git fetch", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git fetch", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git worktree list", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git worktree list --porcelain", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git fetch", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/sweep --repo . --due", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/sweep\" --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "/p/orchestrate/0.7.0/scripts/sweep --repo . --due", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git fetch origin", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git fetch origin +main:main", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git merge --no-edit origin/master", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/park-pr 12 --why \"$(id)\"", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/park-pr 12 --why `id`", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/park-pr 12 --why 'waits on #13'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/board\" --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/board --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/sweep --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/sweep --repo . --due", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/sweep\" --repo . --due", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/sweep --repo /other", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/sweep --repo . extra", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "git worktree list", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "git worktree list --porcelain", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "git worktree remove --force /tmp/x", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "git worktree add /tmp/x", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/claims\" --slots --session x --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/frontier\" --all --slots --session x --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/frontier\" --slots --state /etc/x", "expected": "silent", "source": "hand"}
