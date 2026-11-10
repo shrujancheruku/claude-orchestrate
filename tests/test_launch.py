@@ -297,6 +297,23 @@ class Launch(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("ARG:--resume\nARG:s1\n", r.stdout)
 
+    def resume_events(self):
+        path = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_resume_appends_one_resume_event_for_the_session(self):
+        self.live({"name": "orchestrator", "pid": None, "sessionId": "s1"})
+        self.assertEqual(self.launch("--resume", "s1").returncode, 0)
+        (event,) = self.resume_events()
+        self.assertEqual((event["kind"], event["outcome"], event["session"]), ("resume", "resumed", "s1"))
+
+    def test_no_resume_event_for_a_fresh_launch_a_print_or_a_refused_resume(self):
+        self.assertEqual(self.launch().returncode, 0)
+        self.assertEqual(self.launch("--print", "--resume", "s1").returncode, 0)
+        self.live({"name": "orchestrator", "pid": 4242, "sessionId": "s1"})
+        self.assertEqual(self.launch("--resume", "s1").returncode, 2)
+        self.assertEqual(self.resume_events(), [])
+
     def test_agents_listing_that_cannot_be_trusted_fails_closed(self):
         for body in ("not json", '{"agents": []}', "3"):
             with self.subTest(body):

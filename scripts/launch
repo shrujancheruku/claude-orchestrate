@@ -62,6 +62,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import config  # noqa: E402
+import runlog  # noqa: E402
 
 NAME = "orchestrator"
 MODES = ("acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan")
@@ -438,6 +439,13 @@ def main(argv=None) -> int:
         # The printed line carries the variable as a shell prefix, so running it by hand starts the same session.
         print("".join(f"{k}={v} " for k, v in extra.items()) + render(cmd))
         return 0
+    if args.resume and not args.lead:
+        # The profile finds a Session gap from this event: the gap runs from the session's last transcript entry
+        # before it up to its ts. Best effort: a log that cannot be written must not stop the resume.
+        try:
+            runlog.append_event(args.repo, runlog.RESUME, "resumed", session=args.resume)
+        except (OSError, ValueError, runlog.NoSession) as e:
+            print(f"launch: the resume event was not logged: {e}", file=sys.stderr)
     env = {**os.environ, **extra}
     if args.lead:
         env.pop(ROLE_ENV, None)  # an inherited orchestrator role must not make the lead's calls deny

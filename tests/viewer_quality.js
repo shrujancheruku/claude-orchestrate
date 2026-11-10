@@ -13,4 +13,5 @@ const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 const src = scripts[scripts.length - 1][1].replace(/\nrender\(\);\s*$/, "\n");
 const text = (n) => (n._t || "") + (n.children || []).map((x) => (typeof x === "string" ? x : text(x))).join("|");
 const card = process.argv[4] || "quality";
-console.log(text(new Function(src + "\nreturn " + card + ";")()(profile)));
+const out = new Function(src + "\nreturn " + card + ";")()(profile);
+console.log(typeof out === "string" ? out : text(out));
