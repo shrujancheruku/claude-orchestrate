@@ -743,6 +743,30 @@ def conversation_comments(pr, cwd=None) -> list:
             if isinstance(c, dict)]
 
 
+def recent_open_issues(cwd=None, pages: int = 3) -> list:
+    """The newest open issues (REST rows with `number`, `title`, `body`, `author_association`; pull requests left out),
+    up to `pages` x 100: where a follow-up ticket filed for a PR is looked for before another is created."""
+    rows = _pages("repos/{owner}/{repo}/issues?state=open&sort=created&direction=desc&per_page=100", cwd, max_pages=pages)
+    return [r for r in rows if isinstance(r, dict) and "pull_request" not in r]
+
+
+def create_issue(title: str, body: str, labels, cwd=None) -> int:
+    """File an issue (REST `POST issues`) and return its number. Not retried on a 5xx: a repeat could file it twice."""
+    args = ["api", "--method", "POST", "repos/{owner}/{repo}/issues", "-f", f"title={title}", "-f", f"body={body}"]
+    for label in labels:
+        args += ["-f", f"labels[]={label}"]
+    number = call_json(*args, cwd=cwd).get("number")
+    if not isinstance(number, int):
+        raise GhError(MALFORMED, "gh returned no issue number for the new issue")
+    return number
+
+
+def set_body(kind: str, number, body: str, cwd=None) -> None:
+    """Replace the body of an issue (`kind` "issues") or a pull request (`kind` "pulls"), one REST PATCH."""
+    call("api", "--method", "PATCH", f"repos/{{owner}}/{{repo}}/{kind}/{_pr_number(number)}", "-f", f"body={body}",
+         cwd=cwd, idempotent=True)
+
+
 def pr_diff(pr, cwd=None) -> str:
     """The unified diff of a PR (`pulls/{n}` with the diff media type)."""
     return call("api", "-H", "Accept: application/vnd.github.diff", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}",
