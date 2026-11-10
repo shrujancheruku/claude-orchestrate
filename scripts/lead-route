@@ -30,12 +30,14 @@ RESUME, ESCALATE or REDISPATCH, whatever its stop comment says.
 A narrowed or reworded ticket needs no verdict of its own: it is a RESUME. The ADR-conflict comment is the one
 whose first line is `> *ADR conflict held for the lead.*`; a needs-lead ticket whose newest such comment is newer
 than its newest stop comment is held by a conflict, and gets no FALLBACK or UNCAP.
-Last line, always: `counted: <k> of <cap>`, where k is the claimed open tickets that still hold a slot
+The last line before the verdict, always: `counted: <k> of <cap>`, where k is the claimed open tickets that still hold a slot
 (not `lead` tickets, not UNCAP, not FALLBACK, not HANDBACK, not ABANDON). A `lead` ticket holds no slot: no worker
 is dispatched for it. With --lead none and nothing to route, only that line prints.
 --now (an ISO time) is for tests; the default is the current time.
 Exit codes: 0 routed; 2 could not run (no `gh`, gh failed, no repository, an unreadable state file or
 --now), one line on stderr; the orchestrator then treats lead mode as off for that pass.
+Then the one verdict line (ADR-0014): `next: done` (0) | `retry-after <time>` (2, a rate limit) | `could-not-run
+[<Class>: <message>]` (2).
 Stdlib only, Python 3.9+.
 """
 
@@ -211,7 +213,7 @@ def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
     return lines
 
 
-def main(argv=None) -> int:
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--lead", required=True, choices=["live", "none"], help="whether a live lead session exists")
     ap.add_argument("--cap", required=True, type=int, help="the slot cap in force (config slots, or the greedy cap)")
@@ -246,6 +248,11 @@ def main(argv=None) -> int:
     for line in route(issues, found, args.lead, args.cap, now, open_pr_heads(prs), abandoned):
         print(line)
     return 0
+
+
+def main(argv=None) -> int:
+    """Run, then end with the one `next:` line (see the module docstring)."""
+    return common.finish(run, argv, {0: ("done",)})
 
 
 if __name__ == "__main__":

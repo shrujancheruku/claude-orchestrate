@@ -42,7 +42,9 @@ Each resolve and reopen appends a `threads` event per thread to the run log (out
 and author).
 Exit codes: 0 done; 1 nothing changed (a thread id the PR doesn't have, a resolve of a resolved thread, a reopen of an
 open one, a --fixed sha not on the branch: one line on stderr); 2 could not run (`gh` failed, or a bad command line;
-run it again). Stdlib only, Python 3.9+.
+run it again).
+Last line, always (ADR-0014): `next: done` (0) | `refused <why>` (1) | `retry-after <time>` (2, a rate limit) |
+`could-not-run [<Class>: <message>]` (2). A `followup` prints the ticket number on the line before it. Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
@@ -97,6 +99,7 @@ def listing(threads, show_all) -> list:
 
 def refuse(msg) -> int:
     print(f"threads: {msg}", file=sys.stderr)
+    REFUSAL.append(msg)
     return 1
 
 
@@ -186,7 +189,16 @@ def followup(pr, threads, args, cwd) -> int:
     return 0
 
 
+REFUSAL: list = []  # the last refuse() message: the `refused <why>` of the verdict line
+
+
 def main(argv=None) -> int:
+    """Run, then end with the one `next:` line (see the module docstring)."""
+    REFUSAL.clear()
+    return common.finish(run, argv, {0: ("done",), 1: lambda: ("refused", *REFUSAL[-1:])})
+
+
+def run(argv=None) -> int:
     # No abbreviations: the guard approves a worker's call by the flags' full names, so `--rep` must not mean `--repo`.
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("words", nargs="*", metavar="[pr] [resolve|reopen] [thread]...",
