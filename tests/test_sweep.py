@@ -91,6 +91,24 @@ class Sweep(unittest.TestCase):
         kinds = [e["ref"] for e in self.env.events() if e["kind"] == "sweep" and e["outcome"] == "prompt-kind"]
         self.assertEqual(kinds, ["orchestrator Bash gh", "worker Bash git", "orchestrator Bash rm"])
 
+    def test_a_digest_mark_or_more_than_forty_prompts_hide_no_kind(self):
+        self.prompt(command="gh pr list", time="2026-11-10T09:00:00+00:00")
+        for i in range(45):  # the newest 40 lines of `prompts` would not reach the first kind
+            self.prompt(command="git status", time=f"2026-11-10T10:{i:02d}:00+00:00")
+        mark = self.env.repo / ".claude" / "orchestrate-prompts.mark"
+        mark.write_text(json.dumps({"ts": "2026-11-10T11:00:00+00:00", "session": None}) + "\n")  # a digest mark after them all
+        self.prompt(tool="Edit", command="/x/a.py", time="2026-11-10T12:00:00+00:00")
+        self.prompt(tool="Edit", command="/x/b.py", time="2026-11-10T12:01:00+00:00")
+        self.serve()
+        self.assertEqual(self.sweep(), ["new-prompt: orchestrator Bash gh", "new-prompt: orchestrator Bash git",
+                                        "new-prompt: orchestrator Edit", "next: findings 3"])
+
+    def test_the_lead_with_no_state_file_session_still_writes_its_watermark(self):
+        (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
+        self.serve()
+        self.sweep()
+        self.assertEqual([e["session"] for e in self.env.events() if e["kind"] == "sweep"], ["lead"])
+
     def test_a_pr_in_its_third_review_round(self):
         for pr, rnd in ((12, 2), (12, 3), (13, 2)):
             runlog.append_event(self.env.repo, runlog.REVIEW, "request-changes", ref=pr, session="s1", round=rnd)

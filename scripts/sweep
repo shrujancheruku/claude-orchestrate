@@ -5,13 +5,14 @@ Runs six checks and prints one line per finding, `<check>: <detail>`, then one `
     red-main: <check> on <branch> concluded <conclusion>   the default branch's newest commit has a failed check run
     stale-claim: #<n> stalled ...                           a claim that is stalled and holds no unsaved work (`claims` has the detail)
     orphan-worktree: <path> (<why>)                         a worktree under .claude/worktrees/ that no claim names and no live lock holds
-    new-prompt: <role> <tool> <command word>                a kind of permission prompt (`scripts/prompts --watermark`) no earlier sweep reported
+    new-prompt: <role> <tool> <command word>                a kind of permission prompt (any in `scripts/prompts --all`) no earlier sweep reported
     failed-rescue: #<n> <why>                               a stalled claim whose worktree still holds work (dirty, unpushed, or on the harness's branch): `rescue <n>` did not save it
     rounds: PR #<n> is in review round <r>                  an open PR whose newest `review` event is round 3 or later
     next: clean | findings <n>
 The thresholds are constants in this file (DUE_MERGES, ROUND_LIMIT), tested, not config lines.
 Running it writes a `sweep` event `ran` (the watermark) and one `prompt-kind` event per new kind (ref = the kind), to the run log,
-so `--due` and the seen set survive a restart and a compaction. A prompt kind is `<role> <tool> <first word of the command>`.
+so `--due` and the seen set survive a restart and a compaction (session: --session, else the state file's, else `lead`). A prompt kind is
+`<role> <tool>`, plus the first word of the command for a Bash prompt.
 --due reads only: `next: due <n>` when DUE_MERGES merges (`merge` events) have landed since the last `ran` event (all of them when
 there is none), else `next: not-due <n>`.
 Exit codes: 0 ran; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository), one line on stderr; a rate limit it would
@@ -92,12 +93,13 @@ def prompt_kind(line):
     parts = line.split()
     if len(parts) < 3:
         return None
-    word = os.path.basename(parts[3]) if len(parts) > 3 else ""
+    # Only a Bash command has a command word; for a file tool the detail is a path, and every new file would be a new kind.
+    word = os.path.basename(parts[3]) if len(parts) > 3 and parts[2] == "Bash" else ""
     return " ".join(p for p in (parts[1], parts[2], word) if p)
 
 
 def new_prompts(root) -> list:
-    r = common.run(sys.executable, str(HERE / "prompts"), "--repo", str(root), "--watermark")
+    r = common.run(sys.executable, str(HERE / "prompts"), "--repo", str(root), "--all")  # every prompt: the seen set dedupes, and a digest mark or the 40-line limit must hide no kind
     if r.code != 0:
         common.die(f"sweep: cannot run: prompts failed: {common.one_line(r.stderr)}")
     seen = {str(e.get("ref")) for e in runlog.read_kinds(root, [runlog.SWEEP]) if e.get("outcome") == "prompt-kind"}
@@ -150,12 +152,11 @@ def main(argv=None) -> int:
         common.die(f"sweep: cannot run: {e}")
     for f in findings:
         print(f)
-    try:
-        for k in kinds:
-            runlog.append_event(root, runlog.SWEEP, "prompt-kind", ref=k)
-        runlog.append_event(root, runlog.SWEEP, "ran")
-    except runlog.NoSession as e:
-        print(f"{e}; the next sweep will report these again", file=sys.stderr)
+    # The lead has no state-file session of its own: events still need an id, or `ran` is never written and `--due` stays due.
+    sid = args.session or runlog.current_session(root) or "lead"
+    for k in kinds:
+        runlog.append_event(root, runlog.SWEEP, "prompt-kind", ref=k, session=sid)
+    runlog.append_event(root, runlog.SWEEP, "ran", session=sid)
     return common.verdict("clean", exit_code=0) if not findings else common.verdict("findings", len(findings), exit_code=0)
 
 

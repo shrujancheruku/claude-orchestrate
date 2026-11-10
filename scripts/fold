@@ -4,19 +4,21 @@
 The lead's and the orchestrator's fold, as one command. It refuses (`next: ask-user <why>`, exit 1, nothing written) when:
     - either ticket is not open, or its body was last edited by an untrusted author (ADR-0015);
     - either ticket is claimed (an assignee, or a `claims` state other than done);
-    - one ticket is gated and the other is not: a ticket is gated when its `Touch map:` line (body or a trusted comment) hits a
-      config risk path (`hooks/**` is one), because the merge gate differs.
+    - one ticket is gated and the other is not: a ticket is gated when its `Touch map:` line (the newest trusted `## Agent Brief`
+      comment's, else the body's) hits a config risk path (`hooks/**` is one), because the merge gate differs;
+    - the fold would close a blocking cycle (one ticket waits on the other through a third).
 Otherwise it writes, one line each:
     folded: #<into> now holds #<from>'s body and trusted comments under `## Also, folded from #<from>`
     commented: #<from> #<into>              a pointer comment on each
     edges: <k> moved                        <from>'s open blockers become <into>'s (native edge and `Blocked by:` line), and every
                                             ticket blocked by <from> is blocked by <into> instead (native edge and `Blocked by:` line)
+    left: #<n> body untrusted, Blocked by: line not rewritten   a dependent whose body an untrusted author last edited keeps its body (ADR-0015); only its native edge moves
     closed: #<from> duplicate of #<into>    closed as `duplicate`, and `ready-for-agent` removed
     next: folded <from> <into>
 The absorber's `## Agent Brief` comment is the caller's judgement and is not written here. It has no guard row yet, so a call prompts.
 Exit codes: 0 folded; 1 refused; 2 could not run (no `gh`, a failed `gh` call, not a repository), one line on stderr; a rate limit it
 would not sleep through also ends `next: retry-after <time>`. A failed `gh` write leaves the steps before it done; the donor is closed
-last, so a re-run finishes the fold. Stdlib only, Python 3.9+.
+last, so a re-run finishes the fold (it appends and comments nothing twice: an absorber that already holds the `## Also, folded` heading is skipped). Stdlib only, Python 3.9+.
 """
 
 import argparse
@@ -36,17 +38,37 @@ import tracker
 from repo import STATE, main_checkout
 
 
-def text_of(issue) -> str:
-    return "\n".join([issue["body"]] + [c["body"] for c in issue["comments"]])
+def touch_map_text(issue) -> str:
+    """The text whose `Touch map:` line counts: the newest trusted `## Agent Brief` comment that has one (the brief overrides
+    the body, the tracker doc says), else the body, else any trusted comment."""
+    briefs = [c["body"] for c in reversed(issue["comments"]) if c["body"].lstrip().startswith("## Agent Brief")]
+    others = [c["body"] for c in issue["comments"]]
+    for text in briefs + [issue["body"]] + others:
+        if session.brief_field(text, "Touch map") is not None:
+            return text
+    return ""
 
 
 def gated(issue, cfg):
     """Whether the ticket's touch map hits a risk path (the merge gate line), or None when the map is unreadable."""
     try:
-        paths = [e.path for e in session.touch_map(text_of(issue))]
+        paths = [e.path for e in session.touch_map(touch_map_text(issue))]
     except touchmap.TouchMapError:
         return None
     return cfg.risk_hit(paths)
+
+
+def reaches(start, target, graph, seen=None) -> bool:
+    """Whether `target` is blocked, directly or through others, by `start` in `graph` ({ticket: [its open blockers]})."""
+    seen = seen if seen is not None else set()
+    for x in graph.get(start, ()):
+        if x == target:
+            return True
+        if x not in seen:
+            seen.add(x)
+            if reaches(x, target, graph, seen):
+                return True
+    return False
 
 
 def refusal(a, b, snap, found, cfg):
@@ -60,6 +82,14 @@ def refusal(a, b, snap, found, cfg):
         c = found.get(n)
         if issue["claimed"] or (c is not None and c.state != "done"):
             return f"#{n} is claimed" + (f" ({c.state})" if c is not None else "")
+    # Folding makes <into> wait for <from>'s blockers and <from>'s dependents wait for <into>: a path of two or more edges
+    # between them in either direction (a direct edge is dropped by the fold) would close into a cycle.
+    open_numbers = set(by_number)
+    graph = {n: [m for m, _ in tracker.open_blockers(i, open_numbers)] for n, i in by_number.items()}
+    for x, y in ((a, b), (b, a)):
+        for mid in graph[x]:
+            if mid not in (a, b) and reaches(mid, y, graph):
+                return f"#{x} waits on #{y} through #{mid}: the fold would make a blocking cycle"
     marks = [gated(by_number[n], cfg) for n in (a, b)]
     if None in marks:
         return f"#{(a, b)[marks.index(None)]} has a touch map the grammar rejects, so its merge gate is unknown"
@@ -99,16 +129,20 @@ def fold(root, snap, a, b, ready_label) -> list:
     open_numbers = set(by_number)
     mine = {n for n, _ in tracker.open_blockers(absorber, open_numbers)}
     carried = [n for n, _ in tracker.open_blockers(donor, open_numbers) if n not in mine and n not in (a, b)]
-    body = absorber["body"].rstrip("\n") + f"\n\n## Also, folded from #{a}\n\n{donor['body'].strip()}\n"
-    for c in donor["comments"]:
-        body += f"\n{c['body'].strip()}\n"
-    if carried:
-        body += "\nBlocked by: " + ", ".join(f"#{n}" for n in carried) + "\n"
-    github.set_body("issues", b, body, cwd=root)
-    out = [f"folded: #{b} now holds #{a}'s body and trusted comments under `## Also, folded from #{a}`"]
-    post_comment(a, f"Folded into #{b}: its scope now lives there. Closing this ticket as a duplicate.", root)
-    post_comment(b, f"Widened with #{a} (see `## Also, folded from #{a}` in the body).", root)
-    out.append(f"commented: #{a} #{b}")
+    heading = f"## Also, folded from #{a}"
+    if heading in absorber["body"]:  # a re-run after a failed write: the body and the pointer comments are already there
+        out = [f"folded: #{b} already holds #{a} (re-run)"]
+    else:
+        body = absorber["body"].rstrip("\n") + f"\n\n{heading}\n\n{donor['body'].strip()}\n"
+        for c in donor["comments"]:
+            body += f"\n{c['body'].strip()}\n"
+        if carried:
+            body += "\nBlocked by: " + ", ".join(f"#{n}" for n in carried) + "\n"
+        github.set_body("issues", b, body, cwd=root)
+        out = [f"folded: #{b} now holds #{a}'s body and trusted comments under `{heading}`"]
+        post_comment(a, f"Folded into #{b}: its scope now lives there. Closing this ticket as a duplicate.", root)
+        post_comment(b, f"Widened with #{a} (see `{heading}` in the body).", root)
+        out.append(f"commented: #{a} #{b}")
     moved = 0
     for n in carried:
         github.add_blocked_by(b, n, cwd=root)
@@ -124,7 +158,10 @@ def fold(root, snap, a, b, ready_label) -> list:
             github.call("api", "--method", "DELETE", f"repos/{{owner}}/{{repo}}/issues/{d['number']}/dependencies/blocked_by/{donor_id}",
                         cwd=root, idempotent=True)
         if d["number"] != b and a in tracker.body_blockers(d):
-            github.set_body("issues", d["number"], rewrite_blocked_lines(d["body"], a, b), cwd=root)
+            if d.get("body_trusted", True):
+                github.set_body("issues", d["number"], rewrite_blocked_lines(d["body"], a, b), cwd=root)
+            else:  # saving would make the developer the body's last editor and so launder untrusted text (ADR-0015)
+                out.append(f"left: #{d['number']} body untrusted, Blocked by: line not rewritten")
     out.append(f"edges: {moved} moved")
     if ready_label in donor["labels"]:
         github.call("api", "--method", "DELETE", f"repos/{{owner}}/{{repo}}/issues/{a}/labels/{ready_label}", cwd=root, idempotent=True)

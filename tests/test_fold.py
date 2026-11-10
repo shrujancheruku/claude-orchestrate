@@ -9,8 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import ScriptEnv, gh_pr_list, gh_repo_rest  # noqa: E402
 
 
-def node(n, body="", claimed=False, labels=("ready-for-agent",), blockers=(), comments=()):
-    return {"number": n, "title": f"t{n}", "body": body, "labels": {"nodes": [{"name": x} for x in labels]},
+def node(n, body="", claimed=False, labels=("ready-for-agent",), blockers=(), comments=(), untrusted=False):
+    """`untrusted`: the body's last editor is its author, a stranger (ADR-0015)."""
+    who = {"author": {"login": "stranger"}, "authorAssociation": "NONE", "editor": {"login": "stranger"}} if untrusted else {}
+    return {**who, "number": n, "title": f"t{n}", "body": body, "labels": {"nodes": [{"name": x} for x in labels]},
             "assignees": {"totalCount": 1 if claimed else 0},
             "blockedBy": {"nodes": [{"number": b, "state": "OPEN"} for b in blockers]},
             "comments": {"nodes": [{"body": c, "authorAssociation": "OWNER", "author": {"login": "me"}} for c in comments]}}
@@ -100,6 +102,51 @@ class Fold(unittest.TestCase):
         self.serve(node(5, "Touch map: hooks/a.py\n"), node(6, "Touch map: hooks/b.py\n"))
         r = self.fold(5, 6)
         self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (0, "next: folded 5 6"), r.stderr)
+
+    def test_an_untrusted_body_is_refused_for_either_ticket(self):
+        for donor_untrusted in (True, False):
+            with self.subTest(donor_untrusted=donor_untrusted):
+                self.serve(node(5, untrusted=donor_untrusted), node(6, untrusted=not donor_untrusted))
+                r = self.fold(5, 6)
+                self.assertEqual(r.returncode, 1)
+                self.assertRegex(r.stdout, r"next: ask-user #\d body was last edited by an untrusted author")
+                self.assertEqual(self.writes(), [])
+
+    def test_a_dependent_with_an_untrusted_body_keeps_its_body_but_moves_its_edge(self):
+        self.serve(node(5, "d"), node(6, "a"), node(7, "Blocked by: #5\n", blockers=(5,), untrusted=True))
+        r = self.fold(5, 6)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertIn("left: #7 body untrusted, Blocked by: line not rewritten", r.stdout)
+        self.assertFalse([c for c in self.writes() if c[2:3] == ["PATCH"] and c[3].endswith("/issues/7")])
+        self.assertTrue([c for c in self.writes() if c[2:3] == ["POST"] and c[3].endswith("/issues/7/dependencies/blocked_by")])
+
+    def test_a_fold_that_would_close_a_blocking_cycle_is_refused(self):
+        # 7 waits on the donor 5, and the absorber 6 waits on 7: 7 would wait on 6, which waits on 7.
+        self.serve(node(5), node(6, blockers=(7,)), node(7, blockers=(5,)))
+        r = self.fold(5, 6)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("would make a blocking cycle", r.stdout)
+        # The reverse: the donor waits on 7, which waits on the absorber.
+        self.serve(node(5, blockers=(7,)), node(6), node(7, blockers=(6,)))
+        r = self.fold(5, 6)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("would make a blocking cycle", r.stdout)
+        self.assertEqual(self.writes(), [])
+
+    def test_an_agent_brief_touch_map_overrides_the_body(self):
+        brief = "## Agent Brief\n\nTouch map: hooks/guard.py\n"
+        self.serve(node(5, "Touch map: scripts/a\n", comments=(brief,)), node(6, "Touch map: scripts/b\n"))
+        r = self.fold(5, 6)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the merge gate differs", r.stdout)
+
+    def test_a_rerun_after_a_partial_fold_appends_and_comments_nothing_twice(self):
+        self.serve(node(5, "Donor.\n"), node(6, "Absorber.\n\n## Also, folded from #5\n\nDonor.\n"))
+        r = self.fold(5, 6)
+        self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (0, "next: folded 5 6"), r.stderr)
+        self.assertFalse([c for c in self.writes() if c[2:3] == ["POST"] and c[3].endswith("/comments")])
+        self.assertFalse([c for c in self.writes() if c[2:3] == ["PATCH"] and c[3].endswith("/issues/6")])
+        self.assertTrue([c for c in self.writes() if c[2:3] == ["PATCH"] and c[3].endswith("/issues/5")])
 
     def test_a_closed_ticket_is_refused(self):
         self.serve(node(6))
