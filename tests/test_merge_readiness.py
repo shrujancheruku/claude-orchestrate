@@ -622,7 +622,7 @@ class ReadinessTest(unittest.TestCase):
 
     # A merged change to the guard does nothing for a run that loaded its plugin before it (#727).
     def snapshot_events(self):
-        return [(e["outcome"], e["ref"], bool(e.get("sha"))) for e in self.env.events() if e["kind"] == "snapshot"]
+        return [(e["outcome"], e["ref"], bool(e.get("sha"))) for e in self.env.events() if e["kind"] == "snapshot" and e["outcome"] == "stale"]
 
     def launched(self, source=None, sha="f" * 40):
         """A fresh launch's event: the snapshot `sha` it loaded, exported from the checkout `source` (default: this repo)."""
