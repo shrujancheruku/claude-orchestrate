@@ -828,7 +828,14 @@ def scratchpad_path_ok(value: str, base: str, session: str) -> bool:
         return False
     target = os.path.realpath(os.path.join(base or ".", value))
     pad = scratchpad_pattern(session)
-    return any(target.startswith(t + "/") and pad.fullmatch(target[len(t):]) for t in TEMP_ROOTS)
+    for t in TEMP_ROOTS:
+        if target.startswith(t + "/") and pad.fullmatch(target[len(t):]):
+            # A `pr-<n>` tree is one the orchestrator runs `gate` and `verify --cwd` in (#624), so a reviewer or scout
+            # that read an untrusted diff never writes into one (or makes one): its own writes go in a subdirectory
+            # of another name (#713). Case-folded: the temp filesystem on macOS is case-insensitive.
+            inside = target[len(t):].split("/scratchpad/", 1)[1:]
+            return not (inside and any(SCRATCH_TREE_ANY_CASE.fullmatch(part) for part in inside[0].split("/")))
+    return False
 
 
 # The flags of the writes a reviewer or scout may make inside its own scratchpad (#687): `mkdir -p`, `tee -a`, and
@@ -1524,10 +1531,12 @@ def edit_decision(tool_name: str, tool_input: object, cwd: str) -> tuple | None:
         # Writes that change the worker's own permissions or git internals are refused: a background worker
         # has nobody to answer the prompt they would get (#567).
         parts = target.relative_to(worktree).parts if target != worktree else ()
-        if parts[:1] == (".git",) or (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
+        # Case-folded (#713): `.Claude` and `.GIT` are the same directories on macOS's case-insensitive filesystem.
+        folded = tuple(part.casefold() for part in parts)
+        if folded[:1] == (".git",) or (len(folded) >= 2 and folded[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
             return "deny", (f"the worker role can't edit {path}: it is git internals or a settings file. "
                             "Change only your ticket's files.")
-        if parts[:1] == (".claude",) and parts not in PLUGIN_OWNED_CLAUDE_FILES:
+        if folded[:1] == (".claude",) and parts not in PLUGIN_OWNED_CLAUDE_FILES:
             # A stray file under `<worktree>/.claude/` (a `pr-body.md`) is left behind untracked and blocks the
             # worktree's removal (#404): refused like a write outside the worktree.
             return "deny", (f"the worker role can't edit {path}: it is outside your worktree ({worktree}). "
@@ -2056,6 +2065,7 @@ def script_form_ok(name: str, words: list, ctx: FormContext) -> bool:
 
 
 SCRATCH_TREE = re.compile(r"pr-\d+[a-z]?(?:-[\w.]+)?")
+SCRATCH_TREE_ANY_CASE = re.compile(SCRATCH_TREE.pattern, re.IGNORECASE)
 
 
 def gate_cwd_ok(value: str | None, cwd: str, session: str = "") -> bool:
@@ -2380,7 +2390,8 @@ def inside_worktree(path: str, here: str, worktree: Path | None) -> bool:
         return False
     parts = resolved.relative_to(worktree).parts
     # The same files edit_decision keeps behind a prompt for the Edit tool: git internals and the settings files.
-    return ".git" not in parts and not (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1]))
+    folded = tuple(part.casefold() for part in parts)  # #713: `.GIT` is `.git` on a case-insensitive filesystem
+    return ".git" not in folded and not (len(folded) >= 2 and folded[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1]))
 
 
 def remote_names(cwd: str) -> set:

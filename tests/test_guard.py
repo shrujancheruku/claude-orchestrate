@@ -2614,7 +2614,7 @@ class ScratchpadWritesTest(unittest.TestCase):
 
     def test_writes_whose_every_target_is_in_the_scratchpad_are_approved(self):
         for role in ("reviewer", "scout"):
-            for command in (f"cp src/a.py {self.PAD}/a.py", f"cp -r src {self.PAD}/pr-1b", f"mkdir -p {self.PAD}/a/b",
+            for command in (f"cp src/a.py {self.PAD}/a.py", f"cp -r src {self.PAD}/reviewer-1b", f"mkdir -p {self.PAD}/a/b",
                             f"git show HEAD:a.py | tee {self.PAD}/a.py", f"echo x > {self.PAD}/n.txt",
                             f"gh pr diff 5 >> {self.PAD}/d.diff", f"mkdir -p {self.PAD}/a && cp src/a.py {self.PAD}/a/b.py && diff {self.PAD}/a/b.py src/a.py"):
                 with self.subTest(role=role, command=command):
@@ -2637,11 +2637,34 @@ class ScratchpadWritesTest(unittest.TestCase):
             self.assertTrue(self.refused(role, command, sid=None))
 
     def test_a_symlink_out_of_the_scratchpad_is_followed(self):
+        # The temp dir stands in for the temp root, so the pad matches the scratchpad pattern and the same link
+        # is approved or refused only by where it points.
         pad = self.cwd / "claude-0" / "-proj" / self.SID / "scratchpad"
-        pad.mkdir(parents=True)
-        (pad / "link").symlink_to(self.cwd)
-        # a real temp root is needed for the pattern, so only the refusal of the link's target is asserted here
-        self.assertTrue(self.refused("reviewer", f"cp a {pad}/link/x"))
+        (pad / "mine").mkdir(parents=True)
+        outside = self.cwd / "outside"
+        outside.mkdir()
+        (pad / "out").symlink_to(outside)
+        (pad / "in").symlink_to(pad / "mine")
+        with unittest.mock.patch.object(GUARD_MODULE, "TEMP_ROOTS", (str(self.cwd),)):
+            self.assertTrue(GUARD_MODULE.scratchpad_path_ok(f"{pad}/mine/x", str(self.cwd), self.SID))
+            self.assertTrue(GUARD_MODULE.scratchpad_path_ok(f"{pad}/in/x", str(self.cwd), self.SID))
+            self.assertFalse(GUARD_MODULE.scratchpad_path_ok(f"{pad}/out/x", str(self.cwd), self.SID))
+
+    def test_a_pr_tree_is_never_written(self):
+        for role in ("reviewer", "scout"):
+            for command in (f"cp a.py {self.PAD}/pr-5/a.py", f"cp a.py {self.PAD}/pr-5b/a.py", f"tee {self.PAD}/pr-5/a.py",
+                            f"echo x > {self.PAD}/pr-5/a.py", f"echo x >> {self.PAD}/pr-5-x/a.py", f"mkdir -p {self.PAD}/pr-5/sub",
+                            f"mkdir -p {self.PAD}/PR-5/sub", f"cp a.py {self.PAD}/x/../pr-5/a.py", f"mkdir -p {self.PAD}/a/pr-5"):
+                with self.subTest(role=role, command=command):
+                    self.assertTrue(self.refused(role, command))
+
+    def test_a_link_into_a_pr_tree_is_followed(self):
+        pad = self.cwd / "claude-0" / "-proj" / self.SID / "scratchpad"
+        (pad / "pr-5").mkdir(parents=True)
+        (pad / "mine").symlink_to(pad / "pr-5")
+        with unittest.mock.patch.object(GUARD_MODULE, "TEMP_ROOTS", (str(self.cwd),)):
+            self.assertFalse(GUARD_MODULE.scratchpad_path_ok(f"{pad}/mine/x", str(self.cwd), self.SID))
+            self.assertTrue(GUARD_MODULE.scratchpad_path_ok(f"{pad}/mine2/x", str(self.cwd), self.SID))
 
     def test_a_worker_is_not_given_these_writes(self):
         self.assertFalse(approved("orchestrate:worker", f"mkdir -p {self.PAD}/a", self.cwd, session_id=self.SID))
@@ -2689,6 +2712,27 @@ class CorpusDenyReasonsTest(unittest.TestCase):
         reason = self.reason("orchestrate:scout", "gh api graphql -f query='mutation { addStar(input: {}) { id } }'")
         self.assertIn("scout", reason)
         self.assertIn("mutation", reason.lower())
+
+    def test_a_write_into_a_pr_tree_names_the_write(self):
+        pad = f"/private/tmp/claude-0/-proj/{self.SID}/scratchpad"
+        for role in ("reviewer", "scout"):
+            for command, what in ((f"cp a.py {pad}/pr-5/a.py", "writes files or runs a build"),
+                                  (f"mkdir -p {pad}/pr-5/s", "writes files or runs a build"),
+                                  (f"tee {pad}/pr-5/a.py", "writes files or runs a build"),
+                                  (f"echo x > {pad}/pr-5/a.py", "redirects output into a file")):
+                with self.subTest(role=role, command=command):
+                    out = raw(f"orchestrate:{role}", command, self.work, session_id=self.SID, full=True)
+                    self.assertEqual(out["permissionDecision"], "deny")
+                    self.assertIn(what, out["permissionDecisionReason"])
+
+    def test_the_protected_parts_of_an_edit_path_compare_case_folded(self):
+        (self.work / ".claude").mkdir(exist_ok=True)
+        for path in (".Claude/x", ".CLAUDE/x", ".Git/config", ".GIT/config", "sub/../.Git/config", ".Claude/settings.json"):
+            for tool in ("Edit", "Write"):
+                with self.subTest(path=path, tool=tool):
+                    out = raw("orchestrate:worker", None, self.work, tool_name=tool,
+                              tool_input={"file_path": str(self.work / path)}, full=True)
+                    self.assertEqual(out["permissionDecision"], "deny")
 
     def test_a_scratchpad_write_outside_the_scratchpad_names_the_write_and_the_next_step(self):
         for role in ("reviewer", "scout"):
