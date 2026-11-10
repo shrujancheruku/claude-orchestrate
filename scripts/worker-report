@@ -243,12 +243,13 @@ def bound_risk_notes(notes: list) -> list:
     kept = notes[:MAX_RISK_NOTES]
     out, cut = [], 0
     for n in kept:
+        n = n.replace("@", "@​").replace("> *", ">​*")  # first, so the cap counts what is posted
         if len(n) > MAX_NOTE_CHARS:
             n, cut = n[:MAX_NOTE_CHARS - 1] + "…", cut + 1
-        out.append(n.replace("@", "@​").replace("> *", ">​*"))
+        out.append(n)
     dropped = len(notes) - len(kept)
     if dropped or cut:
-        out.append(f"({dropped} more notes dropped, {cut} cut to {MAX_NOTE_CHARS} characters)")
+        out.append(f"(notes dropped: {dropped}; notes cut to {MAX_NOTE_CHARS} characters: {cut})")
     return out
 
 

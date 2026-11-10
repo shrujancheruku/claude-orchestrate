@@ -96,13 +96,17 @@ class RiskNotes(unittest.TestCase):
     def test_the_note_count_is_capped_and_the_dropped_count_said(self):
         lines = self.posted_body([f"f.py:{i} — note {i}" for i in range(1, 16)])
         self.assertEqual(lines[:12], [f"f.py:{i} — note {i}" for i in range(1, 13)])
-        self.assertEqual(lines[12:], ["(3 more notes dropped, 0 cut to 300 characters)"])
+        self.assertEqual(lines[12:], ["(notes dropped: 3; notes cut to 300 characters: 0)"])
 
     def test_a_long_note_is_cut_and_counted(self):
         lines = self.posted_body(["f.py:1 — " + "x" * 400, "f.py:2 — short"])
         self.assertEqual(len(lines[0]), 300)
         self.assertTrue(lines[0].endswith("…"))
-        self.assertEqual(lines[1:], ["f.py:2 — short", "(0 more notes dropped, 1 cut to 300 characters)"])
+        self.assertEqual(lines[1:], ["f.py:2 — short", "(notes dropped: 0; notes cut to 300 characters: 1)"])
+
+    def test_the_cap_counts_the_zero_width_spaces_the_neutralising_adds(self):
+        (line, _) = self.posted_body(["f.py:1 — " + "@" * 400])
+        self.assertEqual(len(line), 300)
 
     def test_notes_within_the_caps_carry_no_count_line(self):
         self.assertEqual(len(self.posted_body([f"f.py:{i} — n" for i in range(12)])), 12)
