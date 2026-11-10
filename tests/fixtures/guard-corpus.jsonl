@@ -1001,6 +1001,13 @@
 {"role": "orchestrate:scout", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/mine/a.py", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git status -sb | head -3 && git log -1 --format=%H origin/main 2>/dev/null; sed -n '/Review/,/^## /p' .claude/orchestration.md | head -60", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git fetch", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git fetch", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git worktree list", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git worktree list --porcelain", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git fetch", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/sweep --repo . --due", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/sweep\" --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "/p/orchestrate/0.7.0/scripts/sweep --repo . --due", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git fetch origin", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git fetch origin +main:main", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git merge --no-edit origin/master", "expected": "unapproved", "source": "hand"}

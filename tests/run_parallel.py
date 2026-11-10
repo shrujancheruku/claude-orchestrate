@@ -12,16 +12,19 @@ to the last TAIL lines like scripts/verify. A module that finds zero tests fails
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 TAIL = 40
+RUN_MARKER = "run-parallel-" + uuid.uuid4().hex  # this run's session for the guard modules (#710)
 HOOK_MODULES = ("test_guard", "test_guard_corpus")  # the modules that run hooks/guard.py in-process
 RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
 
@@ -40,8 +43,12 @@ def run_module(tests_dir, module):
         # their run log to a temp dir, never to the events log of the checkout the tests run in, under the live run's
         # session. The others build a temp repo and read its log back, so the override would hide it from them.
         env.pop("ORCHESTRATE_STATE_DIR", None)
+        env.pop("ORCHESTRATE_SESSION", None)
         if module in HOOK_MODULES:
             env["ORCHESTRATE_STATE_DIR"] = state
+            # The row's `session` is this variable first: a row that reaches the real log despite the override
+            # carries this run's marker, so another run's rows (an older branch's test_guard) never count as ours.
+            env["ORCHESTRATE_SESSION"] = RUN_MARKER
         env.pop("CLAUDE_PLUGIN_ROOT", None)  # tests run the tree's own scripts, not an installed plugin's
         p = subprocess.run([sys.executable, "-m", "unittest", module], cwd=str(tests_dir), env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
@@ -88,10 +95,9 @@ def other_runners():
     return count_other_runners(out, os.getpid())
 
 
-# What the test fixtures call themselves in a `gh_call` row (#710): `repos/o/r/...` paths and the made-up role
-# `nonexistent`. A live run writes the real events log meanwhile (every agent's `gh` call is a row), so a growth check
-# on the file's size would fail whenever one is running; only a row with these marks is the tests' own.
-FIXTURE_ROW = re.compile(r'repos/o/r/|"role":"nonexistent"')
+# A live run, and other branches' test runs without this fix, write the real events log meanwhile, so a growth check on
+# the file's size, or on what the fixtures call themselves, would fail whenever one overlaps. Only a row whose session
+# is this run's RUN_MARKER is this run's own.
 
 
 def real_events_log(tests_dir):
@@ -118,14 +124,22 @@ def log_size(path):
 
 
 def leaked_rows(path, start):
-    """The fixture rows appended to the events log at `path` after byte offset `start`."""
+    """The rows of this run (session RUN_MARKER) appended to the events log at `path` after byte offset `start`."""
     try:
         with open(path, "rb") as f:
             f.seek(start)
             text = f.read().decode("utf-8", "replace")
     except OSError:
         return []
-    return [line for line in text.splitlines() if FIXTURE_ROW.search(line)]
+    return [line for line in text.splitlines() if json.dumps(RUN_MARKER) in line and _session(line) == RUN_MARKER]
+
+
+def _session(line):
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    return row.get("session") if isinstance(row, dict) else None
 
 
 def main(argv=None):

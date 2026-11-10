@@ -784,7 +784,9 @@ def rule_git_writes(p: Parsed, cwd: str) -> str | None:
         if call.is_sub(*SCOUT_GIT_WRITES) or subcommand_writes(call) or (
                 call.is_sub("worktree") and call.args[:1] and call.args[0].text in WORKTREE_WRITES):
             return "changes git state"
-        if call.is_sub("fetch"):  # the scout, like the reviewer, may fetch only into FETCH_HEAD
+        # The scout, like the reviewer, may fetch no refspec that writes a local ref. A bare `fetch` or `fetch origin`
+        # (#720) updates the remote-tracking refs only (and prunes per `fetch.prune`), which no rule here refuses.
+        if call.is_sub("fetch"):
             problem = reviewer_git_problem(call, cwd)
             if problem:
                 return problem
