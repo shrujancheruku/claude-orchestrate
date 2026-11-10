@@ -27,6 +27,7 @@ PASS_LOG = "passes.jsonl"
 # (tests/test_runlog.py checks they agree); gate, watch-ci and merge write the others.
 GATE, CI, MERGE, REPLAY, WORKER_REPORT, FRONTIER = "gate", "ci", "merge", "replay", "worker-report", "frontier"
 THREADS = "threads"
+RESUME = "resume"  # scripts/launch --resume: one per resumed run; the profile measures the Session gap up to its ts
 REVIEW = "review"  # scripts/worker-report <pr> --reviewer: one per reviewer report (ref = PR; round, head, suite, blocking, non_blocking, posted)
 GH_CALL = "gh_call"  # scripts/github.py: one per `gh` attempt (ok|failed|ratelimited), or "wait" for a sleep
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
@@ -41,6 +42,7 @@ OUTCOMES = {
     THREADS: ("resolved", "reopened"),  # scripts/threads: the thread id and its author ride as extra fields
     FRONTIER: ("ran",),  # scripts/frontier: the takeable count rides as an extra field
     GH_CALL: ("ok", "failed", "ratelimited", "wait"),
+    RESUME: ("resumed",),
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"

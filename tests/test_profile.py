@@ -341,6 +341,64 @@ class ProfileTest(unittest.TestCase):
         self.assertIn("partial", p["warnings"][0])
         self.assertIn("WARNING", prof.summary(p, Path("x.json")))
 
+    def late_entry(self, minutes):
+        """The orchestrator's transcript writes one more record `minutes` after the start."""
+        self.fx.main.write_text(self.fx.main.read_text() + json.dumps(assistant(minutes, f"late{minutes}", "claude-opus-5-5", [])) + "\n")
+
+    def resume(self, minutes):
+        return {"ts": at(minutes), "session": SESSION, "kind": "resume", "ref": None, "outcome": "resumed"}
+
+    def test_a_resume_event_reports_the_session_gap_and_leaves_it_out_of_the_span(self):
+        self.late_entry(80)
+        self.fx.events([self.resume(79)])
+        m = self.fx.run()["metrics"]
+        self.assertEqual(m["session_gap"], {"total_s": 38 * 60, "intervals": [[at(41), at(79)]]})
+        self.assertEqual(m["span_s"], (79 - 1) * 60 - 38 * 60 + 60)  # at(1) to at(80), minus the gap
+        self.assertEqual(m["unexplained_silences"], [])
+
+    def test_a_silence_over_30_minutes_with_no_event_is_noted_and_not_excluded(self):
+        self.late_entry(80)
+        p = self.fx.run()
+        m = p["metrics"]
+        self.assertEqual(m["unexplained_silences"], [[at(41), at(80)]])
+        self.assertEqual(m["session_gap"], {"total_s": 0, "intervals": []})
+        self.assertEqual(m["span_s"], 79 * 60)
+        self.assertIn("no resume event", prof.summary(p, Path("x.json")))
+
+    def test_a_silence_of_30_minutes_or_less_is_not_noted(self):
+        self.late_entry(71)
+        self.assertEqual(self.fx.run()["metrics"]["unexplained_silences"], [])
+
+    def test_outside_gaps_is_the_window_minus_the_gaps(self):
+        t = lambda m: T0 + timedelta(minutes=m)
+        got = prof.outside_gaps(t(0), t(100), [[t(10), t(20)], [t(15), t(30)], [t(90), t(120)]])
+        self.assertEqual(got, [[t(0), t(10)], [t(30), t(90)]])
+
+    def test_viewer_shows_the_gap_in_the_subtitle_the_bands_and_the_silence_banner(self):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        self.late_entry(80)
+        self.fx.events([self.resume(60)])
+        p = self.fx.run()
+        self.late_entry(130)
+        silent = self.fx.run()
+        path = Path(self.tmp.name) / "p.json"
+        run = lambda prof_, card: subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(path), card],
+                                                 capture_output=True, text=True)
+        path.write_text(json.dumps(p))
+        sub = run(p, "subtitleText")
+        self.assertEqual(sub.returncode, 0, sub.stderr)
+        self.assertIn("session gap 19m, outside the span", sub.stdout)
+        for card in ("timeline", "usage"):
+            out = run(p, card)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("session gap", out.stdout)
+        self.assertNotIn("No transcript entry", run(p, "silenceBanners").stdout)
+        path.write_text(json.dumps(silent))
+        banner = run(silent, "silenceBanners")
+        self.assertEqual(banner.returncode, 0, banner.stderr)
+        self.assertIn("no resume event", banner.stdout)
+
     def test_schema_3_keeps_slot_efficiency_fields(self):
         p = self.fx.run()
         self.assertEqual(p["schema"], 3)

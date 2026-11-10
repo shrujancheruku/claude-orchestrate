@@ -926,6 +926,41 @@ def recommend(slots: int, occupancy: float, wins: list, limits: list) -> str | N
 WAKE_GRACE = timedelta(minutes=5)
 
 
+SILENCE = timedelta(minutes=30)  # a transcript silence this long, with no `resume` event, is noted (GLOSSARY: Session gap)
+
+
+def session_gaps(times: list, events: list | None) -> list:
+    """Each Session gap, as [start, end]: from the session's last transcript entry before a `resume` event up to the
+    event. `times` is the sorted transcript timestamps. A resume with no earlier entry has no gap to measure."""
+    gaps = []
+    for e in events or []:
+        at = parse_ts(e.get("ts")) if e.get("kind") == runlog.RESUME else None
+        before = [t for t in times if t < at] if at else []
+        if before:
+            gaps.append([before[-1], at])
+    return merge_intervals(gaps)
+
+
+def unexplained_silences(times: list, gaps: list) -> list:
+    """Silences over SILENCE between consecutive transcript entries that no `resume` event explains: noted, never
+    excluded (a hand `claude --resume` skips `launch`, so no event marks it)."""
+    return [[a, b] for a, b in zip(times, times[1:])
+            if b - a > SILENCE and not any(g[0] < b and g[1] > a for g in gaps)]
+
+
+def outside_gaps(start: datetime, end: datetime, gaps: list) -> list:
+    """The profile's [start, end] window minus its Session gaps, as intervals: the span per-hour figures divide by and
+    the window the lead's cost is clipped to (later tickets reuse this)."""
+    out, at = [], start
+    for s, e in merge_intervals([list(g) for g in clip(gaps, start, end)]):
+        if s > at:
+            out.append([at, s])
+        at = max(at, e)
+    if end > at:
+        out.append([at, end])
+    return out
+
+
 def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: float, now: datetime) -> dict:
     main = Transcript(transcript)
     sid = transcript.stem
@@ -949,7 +984,10 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     # (an older config, or lanes) means the session's own concurrency is the truth for that stretch.
     segments, slots_raised = slot_segments(passes, tickets, start, end, slots, config_slots(repo))
     slots = segments[-1][2]
-    span = max((end - start).total_seconds(), 1.0)
+    gaps = session_gaps(main.times, events)
+    silences = unexplained_silences(main.times, gaps)
+    # The span per-hour figures use leaves the Session gaps out: a resumed run's downtime is not slow work.
+    span = max(seconds(outside_gaps(start, end, gaps)), 1.0)
     capacity = sum(n * (b - a).total_seconds() for a, b, n in segments) or span
     occupied = sum(seconds(clip([[tk["start"], tk["end"]]], start, end)) for tk in tickets)
     building = sum(seconds(tk["building"]) for tk in tickets)
@@ -1045,6 +1083,10 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         "limits": limits,
         "metrics": {
             "span_s": span,
+            # Downtime of a resumed run (`launch --resume` logs a `resume` event), outside span_s.
+            "session_gap": {"total_s": seconds(clip(gaps, start, end)), "intervals": interval(clip(gaps, start, end))},
+            # Transcript silences over 30 minutes that no event explains (a hand resume): noted, still inside span_s.
+            "unexplained_silences": interval(silences),
             "occupancy": occupancy,
             "building_share": building / capacity,
             "review_share": max(occupied - building, 0.0) / capacity,
@@ -1118,6 +1160,11 @@ def summary(p: dict, saved: Path) -> str:
         lines.append(f"WARNING {w}")
     if p["recommendation"]:
         lines.append(f"advice  {p['recommendation']}")
+    gap = m.get("session_gap") or {}
+    if gap.get("intervals"):
+        lines.append(f"note    session gap {fmt_dur(gap['total_s'])} over {len(gap['intervals'])} resume(s), outside the span")
+    for s, e in m.get("unexplained_silences") or []:
+        lines.append(f"WARNING no transcript entry from {s[:16]}Z to {e[:16]}Z and no resume event (a hand `claude --resume`?): inside the span, not excluded")
     if p.get("slots_raised"):
         lines.append("note    more tickets ran at once than the slot count in force; occupancy is against the higher count")
     if p["metrics"].get("merges_unverified"):
