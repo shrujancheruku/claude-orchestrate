@@ -158,6 +158,7 @@ def overlap(root, changed, ticket) -> int:
     except github.GhError as e:
         if e.kind == github.RATELIMITED:
             # The rescue itself is done; only the lookup was limited. Not a failure: the orchestrator checks holds later.
+            github.rate_limited_until = None  # swallowed: a later exit 2 is a failure, not a rate limit
             say("overlap: unchecked (rate limited; re-run holds before dispatching into these files)")
             return 0
         say(f"overlap: could not check ({common.one_line(e.message) or 'no reason given'})")

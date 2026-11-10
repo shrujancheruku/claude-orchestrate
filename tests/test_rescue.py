@@ -426,6 +426,19 @@ class Rescue(unittest.TestCase):
         bad = self.env.run("rescue", "not-a-ticket", check=False)
         self.assertEqual((bad.returncode, bad.verdict), (2, "next: could-not-run"))
 
+    def test_a_swallowed_rate_limit_leaves_no_retry_time_behind(self):
+        import contextlib
+        import io
+
+        mod = self.load_script()
+
+        def limited(*a, **k):
+            raise github.GhError(github.RATELIMITED, "rate limit until 2026-01-01T00:05:00Z")
+
+        with unittest.mock.patch.object(mod.tracker.Snapshot, "open", limited), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mod.overlap(self.env.repo, ["a.txt"], 42), 0)
+        self.assertIsNone(github.rate_limited_until)
+
     def test_a_live_foreign_lock_ends_elsewhere(self):
         self.worktree()
         self.lock("keep me")
