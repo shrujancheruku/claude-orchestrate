@@ -1152,7 +1152,11 @@ def posting_enabled(cwd: str) -> bool:
     return False
 
 
+_DENIED: list = []  # non-empty once this hook run has denied, so main() skips the gh_call row (#445)
+
+
 def deny(reason: str) -> None:
+    _DENIED.append(reason)
     json.dump(
         {
             "hookSpecificOutput": {
@@ -3132,6 +3136,36 @@ def allow(reason: str) -> None:
                                       "permissionDecisionReason": f"orchestrate guard: {reason}"}}, sys.stdout)
 
 
+def log_gh_calls(role: str, command: object, cwd: str) -> None:
+    """Append one `gh_call` row per `gh` command in this line, for the profile (#445). The scripts log their own
+    calls; this covers the direct `gh` calls of workers, reviewers, scouts and the orchestrator. Best effort:
+    the decision never depends on it, and any failure is swallowed."""
+    try:
+        if not isinstance(command, str) or "gh" not in command:
+            return
+        found = []
+        for cmd in Parsed(parse(command)).cmds:
+            k = command_index(cmd.words)
+            if k < len(cmd.words) and not cmd.words[k].dynamic and basename(cmd.words[k]) == "gh":
+                call = parse_gh(cmd.words, k)
+                if call.sub is None:
+                    continue
+                if call.sub.text == "api":
+                    found.append(["api"] + [w.text for w in call.args])
+                else:
+                    found.append([call.sub.text] + ([call.verb.text] if call.verb else []))
+        if not found:
+            return
+        scripts = str(PLUGIN_SCRIPTS)
+        if scripts not in sys.path:
+            sys.path.append(scripts)
+        import github  # the writer the scripts use, so the row has the same shape
+        for args in found:
+            github._log({"script": f"agent:{role}", "role": role}, cwd or None, args)
+    except Exception:  # noqa: BLE001 - a log must never change the decision
+        pass
+
+
 def main() -> None:
     try:
         data = json.load(sys.stdin)
@@ -3139,6 +3173,22 @@ def main() -> None:
         return
     if not isinstance(data, dict):
         return  # valid JSON that isn't an object names no agent, like bad JSON
+    _DENIED.clear()
+    try:
+        _hook(data)
+    finally:
+        # Logged after the decision, so a refused command is not counted as a call that ran. Only the
+        # orchestrate roles and the main session are logged; another plugin's agent is none of our business.
+        agent_type = data.get("agent_type")
+        if data.get("tool_name") in ("Bash", "Monitor") and not _DENIED:
+            tool_input = data.get("tool_input")
+            cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else ""
+            label = role_of(agent_type if isinstance(agent_type, str) else "") or ("" if agent_type else "orchestrator")
+            if label:
+                log_gh_calls(label, tool_input.get("command") if isinstance(tool_input, dict) else None, cwd)
+
+
+def _hook(data: dict) -> None:
     agent_type = data.get("agent_type")
     tool_input = data.get("tool_input")
     role = role_of(agent_type if isinstance(agent_type, str) else "")

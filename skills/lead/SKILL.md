@@ -64,6 +64,7 @@ Fold related backlog tickets proactively, without being asked, so fewer PRs go t
 - On every pass digest, scan the takeable backlog for tickets that share files and fold them the same way.
 - Never fold into a ticket that is claimed or in review.
 - Never fold an ungated ticket into one gated on the permission layer (`hooks/**`), or the reverse: the merge gate differs.
+- On each pass apply ADR-0017's triage test: a ticket that adds prompt prose has a `Lands in:` section naming the owning module and the judgement the prose carries, or it is not `ready-for-agent`.
 - After folding, add an `## Agent Brief` comment to the absorber saying what it now covers and what it waits on, and tell the orchestrator to reread the absorbers before dispatch.
 
 ### Breakage sweep
