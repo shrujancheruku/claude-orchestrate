@@ -43,7 +43,7 @@ class VerdictHelperTest(unittest.TestCase):
         ("send-back", ("7",), 1), ("ask-user", ("an open blocker",), 1), ("retry", (), 3), ("review", ("abc",), 0),
         ("rerun-after-ci", (), 3), ("wait-older", ("7", "5"), 3), ("wait-ticket", ("7", "9"), 3),
         ("settled", (), 0),("retry-after", ("2026-01-01T00:00:00Z",), 2),
-        ("could-not-run", (), 2),
+        ("could-not-run", (), 2), ("rerun", ("7", "abc"), 0), ("already-running", ("7",), 1),
     )
 
     def run_verdict(self, word, args, code):

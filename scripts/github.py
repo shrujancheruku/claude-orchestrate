@@ -69,6 +69,46 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
 }"""
 
 
+# One issue, open or closed (`scripts/issue`, #545): the fields tracker.from_nodes reads, plus the state and the comment
+# count (the 100 newest comments come back; the count says how many older ones are not shown).
+ISSUE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      number
+      title
+      url
+      state
+      body
+      labels(first: 30) { nodes { name } }
+      editor { login }
+      author { login }
+      authorAssociation
+      lastEditedAt
+      comments(last: 100) { totalCount nodes { body createdAt lastEditedAt authorAssociation author { login } } }
+    }
+  }
+}"""
+
+
+def issue_node(number, cwd=None) -> dict:
+    """The raw GraphQL node of one issue (`ISSUE_QUERY`), open or closed; a GhError when the repository has no such issue."""
+    info = repo_info(cwd=cwd)
+    try:
+        owner, name = info["owner"]["login"], info["name"]
+        n = int(str(number).lstrip("#"))
+    except (KeyError, TypeError, ValueError):
+        raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
+    data = call_json("api", "graphql", "-f", f"query={ISSUE_QUERY}", "-f", f"owner={owner}", "-f", f"name={name}",
+                     "-F", f"number={n}", cwd=cwd, idempotent=True)
+    try:
+        node = data["data"]["repository"]["issue"]
+    except (KeyError, TypeError):
+        raise GhError(MALFORMED, "gh returned an unexpected reply (issue)") from None
+    if node is None:
+        raise GhError(FAILED, f"issue #{n} does not exist")
+    return node
+
+
 # The Projects board in one read (#447): the owner (a user or an organization), the project's id, its `Stage` field
 # with every option, and the items a page at a time (first page carries the field; `after` pages the items). The
 # field is named in the query, so it must match board.FIELD (a test holds them together).
@@ -737,6 +777,45 @@ def _pages(path: str, cwd=None, max_pages: int = 10) -> list:
         if len(got) < 100:
             break
     return rows
+
+
+def conversation_comments(pr, cwd=None) -> list:
+    """The comments on a PR's conversation (REST `issues/{n}/comments`, the `gh pr comment` ones), as the host's rows
+    (`body`, `user.login`, `author_association`), up to 1,000. A reader keeps a trusted author's only (ADR-0015)."""
+    return [c for c in _pages(f"repos/{{owner}}/{{repo}}/issues/{_pr_number(pr)}/comments?per_page=100", cwd)
+            if isinstance(c, dict)]
+
+
+def recent_open_issues(cwd=None, pages: int = 3) -> list:
+    """The newest open issues (REST rows with `number`, `title`, `body`, `author_association`; pull requests left out),
+    up to `pages` x 100: where a follow-up ticket filed for a PR is looked for before another is created."""
+    rows = _pages("repos/{owner}/{repo}/issues?state=open&sort=created&direction=desc&per_page=100", cwd, max_pages=pages)
+    return [r for r in rows if isinstance(r, dict) and "pull_request" not in r]
+
+
+def create_issue(title: str, body: str, labels, cwd=None) -> int:
+    """File an issue (REST `POST issues`) and return its number. Not retried on a 5xx: a repeat could file it twice."""
+    args = ["api", "--method", "POST", "repos/{owner}/{repo}/issues", "-f", f"title={title}", "-f", f"body={body}"]
+    for label in labels:
+        args += ["-f", f"labels[]={label}"]
+    number = call_json(*args, cwd=cwd).get("number")
+    if not isinstance(number, int):
+        raise GhError(MALFORMED, "gh returned no issue number for the new issue")
+    return number
+
+
+def set_body(kind: str, number, body: str, cwd=None) -> None:
+    """Replace the body of an issue (`kind` "issues") or a pull request (`kind` "pulls"), one REST PATCH."""
+    call("api", "--method", "PATCH", f"repos/{{owner}}/{{repo}}/{kind}/{_pr_number(number)}", "-f", f"body={body}",
+         cwd=cwd, idempotent=True)
+
+
+def set_pr_state(pr, state: str, cwd=None) -> None:
+    """Close (`closed`) or reopen (`open`) a pull request: one REST PATCH of `pulls/{n}`."""
+    if state not in ("open", "closed"):
+        raise ValueError(f"set_pr_state: {state!r} is not open or closed")
+    call("api", "--method", "PATCH", f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}", "-f", f"state={state}", cwd=cwd,
+         idempotent=True)
 
 
 def pr_diff(pr, cwd=None) -> str:
