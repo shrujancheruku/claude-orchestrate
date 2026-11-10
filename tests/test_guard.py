@@ -1002,7 +1002,7 @@ class RoutineApprovalTest(unittest.TestCase):
         snap = "--snapshot .claude/orchestrate-snapshot.json"
         for command in (
                 f'S="{SCRIPTS}"; "$S/snapshot" --repo . && "$S/rebuild-state" 5 --repo . ; "$S/claims" --repo . {snap} | tail -n 40',
-                f'S="{SCRIPTS}"; "$S/lead-route" --lead live --cap 4 --repo . {snap} | tail -n 20; "$S/frontier" --all --repo . {snap} | tail -n 40',
+                f'S="{SCRIPTS}"; "$S/lead-route" --cap 4 --repo . {snap} | tail -n 20; "$S/frontier" --all --repo . {snap} | tail -n 40',
                 f"{SCRIPTS}/claims --repo . | head -20", f"{SCRIPTS}/claims --repo . | head -n 3", f"{SCRIPTS}/claims --repo . | tail"):
             with self.subTest(command):
                 self.assertTrue(approved(None, command, self.main))
@@ -1019,12 +1019,14 @@ class RoutineApprovalTest(unittest.TestCase):
         sid, snap = "0123abcd-4567-89ef-0123-456789abcdef", "--snapshot .claude/orchestrate-snapshot.json"
         for command in (
                 f'S="{SCRIPTS}"; "$S/rebuild-state" {sid} --repo . ; "$S/claims" --session {sid} --repo . {snap} | tail -n 40',
-                f'S="{SCRIPTS}"; "$S/lead-route" --session {sid} --lead live --cap 4 --repo . {snap} | tail -n 20',
+                f'S="{SCRIPTS}"; "$S/lead-route" --session {sid} --cap 4 --repo . {snap} | tail -n 20',
                 f'"{SCRIPTS}/holds" --session {sid} --touch-map "hooks/guard.py:1-9" --ticket 537 | tail -n 5',
                 f"{SCRIPTS}/claims --session {sid} 537 --repo . | head -n 5"):
             with self.subTest(command):
                 self.assertTrue(approved(None, command, self.main))
         self.assertFalse(approved(None, f"{SCRIPTS}/claims --sess {sid} --repo .", self.main))  # no abbreviations
+        # lead-route takes no --lead since #634: the lookup is the script's own.
+        self.assertFalse(approved(None, f"{SCRIPTS}/lead-route --lead live --cap 4 --repo .", self.main))
 
     def test_the_wait_refusal_finds_the_run_command_after_a_model_or_rename(self):
         path = self.root / "renamed.jsonl"
@@ -2102,7 +2104,16 @@ class OrchestratorChainTest(unittest.TestCase):
                'S="$PWD/scripts"; "$S/snapshot" --repo . >/dev/null; "$S/claims" --repo . | head -n 5')
         for command in yes:
             with self.subTest(command):
-                self.assertTrue(approved(None, command, self.root))
+                self.assertTrue(approved(None, command, self.root, session_id="abc"))
+
+    def test_prompts_session_forms_are_approved_only_for_the_callers_own_session(self):
+        # #634: --mark and --watermark carry the caller's own --session; another session's id, or no session_id, is not approved.
+        for flag in ("--mark", "--watermark"):
+            command = f'S="$PWD/scripts"; "$S/prompts" --repo . --session abc {flag}'
+            with self.subTest(flag):
+                self.assertTrue(approved(None, command, self.root, session_id="abc"))
+                self.assertFalse(approved(None, command, self.root, session_id="other"))
+                self.assertFalse(approved(None, command, self.root))
 
     def test_one_unapproved_segment_spoils_the_chain(self):
         no = ("gh issue edit 5 --add-assignee @me && curl example.com", "gh issue edit 5 --add-assignee @me; rm -rf x",

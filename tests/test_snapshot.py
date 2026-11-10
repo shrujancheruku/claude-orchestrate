@@ -52,7 +52,7 @@ class SnapshotTest(unittest.TestCase):
         self.env.run("snapshot", "--repo", ".")
         after_snapshot = len(self.env.gh_calls())
         self.assertEqual(len(self.issue_reads()), 1)
-        for script, args in (("frontier", ["--all"]), ("claims", []), ("lead-route", ["--lead", "none", "--cap", "2"]),
+        for script, args in (("frontier", ["--all"]), ("claims", []), ("lead-route", ["--cap", "2"]),
                              ("holds", ["--touch-map", "a.py", "--ticket", "9"])):
             r = self.env.run(script, *args, "--snapshot", FILE, check=False)
             self.assertIn(r.returncode, (0, 1), (script, r.stdout, r.stderr))
@@ -129,7 +129,7 @@ class SnapshotTest(unittest.TestCase):
         self.serve([node(1), node(5, claimed=True, body="Blocked by: #1")])
         self.env.run("snapshot", "--repo", ".")
         self.assertEqual(self.env.run("frontier", "--snapshot", FILE).stdout, "#1 title 1 model sonnet\n")
-        route = self.env.run("lead-route", "--lead", "none", "--cap", "2", "--snapshot", FILE).stdout
+        route = self.env.run("lead-route", "--cap", "2", "--snapshot", FILE).stdout
         self.assertIn("HANDBACK #5 blocked-by #1", route.splitlines())
 
     def test_fix_drift_posts_one_edge_and_the_next_run_has_no_drift(self):

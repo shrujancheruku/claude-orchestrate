@@ -7,8 +7,10 @@ The worktree-list parser stays in `common.worktrees`, which the liveness block t
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,6 +47,42 @@ def main_checkout(repo) -> Path:
     # A submodule or a GIT_DIR checkout: the common dir isn't `.git`, so use this checkout's own toplevel.
     code, out, _ = common.run("git", "rev-parse", "--show-toplevel", cwd=start)
     return Path(out.strip()) if code == 0 and out.strip() else repo
+
+
+LEAD_NAME = "lead"  # the name `scripts/launch --lead` gives the lead session
+
+
+def lead_session(repo) -> tuple:
+    """(session id, why): the one live session named `lead` whose `cwd` is this repo's main checkout, else (None, why not).
+
+    The one rule for lead mode (#634): a row of `claude agents --json` that is live (it has a pid), named `lead`, with a
+    `cwd` that resolves exactly to the main checkout (the comparison `launch --resume-latest` makes). A `lead` in another
+    checkout or in a linked worktree of this repo is not this repo's lead. None, with the reason, on no match, several
+    matches, a failed call or a reply that is not a list; the caller treats that as lead mode off and never stops a pass.
+    """
+    if not shutil.which("claude"):
+        return None, "`claude` is not installed"
+    code, out, _ = common.run("claude", "agents", "--json")
+    if code != 0:
+        return None, f"`claude agents --json` failed (exit {code})"
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        return None, "`claude agents --json` did not print a list"
+    here = main_checkout(repo).resolve()
+    mine = [r for r in rows
+            if isinstance(r, dict) and r.get("name") == LEAD_NAME and r.get("pid") is not None
+            and isinstance(r.get("cwd"), str) and Path(r["cwd"]).resolve() == here]
+    if not mine:
+        return None, "no live session named lead in this repo's main checkout"
+    if len(mine) > 1:
+        return None, f"{len(mine)} live sessions named lead in this repo's main checkout"
+    sid = mine[0].get("sessionId")
+    if not isinstance(sid, str) or not sid:
+        return None, "the live lead row has no sessionId"
+    return sid, "one live lead in this repo's main checkout"
 
 
 def ticket_of_branch(name) -> int | None:
