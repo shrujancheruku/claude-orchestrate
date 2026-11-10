@@ -1,13 +1,16 @@
 """scripts/threads and github.review_threads through the CLI, with the fake `gh` serving the GraphQL replies."""
 
 import json
+import os
 import sys
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from harness import ScriptEnv, gh_repo_view  # noqa: E402
+from harness import ScriptEnv, gh_repo_view, verdict_runs  # noqa: E402
 import github  # noqa: E402
 from importlib.machinery import SourceFileLoader  # noqa: E402
 from importlib.util import module_from_spec, spec_from_loader  # noqa: E402
@@ -46,7 +49,7 @@ def reply(nodes, more=False, cursor=None):
 
 class Threads(unittest.TestCase):
     def setUp(self):
-        self.env = ScriptEnv()
+        self.env = verdict_runs(ScriptEnv())  # every run is checked for exactly one closing `next:` line
         self.addCleanup(self.env.close)
 
     def gh(self, *threads_replies, extra=()):
@@ -282,6 +285,31 @@ class Threads(unittest.TestCase):
         self.gh(reply([]))
         for args in (["resolve", "T1"], ["resolve", "T1", "--fixed", "a", "--left", "b"], ["reopen", "T1"]):
             self.assertEqual(self.env.run("threads", 12, *args, check=False).returncode, 2, args)
+
+    def test_every_outcome_ends_one_next_line(self):
+        self.gh(reply([thread("T1")]))
+        ok = self.env.run("threads", 12)
+        self.assertEqual((ok.returncode, ok.verdict), (0, "next: done"))
+        done = self.env.run("threads", 12, "resolve", "T1", "--left", "x", "--no-followup")
+        self.assertEqual((done.returncode, done.verdict), (0, "next: done"))
+        self.gh(reply([thread("T1")]))
+        no = self.env.run("threads", 12, "resolve", "NOPE", "--left", "x", "--no-followup", check=False)
+        self.assertEqual((no.returncode, no.stdout, no.verdict), (1, "", "next: refused PR #12 has no review thread NOPE"))
+        bad = self.env.run("threads", 12, "resolve", "T1", check=False)
+        self.assertEqual((bad.returncode, bad.verdict), (2, "next: could-not-run"))
+
+    def test_a_gh_failure_ends_could_not_run(self):
+        self.env.set_gh([{"args": ["api", "repos/{owner}/{repo}"], "stderr": "boom", "exit": 1}])
+        r = self.env.run("threads", 12, check=False)
+        self.assertEqual((r.returncode, r.verdict), (2, "next: could-not-run"))
+
+    def test_a_rate_limit_ends_retry_after_with_the_reset_time(self):
+        self.env.set_gh([{"args": ["api", "repos/{owner}/{repo}"], "exit": 1,
+                          "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
+        with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            r = self.env.run("threads", 12, check=False)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
 ROOT = Path(__file__).resolve().parent.parent

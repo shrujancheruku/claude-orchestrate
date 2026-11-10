@@ -3,6 +3,7 @@
 Generated files are in test_merge_regenerate.py.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -10,8 +11,9 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import git  # noqa: E402
-from merge_support import CHANGELOG, SweepMixin  # noqa: E402
+from harness import git, gh_pulls  # noqa: E402
+from merge_support import (CHANGELOG, ISSUE_VIEW, CLOSED_ISSUE, OK, OPEN_PULLS, PR_MERGE, PR_VIEW, REF_GET, REPO,  # noqa: E402
+                           REPO_VIEW, SweepMixin, pr)
 
 
 class SweepTest(SweepMixin, unittest.TestCase):
@@ -74,6 +76,32 @@ class SweepTest(SweepMixin, unittest.TestCase):
         self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
         self.assertNotIn("pr-a", p.stdout)
         self.assertIn("HANDBACK PR #9 pr-b: src.txt (not a shared file)", p.stdout)
+
+    def test_a_gated_pr_is_not_swept_and_an_ungated_one_beside_it_is(self):
+        (self.env.repo / ".claude" / "orchestration.md").write_text(
+            "## Shared files\n\n- **Shared files:**\n  - `CHANGELOG.md`: one line under Unreleased\n- **Generated:** none\n\n"
+            "## Gates\n\n- **Merge gates:** PRs touching `hooks/**` are merged by the developer.\n")
+        self.pr_branch("pr-a", {"hooks/g.py": "x\n", "src.txt": "one\nPR\n"})
+        self.pr_branch("pr-b", {"other.txt": "x\n", "src.txt": "one\nPR-B\n"})
+        self.land({"src.txt": "one\nMAIN\n"})
+        self.seq_files = {7: ["x.txt"], 8: ["hooks/g.py"], 9: ["other.txt"]}
+        listing = gh_pulls([{"number": 8, "headRefName": "pr-a"}, {"number": 9, "headRefName": "pr-b"}], "open")["stdout"]
+        self.env.set_gh([
+            *({"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{n}/files"],
+               "stdout": json.dumps([{"filename": f} for f in names])} for n, names in self.seq_files.items()),
+            {"args": list(PR_VIEW), "seq": [pr("OPEN"), pr("MERGED")]},
+            {"args": list(ISSUE_VIEW), "seq": CLOSED_ISSUE},
+            {"args": REF_GET.split(), "seq": [OK]},
+            {"args": list(OPEN_PULLS), "seq": [{"stdout": listing}]},
+            {"args": list(REPO_VIEW), "seq": REPO},
+            {"args": ["api", "-X", "DELETE"], "seq": [OK]},
+            {"args": list(PR_MERGE), "exit": 0},
+        ])
+        p = self.merge()
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertIn("sweep: PR #8 pr-a left alone: it touches the merge gate hooks/**", p.stdout)
+        self.assertIn("HANDBACK PR #9 pr-b: src.txt (not a shared file)", p.stdout)
+        self.assertNotIn("HANDBACK PR #8", p.stdout)
 
     def sweep_with(self, method):
         self.pr_branch("pr-a", {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n"})

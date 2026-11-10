@@ -10,11 +10,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest, git, verdict_runs  # noqa: E402
 from test_claims import own_start_reason  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,7 +57,7 @@ def failure(minutes, marker, sha):
 
 class LeadRoute(unittest.TestCase):
     def setUp(self):
-        self.env = ScriptEnv()
+        self.env = verdict_runs(ScriptEnv())  # every run is checked for exactly one closing `next:` line
         self.addCleanup(self.env.close)
 
     def serve(self, issues=(), gh_exit=0, open_branches=(), wontfix=(), heads=None, merged_branches=(), drafts=()):
@@ -424,6 +425,27 @@ class LeadRoute(unittest.TestCase):
     def test_exit_2_when_gh_is_missing(self):
         r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False, no_gh=True)
         self.assertEqual(r.returncode, 2)
+
+    def test_every_exit_ends_one_next_line(self):
+        self.serve([issue(1)])
+        self.state({})
+        self.env.set_gh(self.responses)
+        ok = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0))
+        self.assertEqual(ok.verdict, "next: done")
+        self.assertEqual(ok.stdout.splitlines()[-1], "counted: 0 of 2")  # the counted line stays last before the verdict
+        bad = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", "not a time", check=False)
+        self.assertEqual((bad.returncode, bad.stdout, bad.verdict), (2, "", "next: could-not-run"))
+        usage = self.env.run("lead-route", "--lead", "live", "--cap", "0", check=False)
+        self.assertEqual((usage.returncode, usage.verdict), (2, "next: could-not-run"))
+
+    def test_a_rate_limit_ends_retry_after_with_the_reset_time(self):
+        self.state({})
+        self.env.set_gh([{"args": ["api"], "exit": 1,
+                          "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
+        with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            r = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0), check=False)
+        self.assertEqual((r.returncode, r.stdout), (2, ""))
+        self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
 class RouteFromClaims(unittest.TestCase):

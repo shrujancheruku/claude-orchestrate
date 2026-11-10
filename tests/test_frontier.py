@@ -1,13 +1,16 @@
 """scripts/frontier through its CLI, with a fake `gh` serving the open issues (two pages in one test)."""
 
 import json
+import os
 import sys
+import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from harness import ScriptEnv, gh_repo_view  # noqa: E402
+from harness import Run, ScriptEnv, gh_repo_view  # noqa: E402
 
 
 def node(n, labels=("ready-for-agent",), claimed=False, blockers=(), body="", total=0, completed=0, parent=None):
@@ -37,7 +40,7 @@ class Frontier(unittest.TestCase):
         self.env.set_gh([gh_repo_view(), graphql])
 
     def frontier(self, *args, check=True):
-        return self.env.run("frontier", *args, check=check)
+        return Run(self.env.run("frontier", *args, check=check))
 
     def test_default_prints_one_line_per_takeable_ticket_ascending(self):
         self.serve(page([node(9), node(3), node(5, claimed=True), node(6, labels=("ready-for-human",))]))
@@ -208,8 +211,28 @@ class Frontier(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (2, ""))
 
     def test_a_missing_gh_exits_2(self):
-        r = self.env.run("frontier", check=False, no_gh=True)
+        r = Run(self.env.run("frontier", check=False, no_gh=True))
+        self.assertEqual((r.returncode, r.stdout, r.verdict), (2, "", "next: could-not-run"))
+
+    def test_success_ends_next_done_even_when_nothing_is_takeable(self):
+        self.serve(page([node(1, claimed=True)]))
+        r = self.frontier("--all")
+        self.assertEqual((r.returncode, r.verdict), (0, "next: done"))
+
+    def test_a_program_error_ends_could_not_run(self):
+        self.serve(page([node(1)]))
+        r = self.frontier("--touch-map", "a.py", check=False)  # --touch-map needs --ticket
+        self.assertEqual((r.returncode, r.verdict), (2, "next: could-not-run"))
+        self.serve({"stdout": json.dumps({"data": {}})})
+        self.assertEqual(self.frontier(check=False).verdict, "next: could-not-run")
+
+    def test_a_rate_limit_ends_retry_after_with_the_reset_time(self):
+        self.env.set_gh([gh_repo_view(), {"args": ["api", "graphql"], "exit": 1,
+                                          "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
+        with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            r = self.frontier(check=False)
         self.assertEqual((r.returncode, r.stdout), (2, ""))
+        self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
 if __name__ == "__main__":

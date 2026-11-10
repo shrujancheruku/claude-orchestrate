@@ -4,8 +4,8 @@
 The lead's and the orchestrator's fold, as one command. It refuses (`next: ask-user <why>`, exit 1, nothing written) when:
     - either ticket is not open, or its body was last edited by an untrusted author (ADR-0015);
     - either ticket is claimed (an assignee, or a `claims` state other than done);
-    - one ticket is gated and the other is not: a ticket is gated when its `Touch map:` line (the newest trusted `## Agent Brief`
-      comment's, else the body's) hits a config risk path (`hooks/**` is one), because the merge gate differs;
+    - the two tickets fall under different merge gates (or one is gated and the other is not): a ticket's gate is the config's Merge
+      gates glob its `Touch map:` line (the newest trusted `## Agent Brief` comment's, else the body's) hits, by `Config.merge_gate_for`;
     - the fold would close a blocking cycle (one ticket waits on the other through a third).
 Otherwise it writes, one line each:
     folded: #<into> now holds #<from>'s body and trusted comments under `## Also, folded from #<from>`
@@ -49,13 +49,17 @@ def touch_map_text(issue) -> str:
     return ""
 
 
-def gated(issue, cfg):
-    """Whether the ticket's touch map hits a risk path (the merge gate line), or None when the map is unreadable."""
+UNKNOWN = object()  # the touch map is unreadable, so the merge gate is not known
+
+
+def gate_of(issue, cfg):
+    """The Merge gates glob the ticket's touch map hits (`Config.merge_gate_for`, the one `merge` enforces), None when
+    it hits none, or UNKNOWN when the map is unreadable."""
     try:
         paths = [e.path for e in session.touch_map(touch_map_text(issue))]
     except touchmap.TouchMapError:
-        return None
-    return cfg.risk_hit(paths)
+        return UNKNOWN
+    return cfg.merge_gate_for(paths)
 
 
 def reaches(start, target, graph, seen=None) -> bool:
@@ -90,11 +94,12 @@ def refusal(a, b, snap, found, cfg):
         for mid in graph[x]:
             if mid not in (a, b) and reaches(mid, y, graph):
                 return f"#{x} waits on #{y} through #{mid}: the fold would make a blocking cycle"
-    marks = [gated(by_number[n], cfg) for n in (a, b)]
-    if None in marks:
-        return f"#{(a, b)[marks.index(None)]} has a touch map the grammar rejects, so its merge gate is unknown"
+    marks = [gate_of(by_number[n], cfg) for n in (a, b)]
+    if UNKNOWN in marks:
+        return f"#{(a, b)[marks.index(UNKNOWN)]} has a touch map the grammar rejects, so its merge gate is unknown"
     if marks[0] != marks[1]:
-        return f"#{a} is {'gated' if marks[0] else 'ungated'} and #{b} is {'gated' if marks[1] else 'ungated'}: the merge gate differs"
+        say = lambda m: f"gated by {m}" if m else "ungated"
+        return f"#{a} is {say(marks[0])} and #{b} is {say(marks[1])}: the merge gate differs"
     return None
 
 
