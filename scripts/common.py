@@ -101,6 +101,8 @@ VERDICT_WORDS = {
     # watch-ci: one `also:` per PR that settled, then `settled`
     "settled": "", "ci-pass": "<pr> <head>", "ci-fail": "<pr> <head>", "no-run": "<pr> <head>",
     "stuck": "<pr> <run id> <job id>", "head-not-reached": "<pr> <sha>", "gave-up": "<pr> <why>",
+    # ci-rerun
+    "rerun": "<pr> <head>", "already-running": "<pr>",
     # every script: a rate limit, and a run that could not happen
     "retry-after": "<time>", "could-not-run": "[<why>]",
 }

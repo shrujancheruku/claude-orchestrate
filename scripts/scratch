@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""scratch <pr> <head> --under <dir> [--repo DIR] : add a scratch worktree for a PR's head, the only way one is added (#545)
+
+A scratch worktree (GLOSSARY.md) is a detached checkout of a PR's head in which the lead or a reviewer reads or runs the
+code, outside every checkout so a hostile PR's files never sit in the repo. The caller passes its own scratchpad as
+`--under` (no script can know it); this script creates `<dir>/pr-<pr>` detached at <head> (a commit hash, 7 to 40 hex
+digits), or `<dir>/pr-<pr>b`, `pr-<pr>c`, ... when that name is taken (`merge` removes every `pr-<pr>[letter|-suffix]` tree
+after the PR merges or closes), and prints its path as the one line of stdout.
+It refuses (exit 1, one line on stderr) a <dir> that is not absolute or lies inside any checkout of the repository (the main
+checkout or one of its worktrees), and a <head> that is not a hash of a commit this clone holds (fetch it first).
+Exit codes: 0 added; 1 refused; 2 could not run (git failed). Stdlib only, Python 3.9+.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import string
+import sys
+from pathlib import Path
+
+import common
+from repo import main_checkout
+
+HASH = re.compile(r"[0-9a-fA-F]{7,40}")
+
+
+def inside(path: Path, roots) -> bool:
+    return any(path == root or root in path.parents for root in roots)
+
+
+def free_name(base: Path, pr: str, registered: set) -> Path | None:
+    for suffix in ("", *string.ascii_lowercase[1:]):
+        candidate = base / f"pr-{pr}{suffix}"
+        if not candidate.exists() and str(candidate) not in registered:
+            return candidate
+    return None
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("pr", help="PR number")
+    ap.add_argument("head", help="the PR's head commit (a hash)")
+    ap.add_argument("--under", required=True, metavar="DIR", help="the caller's scratchpad: an absolute directory outside every checkout")
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    args = ap.parse_args(argv)
+    pr, _ = common.pr_ref(args.pr)
+    if not (pr.isascii() and pr.isdigit()):
+        ap.error("the PR must be a number")
+    if not HASH.fullmatch(args.head):
+        print(f"scratch: {args.head!r} is not a commit hash (7 to 40 hex digits)", file=sys.stderr)
+        return 1
+    if not Path(args.under).is_absolute():
+        print("scratch: --under must be an absolute directory", file=sys.stderr)
+        return 1
+    under = Path(args.under).resolve()
+    main_root = main_checkout(args.repo).resolve()
+    roots = {main_root, *(Path(wt["path"]).resolve() for wt in common.worktrees(main_root))}
+    if inside(under, roots):
+        print(f"scratch: {under} is inside a checkout of this repository; pass a scratchpad outside it", file=sys.stderr)
+        return 1
+    known = common.run("git", "cat-file", "-e", f"{args.head}^{{commit}}", cwd=main_root)
+    if known.code != 0:
+        print(f"scratch: this clone holds no commit {args.head} (fetch it first)", file=sys.stderr)
+        return 1
+    registered = {str(Path(wt["path"])) for wt in common.worktrees(main_root)}
+    target = free_name(under, pr, registered)
+    if target is None:
+        print(f"scratch: every pr-{pr} name under {under} is taken", file=sys.stderr)
+        return 1
+    added = common.run("git", "worktree", "add", "--detach", str(target), args.head, cwd=main_root)
+    if added.code != 0:
+        print(f"scratch: git worktree add failed: {common.one_line(added.stderr)}", file=sys.stderr)
+        return 2
+    print(target)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
