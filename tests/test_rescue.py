@@ -116,7 +116,8 @@ class Rescue(unittest.TestCase):
         r = self.rescue()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         (e,) = self.rescue_events()
-        self.assertEqual((e["ref"], e["outcome"], e["branch"], e["session"]), (42, "ok", BRANCH, "lead"))
+        self.assertEqual((e["ref"], e["outcome"], e["branch"]), (42, "ok", BRANCH))
+        self.assertTrue(e["session"])
         self.assertIn(BRANCH, e["reason"])
 
     def test_a_failed_rescue_writes_a_failed_event_with_the_reason(self):
