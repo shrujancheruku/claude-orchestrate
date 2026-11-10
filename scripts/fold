@@ -130,7 +130,8 @@ def fold(root, snap, a, b, ready_label) -> list:
     mine = {n for n, _ in tracker.open_blockers(absorber, open_numbers)}
     carried = [n for n, _ in tracker.open_blockers(donor, open_numbers) if n not in mine and n not in (a, b)]
     heading = f"## Also, folded from #{a}"
-    if heading in absorber["body"]:  # a re-run after a failed write: the body and the pointer comments are already there
+    # A whole line: `## Also, folded from #5` is a prefix of `... from #55`, and a false hit would skip the copy and lose the donor's scope.
+    if re.search(rf"^{re.escape(heading)}[ \t]*$", absorber["body"], re.M):  # a re-run after a failed write: the body and the pointer comments are already there
         out = [f"folded: #{b} already holds #{a} (re-run)"]
     else:
         body = absorber["body"].rstrip("\n") + f"\n\n{heading}\n\n{donor['body'].strip()}\n"
@@ -144,7 +145,9 @@ def fold(root, snap, a, b, ready_label) -> list:
         post_comment(b, f"Widened with #{a} (see `{heading}` in the body).", root)
         out.append(f"commented: #{a} #{b}")
     moved = 0
-    for n in carried:
+    # Every donor blocker the absorber has no native edge to yet, not just the `carried` ones: on a re-run the body line is
+    # already there, so `carried` is empty, but the edge may be the write that failed.
+    for n in sorted({m for m, _ in tracker.open_blockers(donor, open_numbers)} - {a, b} - set(absorber["blockers"])):
         github.add_blocked_by(b, n, cwd=root)
         moved += 1
     donor_id = issue_id(a, root)

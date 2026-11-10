@@ -148,6 +148,22 @@ class Fold(unittest.TestCase):
         self.assertFalse([c for c in self.writes() if c[2:3] == ["PATCH"] and c[3].endswith("/issues/6")])
         self.assertTrue([c for c in self.writes() if c[2:3] == ["PATCH"] and c[3].endswith("/issues/5")])
 
+    def test_a_longer_ticket_number_in_the_heading_is_not_a_rerun(self):
+        # `## Also, folded from #55` must not stop the copy of #5.
+        self.serve(node(5, "Donor scope.\n"), node(6, "Absorber.\n\n## Also, folded from #55\n\nOther.\n"))
+        r = self.fold(5, 6)
+        self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (0, "next: folded 5 6"), r.stderr)
+        patch = next(c for c in self.writes() if c[2:3] == ["PATCH"] and c[3].endswith("/issues/6"))
+        text = next(a for a in patch if a.startswith("body="))
+        self.assertIn("## Also, folded from #5\n\nDonor scope.", text)
+
+    def test_a_rerun_still_adds_the_missing_native_edge_to_the_donors_blocker(self):
+        self.serve(node(5, "Donor.\n", blockers=(9,)), node(6, "Absorber.\n\n## Also, folded from #5\n\nDonor.\n\nBlocked by: #9\n"),
+                   node(9, "x"))
+        r = self.fold(5, 6)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertTrue([c for c in self.writes() if c[2:3] == ["POST"] and c[3] == "repos/{owner}/{repo}/issues/6/dependencies/blocked_by"])
+
     def test_a_closed_ticket_is_refused(self):
         self.serve(node(6))
         r = self.fold(5, 6)
