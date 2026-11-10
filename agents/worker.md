@@ -73,7 +73,7 @@ Work the ticket can't be finished without is not discovered work: it stays a sto
 
 ## Follow-ups
 
-If a push is rejected because the orchestrator's sweep updated your branch while you worked (it merged main in, or rebased it), run `git fetch origin`, then reset to or merge `origin/<branch>` and push again. Never force.
+If a push is rejected non-fast-forward because the orchestrator's sweep updated your branch while you worked (it merged main in, or rebased it), run `git fetch origin <branch>`, then `git merge --no-edit origin/<branch>` (or `git pull --no-rebase origin <branch>`; `git merge --ff-only origin/<branch>` when only the remote moved), re-run verify and push again. The guard approves these two forms for your own branch only, never another branch or `main`. Never reset, rebase or force-push. Push with the explicit form `git push -u origin <branch>`; a bare `git push` is refused. To remove a leftover file of your own, use `rm <path>` (untracked) or `git rm <path>` (tracked) inside your worktree, and `git checkout <ref> -- <path>` to restore one.
 
 If you're resumed with a **conflict list** (lines `HANDBACK PR #n <branch>: <path> (<why>)`), the script could not update your branch and left it untouched. Run `git fetch origin`, reset your local branch to `origin/<branch>`, merge `origin/<default branch>`, resolve exactly the listed files, re-run the verify commands, and push without force. This is the one rule for bringing in the default branch: always merge, never force, whatever the config's merge method. Under `Method: rebase` the orchestrator's sweep or merge rebases the history; you never rebase and never force-push.
 

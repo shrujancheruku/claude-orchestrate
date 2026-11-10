@@ -182,7 +182,7 @@ def main(argv=None) -> int:
 
 
 def run(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)  # the guard approves it by flag name
     ap.add_argument("branch", metavar="ticket|branch", help="the ticket number, or its branch `<number>-<slug>`")
     ap.add_argument("--title", help="the ticket title, for the wip commit message")
     ap.add_argument("--pr", type=int, help="the ticket's open PR: its reviewer scratch worktrees are removed too")
