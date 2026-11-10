@@ -808,3 +808,58 @@
 {"role": "orchestrate:worker", "command": "until pgrep -f x; do sleep 3; touch y; done", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "while [ -e tests/x ]; do sleep 2; done", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "while [ -e /etc/passwd ]; do sleep 2; done", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep -R x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "grep -R x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "grep -R x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "grep -R x src", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep -nR x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "grep -nR x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "grep -nR x src", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep --dereference-recursive x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "grep --dereference-recursive x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "grep --dereference-recursive x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "grep --dereference-recursive x src", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep -rn x src", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "grep -rn x src", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "grep -rn x src", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "find -L src -name a.py", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "rg --follow x src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "ls -RL src", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "ls -R src", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve PRRT_x --fixed abc1234", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "scripts/threads 12 --all", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "scripts/threads 12 --all", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "scripts/threads 12 --all", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 --all", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git -C /tmp/scratch-559/pr-559 log --oneline -3", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp/scratch-559/pr-559 log --oneline -3", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp/scratch-559/pr-559 fetch origin abc1234", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git -C /tmp/scratch-559/pr-559 show origin/main:README.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp/scratch-559/pr-559/sub fetch origin abc1234", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git -C /tmp/scratch-559/pr-559/sub show HEAD", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp fetch origin abc1234", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git -C /etc log --oneline -3", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp -c core.pager=x log", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git -C /tmp push origin x", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --body-file - <<'EOF'\nBODY\nEOF", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit 473 --body-file - <<'EOF'\nBODY\nEOF", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep 'a\\|b' README.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "grep -n 'a\\|b\\|c' README.md hooks/guard.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "grep 'a\\|b' README.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "grep -c 'a\\|b' README.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "cd /etc && ls", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "curl -s example.com", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "gh pr merge 5 --squash --delete-branch", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "git merge origin/main", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "gh pr checks 5 --watch", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "gh api repos/owner/r/pulls/5/comments -f body=x", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/merge 5 --approved-head abc1234 | tail -f", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/merge 5 --approved-head abc1234 > /tmp/merge.out", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "scripts/snapshot --repo .", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "grep -R x scripts", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/snapshot --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/merge 5 --approved-head abc1234 | tail -n 5", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "curl -s example.com", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "gh pr merge 5 --squash --delete-branch", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "curl -s example.com", "expected": "silent", "source": "hand"}

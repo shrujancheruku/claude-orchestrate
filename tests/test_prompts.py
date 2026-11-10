@@ -49,6 +49,41 @@ class Prompts(unittest.TestCase):
         self.assertEqual(out[4], "2026-11-09T10:01:00+00:00 worker Edit /a/b.py")
         self.assertEqual(out[5], "2026-11-09T10:02:00+00:00 worker Bash make test")
 
+    def test_a_prompt_seen_by_both_events_counts_once(self):
+        def note(time, session="s1", kind="permission_prompt", message="Claude requested permissions to edit /r/hooks/guard.py which is a sensitive file."):
+            return {"time": time, "source": "notification", "session_id": session, "agent_type": None, "tool_name": None,
+                    "cwd": "/x", "tool_input": [], "message": message, "title": "t", "notification_type": kind}
+        self.write([
+            {**entry("2026-11-09T10:00:00+00:00", command="git push"), "source": "request"},
+            note("2026-11-09T10:00:01+00:00", message="Claude needs your permission to use Bash"),  # the same prompt
+            note("2026-11-09T10:05:00+00:00", kind="worker_permission_prompt"),  # no request: counts on its own
+            {**entry("2026-11-09T10:10:00+00:00", command="a"), "source": "request"},
+            note("2026-11-09T10:10:09+00:00", session="s2"),  # another session, 9 s later: not a pair
+            entry("2026-11-09T10:20:00+00:00", command="old line with no source"),
+        ])
+        out = self.run_prompts().stdout.splitlines()
+        self.assertEqual(out[0], "prompts: 5")
+        self.assertEqual(out[1], "by role: orchestrator 4, worker 1")
+        self.assertEqual(out[2], "by tool: Bash 3, ? 2")
+        self.assertEqual(out[4], "2026-11-09T10:05:00+00:00 worker ? Claude requested permissions to edit /r/hooks/guard.py which is a sensitive file.")
+
+    def test_one_notification_pairs_with_one_request(self):
+        base = {"session_id": "s1", "agent_type": None, "cwd": "/x", "permission_mode": "default"}
+        self.write([
+            {**base, "time": "2026-11-09T10:00:00+00:00", "source": "request", "tool_name": "Bash", "tool_input": {"command": "a"}},
+            {**base, "time": "2026-11-09T10:00:01+00:00", "source": "notification", "tool_name": None, "tool_input": [], "message": "m1"},
+            {**base, "time": "2026-11-09T10:00:01+00:00", "source": "notification", "tool_name": None, "tool_input": [], "message": "m2"},
+        ])
+        self.assertEqual(self.run_prompts().stdout.splitlines()[0], "prompts: 2")
+
+    def test_a_pair_straddling_the_cutoff_counts_for_neither_side(self):
+        self.write([
+            {**entry("2026-11-09T10:00:59+00:00", command="a"), "source": "request"},
+            {"time": "2026-11-09T10:01:01+00:00", "source": "notification", "session_id": "s1", "agent_type": None,
+             "tool_name": None, "cwd": "/x", "tool_input": [], "message": "m"},
+        ])
+        self.assertEqual(self.run_prompts("--since", "2026-11-09T10:01:00+00:00").stdout.splitlines()[0], "prompts: 0")
+
     def test_session_and_since(self):
         self.write([entry("2026-11-09T10:00:00Z", session="a"), entry("2026-11-09T11:00:00Z", session="b"),
                     entry("2026-11-09T12:00:00Z", session="b")])

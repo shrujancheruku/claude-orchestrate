@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""PermissionRequest hook: record every permission prompt, decide none (#569).
+"""PermissionRequest and Notification hook: record every permission prompt, decide none (#569, #579).
 
-Claude Code fires PermissionRequest right before it shows a prompt. This hook appends one JSON line to
-`.claude/orchestrate-prompts.jsonl` in the main checkout and prints nothing, so the prompt still shows
+Claude Code fires PermissionRequest right before it shows a prompt, and a Notification of type
+`permission_prompt` or `worker_permission_prompt` when it shows one. The notification also covers a prompt that
+returns before the hook path (the "sensitive file" check), which PermissionRequest never sees. This hook appends one
+JSON line to `.claude/orchestrate-prompts.jsonl` in the main checkout and prints nothing, so the prompt still shows
 and the developer's choice is unchanged. Whatever goes wrong (a bad payload, an unwritable file) is one
 line on stderr; the exit code is always 0 and the hook never blocks.
 
-The line holds: time, session_id, agent_type (null for the main session), tool_name, cwd, permission_mode and
+Every line has `"source"`: `request` (PermissionRequest) or `notification`. A notification line has no tool: it
+holds `message`, `title` and `notification_type` (each cut to 500 characters) in place of `tool_name`/`tool_input`.
+scripts/prompts counts a prompt both events saw once.
+
+A request line holds: time, session_id, agent_type (null for the main session), tool_name, cwd, permission_mode and
 tool_input, cut down: a Bash or Monitor `command` to 2000 characters, `file_path` for an edit, and for any other tool the
 key names only (no file contents, no MCP arguments). The orchestrator and its workers prompt at the same time,
 so a write is one O_APPEND write under an exclusive flock.
@@ -25,6 +31,7 @@ from pathlib import Path
 
 LOG = Path(".claude") / "orchestrate-prompts.jsonl"
 COMMAND_LIMIT = 2000
+MESSAGE_LIMIT = 500
 COMMAND_TOOLS = ("Bash", "Monitor")
 PATH_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
@@ -60,19 +67,30 @@ def cut_input(tool: str, tool_input) -> dict | list:
     return sorted(str(k) for k in tool_input)
 
 
+def text_field(payload: dict, key: str):
+    value = payload.get(key)
+    return value[:MESSAGE_LIMIT] if isinstance(value, str) else None
+
+
 def record(payload: dict) -> dict:
-    tool = payload.get("tool_name")
-    tool = tool if isinstance(tool, str) else ""
     agent = payload.get("agent_type")
-    return {
+    entry = {
         "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "session_id": payload.get("session_id"),
         "agent_type": agent if isinstance(agent, str) and agent else None,
-        "tool_name": tool,
         "cwd": payload.get("cwd"),
-        "tool_input": cut_input(tool, payload.get("tool_input")),
         "permission_mode": payload.get("permission_mode"),
     }
+    if payload.get("hook_event_name") == "Notification" or ("message" in payload and "tool_name" not in payload):
+        # The prompt as the developer saw it. A Notification names no tool: the message is all there is
+        # ("Claude requested permissions to edit <path> which is a sensitive file"). It fires for prompts that
+        # PermissionRequest never sees (#579).
+        return {**entry, "source": "notification", "tool_name": None, "tool_input": [],
+                "message": text_field(payload, "message"), "title": text_field(payload, "title"),
+                "notification_type": text_field(payload, "notification_type")}
+    tool = payload.get("tool_name")
+    tool = tool if isinstance(tool, str) else ""
+    return {**entry, "source": "request", "tool_name": tool, "tool_input": cut_input(tool, payload.get("tool_input"))}
 
 
 def append(path: Path, line: str) -> None:
