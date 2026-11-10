@@ -594,6 +594,12 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (1, "next: ask-user gate gated.txt"), p.stdout + p.stderr)
         self.assertEqual(self.called(MERGE), [])
 
+    def test_a_rename_out_of_a_gated_path_is_gated(self):
+        rows = [{"filename": "elsewhere/guard.py", "previous_filename": "hooks/guard.py", "status": "renamed"}]
+        p = self.merge(self.approved, files_reply={"stdout": json.dumps(rows)})
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (1, "next: ask-user gate hooks/**"), p.stdout + p.stderr)
+        self.assertEqual(self.called(MERGE), [])
+
     def test_a_release_pr_says_so(self):
         p = self.merge(self.approved, files=(".release-please-manifest.json", "hooks/x"), title="chore(main): release 1.2.3")
         self.assertIn("a release PR", p.stdout)

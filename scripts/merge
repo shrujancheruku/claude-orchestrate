@@ -218,7 +218,7 @@ def gate_of(cwd, pr):
     if not cfg.merge_gates:
         return None, None  # no gate configured: no file list to read
     try:
-        files = github.pr_files(pr, cwd)
+        files = github.pr_touched_paths(pr, cwd)  # a rename out of a gated path counts: its old name is in the list
     except github.GhError as e:
         say(f"merge: could not read the changed files of PR #{pr} to judge its merge gate: {e.message}")
         return None, 2
