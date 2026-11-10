@@ -541,9 +541,12 @@ REVIEW_CASES = [
     (POST.replace("--method", "-X") + COMMENT + "\nEOF\n", "allow"),
     (POST.replace("'EOF'", '"EOF"') + COMMENT + "\nEOF", "allow"),
     (POST + '{"event": "COMMENT", "body": "rm -rf; git push > x"}\nEOF', "allow"),
-    (FILE_COMMENT, "allow"),
-    (FILE_COMMENT.replace("--method", "-X"), "allow"),
-    ("cd /repo && " + FILE_COMMENT, "allow"),
+    (FILE_COMMENT, "deny"),  # #700: no file-level comment form; the finding goes in the review body
+    (FILE_COMMENT.replace("--method", "-X"), "deny"),
+    ("cd /repo && " + FILE_COMMENT, "deny"),
+    # the documented form carrying an in-diff comment and an `## Outside the diff` body section
+    (POST + '{"event": "COMMENT", "body": "r\\n## Outside the diff\\n- [minor] a.py:1 — x", '
+     '"comments": [{"path": "a.py", "line": 3, "side": "RIGHT", "body": "[blocking] y"}]}\nEOF', "allow"),
     (FILE_COMMENT.replace("subject_type=file", "subject_type=line"), "deny"),
     (FILE_COMMENT + " -f event=x", "deny"),
     (FILE_COMMENT + " && echo hi", "deny"),
@@ -564,15 +567,15 @@ REVIEW_CASES = [
     ("cd /tmp/x; " + POST + COMMENT + "\nEOF", "deny"),
     ("cd $(rm -rf x) && " + POST + COMMENT + "\nEOF", "deny"),
     (POST.replace("{owner}/{repo}", "shrujancheruku/claude-orchestrate") + COMMENT + "\nEOF", "allow"),
-    ("gh pr review 12 --comment --body 'x'", "allow"),
-    ("gh pr review 12 --comment -b 'LGTM $(x)'", "allow"),
-    ("gh pr review 12 --body 'x' --comment", "allow"),
-    ('gh pr review 12 --comment --body "x"', "allow"),
+    ("gh pr review 12 --comment --body 'x'", "deny"),  # #700: `gh pr review` is no reviewer form
+    ("gh pr review 12 --comment -b 'LGTM $(x)'", "deny"),
+    ("gh pr review 12 --body 'x' --comment", "deny"),
+    ('gh pr review 12 --comment --body "x"', "deny"),
     ('gh pr review 12 --comment --body "$(rm x)"', "deny"),
     ("gh pr review 12 --comment --body 'x'; rm x", "deny"),
     ("gh pr review 12 --comment --body 'x' && gh pr merge 12", "deny"),
-    ("gh pr review 12 --comment --body-file - <<'EOF'\nbody $(x)\nEOF", "allow"),
-    ("cd /tmp/x && gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF\n", "allow"),
+    ("gh pr review 12 --comment --body-file - <<'EOF'\nbody $(x)\nEOF", "deny"),
+    ("cd /tmp/x && gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF\n", "deny"),
     ("gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF\nrm x", "deny"),
     ("gh pr review 12 --comment --body-file - <<EOF\nbody\nEOF", "deny"),
     ("gh pr review 12 --approve --body x", "deny"),
@@ -581,8 +584,8 @@ REVIEW_CASES = [
     ("gh pr review 12 -a", "deny"),
     ("gh pr review 12 -r --body 'x'", "deny"),
     ("gh pr review 12 --comment --body 'x' --approve", "deny"),
-    ("gh pr review 12 --comment -F - <<'EOF'\nbody\nEOF", "allow"),
-    ("gh pr review 12 --comment --body-file=- <<'EOF'\nbody\nEOF", "allow"),
+    ("gh pr review 12 --comment -F - <<'EOF'\nbody\nEOF", "deny"),
+    ("gh pr review 12 --comment --body-file=- <<'EOF'\nbody\nEOF", "deny"),
     ('cd "$HOME/x" && ' + POST + COMMENT + "\nEOF", "deny"),
     ("cd /tmp/x && " + POST + '{"event": "APPROVE", "body": "x"}\nEOF', "deny"),
     ("gh api repos/o/r/pulls/12/reviews", "allow"),  # a GET
@@ -590,7 +593,7 @@ REVIEW_CASES = [
     ('git log --grep="gh pr review"', "allow"),
     ("gh pr review 12 --comment --approve --body x", "deny"),
     ("gh pr comment 12 --body x", "deny"),
-    ("gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF", "allow"),
+    ("gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF", "deny"),
     ("gh api --method POST repos/o/r/pulls/12/reviews --input - <<'EOF'\n" + COMMENT + "\nEOF", "allow"),
     ("gh api --method POST repos/o/r/pulls/12/reviews -f event=APPROVE", "deny"),
     ("gh api --method POST repos/o/r/pulls/12/reviews --input - -f event=APPROVE <<'EOF'\n" + COMMENT + "\nEOF", "deny"),
@@ -826,7 +829,24 @@ class GuardTest(unittest.TestCase):
                 payload = {"tool_input": {"command": command}, "agent_type": "orchestrate:reviewer", "cwd": root}
                 reason = self.run_guard(payload)
                 self.assertIn("pulls/<n>/reviews", reason)
-                self.assertIn("--comment --body-file -", reason)
+                self.assertNotIn("--comment --body-file -", reason)
+
+    def test_removed_shapes_are_refused_with_the_documented_form(self):
+        """#700: `gh pr review --comment` and the file-comment POST have no form in agents/reviewer.md."""
+        with tempfile.TemporaryDirectory() as root:
+            config = Path(root) / ".claude" / "orchestration.md"
+            config.parent.mkdir()
+            config.write_text("- **Post reviews:** yes\n")
+            for command, says in [
+                ("gh pr review 12 --comment --body 'x'", "`gh pr review` is not a reviewer's post form"),
+                ("gh pr review 12 --comment --body-file - <<'EOF'\nbody\nEOF", "`gh pr review` is not a reviewer's post form"),
+                (FILE_COMMENT, "a file-level comment is not a reviewer's post form"),
+            ]:
+                payload = {"tool_input": {"command": command}, "agent_type": "orchestrate:reviewer", "cwd": root}
+                reason = self.run_guard(payload)
+                self.assertIn(says, reason)
+                self.assertIn("pulls/<n>/reviews --input -", reason)
+                self.assertIn("## Outside the diff", reason)
 
     def test_other_api_write_keeps_generic_message(self):
         payload = {
@@ -836,8 +856,7 @@ class GuardTest(unittest.TestCase):
         self.assertIn("writes through the GitHub API", self.run_guard(payload))
 
     def test_posting_off(self):
-        for post in [POST + COMMENT + "\nEOF", "gh pr review 12 --comment --body 'x'"]:
-            self.check_off(post)
+        self.check_off(POST + COMMENT + "\nEOF")
 
     def check_off(self, post):
         for text in ["- **Post reviews:** no\n", "- **Post reviews:** <yes | no>\n", "## Review\n", None]:
@@ -1101,12 +1120,13 @@ class RoutineApprovalTest(unittest.TestCase):
         self.assertEqual(raw("orchestrate:worker", "git push origin main", self.work)["permissionDecision"], "deny")
 
     def test_reviewer_post_is_approved_only_in_the_accepted_shape_and_with_posting_on(self):
-        self.assertTrue(approved("orchestrate:reviewer", "gh pr review 12 --comment --body 'x'", self.main))
-        self.assertFalse(approved("orchestrate:reviewer", "gh pr review 12 --comment --body 'x' && ls", self.main))
+        self.assertTrue(approved("orchestrate:reviewer", POST + COMMENT + "\nEOF", self.main))
+        self.assertFalse(approved("orchestrate:reviewer", "gh pr review 12 --comment --body 'x'", self.main))
+        self.assertFalse(approved("orchestrate:reviewer", POST + COMMENT + "\nEOF\nls", self.main))
         self.assertFalse(approved("orchestrate:reviewer", "gh pr review 12 --approve", self.main))
         self.assertIsNone(raw("orchestrate:reviewer", "gh pr view 12 --web", self.main))
         (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** no\n")
-        self.assertEqual(raw("orchestrate:reviewer", "gh pr review 12 --comment --body 'x'", self.main)
+        self.assertEqual(raw("orchestrate:reviewer", POST + COMMENT + "\nEOF", self.main)
                          ["permissionDecision"], "deny")
 
     def test_scout_is_never_approved(self):
@@ -2637,6 +2657,18 @@ class CorpusDenyReasonsTest(unittest.TestCase):
 
     def reason(self, role, command):
         return UnapprovedCallsAreDeniedTest.reason(self, role, command)
+
+    def test_the_corpus_reviewer_post_denies_name_the_documented_form(self):
+        """#700: the corpus rows for `gh pr review --comment` and the file-comment POST."""
+        corpus = Path(__file__).parent / "fixtures" / "guard-corpus.jsonl"
+        rows = [json.loads(line) for line in corpus.read_text().splitlines() if line.strip()]
+        shapes = [r for r in rows if r["role"] == "orchestrate:reviewer" and r["expected"] == "deny"
+                  and ("gh pr review" in r["command"] or "subject_type=file" in r["command"])]
+        self.assertTrue(shapes)
+        for r in shapes:
+            with self.subTest(r["command"][:80]):
+                reason = self.reason("orchestrate:reviewer", r["command"])
+                self.assertIn("pulls/<n>/reviews --input -", reason)
 
     def test_a_worker_pull_or_merge_of_another_ref_says_no_rule_approves_it(self):
         for command in ("git pull --ff-only origin main", "git pull --ff-only", "git pull --rebase origin 567-x",
