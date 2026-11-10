@@ -37,7 +37,20 @@ import unittest.mock
 from collections import Counter
 from pathlib import Path
 
+import harness
 import transcripts
+
+_undo_isolation = None
+
+
+def setUpModule():
+    # The guard logs a `gh_call` row for the `gh` commands it sees; never into the real events log (#710).
+    global _undo_isolation
+    _undo_isolation = harness.isolate_run_log()
+
+
+def tearDownModule():
+    _undo_isolation()
 
 ROOT = Path(__file__).resolve().parent.parent
 GUARD = ROOT / "hooks" / "guard.py"
@@ -81,16 +94,23 @@ def rows():
 
 # The session the corpus scratchpad paths belong to (the hook input carries it as `session_id`).
 SESSION = "00000000-0000-0000-0000-000000000000"
+# The scratchpad every corpus row names. A row that needs the directory to exist (a checkout among the agent's own
+# directories, #720) is pointed at a real one made in setUpClass, as the scratch path above is.
+PLACEHOLDER_PAD = f"/private/tmp/claude-0/-Users-owner-code-claude-orchestrate/{SESSION}/scratchpad"
 
 
 class Decider:
     """Runs the guard's main() in-process on the hook's JSON input, so 500 calls take a second."""
 
-    def __init__(self, cwd, worker_cwd=None, scratch=None):
+    def __init__(self, cwd, worker_cwd=None, scratch=None, pad=None):
         self.scratch = scratch
+        self.pad = pad
         spec = importlib.util.spec_from_file_location("guard_under_test", GUARD)
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
+        if pad:
+            # The made scratchpad stands under a temp root, as `/private/tmp/claude-<uid>/...` does.
+            self.module.TEMP_ROOTS = (*self.module.TEMP_ROOTS, str(Path(pad).parents[3]))
         self.cwd, self.worker_cwd = cwd, worker_cwd or cwd
         # The hook input names the main session's transcript, whose first command tells the orchestrator
         # (/orchestrate:run) from the lead (/orchestrate:lead).
@@ -111,6 +131,8 @@ class Decider:
         command = command.replace("/p/orchestrate/0.7.0/scripts/", f"{ROOT / 'scripts'}/")
         if self.scratch:
             command = command.replace("/tmp/scratch-559/pr-559", self.scratch)
+        if self.pad:
+            command = command.replace(PLACEHOLDER_PAD, self.pad)
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": self.worker_cwd if role == "orchestrate:worker" and not outside else self.cwd, "session_id": SESSION}
         if background:
             payload["tool_input"]["run_in_background"] = True
@@ -162,6 +184,9 @@ class GuardCorpus(unittest.TestCase):
         work.mkdir(parents=True)
         (work / ".git").write_text(f"gitdir: {git_dir}\n")
         (main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
+        # The default branch is the one `origin/HEAD` names (#720); a worker's merge of `origin/<default>` needs it readable.
+        (main / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True)
+        (main / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text("ref: refs/remotes/origin/main\n")
         # The reviewer's scratch checkout (#562): outside the repo, a linked worktree of it, and so is a plain
         # directory that is not (a corpus row names it by the same placeholder).
         (Path(cls.tmp.name) / ".git" / "worktrees" / "scratch").mkdir(parents=True)
@@ -172,7 +197,13 @@ class GuardCorpus(unittest.TestCase):
         scratch = Path(scratch_tmp.name).resolve() / "pr-559"
         scratch.mkdir()
         (scratch / ".git").write_text(f"gitdir: {Path(cls.tmp.name).resolve()}/.git/worktrees/scratch\n")
-        cls.decide = Decider(cls.tmp.name, str(work.resolve()), str(scratch))
+        # The session scratchpad (#720): `checkout` is a tree the orchestrator could run `gate` in (a `.git` entry) under a
+        # name that isn't `pr-<n>`; `mine` is a reviewer's or scout's own directory.
+        pad = Path(scratch_tmp.name).resolve() / "claude-0" / "-proj" / SESSION / "scratchpad"
+        (pad / "mine").mkdir(parents=True)
+        (pad / "checkout").mkdir()
+        (pad / "checkout" / ".git").write_text(f"gitdir: {Path(cls.tmp.name).resolve()}/.git/worktrees/scratch\n")
+        cls.decide = Decider(cls.tmp.name, str(work.resolve()), str(scratch), str(pad))
 
     def test_corpus_is_seeded_and_well_formed(self):
         self.assertGreater(len(self.rows), 400)

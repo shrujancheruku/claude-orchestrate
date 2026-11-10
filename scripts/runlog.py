@@ -62,9 +62,21 @@ class NoSession(RuntimeError):
     (`runlog: no session, <kind> event not written`); the CLI keeps its own output and exit code (ADR-0014)."""
 
 
+STATE_DIR_ENV = "ORCHESTRATE_STATE_DIR"  # a directory that stands in for the main checkout (#710): the test runner sets it
+
+
+def state_root(repo) -> Path:
+    """The directory that holds the run state and the logs: $ORCHESTRATE_STATE_DIR when set, else the main checkout.
+
+    The override exists for tests (#710): a test that drives the guard or a script that logs must never write the
+    real events log of the checkout it runs in, under the live run's session. An empty value is no override."""
+    override = os.environ.get(STATE_DIR_ENV)
+    return Path(override) if override else main_checkout(repo)
+
+
 def log_path(repo, name: str) -> Path:
     """Where the log called `name` (EVENTS_LOG or PASS_LOG) lives for `repo`."""
-    return main_checkout(repo) / PROFILES / name
+    return state_root(repo) / PROFILES / name
 
 
 SESSION_ENV = "ORCHESTRATE_SESSION"  # a script run with `--session <id>` sets it, so its events carry that id (#532)
@@ -83,7 +95,7 @@ def current_session(repo) -> str | None:
     if os.environ.get(SESSION_ENV):
         return os.environ[SESSION_ENV]
     try:
-        state = json.loads((main_checkout(repo) / STATE).read_text(encoding="utf-8"))
+        state = json.loads((state_root(repo) / STATE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     sid = state.get("session") if isinstance(state, dict) else None

@@ -91,6 +91,70 @@ class RunParallelTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
 
 
+class EventsLogGuardTest(unittest.TestCase):
+    """#710: the tests never write the real events log. A module that runs the guard gets ORCHESTRATE_STATE_DIR; the run
+    fails when a row carrying this run's marker session lands in the events log of the checkout the tests sit in."""
+
+    ROW = '{"ts":"2026-01-01T00:00:00+00:00","session":"s","kind":"gh_call","script":"agent:scout","path":"repos/o/r/issues"}\n'
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name).resolve() / "repo"
+        (self.repo / "tests").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        (self.repo / "scripts").symlink_to(Path(__file__).resolve().parent.parent / "scripts")
+        self.log = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
+        self.log.parent.mkdir(parents=True)
+        self.log.write_text('{"kind":"gh_call","path":"repos/real/one"}\n')
+
+    def run_runner(self):
+        return subprocess.run([sys.executable, str(RUNNER), "-j", "1", str(self.repo / "tests")],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+
+    def module(self, name, body):
+        (self.repo / "tests" / name).write_text("import unittest\nimport os\n" + body)
+
+    def test_a_run_that_leaves_the_real_log_alone_passes(self):
+        self.module("test_quiet.py", PASSING)
+        r = self.run_runner()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def append_row(self, session_expr):
+        """A guard-module body that appends a fixture row to the real log, with this session (a Python expression)."""
+        return ("import json\nclass T(unittest.TestCase):\n    def test_x(self):\n"
+                f"        row = {self.ROW!r}\n"
+                f"        row = json.loads(row); row['session'] = {session_expr}\n"
+                f"        open({str(self.log)!r}, 'a').write(json.dumps(row) + '\\n')\n")
+
+    def test_a_run_whose_tests_add_a_row_with_the_run_marker_to_the_real_log_fails(self):
+        self.module("test_guard.py", self.append_row("os.environ['ORCHESTRATE_SESSION']"))
+        r = self.run_runner()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("real events log", r.stdout)
+        self.assertIn("repos/o/r/issues", r.stdout)
+
+    def test_a_fixture_row_of_another_session_is_not_this_runs(self):
+        """Another branch's older test_guard, running at the same time, writes fixture rows under the live session."""
+        self.module("test_guard.py", self.append_row("'another-run'"))
+        r = self.run_runner()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_another_sessions_rows_appended_meanwhile_are_not_the_tests(self):
+        self.module("test_live.py", "class T(unittest.TestCase):\n    def test_x(self):\n"
+                                    f"        open({str(self.log)!r}, 'a').write('{{\"kind\":\"merge\",\"ref\":5}}\\n')\n")
+        r = self.run_runner()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_only_the_guard_modules_get_the_state_dir_override(self):
+        probe = ("class T(unittest.TestCase):\n    def test_x(self):\n"
+                 "        self.assertEqual(bool(os.environ.get('ORCHESTRATE_STATE_DIR')), %s)\n")
+        self.module("test_guard.py", probe % "True")
+        self.module("test_other.py", probe % "False")
+        r = self.run_runner()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+
 class DefaultJobsTest(unittest.TestCase):
     PS = ("  101 /usr/bin/python3 /x/tests/run_parallel.py\n"
           "  102 python3 /y/tests/run_parallel.py -j 2 /y/tests\n"
