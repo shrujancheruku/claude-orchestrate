@@ -1015,12 +1015,21 @@ def merged_prs(base, cwd=None, limit: int = 200) -> list:
     return merged[:limit]
 
 
-def pr_files(pr, cwd=None) -> list:
-    """The paths a PR's diff changes."""
+def _pr_file_rows(pr, cwd=None) -> list:
     rows = _pages(f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/files?per_page=100", cwd, max_pages=30)
     if not all(isinstance(f, dict) and isinstance(f.get("filename"), str) for f in rows):
         raise GhError(MALFORMED, "gh returned no file list for the PR")
-    return [f["filename"] for f in rows]
+    return rows
+
+
+def pr_files(pr, cwd=None) -> list:
+    """The paths a PR's diff changes."""
+    return [f["filename"] for f in _pr_file_rows(pr, cwd)]
+
+
+def pr_touched_paths(pr, cwd=None) -> list:
+    """Every path a PR's diff touches: each file's new name and, for a rename, the old one too (moving a file out of a path still changes that path)."""
+    return [p for f in _pr_file_rows(pr, cwd) for p in (f["filename"], f.get("previous_filename")) if isinstance(p, str)]
 
 
 def repo_info(cwd=None) -> dict:

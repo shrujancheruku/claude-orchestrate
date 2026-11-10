@@ -85,6 +85,22 @@ class AlsoApprovedTest(unittest.TestCase):
         self.assertIn("PR #8 not updated", p.stdout)
         self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 not updated: boom", "next: merged"])
 
+    def test_a_gated_pr_is_left_alone_even_when_behind(self):
+        cfg = self.env.repo / ".claude" / "orchestration.md"
+        cfg.parent.mkdir(exist_ok=True)
+        cfg.write_text("## Gates\n\n- **Merge gates:** PRs touching `hooks/**` are merged by the developer.\n")
+
+        def files(n, *names):
+            return {"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{n}/files"],
+                    "stdout": json.dumps([{"filename": f} for f in names])}
+        p = self.merge([files(7, "a.txt"), files(8, "hooks/guard.py"), files(9, "b.txt"),
+                        self.other(8, "b" * 40), self.behind(8, 3), self.other(9, "c" * 40), self.behind(9, 1)],
+                       "8=" + "b" * 40, "9=" + "c" * 40)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.updated(), ["9"])
+        self.assertIn("PR #8 left alone: it touches the merge gate hooks/**", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-3:], ["also: left 8 gated by hooks/**", "also: wait-ci 9 " + p.stdout.split("also: wait-ci 9 ")[1].split()[0], "next: merged"])
+
     def test_a_malformed_spec_is_skipped(self):
         p = self.merge([], "nonsense")
         self.assertEqual(p.returncode, 0)

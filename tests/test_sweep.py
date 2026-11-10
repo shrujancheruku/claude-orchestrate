@@ -48,7 +48,8 @@ class Sweep(unittest.TestCase):
         log = self.env.repo / ".claude" / "orchestrate-prompts.jsonl"
         with open(log, "a") as f:
             f.write(json.dumps({"time": time, "session_id": session, "agent_type": agent, "tool_name": tool,
-                                "tool_input": {"command": command}}) + "\n")
+                                "tool_input": {"command": command},
+                                **({} if agent else {"role": "orchestrator"})}) + "\n")  # as the hook logs the orchestrator (#642)
 
     def test_a_quiet_repo_is_clean(self):
         self.serve()
