@@ -5,7 +5,7 @@ Stdlib only, Python 3.9+. A library: imported, never run. The functions never ca
 other function takes:
     {number, title, url, body, labels (set), claimed, blockers (open native blockers, sorted),
      sub_issues {total, completed}, parent (number | None),
-     body_edits [ISO time], comments [{body, created, edits [ISO time]}], untrusted_comments (a count)}
+     body_edits [ISO time], body_trusted (False when an untrusted author made the last edit), comments [{body, created, edits [ISO time]}], untrusted_comments (a count)}
 `comments` holds only a trusted author's (ADR-0015, `github.is_trusted`); the others are counted, their text dropped.
 The issues are open-only, so an issue number absent from them is closed (or does not exist) and blocks nothing.
 `Snapshot.blockers` is the one blocker rule (native edges plus the body `Blocked by:` line): frontier, lead-route, gate
@@ -78,6 +78,20 @@ def _edit_times(node) -> list:
     return [edited] if edited else []
 
 
+def _body_trusted(n, trusted) -> bool:
+    """False when the body's last editor is untrusted (ADR-0015): a collaborator labelled the ticket, but an outside
+    author can still edit the body afterwards. GraphQL's `Issue.editor` is an actor with no association, so: an editor
+    other than the issue's author must have write access (only the author or a collaborator can edit), and the author
+    as editor is trusted by the issue's own `authorAssociation` or the config's logins. Never edited, or no editor: trusted."""
+    editor = (n.get("editor") or {}).get("login")
+    if not editor:
+        return True
+    author = (n.get("author") or {}).get("login")
+    if author and editor.lower() != author.lower():
+        return True
+    return github.is_trusted(n.get("authorAssociation"), editor, trusted)
+
+
 def from_nodes(nodes, trusted=()) -> list:
     """Plain issue dicts from raw GraphQL nodes; KeyError, TypeError or ValueError when a node is malformed.
     `trusted` is the config's extra trusted logins (lowercase); a comment from anyone else is counted, not kept."""
@@ -91,7 +105,7 @@ def from_nodes(nodes, trusted=()) -> list:
         out.append({
             "number": int(n["number"]), "title": n.get("title") or "", "url": n.get("url") or "",
             "body": n.get("body") or "",
-            "body_edits": _edit_times(n),
+            "body_edits": _edit_times(n), "body_trusted": _body_trusted(n, trusted),
             "comments": [{"body": c.get("body") or "", "created": c.get("createdAt"), "edits": _edit_times(c)}
                          for c in kept],
             "untrusted_comments": len(every) - len(kept),
@@ -130,13 +144,15 @@ def open_blockers(issue, open_numbers) -> list:
 
 
 def why_not(issue, labels, issues=None) -> str | None:
-    """The first reason a `ready-for-agent` ticket is not takeable (claimed, blocked-by, parent, lead, wayfinder), else None.
+    """The first reason a `ready-for-agent` ticket is not takeable (claimed, untrusted-edit, blocked-by, parent, lead, wayfinder), else None.
 
     `labels` is {"ready": ..., "lead": ...}. `issues` is the whole snapshot, for body blockers; omitted, only native ones count.
     """
     open_numbers = {i["number"] for i in issues} if issues is not None else set(issue["blockers"])
     if issue["claimed"]:
         return "claimed"
+    if not issue.get("body_trusted", True):
+        return "untrusted-edit (body last edited by an untrusted author)"
     blockers = open_blockers(issue, open_numbers)
     if blockers:
         return "blocked-by " + " ".join(f"#{n} (body)" if from_body else f"#{n}" for n, from_body in blockers)
