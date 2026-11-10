@@ -15,6 +15,8 @@ FORBIDDEN = {
     "reads the state file": r"(?i)\bin the state file\b",
     "removes a reviewer's tree": r"remove the `pr-",
     "stale reviewer-tree ticket": r"#445",
+    "rate-limit cache path": r"github-ratelimit",
+    "worker-report retry count": r"on the third in a row",
 }
 # The `watch-ci` paragraph still states these constants; #542 rewrites it and then moves this
 # pattern into FORBIDDEN, dropping the line skip below.
