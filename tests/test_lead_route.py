@@ -430,12 +430,13 @@ class LeadRoute(unittest.TestCase):
         self.serve([issue(1)])
         self.state({})
         self.env.set_gh(self.responses)
-        ok = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0))
+        self.agents({"name": "lead", "sessionId": "L1"})
+        ok = self.env.run("lead-route", "--cap", "2", "--now", iso(0))
         self.assertEqual(ok.verdict, "next: done")
         self.assertEqual(ok.stdout.splitlines()[-1], "counted: 0 of 2")  # the counted line stays last before the verdict
-        bad = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", "not a time", check=False)
+        bad = self.env.run("lead-route", "--cap", "2", "--now", "not a time", check=False)
         self.assertEqual((bad.returncode, bad.stdout, bad.verdict), (2, "", "next: could-not-run"))
-        usage = self.env.run("lead-route", "--lead", "live", "--cap", "0", check=False)
+        usage = self.env.run("lead-route", "--cap", "0", check=False)
         self.assertEqual((usage.returncode, usage.verdict), (2, "next: could-not-run"))
 
     def test_a_rate_limit_ends_retry_after_with_the_reset_time(self):
@@ -443,7 +444,7 @@ class LeadRoute(unittest.TestCase):
         self.env.set_gh([{"args": ["api"], "exit": 1,
                           "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
         with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
-            r = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0), check=False)
+            r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False)
         self.assertEqual((r.returncode, r.stdout), (2, ""))
         self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
