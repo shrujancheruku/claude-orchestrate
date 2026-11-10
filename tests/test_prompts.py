@@ -1,6 +1,7 @@
 """scripts/prompts: counts and lists the permission-prompt log (#569)."""
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -26,9 +27,42 @@ class Prompts(unittest.TestCase):
     def write(self, entries, name="orchestrate-prompts.jsonl"):
         (self.repo / ".claude" / name).write_text("".join(json.dumps(e) + "\n" for e in entries) + "not json\n")
 
+    def fake_claude(self, rows):
+        """A `claude` first on PATH that prints rows for `agents --json --all`, so no test reads the real sessions."""
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        exe = bin_dir / "claude"
+        exe.write_text("#!/bin/sh\ncat <<'EOF'\n" + json.dumps(rows) + "\nEOF\n")
+        exe.chmod(0o755)
+
     def run_prompts(self, *args):
-        r = subprocess.run([str(PROMPTS), "--repo", str(self.repo), *args], capture_output=True, text=True, timeout=60)
+        env = dict(os.environ, PATH=f"{self.repo / 'bin'}{os.pathsep}{os.environ['PATH']}")
+        r = subprocess.run([str(PROMPTS), "--repo", str(self.repo), *args], capture_output=True, text=True, timeout=60, env=env)
         return r
+
+    def test_roles_orchestrator_lead_main(self):
+        self.fake_claude([{"sessionId": "L", "name": "lead"}, {"sessionId": "H", "name": "mine"}])
+        self.write([
+            {**entry("2026-11-09T10:00:00+00:00", session="O", command="a"), "role": "orchestrator"},
+            entry("2026-11-09T10:01:00+00:00", session="L", command="b"),
+            entry("2026-11-09T10:02:00+00:00", session="L", command="c"),  # old line, no role field: name lookup
+            entry("2026-11-09T10:03:00+00:00", session="H", command="d"),
+            entry("2026-11-09T10:04:00+00:00", session="X", command="e"),  # not in the agents list
+        ])
+        out = self.run_prompts().stdout.splitlines()
+        self.assertEqual(out[1], "by role: main 2, lead 2, orchestrator 1")
+        self.assertIn("orchestrator Bash a", out[3])
+        self.assertIn("lead Bash b", out[4])
+        self.assertIn("main Bash d", out[6])
+
+    def test_role_lookup_failure_falls_back_to_main(self):
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "claude").write_text("#!/bin/sh\necho nope\nexit 1\n")
+        (bin_dir / "claude").chmod(0o755)
+        self.write([entry("2026-11-09T10:00:00+00:00", command="a")])
+        r = self.run_prompts()
+        self.assertEqual((r.returncode, r.stdout.splitlines()[1]), (0, "by role: main 1"))
 
     def test_no_log_is_zero(self):
         r = self.run_prompts()
@@ -36,7 +70,7 @@ class Prompts(unittest.TestCase):
 
     def test_counts_and_lists(self):
         self.write([
-            entry("2026-11-09T10:00:00+00:00", command="git push"),
+            {**entry("2026-11-09T10:00:00+00:00", command="git push"), "role": "orchestrator"},
             entry("2026-11-09T10:01:00+00:00", "Edit", "orchestrate:worker", file_path="/a/b.py"),
             entry("2026-11-09T10:02:00+00:00", "Bash", "orchestrate:worker", command="make\n  test"),
             entry("2026-11-09T10:03:00+00:00", "Skill", "orchestrate:reviewer", **{}),
@@ -63,7 +97,7 @@ class Prompts(unittest.TestCase):
         ])
         out = self.run_prompts().stdout.splitlines()
         self.assertEqual(out[0], "prompts: 5")
-        self.assertEqual(out[1], "by role: orchestrator 4, worker 1")
+        self.assertEqual(out[1], "by role: main 4, worker 1")
         self.assertEqual(out[2], "by tool: Bash 3, ? 2")
         self.assertEqual(out[4], "2026-11-09T10:05:00+00:00 worker ? Claude requested permissions to edit /r/hooks/guard.py which is a sensitive file.")
 
