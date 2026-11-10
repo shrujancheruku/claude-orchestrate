@@ -95,7 +95,36 @@ class Sweep(unittest.TestCase):
         self.serve()
         self.assertEqual(self.sweep(), [f"orphan-worktree: {stray.resolve()} (no lock, no claim)", "next: findings 1"])
 
+    def baseline(self):
+        """An earlier sweep: the first one only records the kinds it finds (#718)."""
+        runlog.append_event(self.env.repo, runlog.SWEEP, "ran", session="s1")
+
+    def test_a_first_sweep_is_the_baseline_and_reports_no_new_prompt(self):
+        self.prompt(command="gh pr list")
+        self.prompt(command="/usr/bin/git status", agent="orchestrate:worker")
+        self.serve()
+        self.assertEqual(self.sweep(), ["note: first sweep, 2 prompt kinds recorded as the baseline", "next: clean"])
+        kinds = [e["ref"] for e in self.env.events() if e["kind"] == "sweep" and e["outcome"] == "prompt-kind"]
+        self.assertEqual(kinds, ["orchestrator Bash gh", "worker Bash git"])
+        self.prompt(command="rm -rf x")
+        self.prompt(command="gh issue view 3")
+        self.serve()
+        self.assertEqual(self.sweep(), ["new-prompt: orchestrator Bash rm", "next: findings 1"])
+
+    def test_the_command_word_is_the_program_not_the_raw_first_token(self):
+        self.baseline()
+        for command in ("cd x && scripts/foo --bar", "(timeout 5 git status)", "FOO=1 BAR=2 /usr/bin/make test",
+                        "main; ls", 'echo "unterminated', "scripts\";"):
+            self.prompt(command=command)
+        self.serve()
+        out = self.sweep()
+        self.assertEqual(sorted(out[:-1]), ["new-prompt: orchestrator Bash ?", "new-prompt: orchestrator Bash git",
+                                            "new-prompt: orchestrator Bash main", "new-prompt: orchestrator Bash make",
+                                            "new-prompt: orchestrator Bash scripts/foo"])
+        self.assertEqual(out[-1], "next: findings 5")
+
     def test_a_new_prompt_kind_is_reported_once_across_sweeps(self):
+        self.baseline()
         self.prompt(command="gh pr list")
         self.prompt(command="/usr/bin/git status", agent="orchestrate:worker")
         self.serve()
@@ -108,6 +137,7 @@ class Sweep(unittest.TestCase):
         self.assertEqual(kinds, ["orchestrator Bash gh", "worker Bash git", "orchestrator Bash rm"])
 
     def test_a_digest_mark_or_more_than_forty_prompts_hide_no_kind(self):
+        self.baseline()
         self.prompt(command="gh pr list", time="2026-11-10T09:00:00+00:00")
         for i in range(45):  # the newest 40 lines of `prompts` would not reach the first kind
             self.prompt(command="git status", time=f"2026-11-10T10:{i:02d}:00+00:00")

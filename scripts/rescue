@@ -223,6 +223,7 @@ def run(argv=None) -> int:
     if ticket is None:
         return fail(f"{branch} is not named <number>-<slug>, so there is no ticket to check the overlap for")
 
+    CTX[:] = [root, ticket, branch]  # from here a failure is logged; the branch is refined once the worktree is found
     if by_number:
         try:
             record = claims.read_state(root / repo.STATE).get(str(ticket))

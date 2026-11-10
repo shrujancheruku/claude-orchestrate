@@ -12,7 +12,9 @@ Runs six checks and prints one line per finding, `<check>: <detail>`, then one `
 The thresholds are constants in this file (DUE_MERGES, ROUND_LIMIT), tested, not config lines.
 Running it writes a `sweep` event `ran` (the watermark) and one `prompt-kind` event per new kind (ref = the kind), to the run log,
 so `--due` and the seen set survive a restart and a compaction (session: --session, else the state file's, else `lead`). A prompt kind is
-`<role> <tool>`, plus the first word of the command for a Bash prompt.
+`<role> <tool>`, plus the program a Bash command runs (`command_word`: shlex-split; a leading `(`, `cd <dir> &&`, env assignments and
+`timeout <secs>` stripped; the basename of an absolute path, a relative one as written; `?` only when unparseable). The first sweep (no `ran` event yet) is the baseline: it records the
+kinds and prints one `note: first sweep, <n> prompt kinds recorded as the baseline` line, no `new-prompt` findings.
 --due reads only: `next: due <n>` when DUE_MERGES merges (`merge` events) have landed since the last `ran` event (all of them when
 there is none), else `next: not-due <n>`.
 Exit codes: 0 ran; 2 could not run (no `gh`, a failed `gh` or `git` call, not a repository), one line on stderr; a rate limit it would
@@ -21,6 +23,8 @@ not sleep through also ends `next: retry-after <time>`. Stdlib only, Python 3.9+
 
 import argparse
 import os
+import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -89,12 +93,43 @@ def prompt_kind(line):
     """`<role> <tool> <command word>` of a `scripts/prompts` list line (`<time> <role> <tool> <detail>`), or None for a header line."""
     if line.startswith(("prompts:", "by role:", "by tool:", "...")):
         return None
-    parts = line.split()
+    parts = line.split(None, 3)
     if len(parts) < 3:
         return None
     # Only a Bash command has a command word; for a file tool the detail is a path, and every new file would be a new kind.
-    word = os.path.basename(parts[3]) if len(parts) > 3 and parts[2] == "Bash" else ""
+    word = command_word(parts[3] if len(parts) > 3 else "") if parts[2] == "Bash" else ""
     return " ".join(p for p in (parts[1], parts[2], word) if p)
+
+
+ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def command_word(command) -> str:
+    """The program a Bash command runs, as the one shape key for a prompt kind: shlex-split, then strip a leading `(`, `cd <dir> &&`,
+    env assignments and a `timeout <secs>` wrapper, and take the basename of an absolute path (a relative one stays as written). `?` when the command can't be parsed or names nothing."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return "?"
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == "(" or ENV_ASSIGNMENT.match(t):
+            i += 1
+        elif t == "cd":
+            while i < len(toks) and toks[i] not in ("&&", ";"):
+                i += 1
+            i += 1
+        elif t == "timeout":
+            i += 2 if i + 1 < len(toks) and re.fullmatch(r"[0-9.]+[smhd]?", toks[i + 1]) else 1
+        else:
+            break
+    if i >= len(toks) or not re.search(r"[A-Za-z0-9]", toks[i]):
+        return "?"
+    word = toks[i]
+    return (os.path.basename(word) if word.startswith("/") else word) or "?"  # /usr/bin/git is git; scripts/foo stays scripts/foo
 
 
 def new_prompts(root) -> list:
@@ -140,7 +175,8 @@ def main(argv=None) -> int:
         found = claims.claims(root, root / STATE, snap.issues, snap.prs, snap.merged, session=args.session)
         findings = red_main(root, snap.default_branch) + claim_findings(found) + failed_rescues(root) + orphans(root, found)
         kinds = new_prompts(root)
-        findings += [f"new-prompt: {k}" for k in kinds] + rounds(root, snap.prs)
+        first_run = not any(e.get("outcome") == "ran" for e in runlog.read_kinds(root, [runlog.SWEEP]))
+        findings += ([] if first_run else [f"new-prompt: {k}" for k in kinds]) + rounds(root, snap.prs)
     except github.GhError as e:
         until = common.rate_limit_time(e.message)
         if until:
@@ -149,6 +185,9 @@ def main(argv=None) -> int:
         common.die(f"sweep: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError) as e:
         common.die(f"sweep: cannot run: {e}")
+    if first_run and kinds:
+        # No earlier sweep: every kind is already in the log, so none is news. Record them as the baseline, say so once.
+        print(f"note: first sweep, {len(kinds)} prompt kinds recorded as the baseline")
     for f in findings:
         print(f)
     # The lead has no state-file session of its own: events still need an id, or `ran` is never written and `--due` stays due.
