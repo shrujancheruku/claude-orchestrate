@@ -50,7 +50,8 @@ class WorkerReport(unittest.TestCase):
         return r.stdout.strip()
 
     def test_reviewer_report_with_a_suite_line_is_valid(self):
-        for suite in ("pass", "fail 2", "not run (S tier)", "`pass`"):
+        for suite in ("pass", "fail 2", "fail", "not run (S tier)", "`pass`",
+                      "pass (py_compile, run_parallel, plugin validate)", "fail (run_parallel: 2 modules)"):
             with self.subTest(suite=suite):
                 self.assertEqual(self.reviewer(f"verdict: approve\nround: 1\nsuite: {suite}\nblocking: 0\n"), "valid")
 
@@ -64,6 +65,7 @@ class WorkerReport(unittest.TestCase):
 
     def test_reviewer_report_with_another_suite_value_is_incomplete(self):
         self.assertEqual(self.reviewer("suite: probably fine\n"), "incomplete suite-unrecognised")
+        self.assertEqual(self.reviewer("suite: passing\n"), "incomplete suite-unrecognised")
 
     def test_reviewer_report_with_an_empty_suite_value_is_unrecognised(self):
         self.assertEqual(self.reviewer("suite:\n"), "incomplete suite-unrecognised")

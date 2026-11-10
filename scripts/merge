@@ -41,7 +41,8 @@ again later; nothing was closed or deleted). A PR found closed unmerged is clean
 "already in progress") only means wait and re-check; the merge command is run again on a 5xx.
 Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word: `merged` |
 `wait-ci <pr> <head>` | `re-review <pr>` | `send-back <pr>` (the lines above it are what the PR's owner gets) |
-`ask-user <why>` | `retry` | `could-not-run`. Before it, one `also: <verdict> <pr> ...` line per other PR the run
+`ask-user <why>` | `retry` | `retry-after <time>` (a rate limit, exit 2) | `could-not-run [<Class>: <message>]` (exit 2;
+an exception is this, with the traceback on stderr, never `ask-user`). Before it, one `also: <verdict> <pr> ...` line per other PR the run
 touched (--also-approved, the sweep): `wait-ci <pr> <head>`, `send-back <pr>` or `left <pr> <why>`. The exit codes
 are unchanged: 0 and 4 end `merged`, 5 `wait-ci`, 6 `re-review`, 3 `retry`, 2 `could-not-run`, and 1 (a refusal)
 `wait-ci`, `send-back` or `ask-user` by its clause.
@@ -411,22 +412,27 @@ def main(argv=None) -> int:
     if "--fast-forward-only" in (sys.argv[1:] if argv is None else argv):
         return run_fast_forward_only(argv)
     VERDICT["next"], VERDICT["also"], VERDICT["pr"] = None, [], "?"
+    github.rate_limited_until = None
     try:
         code = run_merge(argv)
     except Exception as e:  # a verdict line must always exist, even when the merge had landed (the traceback is on stderr)
+        # A program error is not a merge refusal: `ask-user` is only ever a real decision.
         traceback.print_exc()
-        verdict(f"ask-user {VERDICT['pr']} {type(e).__name__}: {why_of(str(e))}")
-        code = 1
+        verdict(f"could-not-run {type(e).__name__}: {why_of(str(e))}")
+        code = 2
     except SystemExit as e:  # common.die (2) or an argparse usage error (2); --help (0) prints no verdict
         if e.code in (0, None):
             raise
         code = e.code if isinstance(e.code, int) else 2
     for line in VERDICT["also"]:
-        say(f"also: {line}")
-    # A path that set no verdict falls back on its exit code: 3 timed out, 0 merged, anything else could not run.
-    fallback = {0: "merged", 3: "retry"}.get(code, "could-not-run")
-    say(f"next: {VERDICT['next'] or fallback}")
-    return code
+        word, _, rest = line.partition(" ")
+        common.also(word, rest)
+    # A path that set no verdict falls back on its exit code: 3 timed out, 0 merged, a rate limit retries after its
+    # time, anything else could not run.
+    until = github.rate_limit_verdict(code)
+    fallback = {0: "merged", 3: "retry"}.get(code) or ("retry-after " + until if until else "could-not-run")
+    word, _, rest = (VERDICT["next"] or fallback).partition(" ")
+    return common.verdict(word, rest, exit_code=code)
 
 
 def run_fast_forward_only(argv=None) -> int:

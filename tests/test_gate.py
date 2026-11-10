@@ -393,7 +393,7 @@ class GateTest(unittest.TestCase):
     def test_the_younger_of_two_open_prs_on_one_path_waits_for_the_older(self):
         self.prime(others=[{"number": 5, "headRefName": "12-older"}])
         r = self.gate()
-        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: rerun-after-ci"]), r.stdout + r.stderr)
+        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: wait-older 7 5"]), r.stdout + r.stderr)
         self.assertIn("waits for #12 (PR #5) to merge: src/a.py", r.stdout)
         self.assertNotIn("fail", r.stdout.replace("failed", ""))
         self.assertEqual((self.event()["outcome"], self.event()["failed"]), ("unknown", []))

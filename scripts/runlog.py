@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -146,11 +147,73 @@ def read_events(repo, session: str, start: datetime, end: datetime) -> list | No
     return out or None
 
 
+IDLE_REASONS = ("overlap", "gate", "empty", "unchecked", "limit")  # why a free slot stayed free (skills/run/SKILL.md, Profiling)
+PASS_SCOPES = ("full", "status", "wake", NUDGE_SCOPE)  # besides `#<ticket>` and `parent #<n>`
+_SCOPE = re.compile(r"(#\d+|parent #\d+)\Z")
+
+
+class BadPass(ValueError):
+    """A pass record off the schema; the message is the one line a CLI prints on stderr."""
+
+
+def _int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _tickets(v) -> bool:
+    return isinstance(v, list) and all(_int(n) and n > 0 for n in v)
+
+
+def validate_pass(entry) -> None:
+    """Raise BadPass unless `entry` is a pass record the profile can read (the one place the schema lives).
+
+    A nudge record is `{"scope": "nudge", "nudged": [ticket, ...]}`. Any other needs `scope`, `slots` and `free`;
+    `idle` (reason -> count, summing to `free`) is required except on a `wake`; the rest is optional and typed."""
+    if not isinstance(entry, dict):
+        raise BadPass("pass record: expected a JSON object")
+    scope = entry.get("scope")
+    if not isinstance(scope, str) or not (scope in PASS_SCOPES or _SCOPE.match(scope)):
+        raise BadPass(f"pass record: scope must be one of {', '.join(PASS_SCOPES)}, #<ticket> or parent #<n>, not {scope!r}")
+    if scope == NUDGE_SCOPE:
+        if set(entry) - {"scope", "nudged", "ts", "session"} or not entry.get("nudged") or not _tickets(entry["nudged"]):
+            raise BadPass("pass record: a nudge record is only `nudged`, a list of ticket numbers")
+        return
+    types = {
+        "slots": _int, "free": _int, "idle": lambda v: isinstance(v, dict), "takeable_waiting": _int,
+        "claimed": lambda v: isinstance(v, dict) and all(isinstance(k, str) and isinstance(x, str) for k, x in v.items()),
+        "greedy": lambda v: isinstance(v, bool), "limit_hit": lambda v: isinstance(v, bool),
+        "reset_at": lambda v: v is None or isinstance(v, str), "suggestion": lambda v: v is None or isinstance(v, str),
+        "dispatched": _tickets, "merged": _tickets, "nudged": _tickets,
+        "ts": lambda v: isinstance(v, str), "session": lambda v: isinstance(v, str),
+    }
+    unknown = sorted(set(entry) - set(types) - {"scope"})
+    if unknown:
+        raise BadPass(f"pass record: unknown field {', '.join(unknown)}")
+    for key in ("slots", "free"):
+        if key not in entry:
+            raise BadPass(f"pass record: missing {key}")
+    for key, ok in types.items():
+        if key in entry and not ok(entry[key]):
+            raise BadPass(f"pass record: bad {key}: {entry[key]!r}")
+    if entry["free"] < 0 or entry["slots"] < 1 or entry["free"] > entry["slots"]:
+        raise BadPass(f"pass record: free {entry['free']} must be between 0 and slots {entry['slots']}")
+    if "idle" not in entry:
+        if scope != "wake":
+            raise BadPass("pass record: missing idle (only a wake may omit it)")
+        return
+    for reason, count in entry["idle"].items():
+        if reason not in IDLE_REASONS or not _int(count) or count < 0:
+            raise BadPass(f"pass record: idle reason {reason!r} must be one of {', '.join(IDLE_REASONS)} with a count >= 0")
+    if sum(entry["idle"].values()) != entry["free"]:
+        raise BadPass(f"pass record: idle reasons sum to {sum(entry['idle'].values())}, not free {entry['free']}")
+
+
 def append_pass(repo, session: str, entry: dict) -> dict:
     """Append one pass (a dict from the orchestrator) to the pass log, stamped with ts and session.
-    An empty session raises NoSession and writes nothing."""
+    An empty session raises NoSession and an off-schema record raises BadPass (`validate_pass`); neither writes anything."""
     if not session:
         raise NoSession("runlog: no session, pass not written")
+    validate_pass(entry)
     entry = {"ts": _now(), "session": session, **entry}
     _append(repo, PASS_LOG, entry)
     return entry

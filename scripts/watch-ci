@@ -6,36 +6,41 @@ Each PR may be followed by the head to wait for, exactly as `merge` prints its `
 head is that commit, so the old head's green CI after an update-branch is never taken for the new one. `?` pins nothing.
 A merged or closed PR settles at once either way.
 
-Run it as a Monitor command so the orchestrator never sleeps or polls. Each line:
-    PR #<n> <pass|fail> <merge state> <head commit>
+Run it as a Monitor command so the orchestrator never sleeps or polls (every CI wait is this script; no budget or
+rate-limit rule suspends it). It is read-only: it names what to do and `ci-rerun` does it. Each PR that settles prints
+one `also:` line with its FULL head, and the run ends with one `next:` line (the verdict grammar, `docs/guide.md`):
+    also: ci-pass <pr> <head>            CI is green on that head
+    also: ci-fail <pr> <head>            CI is red (a closed unmerged PR counts as failed)
+    also: no-run <pr> <head>             no workflow run started on that head: close and reopen the PR once, then watch again
+    also: stuck <pr> <run id> <job id>   a finished job hangs in_progress: rerun that job (the watch carries on)
+    also: head-not-reached <pr> <sha>    the PR never reached the pinned head <sha>
+    also: gave-up <pr> <why>             gh kept failing, the PR is missing from gh's list, or a pass was withheld
+    next: settled | retry-after <time> | could-not-run
+`settled` ends the run (exit 0, or 3 when an `also:` line is an error kind: no-run, head-not-reached or gave-up);
+`retry-after <time>` is a rate limit, so run the watch again after that time; `could-not-run` is exit 2 with the reason
+on stderr. A `stuck` line is not a settle: the watch continues until every PR has settled.
 Each settle also appends one `ci` event (ref = the PR number). A PR with no checks yet counts as
 pending (checks may not be registered right after a push); the Monitor's timeout bounds the wait. A PR
 that is merged or closed settles at once.
 A run that stays `in_progress` is also read each tick (`GET actions/runs/<id>/jobs`: one request per
 in-progress run of a watched PR, so the count grows with those runs; a run is not read again once its stuck jobs
 are reported, until its checks change): a job whose steps are all `completed` yet whose status has stayed `in_progress` for
-5 minutes (`--stuck-after` overrides) prints once
-    PR #<n>: job <name> stuck in_progress with all steps done; rerun with gh run rerun <run id> --job <job id>
-and the watch carries on. Nothing is rerun; the orchestrator decides. A failed jobs read is skipped for that tick.
+5 minutes (`--stuck-after` overrides) prints its `stuck` line once and the watch carries on. Nothing is rerun. A failed
+jobs read is skipped for that tick.
 Each tick is one `gh pr list` request for every PR still watched, so the read load does not grow with the
 number of PRs. The default interval is 30 seconds with one or two PRs and 60 with three or more
 (`--interval` overrides it).
 A ready PR whose head has no check at all for 5 minutes (`--no-run-after` overrides) while the head has workflow files
 (`github.has_workflows`; with none, no run is expected and the watch just waits) did not get a workflow run (GitHub
-sometimes starts none after an update-branch): it ends with
-    PR #<n> error no CI run for <head>, close-and-reopen fires one
-and is no longer watched; the run skill closes and reopens the PR once, then watches again.
-A PR given a head it does not reach in that time (a later push, a lost update) ends
-    PR #<n> error head <sha> never reached; the PR is at <sha>
-A run that ended any PR with an `error` line never prints a `pass` afterwards: a PR that would pass then ends
-    PR #<n> error pass withheld: an earlier error in this run
-so a verdict read after a failure is never trusted; run watch-ci again.
+sometimes starts none after an update-branch): it ends with its `no-run` line and is no longer watched.
+A PR given a head it does not reach in that time (a later push, a lost update) ends with `head-not-reached`.
+A run that ended any PR with an error kind never prints a `ci-pass` afterwards: a PR that would pass then ends
+`gave-up <pr> pass withheld: an earlier error in this run`, so a verdict read after a failure is never trusted;
+run watch-ci again.
 A `gh` failure is retried; when `gh` fails 5 ticks in a row (a success resets the count) every watched PR
-ends with the line
-    PR #<n> error <one-line reason>
-and is no longer watched. A PR missing from the reply is retried on the next tick and ends the same way after
-3 misses in a row; the other PRs carry on. A `gh` failure that cannot clear (no repository or
-working directory) ends the watch at once as could-not-run.
+ends `gave-up` with the reason and is no longer watched. A PR missing from the reply is retried on the next tick and
+ends the same way after 3 misses in a row; the other PRs carry on. A `gh` failure that cannot clear (no repository or
+working directory) ends the watch at once as could-not-run; a rate limit ends it as `retry-after <time>`.
 The repository is resolved once at startup (the main checkout) and every `gh` call runs there, so a
 later change to the shell's directory, such as a removed worktree, cannot break the watch.
 Exit codes: 0 every PR settled; 2 could not run (no `gh`, no repository, a reply that is not a PR, an argument that
@@ -187,14 +192,30 @@ def check_stuck(root, pr, run_id, first_seen, reported, stuck_after):
         since = first_seen.setdefault(key, now)
         if now - since >= stuck_after and key not in reported:
             reported.add(key)
-            print(f"PR #{pr}: job {job.get('name')} stuck in_progress with all steps done; "
-                  f"rerun with gh run rerun {run_id} --job {job.get('id')}", flush=True)
+            common.also("stuck", pr, run_id, job.get("id"))
     # A sibling still working normally may stick later under the same checks, so the run is done only when
     # every in_progress job of it is stuck and reported.
     return bool(running) and all(k in reported for k in running)
 
 
 def main(argv=None) -> int:
+    """Watch, then print the one `next:` line (see the module docstring)."""
+    github.rate_limited_until = None
+    try:
+        code = watch(argv)
+    except SystemExit as e:  # an argparse usage error (2); --help (0) prints no verdict
+        if e.code in (0, None):
+            raise
+        code = e.code if isinstance(e.code, int) else 2
+    if code in (0, EXIT_ERROR):
+        return common.verdict("settled", exit_code=code)
+    until = github.rate_limit_verdict(code)
+    if until:
+        return common.verdict("retry-after", until, exit_code=code)
+    return common.verdict("could-not-run", exit_code=code)
+
+
+def watch(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("prs", nargs="+", help="PR numbers, each optionally followed by its head (merge's wait-ci hint)")
     ap.add_argument("--no-run-after", type=float, default=NO_RUN_AFTER,
@@ -223,14 +244,16 @@ def main(argv=None) -> int:
     errored = False
     first_seen, reported, done = {}, set(), set()  # done: (run, its in-progress URLs) with every stuck job reported
 
-    def give_up(pr, reason):
+    def give_up(pr, word, *args):
+        """End the watch of a PR with an error-kind `also:` line (exit 3)."""
         nonlocal errored
         pending.remove(pr)
         errored = True
-        print(f"PR #{pr} error {common.one_line(reason)}", flush=True)
+        common.also(word, pr, *(common.one_line(a) for a in args))
 
     while pending:
         github.reset_wait_budget()  # a tick of a loop that runs for hours gets its own wait budget
+        github.rate_limited_until = None  # only a limit that ends the run counts for its verdict
         try:
             views, reason = view_prs(root)
         except github.GhError as e:
@@ -240,7 +263,7 @@ def main(argv=None) -> int:
             failures += 1
             if failures >= MAX_FAILURES:
                 for pr in list(pending):
-                    give_up(pr, reason)
+                    give_up(pr, "gave-up", reason)
         else:
             failures = 0
             for pr in list(pending):
@@ -248,7 +271,7 @@ def main(argv=None) -> int:
                 if view is None:
                     misses[pr] += 1
                     if misses[pr] >= MAX_MISSES:
-                        give_up(pr, "not in gh's pr list")
+                        give_up(pr, "gave-up", "not in gh's pr list")
                     continue
                 misses[pr] = 0
                 head_now = (view.get("headRefOid") or "")
@@ -258,7 +281,7 @@ def main(argv=None) -> int:
                     # A head the PR never reaches (a later push, a lost update) ends the watch like a missing run.
                     since = unreached.setdefault(pr, time.monotonic())
                     if time.monotonic() - since >= args.no_run_after:
-                        give_up(pr, f"head {want[:7]} never reached; the PR is at {head_now[:7]}")
+                        give_up(pr, "head-not-reached", want)
                     continue
                 unreached.pop(pr, None)
                 result = judge(view)
@@ -269,12 +292,12 @@ def main(argv=None) -> int:
                     # No workflow files on the head means no run is expected (ADR-0012: green, as `merge` reads it):
                     # keep waiting rather than blame a missing run. An unreadable listing is asked again next tick.
                     if time.monotonic() - seen[1] >= args.no_run_after and has_workflows(root, head_now):
-                        give_up(pr, f"no CI run for {head_now[:7]}, close-and-reopen fires one")
+                        give_up(pr, "no-run", head_now)
                         continue
                 else:
                     empty_since.pop(pr, None)
                 if result == "pass" and errored:
-                    give_up(pr, "pass withheld: an earlier error in this run")
+                    give_up(pr, "gave-up", "pass withheld: an earlier error in this run")
                     continue
                 if result is None:
                     if not view.get("isDraft"):
@@ -285,7 +308,7 @@ def main(argv=None) -> int:
                     continue
                 pending.remove(pr)
                 merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
-                print(f"PR #{pr} {result} {merge} {head}", flush=True)
+                common.also("ci-" + result, pr, view.get("headRefOid") or "?")
                 try:
                     # root is the main checkout resolved at startup, where the run log lives.
                     runlog.append_event(root, "ci", result, ref=common.pr_ref(pr)[1], merge_state=merge, head=head)

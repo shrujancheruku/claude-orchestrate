@@ -22,7 +22,8 @@ worktree, so they see the PR's code); default is the current directory. Each run
 seconds (default 1800); one that outlives it is killed and fails with "timed out after Ns".
 Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word:
 `review <head>` (exit 0) | `send-back <pr>` (exit 1; the lines above it are what the worker gets) |
-`rerun-after-ci` (exit 3) | `could-not-run` (exit 2, the reason on stderr).
+`rerun-after-ci` (exit 3, mergeability still UNKNOWN) | `wait-older <pr> <older>` (exit 3, the PR waits for the older
+PR to merge) | `retry-after <time>` (exit 2, a rate limit) | `could-not-run` (exit 2, the reason on stderr).
 Stdlib only, Python 3.9+.
 """
 
@@ -144,6 +145,7 @@ def overlap_check(pr, cwd, snap):
         return check("no overlap with held paths", True)
     if result.code == 1:
         return check("no overlap with held paths", False, "\n".join(result.lines()))
+    NEXT["older"] = sorted({o.pr for o in result.waits})[0]  # the verdict names the oldest PR to wait for
     return checks.Result("no overlap with held paths: " + "; ".join(result.wait_lines()), WAIT, 0.0, None, "")
 
 
@@ -221,6 +223,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
 def main(argv=None) -> int:
     """Run the gate, then print the one `next:` line (see the module docstring)."""
     NEXT.clear()
+    github.rate_limited_until = None
     try:
         code = run_gate(argv)
     except SystemExit as e:  # an argparse usage error (2); --help (0) prints no verdict
@@ -228,8 +231,18 @@ def main(argv=None) -> int:
             raise
         code = e.code if isinstance(e.code, int) else 2
     pr, head = NEXT.get("pr", "?"), NEXT.get("head")
-    print("next: " + {0: f"review {head}", 1: f"send-back {pr}", 3: "rerun-after-ci"}.get(code, "could-not-run"))
-    return code
+    if code == 0:
+        return common.verdict("review", head, exit_code=code)
+    if code == 1:
+        return common.verdict("send-back", pr, exit_code=code)
+    if code == 3:  # waiting for an older PR is its own word; an UNKNOWN mergeability is a rerun after CI
+        if NEXT.get("older") is not None and not NEXT.get("unknown"):
+            return common.verdict("wait-older", pr, NEXT["older"], exit_code=code)
+        return common.verdict("rerun-after-ci", exit_code=code)
+    until = github.rate_limit_verdict(code)
+    if until:
+        return common.verdict("retry-after", until, exit_code=code)
+    return common.verdict("could-not-run", exit_code=code)
 
 
 def run_gate(argv=None) -> int:
@@ -270,6 +283,7 @@ def run_gate(argv=None) -> int:
     # An UNKNOWN mergeability that was the only failure is not a verdict: rerun, don't send to the worker.
     waits = any(r.status == WAIT for r in results)
     undecided = (unknown and len(failed) == 1) or (waits and not failed)
+    NEXT["unknown"] = unknown and len(failed) == 1  # the mergeability, not the older PR, is what the rerun waits for
     outcome = "unknown" if undecided else "fail" if failed else "pass"
     # The event lands in the main checkout's run log, beside the pass log.
     try:

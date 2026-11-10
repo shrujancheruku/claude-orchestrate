@@ -388,11 +388,6 @@ function orchestrator(p) {
   const m = p.metrics, j = m.jobs, c = m.context;
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Orchestrator turns by job"));
-  // Schema-2 profiles written before these metrics lack them.
-  if (!j || !c) {
-    card.append(el("p", { class: "sub" }, "This profile predates orchestrator metrics; regenerate it with scripts/profile.py."));
-    return card;
-  }
   const merged = m.tickets_merged;
   const per = (job, key, perKey) => (merged ? job[perKey] : job[key]);
   card.append(el("p", { class: "sub" }, `${j.turns} turns, ${usd(j.usd)} proxy in all. ` + (merged ? `Bars are turns per merged ticket (${merged} merged).` : "No tickets merged, so bars are turns in all.")));
@@ -489,11 +484,6 @@ function quality(p) {
   const m = p.metrics, r = m.review;
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Review quality floor"));
-  // Schema-2 profiles written before these metrics lack them.
-  if (!r) {
-    card.append(el("p", { class: "sub" }, "This profile predates review metrics; regenerate it with scripts/profile.py."));
-    return card;
-  }
   if (!r.reviewed_prs) {
     card.append(el("p", { class: "sub" }, "No reviewer verdicts in this session's transcripts."));
   } else {
@@ -648,8 +638,8 @@ function render() {
 }
 
 function add(data, name) {
-  if (!data || data.schema !== 2 || !data.metrics) {
-    const why = data && data.schema != null && data.schema !== 2 ? `is schema ${data.schema}; regenerate it with scripts/profile.py` : "is not an orchestrate profile";
+  if (!data || data.schema !== 3 || !data.metrics) {
+    const why = data && data.schema != null && data.schema !== 3 ? `is schema ${data.schema}; regenerate it with scripts/profile.py` : "is not an orchestrate profile";
     rejected.push(`${name} ${why}`);
     return;
   }

@@ -87,6 +87,48 @@ def pr_ref(s) -> tuple:
     return pr, int(pr) if pr.isdigit() else pr
 
 
+# --- the verdict line (ADR-0014, GLOSSARY.md) -------------------------------------------------------------------
+# The last line of an orchestrator-facing script is `next: <word> [<args>]`, the word one of VERDICT_WORDS; a script
+# that touched other PRs first prints one `also: <word> <args>` line each. The orchestrator applies the words; exit
+# codes keep their numbers for tests and the guard. This dict is the one list: word -> the arguments it carries.
+VERDICT_WORDS = {
+    # merge, and the gate's hand-offs
+    "merged": "", "cleaned": "<pr>", "wait-ci": "<pr> <head>", "re-review": "<pr>", "send-back": "<pr>",
+    "ask-user": "<why>", "retry": "", "left": "<pr> <why>",
+    # gate
+    "review": "<head>", "rerun-after-ci": "", "wait-older": "<pr> <older>",
+    # watch-ci: one `also:` per PR that settled, then `settled`
+    "settled": "", "ci-pass": "<pr> <head>", "ci-fail": "<pr> <head>", "no-run": "<pr> <head>",
+    "stuck": "<pr> <run id> <job id>", "head-not-reached": "<pr> <sha>", "gave-up": "<pr> <why>",
+    # every script: a rate limit, and a run that could not happen
+    "retry-after": "<time>", "could-not-run": "[<why>]",
+}
+RATE_LIMIT_TIME = re.compile(r"(?:rate limit until|resets at)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)")
+
+
+def _verdict_line(word, args) -> str:
+    if word not in VERDICT_WORDS:
+        raise ValueError(f"unknown verdict word {word!r}; the list is common.VERDICT_WORDS")
+    return " ".join([word, *(str(a) for a in args if str(a) != "")])
+
+
+def verdict(word, *args, exit_code) -> int:
+    """Print the run's one `next: <word> <args>` line and return `exit_code`, for `return common.verdict(...)`."""
+    print("next: " + _verdict_line(word, args), flush=True)
+    return exit_code
+
+
+def also(word, *args) -> None:
+    """Print one `also: <word> <args>` line: a PR other than the primary one that the run touched."""
+    print("also: " + _verdict_line(word, args), flush=True)
+
+
+def rate_limit_time(text) -> str | None:
+    """The time a rate-limit message says to retry after (`rate limit until <time>`), or None when it is no rate limit."""
+    m = RATE_LIMIT_TIME.search(str(text or ""))
+    return m.group(1) if m else None
+
+
 def die(message: str) -> None:
     """Exit with "could not run" (2): message on stderr, no traceback."""
     print(message, file=sys.stderr)

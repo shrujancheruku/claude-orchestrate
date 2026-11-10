@@ -174,6 +174,18 @@ class GhError(Exception):
     def __init__(self, kind: str, message: str):
         super().__init__(message)
         self.kind, self.message = kind, message
+        if kind == RATELIMITED:
+            # A CLI's main() reads this to end `next: retry-after <time>` however deep the call that was limited.
+            global rate_limited_until
+            rate_limited_until = common.rate_limit_time(message) or _utc(clock() + DEFAULT_PAUSE)
+
+
+rate_limited_until = None  # the retry time of the last rate limit this process gave up on, or None
+
+
+def rate_limit_verdict(code: int):
+    """`retry-after <time>` when `code` is a could-not-run exit and this process gave up on a rate limit, else None."""
+    return rate_limited_until if code == 2 else None
 
 
 def could_not_run(e: GhError) -> bool:
@@ -577,7 +589,7 @@ def call(*args, cwd=None, idempotent: bool = False) -> str:
         pause = after if after is not None else (reset - clock() if empty and reset is not None and reset > clock() else DEFAULT_PAUSE)
         _record_reset(cwd, clock() + pause)
         if attempt == TRIES:
-            raise GhError(RATELIMITED, message)
+            raise GhError(RATELIMITED, f"{message} (rate limit until {_utc(clock() + pause)})")
         # The reset is recorded above, so a wait over the budget is returned, not slept; the caller retries after it.
         print(f"github: rate limited, retrying in {pause}s (try {attempt} of {TRIES})", file=sys.stderr)
         _wait_until(clock() + pause, cwd)

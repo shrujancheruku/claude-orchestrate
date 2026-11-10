@@ -230,9 +230,10 @@ class GlossaryTerms(unittest.TestCase):
 class VerdictLines(unittest.TestCase):
     """`gate` and `merge` end with one `next:` verdict line; the run skill names every word and no exit code (#347)."""
 
-    GATE = ("review <head>", "send-back <pr>", "rerun-after-ci", "could-not-run")
+    GATE = ("review <head>", "send-back <pr>", "rerun-after-ci", "wait-older <pr> <older>", "retry-after <time>",
+            "could-not-run")
     MERGE = ("merged", "wait-ci <pr> <head>", "re-review <pr>", "send-back <pr>", "ask-user <why>", "retry",
-             "could-not-run")
+             "retry-after <time>", "could-not-run [<Class>: <message>]")
     ALSO = ("wait-ci <pr> <head>", "send-back <pr>", "left <pr> <why>")
 
     def skill(self):
@@ -292,7 +293,8 @@ class ReviewerChecksOutByHash(unittest.TestCase):
     def test_run_skill_reruns_a_stale_head_and_owns_the_reviewer_worktree(self):
         self.assertIn("is stale: run it again", self.RUN)
         self.assertIn("detached `pr-<n>` worktree under its scratchpad", self.RUN)
-        self.assertIn("until that lands, remove the `pr-<n>` trees", self.RUN)
+        # `merge` removes the scratch trees when the PR lands; the orchestrator never does (#540).
+        self.assertNotIn("remove the `pr-<n>` trees", self.RUN)
 
     def test_run_skill_classifies_every_reviewer_report_with_the_script(self):
         self.assertIn('scripts/worker-report" <pr> --reviewer', self.RUN)
