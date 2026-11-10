@@ -107,6 +107,8 @@ VERDICT_WORDS = {
     "parked": "<pr>", "unparked": "<pr>", "refused": "<why>",
     # sweep and fold
     "clean": "", "findings": "<n>", "due": "<n>", "not-due": "<n>", "folded": "<from> <into>",
+    # frontier, snapshot, threads, lead-route, rescue: the run happened; rescue's live lock held by another session
+    "done": "", "elsewhere": "",
     # every script: a rate limit, and a run that could not happen
     "retry-after": "<time>", "could-not-run": "[<why>]",
 }

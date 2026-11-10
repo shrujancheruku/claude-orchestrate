@@ -172,6 +172,27 @@ def gh_pr_list(prs, *prefix):
     return gh_pulls(prs, "open" if "open" in prefix else "closed")
 
 
+class Run:
+    """A script run split at its verdict: `stdout` is what precedes the one closing `next:` line (ADR-0014), which is
+    `verdict`. A run whose last line is no `next:` line, or that prints a second one, fails here, so a test that wraps
+    `env.run` in it checks the line on every call."""
+
+    def __init__(self, r):
+        lines = r.stdout.splitlines(keepends=True)
+        if not lines or not lines[-1].startswith("next: ") or any(l.startswith("next: ") for l in lines[:-1]):
+            raise AssertionError(f"not exactly one closing next: line: {r.stdout!r}")
+        self.returncode, self.stderr = r.returncode, r.stderr
+        self.stdout, self.verdict = "".join(lines[:-1]), lines[-1].strip()
+
+
+def verdict_runs(env, *scripts):
+    """Make `env.run` return a Run (stdout without the closing `next:` line, plus `.verdict`) for the named scripts, or
+    for every script when none is named."""
+    run = env.run
+    env.run = lambda script, *a, **k: Run(run(script, *a, **k)) if not scripts or script in scripts else run(script, *a, **k)
+    return env
+
+
 class ScriptEnv:
     """Use as `env = ScriptEnv(); self.addCleanup(env.close)`.
 

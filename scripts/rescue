@@ -27,7 +27,9 @@ ticket branch), so a worker stopped before it made the ticket branch, whose work
 No worktree on the branch (or for the ticket): `nothing to rescue: no worktree on <branch | #n>`, exit 0 (the remote branch is the whole state).
 Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something held or that could not be checked
 (dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, a lock step 1 lifted put back, or said to be not put back; the worktree stays unless step 5 already removed it, and an exit 2 after that leaves it removed);
-3 a live lock that is not this session's (`live <pid | ?> <worktree>`). Stdlib only, Python 3.9+.
+3 a live lock that is not this session's (`live <pid | ?> <worktree>`).
+Last line, always (ADR-0014): `next: done` (0) | `ask-user overlap` (1) | `elsewhere` (3) | `retry-after <time>` (2, a rate limit)
+| `could-not-run [<Class>: <message>]` (2). Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
@@ -175,10 +177,10 @@ def overlap(root, changed, ticket) -> int:
 
 
 def main(argv=None) -> int:
-    try:
-        return run(argv)
-    except Exception as e:  # unexpected (an OSError from a subprocess, say): put the lifted locks back like any exit 2
+    """Run, then end with the one `next:` line (see the module docstring)."""
+    def crashed(e):  # unexpected (an OSError from a subprocess, say): put the lifted locks back like any exit 2
         return fail(f"unexpected {type(e).__name__}: {common.one_line(e)}")
+    return github.finish(run, argv, {0: ("done",), 1: ("ask-user", "overlap"), 3: ("elsewhere",)}, on_error=crashed)
 
 
 def run(argv=None) -> int:

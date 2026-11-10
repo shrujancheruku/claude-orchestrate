@@ -231,6 +231,42 @@ def rate_limit_verdict(code: int):
     return rate_limited_until if code == 2 else None
 
 
+def finish(run, argv, words, on_error=None) -> int:
+    """Run a CLI's `run(argv)` and end it with the one `next:` line (ADR-0014), returning its exit code unchanged.
+    `words` maps an exit code to its verdict, `(word, *args)` or a callable returning that tuple (read after the run,
+    for a word that carries what the run found). Exit 2 is `retry-after <time>` when this process gave up on a rate
+    limit, else `could-not-run`, with `<Class>: <message>` after it when the run crashed (the traceback goes to stderr,
+    unless `on_error(e)` is given: it reports the crash itself, cleans up and returns the exit code). An exit code `words` lacks is `could-not-run`."""
+    global rate_limited_until
+    rate_limited_until = None
+    crash = ""
+    try:
+        code = run(argv)
+    except SystemExit as e:  # common.die or an argparse usage error (2); --help (0) prints no verdict
+        if e.code in (0, None):
+            raise
+        if not isinstance(e.code, int):
+            print(e.code, file=sys.stderr)
+        code = e.code if isinstance(e.code, int) else 2
+    except Exception as e:  # a program error is could-not-run, never a decision
+        if on_error is None:  # a script with its own handler says it in its own words (rescue: one stderr line)
+            import traceback
+            traceback.print_exc()
+        crash = f"{type(e).__name__}: {common.one_line(e)}"
+        code = on_error(e) if on_error else 2
+    if code == 2:
+        until = rate_limit_verdict(code)
+        if until:
+            return common.verdict("retry-after", until, exit_code=code)
+        return common.verdict("could-not-run", crash, exit_code=code)
+    word = words.get(code)
+    if callable(word):
+        word = word()
+    if word is None:
+        return common.verdict("could-not-run", exit_code=code)
+    return common.verdict(*word, exit_code=code)
+
+
 def could_not_run(e: GhError) -> bool:
     """True when the script should exit 2 ("could not run") rather than treat the call as one more failure."""
     return e.kind in (MISSING, MALFORMED, RATELIMITED, SERVER_ERROR) or (e.kind == FAILED and bool(NO_REPO.search(e.message)))
