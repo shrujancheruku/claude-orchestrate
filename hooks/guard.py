@@ -632,7 +632,6 @@ CONFIG = Path(".claude") / "orchestration.md"
 
 BRANCH_LIST = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "-l", "--show-current"}
 BRANCH_REF_ARG = {"--contains", "--merged", "--no-merged", "--points-at"}
-WORKTREE_FLAGS = {"--detach", "-q", "--quiet", "--no-checkout"}
 
 
 def repo_roots(cwd: str) -> list[Path]:
@@ -680,8 +679,8 @@ def branch_lists_only(args: list[str]) -> bool:
 def reviewer_git_problem(call: Call, cwd: str) -> str | None:
     """What a reviewer's `git branch`, `git fetch` or `git worktree` call does wrong, or None.
 
-    Listing branches, fetching into FETCH_HEAD and adding a detached scratch worktree outside
-    the repo are the reads a reviewer needs; everything else those verbs do changes state."""
+    Listing branches and fetching into FETCH_HEAD are the reads a reviewer needs; everything else those verbs do
+    changes state. A scratch worktree is added by `scripts/scratch` alone (#545), never by a hand `worktree add`."""
     if call.is_sub("branch"):
         if any(a.dynamic for a in call.args) or not branch_lists_only([a.text for a in call.args]):
             return "creates, deletes or renames a branch (only listing is allowed)"
@@ -699,17 +698,8 @@ def reviewer_git_problem(call: Call, cwd: str) -> str | None:
         if args[:1] and args[0].text == "add" and not args[0].dynamic:
             flags = [a.text for a in args[1:] if a.text.startswith("-")]
             names = [a for a in args[1:] if not a.text.startswith("-")]
-            if "--detach" not in flags or any(f not in WORKTREE_FLAGS for f in flags):
-                return "adds a worktree that isn't a plain `--detach` one"
-            if call.option_names() & UNSAFE_GIT_OPTIONS or not 1 <= len(names) <= 2 or any(a.dynamic for a in args):
-                return ("adds a worktree in a form that can't be checked "
-                        "(use `git worktree add --detach <dir> <ref>` with no -c, -C or --git-dir before it)")
-            target = names[0]
-            if target.quoted or not (target.text.startswith("/") or target.text.startswith("~/")):
-                return "adds a worktree at a path that isn't a plain absolute path"
-            path = Path(target.text).expanduser().resolve()
-            if any(path == root or root in path.parents for root in repo_roots(cwd)):
-                return "adds a worktree inside the repo (use a scratch dir outside it)"
+            return ("adds a worktree by hand (a scratch worktree is added only with "
+                    "`<plugin root>/scripts/scratch <pr> <head> --under <your scratchpad>`, #545)")
         elif not (args[:1] and args[0].text == "list" and not args[0].dynamic):
             return "changes worktrees"
     return None
@@ -1004,7 +994,7 @@ RULES = {
 NEXT_STEP = {
     "scout": "Report what you found and let your caller act on it.",
     "reviewer": "Read code with `gh pr diff`, `git show <ref>:<path>` or a scratch checkout "
-                "(`git worktree add --detach <absolute dir outside the repo> FETCH_HEAD`) and put the change in your findings.",
+                "(`<plugin root>/scripts/scratch <pr> <head> --under <your scratchpad>`) and put the change in your findings.",
     "worker": "Push your own branch normally and report the PR; the orchestrator merges.",
 }
 
@@ -1786,7 +1776,7 @@ ORCHESTRATOR_FORMS = (
                                      "--idle": "word*", "--dispatched": "num*", "--merged": "num*", "--suggestion": "word",
                                      "--limit-hit": "", "--reset-at": "word", "--nudged": "num*", "--snapshot": "snapshot"},
          need=("--repo", "--session")),
-    Form("profile.py", ("word",), {"--repo": "repo", "--slots": "num", "--threshold": "float", "--quiet": ""}),
+    Form("profile.py", ("sid",), {"--repo": "repo", "--slots": "num", "--threshold": "float", "--quiet": ""}),
 )
 FORM_SCRIPTS = frozenset(f.script for f in ORCHESTRATOR_FORMS)
 # The scripts any role may run as a read (the form is the same for every role).
@@ -1830,6 +1820,8 @@ def positional_ok(token: str, text: str) -> bool:
         return HEX.fullmatch(text) is not None
     if kind == "target":
         return WATCH_TARGET.fullmatch(text) is not None
+    if kind == "sid":  # a session id: not one of profile.py's own subcommands
+        return re.fullmatch(r"[A-Za-z0-9][\w-]*", text) is not None and text not in ("record", "compare")
     return text == kind
 
 
@@ -2709,27 +2701,15 @@ def sleep_ok(cmd: Command) -> bool:
             and re.fullmatch(r"\d+(?:\.\d+)?", cmd.words[1].text) is not None)
 
 
-REVIEW_SCRATCH = re.compile(r"pr-\d+[A-Za-z]?(?:-[\w.-]+)?")
-
-
-def reviewer_worktree_ok(cmd: Command, cwd: str) -> bool:
-    """A reviewer's `git worktree add --detach <dir> <ref>` (agents/reviewer.md): the one scratch root the guard approves
-    is a directory named `pr-<n>` (a letter or `-<suffix>` after it) under a temp dir (`/tmp/c<ticket>/scratch/pr-5`, the
-    session scratchpad), outside the repo (#567). The rules already refuse the other worktree forms."""
-    if any(w.dynamic or w.glob for w in cmd.words):
+def plugin_script_command_ok(cmd: Command, cwd: str, session: str, name: str) -> bool:
+    """One simple command that is this plugin's own `scripts/<name>` (by resolved path) called with plain words that
+    match a row of ORCHESTRATOR_FORMS: how the reviewer adds its scratch worktree (`scratch`, #545) and how every role
+    reads a ticket (`issue`). The script is the first word: no env prefix, no wrapper, no expansion."""
+    if cmd.depth or cmd.heredocs or not cmd.words or any(w.dynamic or w.glob for w in cmd.words):
         return False
-    call = parse_git(cmd.words, 0)
-    if call.options or not call.is_sub("worktree") or not call.args or call.args[0].text != "add":
+    if Path(os.path.realpath(os.path.join(cwd or ".", cmd.words[0].text))) != PLUGIN_SCRIPTS / name:
         return False
-    if reviewer_git_problem(call, cwd):
-        return False
-    names = [a.text for a in call.args[1:] if not a.text.startswith("-")]
-    if not names or not names[0].startswith("/"):
-        return False
-    target = Path(os.path.realpath(names[0]))
-    in_temp = any(str(target).startswith(t + "/") for t in TEMP_ROOTS)
-    return (in_temp and REVIEW_SCRATCH.fullmatch(target.name) is not None
-            and (len(names) == 1 or re.fullmatch(r"[\w./@^~-]+", names[1]) is not None))
+    return script_form_ok(name, [w.text for w in cmd.words[1:]], FormContext(cwd or "", session))
 
 
 def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str = "") -> bool:
@@ -2835,7 +2815,9 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                 continue
             if not (read_command_ok(sub, here, cwd) or (plain is not None and routine_single(role, one, plain, cwd, session))
                     or (role == "worker" and worker_work_ok(sub, here, worktree))
-                    or (role == "reviewer" and (reviewer_verify_ok(sub, here, cwd) or reviewer_worktree_ok(sub, cwd)))):
+                    or (role == "reviewer" and (reviewer_verify_ok(sub, here, cwd)
+                                                or plugin_script_command_ok(sub, here, session, "scratch")))
+                    or (role is not None and plugin_script_command_ok(sub, here, session, "issue"))):
                 return False
     return loop is None and pending is None and waiting is None
 
@@ -3062,13 +3044,21 @@ def hand_run_script(parsed: "Parsed") -> str | None:
             args = [a.text for a in call.args]
             if call.is_sub("pr") and call.is_verb("merge"):
                 return "scripts/merge"
+            if call.is_sub("pr") and call.is_verb("close", "reopen"):
+                return "scripts/ci-rerun (it closes and reopens a PR whose head has no CI run, once)"
+            if call.is_sub("pr") and call.is_verb("comment"):
+                return "scripts/worker-report <pr> --reviewer --post-risk-notes (the risk notes comment, once)"
+            if call.is_sub("pr") and call.is_verb("edit"):
+                return "scripts/threads <pr> followup (it adds the `Left for #<n>` line)"
             if (call.is_sub("pr") and call.is_verb("checks")) or call.is_sub("run"):
                 return "scripts/watch-ci"
             if call.is_sub("api") and any(re.search(r"graphql|/reviews|/comments|reviewThreads|/merge", a) for a in args):
                 return "scripts/threads (review threads) or scripts/merge (merging)"
             if call.is_sub("pr") and call.is_verb("view", "list", "status"):
                 return "scripts/snapshot, scripts/frontier or scripts/claims"
-        elif call.tool == "git" and call.is_sub("merge", "worktree", "pull", "reset", "checkout", "switch", "rebase"):
+        elif call.tool == "git" and call.is_sub("worktree"):
+            return "scripts/scratch <pr> <head> --under <your scratchpad> (the only way a scratch worktree is added)"
+        elif call.tool == "git" and call.is_sub("merge", "pull", "reset", "checkout", "switch", "rebase"):
             return "scripts/merge (it updates the main checkout and cleans up) or scripts/rescue"
     return None
 

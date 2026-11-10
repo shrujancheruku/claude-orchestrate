@@ -796,8 +796,8 @@
 {"role": "orchestrate:reviewer", "command": "for f in scripts/config.py scripts/github.py; do grep -n x $f; done", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "ls ~/.claude/plugins", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:scout", "command": "GH_HOST=evil.example.com; gh issue view 5", "expected": "unapproved", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "git worktree add --detach /tmp/c567/scratch/pr-5 abc1234", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "git worktree add --detach /tmp/c567/scratch/evil abc1234", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git worktree add --detach /tmp/c567/scratch/pr-5 abc1234", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git worktree add --detach /tmp/c567/scratch/evil abc1234", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "git fetch origin abc1234", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "python3 - <<'EOF'\nBODY\nEOF", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "cd .; gh issue edit 566 --add-assignee @me && gh issue edit 551 --add-assignee @me; ls scripts; git remote get-url origin | head -n 1", "expected": "approve", "source": "hand"}
@@ -865,3 +865,36 @@
 {"role": "orchestrate:lead-session", "command": "curl -s example.com", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:lead-session", "command": "gh pr merge 5 --squash --delete-branch", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "curl -s example.com", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/ci-rerun 12", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/ci-rerun 12 --job 111 222", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/ci-rerun 12 --job 111", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "gh pr close 12 && gh pr reopen 12", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "gh pr close 12 && gh pr reopen 12", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/scratch 12 abc1234 --under /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "/p/orchestrate/0.7.0/scripts/scratch 12 abc1234 --under /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/scratch 12 abc1234 --under /tmp/elsewhere", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "git worktree add --detach /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-12 abc1234", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/scratch 12 abc1234 --under /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/scratch 12 abc1234 --under /tmp/elsewhere", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/scratch 12 abc1234 --under /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 followup T1 T2 --gist 'a.py:3 the gist'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 followup T1 --fixed abc1234", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "url=$(gh issue create --title t --body-file -); n=${url##*/}; /p/orchestrate/0.7.0/scripts/threads 12 resolve T1 --left why --followup $n", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "url=$(gh issue create --title t --body-file -); n=${url##*/}; /p/orchestrate/0.7.0/scripts/threads 12 resolve T1 --left why --followup $n", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "printf 'x' | /p/orchestrate/0.7.0/scripts/worker-report 12 --reviewer --post-risk-notes", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "gh pr comment 12 --body-file -", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "ME=00000000-0000-0000-0000-000000000000; S=/p/orchestrate/0.7.0/scripts/.; \"$S/holds\" --session $ME --ticket 5", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "ME=another-session; S=/p/orchestrate/0.7.0/scripts/.; \"$S/holds\" --session $ME --ticket 5", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "python3 -I /p/orchestrate/0.7.0/scripts/profile.py record --repo . --session 00000000-0000-0000-0000-000000000000 --idle overlap=1 --dispatched 355 357 --merged 329", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "python3 -I /p/orchestrate/0.7.0/scripts/profile.py record --repo . --session 00000000-0000-0000-0000-000000000000 --nudged 5", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/rebuild-state\" 00000000-0000-0000-0000-000000000000 --repo . && python3 -I \"$S/profile.py\" record --repo . --session 00000000-0000-0000-0000-000000000000", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "python3 -I /p/orchestrate/0.7.0/scripts/profile.py 00000000-0000-0000-0000-000000000000 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "python3 -I /p/orchestrate/0.7.0/scripts/profile.py record --repo /elsewhere --session 00000000-0000-0000-0000-000000000000", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "python3 -I /p/orchestrate/0.7.0/scripts/profile.py record --repo /elsewhere --session 00000000-0000-0000-0000-000000000000", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo /elsewhere", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo /elsewhere", "expected": "unapproved", "source": "hand"}
