@@ -3247,7 +3247,7 @@ def hand_run_script(parsed: "Parsed") -> str | None:
             args = [a.text for a in call.args]
             if call.is_sub("pr") and call.is_verb("merge"):
                 return "scripts/merge"
-            if call.is_sub("pr") and call.is_verb("ready") and "--undo" in call.option_names():
+            if call.is_sub("pr") and call.is_verb("ready"):  # parse_gh drops flags, so `--undo` is not visible
                 return "scripts/park-pr <pr> --why \"<text>\" (it takes the PR out of the merge queue)"
             if call.is_sub("pr") and call.is_verb("close", "reopen"):
                 return ("scripts/park-pr <pr> --why \"<text>\" or --unpark (park a PR behind a newer PR's fix), or "
