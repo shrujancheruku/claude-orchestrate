@@ -120,13 +120,25 @@ def harness_lock(path, cwd):
 
 
 PR_BODY_FILE = ".claude/pr-body.md"
+# Where a worker leaves the PR body it wrote for `gh pr create --body-file`: the old `.claude/` spot (#404), and the
+# worktree root since #582 made a worktree file the place for it (#624). Either, or both, alone goes with the tree.
+PR_BODY_FILES = (PR_BODY_FILE, "pr-body.md")
 
 
 def only_pr_body_untracked(path) -> bool:
     """True when the one change in the worktree at `path` is an untracked `.claude/pr-body.md`: the file older
     workers and briefs wrote for `gh pr create --body-file` (#404). Anything else, or a failed call, is False."""
     st = common.run("git", "status", "--porcelain", "-z", "--untracked-files=all", cwd=path)
-    return st.code == 0 and [e for e in st.stdout.split("\0") if e] == [f"?? {PR_BODY_FILE}"]
+    entries = [e for e in st.stdout.split("\0") if e]
+    return st.code == 0 and bool(entries) and all(e in {f"?? {f}" for f in PR_BODY_FILES} for e in entries)
+
+
+def untracked_names(path, limit=5) -> str:
+    """The untracked paths of the worktree at `path`, named for a refusal (at most `limit`); "" when git can't say."""
+    st = common.run("git", "status", "--porcelain", "-z", "--untracked-files=all", cwd=path)
+    names = [e[3:] for e in st.stdout.split("\0") if e.startswith("?? ")] if st.code == 0 else []
+    more = f" and {len(names) - limit} more" if len(names) > limit else ""
+    return ", ".join(names[:limit]) + more
 
 
 def c_locale():
@@ -136,7 +148,8 @@ def c_locale():
 
 def remove_worktree(path, cwd):
     """Remove the merged PR's worktree and say what happened; never raises, and forces only past an untracked
-    `.claude/pr-body.md` that is the tree's one change (`only_pr_body_untracked`): it goes with the tree.
+    `pr-body.md` (at the worktree root, or the older `.claude/pr-body.md`) that is the tree's only change
+    (`only_pr_body_untracked`): it goes with the tree. Any other untracked file is named in the refusal.
 
     A harness-locked tree is unlocked first, then removed plainly, so a dirty tree is still refused;
     if that refusal comes after the unlock, the lock is put back so the tree is left as found."""
@@ -155,7 +168,8 @@ def remove_worktree(path, cwd):
         return f"worktree {path} already removed"
     reason = harness_lock(path, cwd) if "locked" in err else None
     if reason is None:
-        return f"worktree {path} NOT removed: {err}"
+        names = untracked_names(path) if "untracked" in err else ""
+        return f"worktree {path} NOT removed: {err}" + (f" (untracked: {names})" if names else "")
     u = common.run("git", "worktree", "unlock", path, cwd=cwd, env=c_locale())
     if u.code != 0:
         return f"worktree {path} NOT removed: could not unlock: {common.one_line(u.stderr)}"
