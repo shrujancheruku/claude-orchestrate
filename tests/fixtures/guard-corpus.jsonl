@@ -832,10 +832,13 @@
 {"role": "orchestrate:scout", "command": "scripts/threads 12 --all", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "scripts/threads 12 --all", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/threads 12 --all", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:worker", "command": "git -C /tmp log --oneline -3", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "git -C /tmp log --oneline -3", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "git -C /tmp fetch origin abc1234", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:scout", "command": "git -C /tmp show origin/main:README.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git -C /tmp/scratch-559/pr-559 log --oneline -3", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp/scratch-559/pr-559 log --oneline -3", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp/scratch-559/pr-559 fetch origin abc1234", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git -C /tmp/scratch-559/pr-559 show origin/main:README.md", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp/scratch-559/pr-559/sub fetch origin abc1234", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "git -C /tmp/scratch-559/pr-559/sub show HEAD", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git -C /tmp fetch origin abc1234", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git -C /etc log --oneline -3", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "git -C /tmp -c core.pager=x log", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git -C /tmp push origin x", "expected": "deny", "source": "hand"}

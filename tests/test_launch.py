@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCH = ROOT / "scripts" / "launch"
@@ -254,6 +255,8 @@ class Launch(unittest.TestCase):
         (self.tmp / "agents.json").write_text(json.dumps([self.bg_row()]))
         env_free = self.launch("--lead").stdout  # not an orchestrator line
         self.assertEqual(env_free.strip(), "ROLE:unset")
+        with mock.patch.dict(os.environ, {"ORCHESTRATE_ROLE": "orchestrator"}):  # inherited from the caller's shell
+            self.assertEqual(self.launch("--lead").stdout.strip(), "ROLE:unset")
         for args in (["--greedy=2"], ["403"], ["--bg"], ["--resume", "b1"]):
             with self.subTest(args):
                 if args[0] == "--bg":  # a live orchestrator row would refuse it

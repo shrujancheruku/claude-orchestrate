@@ -2278,7 +2278,20 @@ def git_paths_ok(args: list, here: str, cwd: str) -> bool:
     return True
 
 
-def git_read_ok(cmd: Command, cwd: str = "", here: str = ".") -> bool:
+def checkout_root(real: Path, cwd: str) -> bool:
+    """`real` is the root of a real checkout: the main checkout, a `.claude/worktrees/*` worktree or a reviewer's
+    scratch checkout, with a `.git` entry. Never a subdirectory of one: a hostile PR can commit `HEAD`, `objects/`
+    and `config` in a subdirectory, which git then treats as a bare repository and whose config can run a command
+    (`remote.origin.uploadpack`, `diff.external`) under `git -C <subdir> fetch|show` (#579)."""
+    if not (real / ".git").exists():
+        return False
+    roots = [Path(os.path.realpath(r)) for r in repo_roots(cwd)]
+    if real in roots or any(real.parent == r / ".claude" / "worktrees" for r in roots):
+        return True
+    return scratch_worktree(real, cwd)
+
+
+def git_read_ok(cmd: Command,cwd: str = "", here: str = ".") -> bool:
     call = parse_git(cmd.words, 0)
     if call.sub is None or call.sub.dynamic:
         return False
@@ -2291,6 +2304,8 @@ def git_read_ok(cmd: Command, cwd: str = "", here: str = ".") -> bool:
         if target.dynamic or target.glob or target.text.startswith("-") or not in_read_bound(target.text, here, cwd):
             return False
         here = os.path.realpath(os.path.join(here, target.text))
+        if not checkout_root(Path(here), cwd):
+            return False
     sub, args = call.sub.text, [a.text for a in call.args]
     # A long flag that is a prefix of a writing one (`--outp`) counts as it: git accepts abbreviations.
     if any(a.startswith("--") and len(a.partition("=")[0]) >= 3 and any(u.startswith(a.partition("=")[0]) for u in GIT_UNSAFE_LONG)

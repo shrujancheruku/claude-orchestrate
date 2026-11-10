@@ -439,6 +439,8 @@ def main(argv=None) -> int:
         print("".join(f"{k}={v} " for k, v in extra.items()) + render(cmd))
         return 0
     env = {**os.environ, **extra}
+    if args.lead:
+        env.pop(ROLE_ENV, None)  # an inherited orchestrator role must not make the lead's calls deny
     if args.bg:
         code, out, err = common.run(*cmd, env=env)
         sys.stdout.write(out)

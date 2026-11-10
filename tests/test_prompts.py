@@ -76,6 +76,14 @@ class Prompts(unittest.TestCase):
         ])
         self.assertEqual(self.run_prompts().stdout.splitlines()[0], "prompts: 2")
 
+    def test_a_pair_straddling_the_cutoff_counts_for_neither_side(self):
+        self.write([
+            {**entry("2026-11-09T10:00:59+00:00", command="a"), "source": "request"},
+            {"time": "2026-11-09T10:01:01+00:00", "source": "notification", "session_id": "s1", "agent_type": None,
+             "tool_name": None, "cwd": "/x", "tool_input": [], "message": "m"},
+        ])
+        self.assertEqual(self.run_prompts("--since", "2026-11-09T10:01:00+00:00").stdout.splitlines()[0], "prompts: 0")
+
     def test_session_and_since(self):
         self.write([entry("2026-11-09T10:00:00Z", session="a"), entry("2026-11-09T11:00:00Z", session="b"),
                     entry("2026-11-09T12:00:00Z", session="b")])

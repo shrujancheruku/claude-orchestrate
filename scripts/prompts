@@ -153,16 +153,11 @@ def main(argv=None) -> int:
         cutoff = watermark(root, args.session)
         if cutoff is None:
             note = " (no mark yet: counted from the start of the log)"
-    entries = []
-    for e in common.read_jsonl(repolib.main_checkout(root) / LOG):
-        if args.session and e.get("session_id") != args.session:
-            continue
-        if cutoff is not None:
-            t = repolib.parse_ts(e.get("time"))
-            if t is None or t < cutoff:
-                continue
-        entries.append(e)
-    entries = dedupe(entries)
+    entries = [e for e in common.read_jsonl(repolib.main_checkout(root) / LOG)
+               if not args.session or e.get("session_id") == args.session]
+    entries = dedupe(entries)  # before the cutoff, so a pair straddling it is dropped whole
+    if cutoff is not None:
+        entries = [e for e in entries if (t := repolib.parse_ts(e.get("time"))) is not None and t >= cutoff]
     for line in render(entries, note):
         print(line)
     return 0

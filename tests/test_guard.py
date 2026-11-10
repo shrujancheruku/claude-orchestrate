@@ -1902,6 +1902,22 @@ class GitCOnReadsTest(unittest.TestCase):
                 with self.subTest((role, command)):
                     self.assertTrue(approved(f"orchestrate:{role}", command, self.work))
 
+    def test_git_C_needs_a_checkout_root_never_a_subdirectory(self):
+        # A hostile PR can commit HEAD, objects/ and config in a subdirectory; git run from there sees a bare repo (#579).
+        scratch_git = self.main / ".git" / "worktrees" / "pr-1"
+        scratch_git.mkdir(parents=True)
+        scratch = self.root / "scratch" / "pr-1"
+        (scratch / "sub").mkdir(parents=True)
+        (scratch / ".git").write_text(f"gitdir: {scratch_git}\n")
+        (self.main / "sub").mkdir()
+        (self.work / "sub").mkdir()
+        self.assertTrue(approved("orchestrate:reviewer", f"git -C {scratch} fetch origin abc123", self.work))
+        self.assertTrue(approved("orchestrate:reviewer", f"git -C {scratch} show HEAD", self.work))
+        for base in (scratch, self.main, self.work):
+            for command in (f"git -C {base}/sub fetch origin abc123", f"git -C {base}/sub show HEAD"):
+                with self.subTest(command):
+                    self.assertFalse(approved("orchestrate:reviewer", command, self.work))
+
     def test_git_C_outside_the_bound_or_with_a_write_or_other_global_option(self):
         for command in ("git -C /etc log", "git -C /var/db log", "git -C ~ log", f"git -C {self.main} push origin x",
                         f"git -C {self.main} -c core.pager=x log", f"git -C {self.main} --git-dir=/x log",
