@@ -12,9 +12,11 @@ The state, decided in this order:
   done        the ticket's branch has a merged PR, or the ticket is in the state file but not among the open issues
   building    a worker record from this session in the state file, or no record but the worktree's lock is this
               session's own live worker (`worker unknown`: a dispatch the state file couldn't join)
-  idle        a building claim whose worker is not live (the lock is not `ours <live pid>`) and has made no
-              worker-report since its last commit. `since` is that commit's time; `nudged` is the time of the pass log's
-              `record --nudged` for it, when that is not older than `since`. A pass nudges it once, then hands it back
+  idle        a building claim whose newest non-duplicate worker-report is an `interim` one, newer than the worker's
+              `dispatched` time in its record: the worker ended its turn with a report nobody acts on, and a stopped
+              subagent is never re-invoked unless messaged. The lock plays no part (it is always `ours`, ADR 0009). A
+              record with no `dispatched` is never idle. `since` is that report's time; `nudged` is the time of the pass
+              log's `record --nudged` for it, when that is not older than `since`. A pass nudges it once, then hands it back
   waiting     replaces building and stalled (never a ready PR): the ticket's newest worker-report event is a
               `permission-denied` stop or an `exhausted` transient one. The developer must act; it never expires, and
               only a newer report ends it. `reason` is `permission-denied` or `exhausted`, `since` the report's time
@@ -57,7 +59,7 @@ class Claim:
     draft: bool = False            # `pr` is a draft: the ticket is building, not in review
     pending_branch: bool = False   # the worktree is on a `worktree-agent-*` branch: the worker never made the ticket branch
     reason: str | None = None      # waiting only: `permission-denied` | `exhausted`
-    since: str | None = None       # waiting and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report, or of the last commit
+    since: str | None = None       # waiting and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report
     nudged: str | None = None      # idle only: the same, of the pass's nudge, when it is not older than `since`
     escalate: str | None = None    # the model to escalate to: a haiku worker whose PR hit a mechanical trigger (see escalation)
 
@@ -172,12 +174,6 @@ def fmt_ts(dt) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def last_commit_time(path):
-    """The committer time of HEAD in the worktree at `path`, or None when git can't say (no commits, no directory)."""
-    r = common.run("git", "log", "-1", "--format=%cI", cwd=path)
-    return parse_ts(r.stdout.strip()) if r.code == 0 else None
-
-
 def _reports(repo) -> dict:
     """{ticket as text: its newest worker-report event}, a duplicate passed over, from the run log."""
     out = {}
@@ -213,15 +209,13 @@ def escalation(events, pr, worker, cfg) -> str | None:
     return (cfg.worker_model or config.DEFAULT_WORKER_MODEL) if len(fails) >= 2 or changes else None
 
 
-def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None,
-           commit_time=last_commit_time) -> dict:
+def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktree_state, session=None) -> dict:
     """{ticket: Claim} for each claimed open issue and each state-file ticket that is no longer open (done).
 
     issues: [{"number", "claimed", "labels"}] open issues. prs: [{"number", "headRefName", ...}] open PRs.
     merged: [{"headRefName", ...}] merged PRs. worktrees: `git worktree list`'s (default: asked of `repo`); changes:
     (path, branch) -> (dirty, unpushed), swappable so a pure test needs no repository. session: this caller's own id
-    (`--session`); without it the session that rebuilt last is the current one. commit_time: path -> the HEAD commit's
-    datetime | None, swappable like `changes`; a caller whose answer is always None never sees an idle claim."""
+    (`--session`); without it the session that rebuilt last is the current one."""
     state = read_state(state_file, session)
     other = read_other_state(state_file, session)
     # A worktree git still lists but whose directory is gone (prunable) is gone: git commands in it can't run.
@@ -277,11 +271,13 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.reason = "permission-denied" if report.get("stop_reason") == "permission-denied" else "exhausted"
             claim.since = fmt_ts(reported) if reported else None
             claim.state = "waiting"
-        elif claim.state == "building" and wt and not (claim.lock and claim.lock[0] == "ours"):
-            committed = commit_time(wt["path"])
-            if committed and not (reported and reported > committed):
-                claim.state, claim.since = "idle", fmt_ts(committed)
-                if n in nudges and nudges[n] >= committed:
+        elif claim.state == "building" and record is not None and report and report.get("outcome") == "interim":
+            # The worker ended its turn without handing back. Only an interim newer than this worker's own dispatch
+            # counts, so a redispatch never reads an older worker's interim as its own.
+            dispatched = parse_ts(record.get("dispatched"))
+            if dispatched and reported and reported > dispatched:
+                claim.state, claim.since = "idle", fmt_ts(reported)
+                if n in nudges and nudges[n] >= reported:
                     claim.nudged = fmt_ts(nudges[n])
         if wt and pr is None and claim.state in ("building", "idle", "stalled", "waiting", "elsewhere"):
             claim.changes = changes(wt["path"], wt["branch"])

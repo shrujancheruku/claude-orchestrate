@@ -256,16 +256,14 @@ class WaitingAndIdle(unittest.TestCase):
         lines[-1] = json.dumps(dict(json.loads(lines[-1]), ts=ts), separators=(",", ":"))
         path.write_text("\n".join(lines) + "\n")
 
-    def commit(self, iso):
-        from repo import parse_ts
-        return lambda path: parse_ts(iso)
-
-    def one(self, n, commit_iso=None, state=None, prs=(), locked=None):
+    def one(self, n, state=None, prs=(), locked=None):
         wt = {"path": f"/wt/{n}", "branch": f"{n}-x", "locked": locked}
         if state is not None:
             self.state.write_text(json.dumps({"tickets": state}))
-        return claims.claims(self.tmp.name, self.state, [issue(n)], list(prs), [], [wt], lambda p, b: (0, 0),
-                             commit_time=self.commit(commit_iso) if commit_iso else (lambda p: None))[n]
+        return claims.claims(self.tmp.name, self.state, [issue(n)], list(prs), [], [wt], lambda p, b: (0, 0))[n]
+
+    def worker(self, dispatched="2026-01-01T10:00:00Z"):
+        return dict(WORKER, dispatched=dispatched) if dispatched else dict(WORKER)
 
     def test_w_permission_denied_replaces_building(self):
         self.report(1, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
@@ -299,35 +297,44 @@ class WaitingAndIdle(unittest.TestCase):
 
     def test_w_waiting_beats_idle(self):
         self.report(7, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
-        self.assertEqual(self.one(7, "2026-01-01T10:00:00Z", state={"7": WORKER}).state, "waiting")
+        self.assertEqual(self.one(7, state={"7": self.worker()}).state, "waiting")
 
-    def test_i_a_building_claim_with_no_live_worker_is_idle_since_its_last_commit(self):
-        c = self.one(8, "2026-01-01T10:00:00+00:00", state={"8": WORKER})
-        self.assertEqual((c.state, c.since, c.nudged), ("idle", "2026-01-01T10:00:00Z", None))
+    def test_i_an_interim_after_dispatch_is_idle_though_the_lock_is_ours(self):
+        self.report(8, "interim", ts="2026-01-01T10:05:00+00:00")
+        c = self.one(8, state={"8": self.worker()}, locked=own_start_reason())
+        self.assertEqual((c.state, c.since, c.nudged), ("idle", "2026-01-01T10:05:00Z", None))
 
-    def test_i_a_live_worker_is_never_idle(self):
-        c = self.one(9, "2026-01-01T10:00:00Z", state={"9": WORKER}, locked=own_start_reason())
-        self.assertEqual(c.state, "building")
-
-    def test_i_a_report_after_the_last_commit_means_not_idle(self):
+    def test_i_a_newest_valid_report_means_not_idle(self):
         self.report(10, "interim", ts="2026-01-01T10:05:00+00:00")
-        self.assertEqual(self.one(10, "2026-01-01T10:00:00Z", state={"10": WORKER}).state, "building")
+        self.report(10, "valid", ts="2026-01-01T10:10:00+00:00", status="stopped")
+        self.assertEqual(self.one(10, state={"10": self.worker()}).state, "building")
+
+    def test_i_an_interim_older_than_the_dispatch_is_an_older_workers(self):
         self.report(11, "interim", ts="2026-01-01T09:55:00+00:00")
-        self.assertEqual(self.one(11, "2026-01-01T10:00:00Z", state={"11": WORKER}).state, "idle")
+        self.assertEqual(self.one(11, state={"11": self.worker()}).state, "building")
 
-    def test_i_no_commit_time_means_building(self):
-        self.assertEqual(self.one(12, None, state={"12": WORKER}).state, "building")
+    def test_i_no_dispatched_time_means_building(self):
+        self.report(12, "interim", ts="2026-01-01T10:05:00+00:00")
+        self.assertEqual(self.one(12, state={"12": self.worker(None)}).state, "building")
 
-    def test_i_the_pass_logs_nudge_shows_when_it_is_not_older_than_the_commit(self):
+    def test_i_a_duplicate_is_ignored(self):
+        self.report(16, "interim", ts="2026-01-01T10:05:00+00:00")
+        self.report(16, "duplicate", ts="2026-01-01T10:10:00+00:00", status="pr-opened")
+        c = self.one(16, state={"16": self.worker()})
+        self.assertEqual((c.state, c.since), ("idle", "2026-01-01T10:05:00Z"))
+
+    def test_i_the_pass_logs_nudge_shows_when_it_is_not_older_than_the_interim(self):
+        self.report(13, "interim", ts="2026-01-01T10:05:00+00:00")
         self.nudge(13, "2026-01-01T10:30:00+00:00")
-        c = self.one(13, "2026-01-01T10:00:00Z", state={"13": WORKER})
+        c = self.one(13, state={"13": self.worker()})
         self.assertEqual((c.state, c.nudged), ("idle", "2026-01-01T10:30:00Z"))
-        self.nudge(14, "2026-01-01T09:00:00+00:00")  # an older nudge: the worker has committed since
-        self.assertIsNone(self.one(14, "2026-01-01T10:00:00Z", state={"14": WORKER}).nudged)
+        self.report(14, "interim", ts="2026-01-01T10:05:00+00:00")
+        self.nudge(14, "2026-01-01T10:01:00+00:00")  # an older nudge: the worker has reported again since
+        self.assertIsNone(self.one(14, state={"14": self.worker()}).nudged)
 
     def test_i_a_ticket_with_a_ready_pr_is_never_idle(self):
-        self.assertEqual(self.one(15, "2026-01-01T10:00:00Z", state={"15": WORKER}, prs=[self.pr(15, "15-x")]).state,
-                         "in-review")
+        self.report(15, "interim", ts="2026-01-01T10:05:00+00:00")
+        self.assertEqual(self.one(15, state={"15": self.worker()}, prs=[self.pr(15, "15-x")]).state, "in-review")
 
 
 class Liveness(unittest.TestCase):
@@ -506,7 +513,12 @@ class Cli(unittest.TestCase):
         path = self.harness_worktree("x1")
         (path / "a.txt").write_text("a")
         self.record(7, "x1")
-        # No lock: the worker is not live, and it has committed (the worktree's start) and reported nothing: idle (#501).
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        data = json.loads(state.read_text())
+        data["tickets"]["7"]["dispatched"] = "2026-01-01T00:00:00Z"
+        state.write_text(json.dumps(data))
+        import runlog
+        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "interim", ref="7", session="s")  # after the dispatch: idle (#576)
         line = self.line("7")
         self.assertRegex(line, r"^#7 idle since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ none-yet pr none ")
         self.assertTrue(line.endswith(f" worker x1 claude-sonnet-4-6 worktree {path} lock none dirty 1"), line)
