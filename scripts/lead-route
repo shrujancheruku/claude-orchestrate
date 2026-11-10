@@ -236,10 +236,8 @@ def main(argv=None) -> int:
         prs, merged = snap.prs, snap.merged
         # The claims are read once here (the state file, the worktrees, the PRs); `changes` is a no-op because routing
         # never needs the dirty and unpushed counts, and a git failure there would stop a pass that never needed them.
-        # So Claim.changes is None here: route() must never read claim.changes. The same goes for the commit time
-        # `idle` needs: no ticket is idle here, and a building one is still RESUME's.
-        found = claims.claims(root, state_path, issues, prs, merged, changes=lambda path, branch: None,
-                              commit_time=lambda path: None)
+        # So Claim.changes is None here: route() must never read claim.changes.
+        found = claims.claims(root, state_path, issues, prs, merged, changes=lambda path, branch: None)
     except github.GhError as e:
         common.die(f"lead-route: cannot run: gh failed: {e.message}")
     except (KeyError, TypeError, ValueError) as e:

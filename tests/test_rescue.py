@@ -570,6 +570,14 @@ class Rescue(unittest.TestCase):
         self.assertEqual(code, 0)
         out.assert_called_with("overlap: unchecked (rate limited; re-run holds before dispatching into these files)")
 
+    def test_an_unlisted_holds_exception_is_an_overlap_that_could_not_be_checked(self):
+        mod = self.load_rescue()
+        with unittest.mock.patch.object(mod.tracker.Snapshot, "open", side_effect=RuntimeError("boom")), \
+                unittest.mock.patch.object(mod, "say") as out:
+            code = mod.overlap(Path("."), ["a.py"], 42)
+        self.assertEqual(code, 1)
+        out.assert_called_with("overlap: could not check (RuntimeError: boom)")
+
     def test_a_failure_after_the_branch_was_created_switches_back_and_deletes_it(self):
         self.harness_worktree()
         git(self.env.repo, "remote", "set-url", "origin", str(self.env.repo.parent / "no-such-origin"))

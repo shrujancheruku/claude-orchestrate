@@ -12,7 +12,8 @@ place (it is git-ignored). A file in the old
 description, whose first `#<n>` must be its ticket (the run skill recommends `Build #<ticket>`); a
 dispatch of any other agent type, or without a `#<n>`, is ignored. Per ticket
 it records the worker's agent ID, the worktree, the worker model (from the agent's own transcript,
-else the dispatch, else its metadata), the time of its last record (the last report) and the touch
+else the dispatch, else its metadata), the time of its last record (the last report), the time of the Agent call that dispatched it (`dispatched`, which
+`claims` compares an `interim` report with to call the worker idle) and the touch
 map its brief names. The worktree is the first of these that exists: the path the harness reported
 in the worker's completion, the harness's `.claude/worktrees/agent-<id>`, the worktree `git worktree
 list` shows for the brief's branch; else null. When a ticket was dispatched more than once, the latest wins.
@@ -91,6 +92,7 @@ def rebuild(main_path: Path, repo: Path) -> dict:
             "worktree": worktree_of(a["id"], session.branch_of(a["prompt"]), repo, completions),
             "model": model_of(records, a["dispatch_model"], a["meta_model"]),
             "last_report": session.iso(a["last_record"]),
+            "dispatched": session.iso(a["dispatched"]),
             "touch_map": touch_map_of(a),
         }
     return {"session": sid, "tickets": {str(n): tickets[n] for n in sorted(tickets)}}
