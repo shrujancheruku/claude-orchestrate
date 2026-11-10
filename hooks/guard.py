@@ -1390,6 +1390,10 @@ def chained_external_writes(parsed: "Parsed") -> list:
     chain with no external write."""
     if not any(c.joiner in CHAIN_BREAKS for c in parsed.cmds):
         return []
+    cmds = parsed.cmds
+    if (len(cmds) == 2 and len(cmds[0].words) == 2 and cmds[0].words[0].text == "cd" and not cmds[0].depth
+            and cmds[1].joiner == "&&" and only_plain_words(cmds[0]) and not cmds[0].heredocs):
+        return []  # a lone leading `cd <dir> &&` is no chain: approval accepts it only for the worker's own worktree (#624)
     return [w for w in (external_write(c) for c in parsed.cmds) if w]
 
 
@@ -2093,7 +2097,7 @@ LOOP_VAR = re.compile(r"[A-Za-z_]\w*")
 LOOP_ITEM = re.compile(r"[A-Za-z0-9_./:@=+,%][A-Za-z0-9_./:@=+,%-]*")
 # A flag that writes or runs a program, by the prefix git, ripgrep or find would accept (getopt takes
 # abbreviations): refused whatever its spelling.
-GIT_READ_VERBS = frozenset(("status", "log", "diff", "show", "ls-remote", "ls-files", "rev-parse", "rev-list", "grep"))
+GIT_READ_VERBS = frozenset(("status", "log", "diff", "show", "ls-remote", "ls-files", "ls-tree", "rev-parse", "rev-list", "grep"))
 GIT_UNSAFE_LONG = ("--output", "--ext-diff", "--upload-pack", "--exec", "--open-files-in-pager")
 GIT_BRANCH_READS = frozenset(("-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "--show-current"))
 GIT_FETCH_FLAGS = frozenset(("-q", "--quiet", "-v", "--verbose", "--no-tags", "--tags"))
@@ -2494,7 +2498,9 @@ def gh_read_ok(cmd: Command) -> bool:
         return not any(a in ("-w", "--web", "--watch") for a in args)
     if call.is_sub("api"):
         scan = scan_api(call.args)
-        return (not scan.other and not scan.fields and scan.endpoint is not None and scan.endpoint.text != "graphql")
+        if scan.endpoint is not None and not scan.endpoint.dynamic and scan.endpoint.text == "graphql":
+            return graphql_refusal(call.args) is None  # one literal read-only query (no mutation), as the gate runs it (#667)
+        return (not scan.other and not scan.fields and scan.endpoint is not None)
     return False
 
 
@@ -2639,6 +2645,8 @@ def read_command_ok(cmd: Command, here: str = ".", cwd: str = "") -> bool:
     the read bound (#566). A relative glob is expanded and its matches are held to the bound (#567)."""
     first = cmd.words[0]
     name, words = first.text, cmd.words[1:]
+    if name == "/usr/bin/diff":
+        name = "diff"  # the absolute spelling of the same read (#624)
     if first.dynamic or any(w.dynamic for w in words) or (first.glob and name != "["):
         return False
     if name in SYMLINK_SHORT or name == "diff":
@@ -2908,6 +2916,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                     or (role == "worker" and worker_work_ok(sub, here, worktree))
                     or (role == "reviewer" and (reviewer_verify_ok(sub, here, cwd)
                                                 or plugin_script_command_ok(sub, here, session, "scratch")))
+                    or (role == "scout" and plugin_script_command_ok(sub, here, session, "claims"))
                     or (role is not None and plugin_script_command_ok(sub, here, session, "issue"))):
                 return False
     return loop is None and pending is None and waiting is None
@@ -3118,6 +3127,7 @@ ROLE_SCRIPT_FORMS = {
     },
     "scout": {
         "threads": "`{p}/threads <pr>` and `threads <pr> --all` (list only)",
+        "claims": "`{p}/claims --repo .` (a read of the claims)",
     },
 }
 PLUGIN_SCRIPT_WORD = re.compile(r"(?:^|/)scripts/([\w.-]+)$")

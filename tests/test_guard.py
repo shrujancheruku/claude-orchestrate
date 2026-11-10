@@ -1610,6 +1610,22 @@ class ReadBoundTest(unittest.TestCase):
         for role, cwd in self.roles():
             self.check(role, cwd, no=no)
 
+    def test_the_scout_read_forms_of_run_ac790f0d_are_approved(self):
+        # #624: refused with the generic reason in a real run; each is a read inside the bound.
+        yes = ("git ls-tree -r --name-only origin/main", "git ls-tree -r --name-only origin/main -- scripts hooks",
+               "git grep -n -E 'foo|bar' origin/main -- scripts", "git grep -n foo origin/main", "ls scripts", "cat a.py | head -n 5",
+               "for n in 1 2 3; do gh issue view $n --json title --jq .title; done | head -c 2000",
+               "gh api graphql -f query='query{viewer{login}}' --jq .data",
+               "gh api graphql -f query='{ viewer { login } }'",
+               "diff -r --no-dereference a.py a.py", "/usr/bin/diff a.py a.py", "/usr/bin/diff -r --no-dereference a.py a.py")
+        no = ("gh api graphql -f query='mutation{x}'", "gh api graphql -f query='query{x}' -f query='mutation{y}'",
+              "gh api graphql -f query=@/etc/hosts", "git ls-tree -r origin/main /etc/hosts", "git grep -n foo origin/main -- /etc",
+              "for n in 1 2; do gh issue edit $n --add-label x; done", "for n in 1 2; do gh issue view $n; done > out.txt",
+              "diff /etc/hosts a.py")
+        for role in ("orchestrate:scout", "orchestrate:reviewer", "orchestrate:worker"):
+            cwd = self.work if role.endswith("worker") else self.main
+            self.check(role, cwd, yes=yes, no=no)
+
     def test_a_leaked_secret_cannot_leave_through_a_pipe_either(self):
         self.check("orchestrate:worker", self.work, no=("cat ~/.aws/credentials | head", "grep x a.py; cat /etc/hosts"))
 
@@ -2321,6 +2337,13 @@ class SubagentScriptBoundaryTest(unittest.TestCase):
         self.assertNotIn("verify", self.deny("scout", f"{SCRIPTS}/board"))
         self.assertIn("(list only)", self.deny("scout", f"{SCRIPTS}/board"))
 
+    def test_a_scout_may_read_the_claims_and_no_other_role_may(self):
+        self.assertTrue(approved("orchestrate:scout", f"{SCRIPTS}/claims --repo .", self.work))
+        self.assertTrue(approved("orchestrate:scout", f"{SCRIPTS}/claims --repo . | head -n 20", self.work))
+        for role in ("worker", "reviewer"):
+            self.assertIn("doesn't run", self.deny(role, f"{SCRIPTS}/claims --repo ."))
+        self.assertFalse(approved("orchestrate:scout", f"{SCRIPTS}/claims --repo /other", self.work))
+
     def test_a_scout_has_no_verify(self):
         self.assertIn("doesn't run", self.deny("scout", f"{SCRIPTS}/verify --config"))
 
@@ -2448,6 +2471,15 @@ class WorkerOwnBranchFormsTest(unittest.TestCase):
         for command in ("git checkout origin/main", "git checkout -- ../../../outside.txt", "git checkout origin/main -- /etc/hosts",
                         "git checkout -b other", "git restore --source=origin/main tracked.txt", "git restore --staged tracked.txt",
                         "git checkout -f origin/main -- tracked.txt", "git restore --source $X -- tracked.txt"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def test_a_leading_cd_into_its_own_worktree_before_an_approved_call(self):
+        for command in (f"cd {self.work} && git push origin {self.BRANCH}", f"cd {self.work} && git fetch origin {self.BRANCH}",
+                        f"cd {self.work} && git grep -n foo HEAD", f"cd {self.work} && git merge --no-edit origin/{self.BRANCH}"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in (f"cd {self.main} && git push origin {self.BRANCH}", f"cd /tmp && git push origin {self.BRANCH}"):
             with self.subTest(command):
                 self.assertFalse(self.ok(command))
 
