@@ -19,6 +19,10 @@ A worker used to open its PR only at the end, so the developer saw nothing until
 - The empty start commit adds one `chore:` commit to the branch; the squash merge hides it.
 - Rejected: opening the PR only at Ship (nothing to follow); treating a draft as in review (CI, gate and review on half-built code).
 
+## Note (2026-11-10): a parked PR is closed, and its ticket is `parked`
+
+`scripts/park-pr` closes an open PR that waits on a newer PR's fix, keeping its branch and the ticket's claim (#708). A closed PR is not in the open set `holds` and the gate read, so it holds nothing; `claims` reads the newest `park` run-log event and calls the ticket `parked` (not building, stalled or in review), so no rescue or redispatch touches it. `park-pr <pr> --unpark` reopens it and the ticket is in review again.
+
 ## Note (2026-11-08): the guard enforces the draft
 
 A worker's `gh pr create` without `--draft` (or `-d`) is refused by the guard (#355), because workers skipped the step. The fallback stays, with a marker: the guard allows a non-draft create only when its body (`--body` or `--body-file`) has a line starting `Draft unavailable:` followed by the reason. A PR opened that way is ready from creation, so it counts as in review at once; the worker reports it under Notes.

@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""park-pr <pr> (--why <text> | --unpark) [--repo DIR] : take an open PR out of the merge queue, or put it back (#708)
+
+The one owner of "close this PR for now" (the guard refuses a raw `gh pr ready --undo`, `gh pr close` and `gh pr reopen`).
+Park a PR when it is older than another PR and waits on that PR's fix, so each would otherwise wait on the other:
+    park-pr <pr> --why <text>    close the open PR (its branch is kept, and so is the ticket's claim), comment the reason,
+                                 and append a `park` event (outcome `parked`; ref = the PR; ticket, branch and why ride
+                                 along). `claims` reads the newest such event and calls the ticket `parked`, so it is
+                                 not rescued, redispatched or held as building, and `holds` (the gate's overlap
+                                 check) holds nothing for it.
+    park-pr <pr> --unpark        reopen the PR the same way and append a `park` event with outcome `unparked`.
+Refused, exit 1 and `next: refused <why>`: a PR that is already closed or merged (park), one that is not closed (unpark),
+or a fork PR. Exit 2: could not run (a failed `gh`, one line on stderr), or `next: retry-after <time>`.
+A failed comment after the state change, or a lost run-log line, says so on stderr and does not undo the change.
+Exit codes: 0 parked or unparked; 1 refused; 2 could not run. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import sys
+
+import common
+import github
+import runlog
+from repo import ticket_of_branch
+
+
+def refuse(reason: str) -> int:
+    print(f"park-pr: {reason}", file=sys.stderr)
+    return common.verdict("refused", reason, exit_code=1)
+
+
+def run(args) -> int:
+    _, pr = common.pr_ref(args.pr)
+    cwd = args.repo
+    try:
+        view = github.pr_view(pr, "state,headRefName,isCrossRepository", cwd=cwd)
+        state, branch = str(view.get("state") or "").upper(), view.get("headRefName") or ""
+        if view.get("isCrossRepository"):
+            return refuse(f"PR #{pr} is from a fork")
+        if args.unpark:
+            if state != "CLOSED":
+                return refuse(f"PR #{pr} is {state.lower()}, not closed")
+            github.set_pr_state(pr, "open", cwd=cwd)
+            outcome, comment = "unparked", "Unparked: reopened and back in the merge queue."
+        else:
+            if state != "OPEN":
+                return refuse(f"PR #{pr} is {state.lower()}, not open")
+            github.set_pr_state(pr, "closed", cwd=cwd)
+            outcome, comment = "parked", f"Parked: {common.one_line(args.why, 300)}"
+        try:
+            github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{pr}/comments", "-f",
+                        f"body={comment}", cwd=cwd)
+        except github.GhError as e:
+            print(f"park-pr: PR #{pr} is {outcome}, but its comment failed: {common.one_line(e.message)}", file=sys.stderr)
+    except github.GhError as e:
+        print(f"park-pr: gh failed: {common.one_line(e.message)}", file=sys.stderr)
+        return 2
+    extra = {"why": args.why} if outcome == "parked" else {}
+    try:
+        runlog.append_event(cwd, runlog.PARK, outcome, ref=pr, ticket=ticket_of_branch(branch), branch=branch, **extra)
+    except runlog.NoSession as e:
+        print(e, file=sys.stderr)  # the state changed; only its log line is lost
+    except OSError as e:
+        print(f"park-pr: {outcome}, but the run log is unwritable: {e.strerror or e}", file=sys.stderr)
+    return common.verdict(outcome, pr, exit_code=0)
+
+
+def main(argv=None) -> int:
+    github.rate_limited_until = None
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("pr", help="PR number")
+    what = ap.add_mutually_exclusive_group(required=True)
+    what.add_argument("--why", help="why the PR is parked (the comment on it)")
+    what.add_argument("--unpark", action="store_true", help="reopen a parked PR")
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    args = ap.parse_args(argv)
+    if args.why is not None and not args.why.strip():
+        ap.error("--why takes the reason")
+    code = run(args)
+    until = github.rate_limit_verdict(code)
+    if until:
+        return common.verdict("retry-after", until, exit_code=code)
+    if code == 2:
+        return common.verdict("could-not-run", exit_code=2)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

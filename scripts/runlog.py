@@ -31,7 +31,8 @@ RESUME = "resume"  # scripts/launch --resume: one per resumed run; the profile m
 REVIEW = "review"  # scripts/worker-report <pr> --reviewer: one per reviewer report (ref = PR; round, head, suite, blocking, non_blocking, posted)
 GH_CALL = "gh_call"  # scripts/github.py: one per `gh` attempt (ok|failed|ratelimited), or "wait" for a sleep
 SWEEP = "sweep"  # scripts/sweep: `ran` is the watermark `--due` counts merges from; `prompt-kind` (ref = the kind) is a prompt kind already reported
-PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
+PARK = "park"  # scripts/park-pr: a PR taken out of the merge queue (`parked`) or put back (`unparked`); ref = the PR; ticket, branch, why
+PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED ="pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
     CI: (PASS, FAIL, "rerun"),  # "rerun": scripts/ci-rerun made the PR's CI run again (head; run and job for a job rerun)
@@ -45,6 +46,7 @@ OUTCOMES = {
     GH_CALL: ("ok", "failed", "ratelimited", "wait"),
     RESUME: ("resumed",),
     SWEEP: ("ran", "prompt-kind"),
+    PARK: ("parked", "unparked"),
 }
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"

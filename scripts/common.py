@@ -103,6 +103,8 @@ VERDICT_WORDS = {
     "stuck": "<pr> <run id> <job id>", "head-not-reached": "<pr> <sha>", "gave-up": "<pr> <why>",
     # ci-rerun
     "rerun": "<pr> <head>", "already-running": "<pr>",
+    # park-pr
+    "parked": "<pr>", "unparked": "<pr>", "refused": "<why>",
     # sweep and fold
     "clean": "", "findings": "<n>", "due": "<n>", "not-due": "<n>", "folded": "<from> <into>",
     # every script: a rate limit, and a run that could not happen
