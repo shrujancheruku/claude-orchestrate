@@ -86,10 +86,77 @@ class LeadRoute(unittest.TestCase):
     def worker(self, agent="agent-a", model="claude-sonnet-4-6", last=5):
         return {"agent_id": agent, "worktree": None, "model": model, "last_report": iso(last), "touch_map": []}
 
+    def agents(self, *rows):
+        """What the fake `claude agents --json` lists: live rows by default (a pid), in this repo's main checkout."""
+        self.env.agents_file.write_text(json.dumps([{"pid": 1, "cwd": str(self.env.repo), **r} for r in rows]))
+
     def route(self, lead="live", cap=2, now=60):
+        """(exit code, stdout lines after the `lead:` line). The lead is the stubbed `claude agents --json`: a live row
+        named `lead` in the main checkout for "live", no rows for "none". The first line is asserted here."""
+        self.agents(*([{"name": "lead", "sessionId": "L1"}] if lead == "live" else []))
         self.env.set_gh(self.responses)  # the graphql reply is a sequence: start it over for each run
-        r = self.env.run("lead-route", "--lead", lead, "--cap", str(cap), "--now", iso(now), check=False)
-        return r.returncode, r.stdout.splitlines()
+        r = self.env.run("lead-route", "--cap", str(cap), "--now", iso(now), check=False)
+        lines = r.stdout.splitlines()
+        self.assertEqual(lines[:1], [f"lead: {lead}"])
+        return r.returncode, lines[1:]
+
+    def lead_line(self, rows=None, claude_exit=None):
+        """The first stdout line and stderr of a run against the given `claude agents --json` reply."""
+        if rows is None:
+            self.env.agents_file.write_text("[]")
+        elif isinstance(rows, str):
+            self.env.agents_file.write_text(rows)
+        else:
+            self.agents(*rows)
+        if claude_exit:
+            self.env.agents_file.unlink()  # the fake `claude` then exits 1
+        self.serve([])
+        self.state({})
+        self.env.set_gh(self.responses)
+        r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.splitlines()[0], r.stderr
+
+    def test_one_live_lead_in_the_main_checkout_is_lead_live(self):
+        self.assertEqual(self.lead_line([{"name": "lead", "sessionId": "L1"}]), ("lead: live", ""))
+
+    def test_no_lead_row_is_lead_none_with_the_reason_on_stderr(self):
+        line, err = self.lead_line([{"name": "orchestrator", "sessionId": "O1"}])
+        self.assertEqual(line, "lead: none")
+        self.assertIn("no live session named lead", err)
+
+    def test_a_lead_in_another_checkout_or_a_linked_worktree_is_not_this_repos_lead(self):
+        other = str(self.env.repo.parent / "other-repo")
+        linked = self.env.repo / ".claude" / "worktrees" / "agent-x"
+        for cwd in (other, str(linked), str(self.env.repo / "scripts")):
+            with self.subTest(cwd):
+                self.assertEqual(self.lead_line([{"name": "lead", "sessionId": "L1", "cwd": cwd}])[0], "lead: none")
+
+    def test_a_stopped_lead_row_with_no_pid_is_not_live(self):
+        self.assertEqual(self.lead_line([{"name": "lead", "sessionId": "L1", "pid": None}])[0], "lead: none")
+
+    def test_several_matching_rows_are_lead_none(self):
+        line, err = self.lead_line([{"name": "lead", "sessionId": "L1"}, {"name": "lead", "sessionId": "L2"}])
+        self.assertEqual(line, "lead: none")
+        self.assertIn("2 live sessions named lead", err)
+
+    def test_a_reply_that_is_not_a_list_is_lead_none(self):
+        for reply in ('{"name": "lead"}', "not json"):
+            with self.subTest(reply):
+                line, err = self.lead_line(reply)
+                self.assertEqual(line, "lead: none")
+                self.assertIn("did not print a list", err)
+
+    def test_a_failed_claude_call_is_lead_none_and_the_pass_goes_on(self):
+        line, err = self.lead_line(claude_exit=1)
+        self.assertEqual(line, "lead: none")
+        self.assertIn("failed (exit 1)", err)
+
+    def test_lead_is_no_longer_a_flag(self):
+        self.serve([])
+        self.state({})
+        r = self.env.run("lead-route", "--lead", "live", "--cap", "2", check=False)
+        self.assertEqual(r.returncode, 2)
 
     def test_resume_when_the_stop_is_newer_than_the_workers_last_report(self):
         self.serve([issue(1, claimed=True, comments=[stop(10)])])
@@ -339,7 +406,7 @@ class LeadRoute(unittest.TestCase):
     def test_exit_2_when_gh_fails(self):
         self.serve(gh_exit=1)
         self.state({})
-        r = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0), check=False)
+        r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False)
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")
         self.assertIn("cannot run", r.stderr)
@@ -350,25 +417,26 @@ class LeadRoute(unittest.TestCase):
         path = self.env.repo / ".claude" / "orchestrate-state.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{not json")
-        r = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0), check=False)
+        r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False)
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")
         self.assertIn("unreadable state file", r.stderr)
 
     def test_exit_2_when_gh_is_missing(self):
-        r = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0), check=False, no_gh=True)
+        r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False, no_gh=True)
         self.assertEqual(r.returncode, 2)
 
     def test_every_exit_ends_one_next_line(self):
         self.serve([issue(1)])
         self.state({})
         self.env.set_gh(self.responses)
-        ok = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0))
+        self.agents({"name": "lead", "sessionId": "L1"})
+        ok = self.env.run("lead-route", "--cap", "2", "--now", iso(0))
         self.assertEqual(ok.verdict, "next: done")
         self.assertEqual(ok.stdout.splitlines()[-1], "counted: 0 of 2")  # the counted line stays last before the verdict
-        bad = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", "not a time", check=False)
+        bad = self.env.run("lead-route", "--cap", "2", "--now", "not a time", check=False)
         self.assertEqual((bad.returncode, bad.stdout, bad.verdict), (2, "", "next: could-not-run"))
-        usage = self.env.run("lead-route", "--lead", "live", "--cap", "0", check=False)
+        usage = self.env.run("lead-route", "--cap", "0", check=False)
         self.assertEqual((usage.returncode, usage.verdict), (2, "next: could-not-run"))
 
     def test_a_rate_limit_ends_retry_after_with_the_reset_time(self):
@@ -376,7 +444,7 @@ class LeadRoute(unittest.TestCase):
         self.env.set_gh([{"args": ["api"], "exit": 1,
                           "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
         with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
-            r = self.env.run("lead-route", "--lead", "live", "--cap", "2", "--now", iso(0), check=False)
+            r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False)
         self.assertEqual((r.returncode, r.stdout), (2, ""))
         self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
@@ -426,6 +494,23 @@ class PromptSide(unittest.TestCase):
         self.assertIn('scripts/lead-route"', text)
         self.assertIsNone(re.search(r"30[- ]minute", text), "the 30-minute rule lives in scripts/lead-route")
         self.assertNotIn("newer than", text, "the resume comparison lives in scripts/lead-route")
+
+    def test_run_takes_lead_mode_from_lead_route_not_from_listagents(self):
+        # #634: ListAgents exposes no cwd, so it can't tell this repo's lead from another's.
+        text = SKILL.read_text()
+        call = next(l for l in text.splitlines() if 'scripts/lead-route"' in l and "--cap" in l)
+        self.assertNotIn("--lead", call)
+        mode = next(l for l in text.splitlines() if l.strip().startswith("**Lead mode.**"))
+        self.assertNotIn("ListAgents", mode)
+        self.assertIn("`lead: live`", mode)
+
+    def test_the_lead_skill_carries_the_flags_not_applied_message_and_run_says_profiling_is_fresh_launch_only(self):
+        lead = (ROOT / "skills" / "lead" / "SKILL.md").read_text()
+        self.assertIn("flags were not applied", lead)
+        self.assertIn("scripts/launch --lead --profile", lead)
+        self.assertIn("profile.py <session>", lead)
+        self.assertIn("at a fresh launch only", SKILL.read_text())
+        self.assertIn("`launch --lead --profile` passes `--profile`", SKILL.read_text())
 
     def test_held_paths_sentence_names_elsewhere_worktrees_and_defers_to_holds(self):
         # #253: scripts/holds holds an Elsewhere ticket's live worktree changes (#226); the run prompt must say so.

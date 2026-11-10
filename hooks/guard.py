@@ -1897,7 +1897,7 @@ SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
 # `<pr>` or its head), or a literal word such as "resolve"; a trailing "+", "*" or "?" repeats the last token.
 # Flag value kinds, one per value, space separated: "" (a switch), "word", "num", "float", "hash", "repo" (only `.`),
 # "snapshot" (only the pass's own snapshot file), "cwd" (gate's: a worktree of this repo), "under" (scratch's: this
-# session's scratchpad), and "word*" / "word+" / "num*" for a list.
+# session's scratchpad), "own" (only the caller's own session id), and "word*" / "word+" / "num*" for a list.
 class Form(NamedTuple):
     script: str
     shape: tuple = ()
@@ -1951,9 +1951,10 @@ ORCHESTRATOR_FORMS = (
     Form("verify", (), {"--config": "", "--cwd": "cwd", "--timeout": "float"}, need=("--config", "--cwd")),
     Form("ci-times", (), {"--since": "word"}),
     Form("watch-ci", ("target+",), {"--no-run-after": "float", "--interval": "float", "--stuck-after": "float"}),
-    Form("lead-route", (), {**SESSION_FLAGS, "--lead": "word", "--cap": "num", "--now": "word"}, need=("--lead", "--cap")),
+    Form("lead-route", (), {**SESSION_FLAGS, "--cap": "num", "--now": "word"}, need=("--cap",)),
     Form("lead-brief", (), {"--repo": "repo", "--now": "word", "--checkpoint": "num", "--watch": "", "--interval": "float"}),
-    Form("prompts", (), {"--repo": "repo", "--session": "word", "--since": "word", "--watermark": "", "--mark": ""}),
+    # `--session` is the caller's own id (#634): the mark and the watermark are per session, so another session's id is refused.
+    Form("prompts", (), {"--repo": "repo", "--session": "own", "--since": "word", "--watermark": "", "--mark": ""}),
     # One ticket, through the trust rule (every role may read one).
     Form("issue", ("n",), {"--repo": "repo"}),
     # profile.py, run as `python3 -I <plugin>/scripts/profile.py`: the pass record and the profile build.
@@ -1990,7 +1991,8 @@ def value_ok(kind: str, value: str, ctx: FormContext) -> bool:
         return bool(value) and not value.startswith("-")
     if kind in ("num", "num*"):
         return value.isascii() and value.isdigit()
-    return {"float": lambda: FLOAT.fullmatch(value) is not None, "hash": lambda: HEX.fullmatch(value) is not None,
+    return {"own": lambda: bool(ctx.session) and value == ctx.session,
+            "float": lambda: FLOAT.fullmatch(value) is not None, "hash": lambda: HEX.fullmatch(value) is not None,
             "repo": lambda: value == ".", "snapshot": lambda: value == SNAPSHOT_FILE,
             "cwd": lambda: gate_cwd_ok(value, ctx.cwd, ctx.session), "under": lambda: under_ok(value, ctx.session)}.get(kind, lambda: False)()
 

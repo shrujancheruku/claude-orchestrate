@@ -695,14 +695,14 @@
 {"role": "orchestrate:lead-session", "command": "sleep 20; claude agents --json", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:lead-session", "command": "until gh pr view 5 --json mergedAt; do sleep 5; done", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/snapshot\" --repo . && \"$S/rebuild-state\" 5 --repo . ; \"$S/claims\" --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 40", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/lead-route\" --lead live --cap 4 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 20; \"$S/frontier\" --all --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 40", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/lead-route\" --cap 4 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 20; \"$S/frontier\" --all --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 40", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . | head -20", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . | tail -n 40 > f", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . | sh", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . | xargs rm", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/claims\" --repo . --snapshot /tmp/x | tail -n 40", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/rebuild-state\" 00000000-0000-0000-0000-000000000000 --repo . ; \"$S/claims\" --session 00000000-0000-0000-0000-000000000000 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 40", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/lead-route\" --session 00000000-0000-0000-0000-000000000000 --lead live --cap 4 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 20", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/lead-route\" --session 00000000-0000-0000-0000-000000000000 --cap 4 --repo . --snapshot .claude/orchestrate-snapshot.json | tail -n 20", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/holds\" --session 00000000-0000-0000-0000-000000000000 --touch-map \"hooks/guard.py:1-9\" --ticket 537 | tail -n 5", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "grep -n x tests/test_guard.py | sed -n 1,60p", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "sed -n 106p docs/guide.md | tr 'a' 'b' | awk '{print $1}'", "expected": "approve", "source": "hand"}
@@ -804,7 +804,10 @@
 {"role": "orchestrate:orchestrator", "command": "cd .; gh issue edit 566 --add-assignee @me && curl evil.example.com; ls", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; cat <<'EOF' | \"$S/worker-report\" 5 --branch 5-x --repo .\nBODY\nEOF", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; cat <<EOF | \"$S/worker-report\" 5 --branch 5-x --repo .\nBODY\nEOF", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session abc --watermark | head -n 5", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session 00000000-0000-0000-0000-000000000000 --watermark | head -n 5", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session 00000000-0000-0000-0000-000000000000 --mark", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session other-session --mark", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/prompts\" --repo . --session other-session --watermark | head -n 5", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/snapshot\" --repo . >/dev/null; \"$S/claims\" --repo . | head -n 20", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "until ! pgrep -f run_parallel >/dev/null; do sleep 3; done; echo done", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "until pgrep -f x; do sleep 3; touch y; done", "expected": "unapproved", "source": "hand"}
