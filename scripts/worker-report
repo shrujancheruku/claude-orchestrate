@@ -26,7 +26,8 @@ sends an incomplete report back to the reviewer once.
 word) as one PR comment whose first line is `> *Risk notes (review not posted).*`, when the report says `posted: off` or
 `posted: failed...`, and never twice: a trusted author's comment with that first line already on the PR is left alone. It
 prints a second line after the verdict: `risk-notes posted`, `risk-notes exists` or `risk-notes none` (a posted review
-carries them, or there are none). A failed post is exit 2.
+carries them, or there are none) or `risk-notes unparsed` (the report has a `risk-notes:` line that holds no
+`path:line-range — what to look at` note; the orchestrator posts nothing and tells the user). A failed post is exit 2.
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
 no-primary-source, worktree-gone, transient (a host failure nobody decides: the event carries `retry_after` and
 `failed_command`; a `permission-denied` or `human-only` report whose text names a rate limit or a wait-until time is
@@ -210,7 +211,7 @@ def record_review(repo, pr, words, text) -> None:
 
 # The first line of the fallback comment `--post-risk-notes` posts (scripts/lead-brief reads it back by this line).
 RISK_MARKER = "> *Risk notes (review not posted).*"
-RISK_NOTE = re.compile(r"^\s*[-*]?\s*(\S+:\d+(?:-\d+)?\s+—\s+\S.*?)\s*$")
+RISK_NOTE = re.compile(r"^\s*[-*]?\s*`?([^\s`]+:\d+(?:-\d+)?)`?\s+—\s+(\S.*?)\s*$")  # backticks round the location are dropped
 
 
 def risk_notes(text: str) -> list:
@@ -221,12 +222,12 @@ def risk_notes(text: str) -> list:
         m = re.match(r"^[ \t>*-]*risk-notes:[ \t]*`*(.*?)`*[ \t]*$", lines[i], re.I)
         if not m:
             continue
-        found = [n.group(1) for n in [RISK_NOTE.match(m.group(1))] if n]
+        found = [f"{n.group(1)} — {n.group(2)}" for n in [RISK_NOTE.match(m.group(1))] if n]
         for line in lines[i + 1:]:
             n = RISK_NOTE.match(line)
             if not n:
                 break
-            found.append(n.group(1))
+            found.append(f"{n.group(1)} — {n.group(2)}")
         return found
     return []
 
@@ -237,8 +238,12 @@ def post_risk_notes(repo, pr, text) -> str:
     review carries them, or the report has none). The script that reads the report posts it, so the orchestrator's
     own pass holds no hand-made dedupe (#545)."""
     notes = risk_notes(text)
-    if not notes or not (_field("posted", text) or "").lower().startswith(("off", "failed")):
+    if not (_field("posted", text) or "").lower().startswith(("off", "failed")):
         return "none"
+    if not notes:
+        # A `risk-notes:` line with text that is no `path:line-range — what to look at` note: say so, never drop it silently.
+        stated = (_field("risk-notes", text) or "").lower().rstrip(".")
+        return "unparsed" if stated and stated != "none" else "none"
     try:
         trusted = github.trusted_logins(repo)
         if any(str(c.get("body") or "").strip().split("\n", 1)[0].strip() == RISK_MARKER

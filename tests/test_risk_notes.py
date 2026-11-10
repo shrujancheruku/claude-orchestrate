@@ -72,6 +72,20 @@ class RiskNotes(unittest.TestCase):
         r = self.report("verdict: approve\nsuite: pass\nposted: off\n", "--post-risk-notes")
         self.assertEqual(r.stdout.splitlines(), ["valid", "risk-notes none"])
 
+    def test_a_backticked_location_is_posted_without_the_backticks(self):
+        self.gh()
+        r = self.report("suite: pass\nrisk-notes: `hooks/guard.py:10-20` — a wrong form\nposted: off\n", "--post-risk-notes")
+        self.assertEqual(r.stdout.splitlines()[-1], "risk-notes posted")
+        self.assertIn("hooks/guard.py:10-20 — a wrong form", self.posts()[0][-1])
+
+    def test_notes_that_do_not_parse_are_reported_unparsed_and_nothing_is_posted(self):
+        self.gh()
+        r = self.report("suite: pass\nrisk-notes: guard.py — a wrong form\nposted: off\n", "--post-risk-notes")
+        self.assertEqual(r.stdout.splitlines(), ["valid", "risk-notes unparsed"])
+        self.assertEqual(self.posts(), [])
+        self.assertEqual(self.report("suite: pass\nrisk-notes: none\nposted: off\n", "--post-risk-notes").stdout.splitlines()[-1],
+                         "risk-notes none")
+
     def test_without_the_flag_the_output_is_the_verdict_line_alone(self):
         self.gh()
         r = self.report(REPORT.format(posted="off"))
