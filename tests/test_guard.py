@@ -2359,6 +2359,25 @@ class SubagentScriptBoundaryTest(unittest.TestCase):
             self.assertIn("doesn't run", self.deny(role, f"{SCRIPTS}/claims --repo ."))
         self.assertFalse(approved("orchestrate:scout", f"{SCRIPTS}/claims --repo /other", self.work))
 
+    def test_every_script_the_reason_lists_has_an_approved_form(self):
+        # ROLE_SCRIPT_FORMS is text kept beside the approval rules: a key with no approved form would advise a denied call.
+        forms = {
+            ("worker", "verify"): f"{SCRIPTS}/verify --config --branch 567-x",
+            ("worker", "threads"): f"{SCRIPTS}/threads",
+            ("reviewer", "threads"): f"{SCRIPTS}/threads 12",
+            ("scout", "threads"): f"{SCRIPTS}/threads 12",
+            ("scout", "claims"): f"{SCRIPTS}/claims --repo .",
+        }
+        for role, names in GUARD_MODULE.ROLE_SCRIPT_FORMS.items():
+            for name in names:
+                if (role, name) in forms:
+                    with self.subTest((role, name)):
+                        out = raw(f"orchestrate:{role}", forms[(role, name)], self.work, tool_input={
+                            "command": forms[(role, name)], "timeout": 600000})
+                        self.assertTrue(out and out["permissionDecision"] == "allow")
+                else:
+                    self.assertEqual((role, name), ("reviewer", name), "add the approved form of this key to the test")
+
     def test_a_scout_has_no_verify(self):
         self.assertIn("doesn't run", self.deny("scout", f"{SCRIPTS}/verify --config"))
 
