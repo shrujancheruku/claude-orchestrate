@@ -142,7 +142,7 @@
 {"role": "orchestrate:worker", "command": "grep -n \"risk notes\\|gh pr view\" skills/run/SKILL.md agents/worker.md; sed -n 3p agents/reviewer.md; gh pr view 48 --json body --jq .body", "expected": "allow"}
 {"role": "orchestrate:worker", "command": "python3 - <<'EOF'\nBODY\nEOF\npython3 -m unittest discover tests 2>&1 | tail -1\ngit add agents/reviewer.md agents/worker.md skills/run/SKILL.md && git commit -qm \"TEXT\" && git push -q 2>&1 | tail -1\ngh pr edit 48 --body \"TEXT \\`.\" | tail -1", "expected": "deny"}
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh issue view 37 --comments; gh issue view 27 | head -150; gh pr view 71 --json title,body,headRefName", "expected": "allow"}
-{"role": "orchestrate:reviewer", "command": "cd /repo; gh pr diff 71 > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.diff; wc -l /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.diff; cat agents/reviewer.md; ls docs/adr; grep -n -i -A8 \"review\" docs/agents/*.md | head -40", "expected": "deny"}
+{"role": "orchestrate:reviewer", "command": "cd /repo; gh pr diff 71 > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.diff; wc -l /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.diff; cat agents/reviewer.md; ls docs/adr; grep -n -i -A8 \"review\" docs/agents/*.md | head -40", "expected": "unapproved"}
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh issue view 37 --comments; cat agents/reviewer.md; ls docs/adr; ls .claude 2>/dev/null", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh pr diff 71 -- scripts/profile.py | head -700", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh issue view 37 --comments 2>&1 | head -80", "expected": "allow"}
@@ -184,7 +184,7 @@
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh api --method POST repos/owner/claude-orchestrate/pulls/49/reviews --input - <<'EOF'\n{\"event\": \"COMMENT\", \"body\": \"x\"}\nEOF", "expected": "deny"}
 {"role": "orchestrate:reviewer", "command": "gh api --method POST repos/{owner}/{repo}/pulls/49/reviews --input - <<'EOF'\n{\"event\": \"COMMENT\", \"body\": \"x\"}\nEOF", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh pr view 76 --json title,body,files,headRefName | head -80; gh issue view 38 --comments | head -120", "expected": "allow"}
-{"role": "orchestrate:reviewer", "command": "cd /repo; gh pr diff 76 > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/d.diff; wc -l /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/d.diff", "expected": "deny"}
+{"role": "orchestrate:reviewer", "command": "cd /repo; gh pr diff 76 > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/d.diff; wc -l /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/d.diff", "expected": "unapproved"}
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh pr diff 76 -- scripts/profile.py | head -0; gh pr diff 76 | sed -n 1,700p", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh pr diff 75 | grep -n -i -E \"event|merge\" | grep -i -E \"emit|event|\\\"|'\" | head -50", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "cd /repo; gh pr diff 75 | grep -n -i -E \"replay|handed|ref=\" | head; grep -n -A25 \"def append_event\" scripts/common.py; grep -rn \"append_event(\" scripts | grep -v \"def \" | head -20; T=/home/user/.claude/projects/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000.jsonl; grep -c \"tool-use-id\" $T; grep -o \"<task-notification>.\\{0,300\\}\" $T | head -2; grep -c \"teammate-message\" $T", "expected": "allow"}
@@ -434,7 +434,7 @@
 {"role": "orchestrate:scout", "command": "grep -rn -i \"touch.map\\|scout\" agents skills README.md 2>/dev/null | head -20; ls skills 2>/dev/null; find . -path ./.git -prune -o -name \"SKILL.md\" -print | grep -v .claude | head", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "gh issue view 32 --comments | head -150; gh pr view 75 | head -60; git fetch -q origin pull/75/head && git rev-parse FETCH_HEAD", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "gh pr diff 75 -- hooks/guard.py | head -5; gh pr diff 75 | grep -n '^diff'", "expected": "allow"}
-{"role": "orchestrate:reviewer", "command": "cd /home/user 2>/dev/null; cd /repo && gh pr diff 75 > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.diff; sed -n 1,245p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.diff; gh issue view 32 --json comments -q '.comments[].body'|head -50", "expected": "deny"}
+{"role": "orchestrate:reviewer", "command": "cd /home/user 2>/dev/null; cd /repo && gh pr diff 75 > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.diff; sed -n 1,245p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr.diff; gh issue view 32 --json comments -q '.comments[].body'|head -50", "expected": "unapproved"}
 {"role": "orchestrate:reviewer", "command": "gh pr diff 75 | sed -n 1,245p", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "gh issue view 32 --json body,comments -q '.body, (.comments[].body)'", "expected": "allow"}
 {"role": "orchestrate:reviewer", "command": "gh pr diff 75 | sed -n 245,520p | grep -n -i -E \"head|local|def test|branch\" | head -50; cat > /dev/null <<<x; git show origin/main:hooks/guard.py | sed -n 150,240p", "expected": "allow"}
@@ -525,10 +525,10 @@
 {"role": "orchestrate:scout", "command": "git update-ref refs/heads/x HEAD", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git config user.name x", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:scout", "command": "git remote -v add evil https://example.invalid/x.git", "expected": "deny", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { viewer { login } }'", "expected": "allow", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='{ viewer { login } }'", "expected": "allow", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api graphql -F owner=o -F limit=100 -f query='query($o: String!) { repository(owner: $o) { id } }'", "expected": "allow", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api graphql --paginate -f query='query { viewer { login } }' --jq .data", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { viewer { login } }'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='{ viewer { login } }'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -F owner=o -F limit=100 -f query='query($o: String!) { repository(owner: $o) { id } }'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql --paginate -f query='query { viewer { login } }' --jq .data", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='mutation { addStar(input: {}) { id } }'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='subscription { x }'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query A { a } mutation B { b }'", "expected": "deny", "source": "hand"}
@@ -540,13 +540,13 @@
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a(s: \"#\") } mutation { x }' -f operationName=B", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a(s: \"\"\"#\"\"\") } mutation { x }'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "gh api graphql -f query='query { a }' -F x=@/etc/passwd", "expected": "deny", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api graphql -F limit=100 -f query='query($n: Int!) { node(id: $n) { id } }'", "expected": "allow", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='{ __type(name: \"Mutation\") { fields { name } } }'", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -F limit=100 -f query='query($n: Int!) { node(id: $n) { id } }'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh api graphql -f query='{ __type(name: \"Mutation\") { fields { name } } }'", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh run watch 123 --exit-status", "expected": "deny", "background": true, "source": "hand"}
 {"role": "orchestrate:worker", "command": "scripts/watch-ci 12", "expected": "deny", "background": true, "source": "hand"}
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.0/scripts/verify' --config", "expected": "deny", "background": true, "source": "hand"}
 {"role": "orchestrate:worker", "command": "gh run watch 123 --exit-status | tail -3", "expected": "allow", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "gh run watch 123 --exit-status", "expected": "allow", "background": true, "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "gh run watch 123 --exit-status", "expected": "deny", "background": true, "source": "hand"}
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.11/scripts/verify' --config", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.12/scripts/verify' --config", "expected": "deny", "timeout": 300000, "source": "hand"}
 {"role": "orchestrate:worker", "command": "'/p/orchestrate/0.7.13/scripts/verify' --config", "expected": "allow", "timeout": 600000, "source": "hand"}
@@ -555,7 +555,7 @@
 {"role": "orchestrate:scout", "command": "gh api --method POST repos/owner/claude-orchestrate/pulls/53/comments -f path=hooks/guard.py -f subject_type=file -f commit_id=abc1234 -f body='[blocking] x'", "expected": "deny", "source": "hand"}
 {"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --fixed abc1234", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/threads 12 reopen ID --why 'x'", "expected": "allow", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/threads 12 --all", "expected": "allow", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/threads 12 --all", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "cd /repo && /p/orchestrate/0.7.0/scripts/threads 12", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/threads 12 reopen ID --why 'x'", "expected": "allow", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve ID --left 'x'", "expected": "deny", "source": "hand"}
@@ -735,10 +735,10 @@
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/gate\" 561 --session 00000000-0000-0000-0000-000000000000 --cwd .claude/worktrees/agent-x", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/gate\" 1 --cwd /etc", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "S=/p/orchestrate/0.7.0/scripts/.; \"$S/gate\" 1 --cwd ../x", "expected": "silent", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/pr-559 && /p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/pr-559 2>&1 | tail -25", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/pr-559 2>&1 | tail -10", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/pr-559 && /p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/pr-559 2>&1 | tail -25", "expected": "approve", "source": "hand", "timeout": 600000}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/pr-559 2>&1 | tail -10", "expected": "approve", "source": "hand", "timeout": 600000}
 {"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/pr-559 && gh pr view 559 --json title; grep -n x hooks/guard.py", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/plain 2>&1 | tail -10", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/plain 2>&1 | tail -10", "expected": "unapproved", "source": "hand", "timeout": 600000}
 {"role": "orchestrate:reviewer", "command": "cd /tmp/scratch-559/plain && ls", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "cat /tmp/notes.txt | head -5; sed -n 1,5p /private/tmp/x; grep -rn token hooks tests", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "cat .claude/orchestration.md; find . -maxdepth 2 -name '*.pem'; awk '{print $1}' README.md", "expected": "approve", "source": "hand"}
@@ -910,3 +910,59 @@
 {"role": "orchestrate:orchestrator-run", "command": "gh pr ready 12 --undo", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "gh pr close 12", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "gh pr reopen 12", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/a.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp -r /repo/src /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-1b", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/a.py /repo/src/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp /repo/src/a.py /repo/.claude/worktrees/agent-x/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "cp -t /repo /repo/src/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/pr-1b/x", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "mkdir -p /repo/x", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/x /repo/x", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git show HEAD:a.py | tee /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/a.py", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git show HEAD:a.py | tee /repo/a.py", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/n.txt", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "echo x > /repo/n.txt", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/../n.txt", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/pr-559", "expected": "deny", "background": true, "timeout": 600000, "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/verify --config --cwd /tmp/scratch-559/pr-559", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "python3 -m unittest discover tests", "expected": "deny", "background": true, "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "git merge --ff-only origin/main", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/x", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "cp /repo/a.txt /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/b.txt", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "diff /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/a.txt /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/b.txt", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "cp /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/a.txt /repo/a.txt", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "echo x > /repo/n.txt", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "mkdir -p /tmp/claude-0/other/scratchpad/x", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "gh api graphql -f query='query { viewer { login } }'", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "gh api graphql -f query='mutation { addStar(input: {}) { id } }'", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/claims --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/claims --repo /other", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/claims --repo .", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/claims --repo .", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/rescue 666 --title \"ci: skip draft PRs\" --repo . --pr 668", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/rescue 666 --title t --repo . --force", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/rescue 666 --title t --repo . && ls", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/rescue 666 --title t --repo /other", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/rescue 666 --title t --repo .", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/rescue 666 --title t --repo .", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git pull --ff-only origin 358-ticket", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git pull --ff-only origin main", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git pull --ff-only", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git pull --rebase origin 358-ticket", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git merge --ff-only origin/358-ticket", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git merge --ff-only origin/other-branch", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git merge --no-edit origin/main", "expected": "unapproved", "outside": true, "source": "hand"}
+{"role": "orchestrate:worker", "command": "git merge --ff-only origin/358-ticket", "expected": "unapproved", "outside": true, "source": "hand"}
+{"role": "orchestrate:worker", "command": "git pull --ff-only origin 358-ticket", "expected": "unapproved", "outside": true, "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body \"TEXT\" --base main --head 358-ticket", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create -d -t \"TEXT\" -b \"TEXT\" -B main -H 358-ticket -l bug -a me -r them", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --fill --label bug --assignee me --reviewer them", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body \"TEXT\" --template .github/pull_request_template.md", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body \"TEXT\" --milestone 1", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --web", "expected": "deny", "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr create --draft --title \"TEXT\" --body \"TEXT\"", "expected": "unapproved", "outside": true, "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr ready", "expected": "unapproved", "outside": true, "source": "hand"}
+{"role": "orchestrate:worker", "command": "gh pr edit --title \"TEXT\"", "expected": "unapproved", "outside": true, "source": "hand"}
+{"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/threads resolve 123 --fixed abc1234", "expected": "unapproved", "outside": true, "source": "hand"}
+{"role": "orchestrate:worker", "command": "git push origin 358-ticket", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:worker", "command": "git push origin 358-ticket", "expected": "unapproved", "outside": true, "source": "hand"}
