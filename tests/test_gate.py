@@ -91,6 +91,27 @@ class GateTest(unittest.TestCase):
                 r = self.gate()
                 self.assertEqual(self.tier_line(r), want, r.stdout + r.stderr)
 
+    def test_send_back_carries_no_tier_line(self):
+        self.tiers()
+        self.prime(title="bad title")
+        r = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertNotIn("tier ", r.stdout)
+        self.assertEqual(r.stdout.splitlines()[-1], "next: send-back 7")
+
+    def test_changed_lines_counts_inside_hunks_only(self):
+        import importlib.machinery
+        import importlib.util
+        from pathlib import Path
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        sys.path.insert(0, str(scripts))
+        gate = importlib.machinery.SourceFileLoader("gate_mod", str(scripts / "gate"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("gate_mod", gate))
+        gate.exec_module(mod)
+        diff = ("diff --git a/x.md b/x.md\n--- a/x.md\n+++ b/x.md\n@@ -1,3 +1,3 @@\n context\n\n"
+                "----\n+++x\n+new\n")  # a removed `---` rule and an added `++x`, plus +new; the empty line is context
+        self.assertEqual(mod.changed_lines(diff), 3)
+
     def test_tier_counts_changed_lines_from_the_config(self):
         self.tiers()
         big = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n" + "+x\n" * 401

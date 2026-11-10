@@ -38,6 +38,7 @@ class ModelFor(unittest.TestCase):
             (("size:S",), None, False, cfg(), "haiku"),    # the label alone, before the map
             (("size:S",), risky, False, cfg(), "sonnet"),  # a risk path beats the label
             (("size:S",), four, False, cfg(), "sonnet"),   # so does a map over the limit
+            (("size:S", "size:M"), one, False, cfg(), "sonnet"),  # S only when it is the only size label
             (("size:M",), one, False, cfg(), "sonnet"),
             (("size:L",), one, False, cfg(), "sonnet"),
             ((), one, True, cfg(), "sonnet"),              # investigate / design

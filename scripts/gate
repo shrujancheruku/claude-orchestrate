@@ -20,7 +20,7 @@ and nothing else failed, or the PR waits for an older open PR on a shared path t
 that yields no command fails the gate as malformed. Run the repo-specific commands in --cwd (the worker's
 worktree, so they see the PR's code); default is the current directory. Each runs for at most --timeout
 seconds (default 1800); one that outlives it is killed and fails with "timed out after Ns".
-When the diff was read, a `tier S|M|L` line comes just before the `next:` line: the reviewer's tier (Config.tier_for: the
+On a pass (exit 0), a `tier S|M|L` line comes just before `next: review <head>` (never above a `send-back`, whose lines go to the worker): the reviewer's tier (Config.tier_for: the
 diff's changed lines and files against the config's Tiers, a risk path as L, and the ticket's `size:` label as a floor that
 only raises it); the orchestrator dispatches the reviewer at that tier.
 Every run ends with exactly one `next:` line, the verdict the orchestrator applies word for word:
@@ -91,8 +91,17 @@ def parse_diff(diff):
 
 
 def changed_lines(diff) -> int:
-    """Added plus removed lines of a unified diff (file headers are not lines)."""
-    return sum(1 for l in diff.splitlines() if l[:1] in "+-" and not l.startswith(("+++", "---")))
+    """Added plus removed lines of a unified diff, counted inside hunks only (after an `@@` line, by first character), so
+    file headers are not lines but a removed `---` or an added `++x` is."""
+    n, inside = 0, False
+    for l in diff.splitlines():
+        if l.startswith("diff --git"):
+            inside = False
+        elif l.startswith("@@"):
+            inside = True
+        elif inside and l[:1] in ("+", "-"):
+            n += 1
+    return n
 
 
 def review_tier(view, changed, diff, snap, cwd) -> str:
@@ -252,9 +261,10 @@ def main(argv=None) -> int:
             raise
         code = e.code if isinstance(e.code, int) else 2
     pr, head = NEXT.get("pr", "?"), NEXT.get("head")
-    if NEXT.get("tier"):  # the reviewer's tier, for the dispatch that follows `review <head>`; the verdict stays last
-        print(f"tier {NEXT['tier']}", flush=True)
     if code == 0:
+        # the reviewer's tier, for the dispatch that follows `review <head>`; a send-back's lines go to the worker, so no tier there
+        if NEXT.get("tier"):
+            print(f"tier {NEXT['tier']}", flush=True)
         return common.verdict("review", head, exit_code=code)
     if code == 1:
         return common.verdict("send-back", pr, exit_code=code)

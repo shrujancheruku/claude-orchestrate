@@ -123,7 +123,7 @@ class Config(NamedTuple):
         if investigate or not self.worker_small_model:
             return default
         sized = [x for x in SIZES if f"size:{x}" in set(labels or ())]
-        if sized and "S" not in sized:
+        if sized and sized != ["S"]:  # any bigger label wins (ADR-0016: a label is a floor)
             return default
         paths = None if touch_map_paths is None else list(touch_map_paths)
         if paths is not None and (self.risk_hit(paths) or len(set(paths)) > self._s_files()):
