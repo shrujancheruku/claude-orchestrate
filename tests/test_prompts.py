@@ -95,6 +95,17 @@ class Prompts(unittest.TestCase):
         self.assertEqual(out[4], "2026-11-09T10:01:00+00:00 worker Edit /a/b.py")
         self.assertEqual(out[5], "2026-11-09T10:02:00+00:00 worker Bash make test")
 
+    def test_lists_the_path_of_read_grep_and_glob(self):
+        self.write([
+            entry("2026-11-09T10:00:00+00:00", "Read", "orchestrate:reviewer", file_path="/r/a.py"),
+            entry("2026-11-09T10:01:00+00:00", "Grep", "orchestrate:reviewer", path="/r/src", keys=["path", "pattern"]),
+            entry("2026-11-09T10:02:00+00:00", "Glob", "orchestrate:reviewer", path=None, keys=["pattern"]),
+        ])
+        out = self.run_prompts().stdout.splitlines()
+        self.assertEqual(out[3], "2026-11-09T10:00:00+00:00 reviewer Read /r/a.py")
+        self.assertEqual(out[4], "2026-11-09T10:01:00+00:00 reviewer Grep /r/src")
+        self.assertEqual(out[5], "2026-11-09T10:02:00+00:00 reviewer Glob (pattern)")
+
     def test_a_prompt_seen_by_both_events_counts_once(self):
         def note(time, session="s1", kind="permission_prompt", message="Claude requested permissions to edit /r/hooks/guard.py which is a sensitive file."):
             return {"time": time, "source": "notification", "session_id": session, "agent_type": None, "tool_name": None,
