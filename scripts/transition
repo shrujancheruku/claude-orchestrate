@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""transition <verb> <ticket> [flags] [--repo DIR] : every tracker write of a stop, a hand-back and a marker comment, in one call (#661)
+
+The orchestrator used to type each of these by hand: a label swap, an unassign, a comment whose first line is a marker, then
+`rescue`. `lead-route` and `lead-brief` find the marker by exact text, so a misspelling or a short sha made a stop nobody routed.
+The marker strings live in scripts/tracker.py; this script is the only writer, and nothing in a prompt restates one. One verb
+per transition (the flags each takes; the file flags name a file in the session scratchpad, the text is read from it):
+    handback <n> --branch <b> [--pr <num>] [--blocked-by <m>...] [--title <t>]
+                           unassign, comment the branch (and the blockers) that holds the work, then run `rescue <b>`
+                           (with --pr, so the PR's reviewer scratch worktrees go too) and pass its lines on
+    fallback <n>           the lead is gone: swap `needs-lead` for `needs-info`, comment it, unassign
+    abandon <n> [--pr <num>]
+                           close the PR unmerged (the branch is kept), remove its reviewer scratch trees, unassign. The PR must
+                           be the ticket's own (branch `<n>-...`) and not a fork
+    stop-for-lead <n> --question-file <f> --branch <b>
+                           add `needs-lead`, post the stop comment (the question, the branch)
+    adr-hold <n> --pr <num> --conflicts-file <f>
+                           add `needs-lead`, post the ADR-conflict comment (the conflicts, the PR)
+    undelivered <n> --head <sha> --gist-file <f>
+                           comment that a failure on the lead's PR was not delivered (the full 40-hex head, the gist)
+    resent <n> --head <sha>
+                           comment that the failure for that head was sent again
+    to-human <n> --question-file <f> [--branch <b>]
+                           `ready-for-human` in place of `ready-for-agent`, unassign, comment (the generic `valid stopped` hand-back)
+    to-info <n> --question-file <f> [--branch <b>]
+                           the same with `needs-info`
+Each verb reads the ticket (trusted comments and labels only, ADR-0015) and writes only what is not already there, so a second
+identical call posts and labels nothing: a comment is skipped when the newest comment with the same first line is the same text
+(and, for a stop or an ADR hold, `needs-lead` is still on: after the lead answered, the same question is a new stop).
+Output: one line per write (`commented: #<n> <marker>`, `labelled: ...`, `unlabelled: ...`, `unassigned: #<n>`, `closed: PR #<pr>`,
+the `rescue` lines), then the verdict:
+    next: transitioned <verb> <n>   something was written
+    next: unchanged <verb> <n>      nothing was (the ticket already reads that way)
+    next: ask-user <why>            exit 1: refused, nothing written (a short or non-hex --head, a PR that is not the ticket's, a fork PR),
+                                    or `rescue` reported an overlap (its lines are above); the hand-back itself is done
+    next: elsewhere                 exit 3: `rescue` found the ticket's worktree held by another live session; the hand-back is done
+    next: retry-after <time> | could-not-run [<why>]   exit 2
+A question or conflicts file longer than 4000 characters is cut and says so; an `@login` in it is defused so it notifies no one.
+Run-log events for `stop-for-lead`, `adr-hold` and `to-info` (what `claims` will read as waiting) are not written yet: they need a
+new `runlog` event kind, which #657 is changing. Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+import common
+import github
+import repo
+import tracker
+
+LIMIT = 4000  # characters of a question, a conflicts list or a gist
+VERBS = {  # verb -> (required flags, optional flags); a flag a verb does not list is refused
+    "handback": (("branch",), ("pr", "blocked_by", "title")),
+    "fallback": ((), ()),
+    "abandon": ((), ("pr",)),
+    "stop-for-lead": (("question_file", "branch"), ()),
+    "adr-hold": (("pr", "conflicts_file"), ()),
+    "undelivered": (("head", "gist_file"), ()),
+    "resent": (("head",), ()),
+    "to-human": (("question_file",), ("branch",)),
+    "to-info": (("question_file",), ("branch",)),
+}
+FLAGS = ("branch", "pr", "blocked_by", "title", "question_file", "conflicts_file", "gist_file", "head")
+RESULT = {"word": ("transitioned",), "why": ""}  # the verdict the exit code maps to (read after the run)
+
+
+class Refused(Exception):
+    """Nothing was written: the call is wrong, not the tracker."""
+
+
+def defuse(text: str) -> str:
+    """The text of a file, cut at LIMIT and with every `@login` broken by a zero-width space, so it pings no one."""
+    text = text.strip()
+    note = ""
+    if len(text) > LIMIT:
+        note = f"\n[cut: {len(text) - LIMIT} more characters]"
+        text = text[:LIMIT].rstrip()
+    return re.sub(r"(?<![\w`])@(?=[\w-])", "@​", text) + note
+
+
+def read_text(path: str, what: str) -> str:
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise Refused(f"cannot read the {what} file {path}: {e.strerror or e}") from None
+    if not text.strip():
+        raise Refused(f"the {what} file {path} is empty")
+    return defuse(text)
+
+
+class Ticket:
+    """One ticket as the tracker shows it now, and the writes a verb makes: each skips what is already so, and says what it wrote."""
+
+    def __init__(self, root, number):
+        self.root, self.n = root, number
+        node = github.issue_node(number, cwd=root)
+        (self.issue,) = tracker.from_nodes([node], github.trusted_logins(root))
+        self.labels = set(self.issue["labels"])
+        self.changed = False
+        self.names = tracker.label_strings(root)
+
+    def say(self, line):
+        print(line, flush=True)
+        self.changed = True
+
+    def newest(self, marker):
+        found = [c for c in self.issue["comments"] if repo.first_line(c["body"]) == marker]
+        return found[-1] if found else None
+
+    def comment(self, body, dedupe=True, any_with_body=False):
+        """Post `body` unless it is already the newest comment with its first line (or, `any_with_body`, any comment with it)."""
+        marker = repo.first_line(body)
+        if dedupe:
+            if any_with_body:
+                if any(c["body"].strip() == body.strip() for c in self.issue["comments"]):
+                    return
+            else:
+                last = self.newest(marker)
+                if last and last["body"].strip() == body.strip():
+                    return
+        github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{self.n}/comments", "-f", f"body={body}",
+                    cwd=self.root)
+        self.issue["comments"].append({"body": body, "created": None, "edits": []})
+        self.say(f"commented: #{self.n} {marker}")
+
+    def add_label(self, name):
+        if name in self.labels:
+            return
+        github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{self.n}/labels", "-f", f"labels[]={name}",
+                    cwd=self.root, idempotent=True)
+        self.labels.add(name)
+        self.say(f"labelled: #{self.n} {name}")
+
+    def remove_label(self, name):
+        if name not in self.labels:
+            return
+        github.call("api", "--method", "DELETE", f"repos/{{owner}}/{{repo}}/issues/{self.n}/labels/{name}", cwd=self.root,
+                    idempotent=True)
+        self.labels.discard(name)
+        self.say(f"unlabelled: #{self.n} {name}")
+
+    def unassign(self):
+        data = github.call_json("api", f"repos/{{owner}}/{{repo}}/issues/{self.n}", cwd=self.root, idempotent=True)
+        logins = [a.get("login") for a in data.get("assignees") or [] if isinstance(a, dict) and a.get("login")]
+        if not logins:
+            return
+        args = ["api", "--method", "DELETE", f"repos/{{owner}}/{{repo}}/issues/{self.n}/assignees"]
+        for login in logins:
+            args += ["-f", f"assignees[]={login}"]
+        github.call(*args, cwd=self.root, idempotent=True)
+        self.say(f"unassigned: #{self.n}")
+
+
+def branch_line(branch, pr=None) -> str:
+    return f"Branch: `{branch}`" + (f" (PR #{pr})" if pr is not None else "")
+
+
+def handback(t, a):
+    blockers = sorted(set(a.blocked_by or ()))
+    body = [tracker.TRIAGE_MARKER, "", f"Handed back: the work is on branch `{a.branch}`" + (f" (PR #{a.pr}, left open)" if a.pr else "") + "."]
+    if blockers:
+        body.append("Waiting on: " + ", ".join(f"#{b}" for b in blockers) + ".")
+    t.unassign()
+    t.comment("\n".join(body))
+    argv = [sys.executable, str(Path(__file__).resolve().parent / "rescue"), a.branch, "--title", a.title or f"#{t.n}",
+            "--repo", str(t.root)]
+    if a.pr is not None:
+        argv += ["--pr", str(a.pr)]
+    r = common.run(*argv, cwd=t.root)
+    for line in r.stdout.splitlines():
+        if not line.startswith("next:"):
+            print(f"rescue: {line}", flush=True)
+    if r.code == 1:
+        RESULT.update(word=("ask-user",), why="rescue found an overlap (lines above); the hand-back is done")
+        return 1
+    if r.code == 3:
+        return 3
+    if r.code != 0:
+        print(f"transition: rescue failed (exit {r.code}): {common.one_line(r.stderr)}", file=sys.stderr)
+        return 2
+    t.changed = True  # the rescue ran: the hand-back is a write even when the comment was already there
+    return 0
+
+
+def fallback(t, a):
+    if tracker.NEEDS_LEAD not in t.labels:
+        return 0  # already swapped (or never held): the evidence is the label
+    t.comment("\n".join([tracker.TRIAGE_MARKER, "", "The lead is gone, so this stop is handed back to the ticket's author: "
+                         "`needs-info` in place of `needs-lead`."]), dedupe=False)
+    t.add_label(tracker.NEEDS_INFO)
+    t.remove_label(tracker.NEEDS_LEAD)
+    t.unassign()
+    return 0
+
+
+def abandon(t, a):
+    if a.pr is not None:
+        view = github.pr_view(a.pr, "state,headRefName,headRefOid,isCrossRepository", cwd=t.root)
+        if view.get("isCrossRepository"):
+            raise Refused(f"PR #{a.pr} is from a fork")
+        if repo.ticket_of_branch(view.get("headRefName")) != t.n:
+            raise Refused(f"PR #{a.pr} is on {view.get('headRefName')!r}, not a branch of #{t.n}")
+        if str(view.get("state")).upper() == "OPEN":
+            github.set_pr_state(a.pr, "closed", cwd=t.root)  # the branch is kept
+            t.say(f"closed: PR #{a.pr}")
+        for line in repo.remove_scratch(a.pr, view.get("headRefOid") or "", t.root):
+            t.say(f"scratch {line}")
+    t.unassign()
+    return 0
+
+
+def stop_for_lead(t, a):
+    question = read_text(a.question_file, "question")
+    t.comment("\n".join([tracker.STOP_MARKER, "", question, "", branch_line(a.branch)]), dedupe=tracker.NEEDS_LEAD in t.labels)
+    t.add_label(tracker.NEEDS_LEAD)
+    return 0
+
+
+def adr_hold(t, a):
+    conflicts = read_text(a.conflicts_file, "conflicts")
+    t.comment("\n".join([tracker.ADR_MARKER, "", conflicts, "", f"PR #{a.pr}"]), dedupe=tracker.NEEDS_LEAD in t.labels)
+    t.add_label(tracker.NEEDS_LEAD)
+    return 0
+
+
+def full_head(value):
+    if not re.fullmatch(r"[0-9a-f]{40}", value or ""):
+        raise Refused(f"--head must be the full 40-character commit sha, not {value!r}")
+    return value
+
+
+def undelivered(t, a):
+    head = full_head(a.head)
+    t.comment("\n".join([tracker.UNDELIVERED_MARKER, "", f"head {head}", "", read_text(a.gist_file, "gist")]))
+    return 0
+
+
+def resent(t, a):
+    head = full_head(a.head)
+    body = "\n".join([tracker.RESENT_MARKER, "", f"head {head}"])
+    t.comment(body, any_with_body=True)
+    return 0
+
+
+def triage(label_name):
+    def verb(t, a):
+        label = t.names["human"] if label_name == "human" else tracker.NEEDS_INFO
+        body = [tracker.TRIAGE_MARKER, "", read_text(a.question_file, "question")]
+        if a.branch:
+            body += ["", branch_line(a.branch)]
+        t.add_label(label)
+        t.remove_label(t.names["ready"])
+        t.unassign()
+        t.comment("\n".join(body))
+        return 0
+    return verb
+
+
+HANDLERS = {"handback": handback, "fallback": fallback, "abandon": abandon, "stop-for-lead": stop_for_lead,
+            "adr-hold": adr_hold, "undelivered": undelivered, "resent": resent,
+            "to-human": triage("human"), "to-info": triage("info")}
+
+
+def parser():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("verb", choices=sorted(VERBS))
+    ap.add_argument("ticket", type=int, help="the ticket number")
+    ap.add_argument("--branch", help="the branch that holds the work")
+    ap.add_argument("--pr", type=int, help="the ticket's PR")
+    ap.add_argument("--blocked-by", type=int, nargs="+", help="the tickets a hand-back waits on")
+    ap.add_argument("--title", help="the ticket title, for rescue's wip commit")
+    ap.add_argument("--question-file", help="a file holding the question (to-human, to-info, stop-for-lead)")
+    ap.add_argument("--conflicts-file", help="a file holding the ADR conflicts (adr-hold)")
+    ap.add_argument("--gist-file", help="a file holding the failure's gist (undelivered)")
+    ap.add_argument("--head", help="the full head commit the failure was about (undelivered, resent)")
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    return ap
+
+
+def run(argv=None) -> int:
+    ap = parser()
+    args = ap.parse_args(argv)
+    required, optional = VERBS[args.verb]
+    given = {f for f in FLAGS if getattr(args, f) is not None}
+    if given - set(required) - set(optional) or set(required) - given:
+        flag = lambda names: " ".join("--" + f.replace("_", "-") for f in names) or "none"
+        ap.error(f"{args.verb} takes {flag(required)} and may take {flag(optional)}")
+    root = Path(args.repo).resolve()
+    if not root.is_dir() or common.run("git", "rev-parse", "--git-dir", cwd=root).code != 0:
+        common.die(f"transition: cannot run: {args.repo} is not in a git repository")
+    root = repo.main_checkout(root)
+    try:
+        ticket = Ticket(root, args.ticket)
+        code = HANDLERS[args.verb](ticket, args)
+    except Refused as e:
+        RESULT.update(word=("ask-user",), why=str(e))
+        print(f"transition: {e}", file=sys.stderr)
+        return 1
+    except github.GhError as e:
+        common.die(f"transition: cannot run: gh failed: {common.one_line(e.message)}")
+    except (KeyError, TypeError, ValueError) as e:
+        common.die(f"transition: cannot run: {e}")
+    if code == 0:
+        RESULT["word"] = ("transitioned" if ticket.changed else "unchanged", args.verb, args.ticket)
+    return code
+
+
+def main(argv=None) -> int:
+    """Run, then end with the one `next:` line (see the module docstring)."""
+    def word():
+        return RESULT["word"] if RESULT["word"][0] != "ask-user" else ("ask-user", RESULT["why"])
+    return common.finish(run, argv, {0: word, 1: word, 3: ("elsewhere",)})
+
+
+if __name__ == "__main__":
+    sys.exit(main())
