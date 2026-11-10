@@ -1193,7 +1193,11 @@ def slots_label(p: dict) -> str:
 
 
 def write_html(data: dict, path: Path) -> None:
-    viewer = VIEWER.read_text()
+    try:
+        viewer = VIEWER.read_text()
+    except OSError:  # a plugin copy without viewer/ (#628): the JSON is already saved, so say so and go on
+        print(f"profile.py: the viewer {VIEWER} cannot be read, so only the JSON profile was written", file=sys.stderr)
+        return
     # `</` can't appear inside a script element; JSON allows escaping the slash.
     payload = json.dumps(data).replace("</", "<\\/")
     marker = '<script id="profile-data" type="application/json">null</script>'

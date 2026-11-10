@@ -1044,6 +1044,24 @@ class CommandTest(unittest.TestCase):
         self.assertIn('"session": "sess-1"', html)
         self.assertNotIn('type="application/json">null<', html)
 
+    def test_missing_viewer_writes_only_the_json_with_one_stderr_line(self):
+        # A plugin copy without viewer/ (#628): the scripts copied beside no viewer directory.
+        fx = Fixture(self.root)
+        self.env["ORCHESTRATE_USAGE_LOG"] = str(fx.usage)
+        bare = self.root / "bare-plugin"
+        shutil.copytree(SCRIPTS, bare / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        r = subprocess.run([sys.executable, "-I", str(bare / "scripts" / "profile.py"), SESSION],
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stderr.strip().splitlines()
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertIn(str(bare / "viewer" / "profile.html"), lines[0])
+        self.assertIn("only the JSON", lines[0])
+        self.assertIn("2 slots", r.stdout)  # the summary still prints
+        saved = fx.repo / prof.PROFILES / f"{at(1)[:10]}-{SESSION[:8]}.json"
+        self.assertTrue(saved.is_file())
+        self.assertFalse(saved.with_suffix(".html").exists())
+
     def test_viewer_shows_a_banner_for_rejected_files(self):
         html = prof.VIEWER.read_text()
         self.assertIn("regenerate it with scripts/profile.py", html)
