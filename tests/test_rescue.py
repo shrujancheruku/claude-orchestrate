@@ -560,37 +560,32 @@ class Rescue(unittest.TestCase):
         loader.exec_module(mod)
         return mod
 
-    def overlap_with(self, replies):
+    def test_the_overlap_check_runs_in_process_with_no_holds_subprocess(self):
         mod = self.load_rescue()
-        waits = []
-        with unittest.mock.patch.object(mod.common, "run", side_effect=lambda *a, **k: replies.pop(0)), \
-                unittest.mock.patch.object(mod.github, "_wait_for_shared_reset", side_effect=waits.append), \
-                unittest.mock.patch("builtins.print") as out:
+        self.assertFalse(hasattr(mod, "HOLDS"))
+        with unittest.mock.patch.object(mod.tracker.Snapshot, "open", side_effect=mod.github.GhError(
+                mod.github.RATELIMITED, "rate limit until 2026-01-01T00:00:00Z")), \
+                unittest.mock.patch.object(mod, "say") as out:
             code = mod.overlap(Path("."), ["a.py"], 42)
-        return code, waits, out
+        self.assertEqual(code, 0)
+        out.assert_called_with("overlap: unchecked (rate limited; re-run holds before dispatching into these files)")
 
-    def test_a_rate_limited_overlap_check_is_retried_then_succeeds(self):
-        mod = self.load_rescue()
-        limited = mod.common.Run(2, "", "holds: gh: rate limit until 2026-01-01T00:00:00Z")
-        replies = [limited, mod.common.Run(0, "", "")]
-        code, waits, out = self.overlap_with(replies)
-        self.assertEqual((code, len(waits), replies), (0, 1, []))
-        out.assert_called_with("overlap: none", flush=True)
+    def test_a_failure_after_the_branch_was_created_switches_back_and_deletes_it(self):
+        self.harness_worktree()
+        git(self.env.repo, "remote", "set-url", "origin", str(self.env.repo.parent / "no-such-origin"))
+        r = self.rescue_n("--title", "The ticket")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(git(self.wt, "branch", "--show-current").strip(), "worktree-agent-x1")
+        self.assertEqual(git(self.env.repo, "branch", "--list", "42-*").strip(), "")
 
-    def test_githubs_secondary_limit_and_abuse_detection_text_count_as_rate_limited(self):
-        mod = self.load_rescue()
-        for text in ("You have exceeded a secondary rate limit", "abuse detection mechanism triggered"):
-            self.assertTrue(mod.rate_limited(mod.common.Run(2, "", text)), text)
-        self.assertFalse(mod.rate_limited(mod.common.Run(2, "", "HTTP 502")))
-        self.assertFalse(mod.rate_limited(mod.common.Run(1, "", "secondary rate limit")))
-
-    def test_an_overlap_check_that_stays_rate_limited_is_unchecked_after_the_tries(self):
-        mod = self.load_rescue()
-        limited = mod.common.Run(2, "", "holds: gh: rate limit until 2026-01-01T00:00:00Z")
-        code, waits, out = self.overlap_with([limited] * mod.OVERLAP_TRIES)
-        self.assertEqual((code, len(waits)), (0, mod.OVERLAP_TRIES - 1))
-        out.assert_called_with("overlap: unchecked (rate limited; re-run holds before dispatching into these files)",
-                               flush=True)
+    def test_a_failure_after_work_was_committed_keeps_the_new_branch(self):
+        self.harness_worktree()
+        (self.wt / "n.txt").write_text("n\n")
+        git(self.env.repo, "remote", "set-url", "origin", str(self.env.repo.parent / "no-such-origin"))
+        r = self.rescue_n("--title", "The ticket")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("kept", r.stderr)
+        self.assertEqual(git(self.wt, "branch", "--show-current").strip(), "42-the-ticket")
 
     def test_rescue_never_calls_gh_itself_or_forces(self):
         src = SCRIPT.read_text()

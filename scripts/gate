@@ -30,7 +30,6 @@ import argparse
 import fnmatch
 import re
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -39,6 +38,7 @@ import claims
 import common
 import config
 import github
+import holds
 import repo
 import runlog
 import touchmap
@@ -46,7 +46,6 @@ import tracker
 
 WAIT = "wait"  # a Result status: not a failure and not a pass; the PR waits for an older one (exit 3)
 NEXT = {}  # what main() needs for the `next:` line: the PR and its head
-HOLDS = Path(__file__).resolve().parent / "holds"
 # Paths (by file name) that hold secrets, and added lines that are secrets.
 SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "id_rsa*", "id_ed25519*",
                 "*credentials*.json")
@@ -125,40 +124,27 @@ def dependencies_check(view, snap, cwd="."):
 
 
 def overlap_check(pr, cwd, snap):
-    """The `holds --pr` verdict as a check, or an error string when holds could not run (its exit 2, or an exit 1 with
-    no verdict: a crash the old holds reported as an overlap, #424). An exit 3 is a `wait` result, not a failure."""
-    # --repo is the main checkout: the state file holding the building tickets' touch maps lives only there,
-    # and from a worker's worktree holds would read none.
-    # holds gets the gate's own snapshot (#367), so one gate run reads the tracker once. It reads the repo, issues,
-    # PRs and merged PRs; `abandoned` is not its business, so the file carries an empty one rather than a fetch.
+    """The `holds` verdict for the PR as a check, or an error string when holds could not run. A `waits-for` result is
+    a `wait`, not a failure."""
+    # The repo is the main checkout: the state file holding the building tickets' touch maps lives only there,
+    # and from a worker's worktree holds would read none. holds gets the gate's own snapshot (#367), so one gate run
+    # reads the tracker once; the open PRs' file lists come from the main checkout's snapshot file when their head
+    # SHAs match (#446) and the misses are written back.
+    main = Path(repo.main_checkout(cwd))
     try:
-        full = tracker.Snapshot(cwd, repo=snap.repo, issues=snap.issues, prs=snap.prs, merged=snap.merged, abandoned=[])
-        # The open PRs' file lists come from the main checkout's snapshot file when their head SHAs match (#446); the
-        # misses are fetched once here and written back, and holds reads them from the temp file below.
-        full.use_cache(Path(repo.main_checkout(cwd)) / tracker.SNAPSHOT_FILE)
-        full.cache_pr_files()
-        full.save_cache()
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "snapshot.json"
-            full.write(path)
-            p = common.run(sys.executable, str(HOLDS), "--pr", str(pr), "--repo", repo.main_checkout(cwd),
-                           "--snapshot", str(path), cwd=cwd)
+        snap.use_cache(main / tracker.SNAPSHOT_FILE)
+        result = holds.find(snap, main, pr=pr)
     except github.GhError as e:
         return f"holds could not run: gh failed: {e.message}"
-    except (KeyError, TypeError, ValueError) as e:  # a malformed gh reply: could not run, not a failed check
+    except (KeyError, TypeError) as e:  # a malformed gh reply: could not run, not a failed check
         return f"gh returned a malformed gh reply ({e!r})"
-    except OSError as e:
-        return f"holds could not run: cannot write the snapshot: {e.strerror or e}"
-    if p.code == 0:
+    except (ValueError, OSError) as e:  # an unreadable state file, say
+        return f"holds could not run: {common.one_line(str(e) or type(e).__name__)}"
+    if result.code == 0:
         return check("no overlap with held paths", True)
-    if p.code == 1 and not p.stdout.strip():
-        return f"holds could not run (exit 1, no verdict): {common.one_line(p.stderr)}"
-    if p.code == 1:
-        return check("no overlap with held paths", False, p.stdout.strip())
-    if p.code == 3:
-        lines = [l for l in p.stdout.splitlines() if l.startswith("waits for ")]
-        return checks.Result("no overlap with held paths: " + "; ".join(lines), WAIT, 0.0, None, "")
-    return f"holds could not run (exit {p.code}): {common.one_line(p.stderr or p.stdout)}"
+    if result.code == 1:
+        return check("no overlap with held paths", False, "\n".join(result.lines()))
+    return checks.Result("no overlap with held paths: " + "; ".join(result.wait_lines()), WAIT, 0.0, None, "")
 
 
 def outside_map(branch, changed, cwd) -> int:
