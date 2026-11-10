@@ -330,15 +330,23 @@ class Launch(unittest.TestCase):
         odd.mkdir(parents=True)
         self.assertEqual(self.launch("--print", root=odd).returncode, 2)
 
+    def loaded_snapshot(self, sid, sha):
+        """A saved transcript that names the snapshot the session loaded: agent rows carry no plugin dir (#628)."""
+        d = self.claude_dir / "projects" / "-repo"
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {"type": "attachment", "text": f"loaded plugin from {self.cache}/orchestrate/plugin/{sha}/skills/run"}
+        (d / f"{sid}.jsonl").write_text(json.dumps(rec) + "\n")
+
     def test_a_bg_resume_says_when_its_snapshot_is_older_than_origin(self):
         self.assertEqual(self.launch("--print").returncode, 0)  # snapshot of v1
+        self.loaded_snapshot("b1", self.sha)
         newer = self.commit_plugin("v2")
         self.live(self.bg_row())
-        r = self.launch("--resume", "b1", "--print", root=self.snap)
+        r = self.launch("--resume", "b1", "--print")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stderr.count("resume keeps snapshot"), 0)  # --print launches nothing
         self.live(self.bg_row())
-        r = self.launch("--resume", "b1", root=self.snap)
+        r = self.launch("--resume", "b1")  # from the checkout: the snapshot comes from the transcript, not the runtime root
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(f"launch: resume keeps snapshot {self.sha[:12]}; origin/main is {newer[:12]}: a fresh launch picks it up", r.stderr)
 
@@ -348,10 +356,23 @@ class Launch(unittest.TestCase):
         self.git(self.checkout, "commit", "-qam", "docs")
         self.git(self.checkout, "push", "-q", "origin", "HEAD:main")
         self.git(self.checkout, "fetch", "-q", "origin")
+        self.loaded_snapshot("b1", self.sha)
         self.live(self.bg_row())
         r = self.launch("--resume", "b1", root=self.snap)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("resume keeps snapshot", r.stderr)
+
+    def test_a_bg_resume_with_no_snapshot_in_its_transcript_says_so_in_one_line(self):
+        self.assertEqual(self.launch("--print").returncode, 0)
+        self.live(self.bg_row())  # no transcript at all
+        r = self.launch("--resume", "b1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = [l for l in r.stderr.splitlines() if "cannot tell which snapshot" in l]
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertIn("cannot tell which snapshot b1 keeps", lines[0])
+        self.live(self.bg_row())  # a marketplace install has no snapshot to be stale
+        r = self.launch("--resume", "b1", root=self.claude_dir / "plugins" / "market")
+        self.assertNotIn("cannot tell which snapshot", r.stderr)
 
     def test_the_printed_orchestrator_line_carries_the_variable_and_the_lead_line_does_not(self):
         self.assertTrue(self.launch("--print").stdout.startswith("ORCHESTRATE_ROLE=orchestrator claude "))

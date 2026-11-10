@@ -22,7 +22,8 @@ script (ADR-0006). The flags cannot live in settings: the session-only auto-mode
                                 (#581). The newest 3 snapshots are kept; one stderr line names the sha. The snapshot
                                 carries viewer/ too (profile.py reads it). Run from a snapshot (the lead's), launch
                                 reuses it. A plugin change reaches a background run only through a fresh launch; a
-                                background resume says on stderr when its snapshot is behind origin/<default> (#628).
+                                background resume says on stderr when its snapshot (the last orchestrate/plugin/<sha> path in
+                                its saved transcript) is behind origin/<default>, or that it cannot tell (#628).
     "env":{"ORCHESTRATE_ROLE":"orchestrator"}
                                 in the same --settings JSON on every orchestrator line, never the lead's: `claude --bg`
                                 hands the session to a daemon that never sees the line's own variable (#628)
@@ -123,16 +124,32 @@ def plugin_tree(git, sha: str):
     return out if code == 0 else None
 
 
-def stale_line(args, root: Path, row):
+SNAPSHOT_PATH = re.compile(r"orchestrate/plugin/([0-9a-f]{40})")
+
+
+def saved_snapshot(session_id):
+    """The snapshot a session loads: the last `orchestrate/plugin/<sha>` path in its saved transcript (read only), else None.
+
+    `claude agents --json` rows carry no plugin dir (Claude Code 2.1.311), and the transcript is where the session's
+    own loaded paths are recorded."""
+    try:
+        path = common.find_transcript(session_id)
+        found = SNAPSHOT_PATH.findall(path.read_text(errors="replace")) if path else []
+    except OSError:
+        return None
+    return cache_base() / found[-1] if found else None
+
+
+def stale_line(args, root: Path, session_id):
     """The line a background resume prints when the snapshot it keeps is older than origin/<default>'s plugin tree (#628).
 
     A background resume keeps its saved --plugin-dir (#555), so a merged plugin change reaches it only through a fresh
-    launch. The saved snapshot is the row's `pluginDir` when it has one, else the snapshot this script runs from; the
-    new tree is read from the plugin checkout, else the --repo checkout. None when either side cannot be read."""
-    saved = row.get("pluginDir") if isinstance(row, dict) and isinstance(row.get("pluginDir"), str) else None
-    old = Path(saved) if saved else (root if is_snapshot(root) else None)
-    if old is None or not re.fullmatch(r"[0-9a-f]{40}", old.resolve().name):
-        return None
+    launch. The saved snapshot comes from the session's transcript; the new tree is read from the checkout the
+    snapshot was exported from, else the plugin checkout, else --repo. When the snapshot cannot be found, one line
+    says so; None when the plugin tree is unchanged or cannot be read."""
+    old = saved_snapshot(session_id)
+    if old is None:
+        return f"launch: resume cannot tell which snapshot {session_id} keeps (none in its transcript), so it cannot say whether origin/<default> has moved"
     try:
         source = Path((old / SOURCE_FILE).read_text().strip())
     except OSError:
@@ -485,7 +502,7 @@ def main(argv=None) -> int:
                            f"{saved_mode or 'unreadable'}), so --permission-mode {args.permission_mode} cannot apply; "
                            f"start a fresh orchestrator without --resume to change it")
             start = saved_prompt or (prompt(args) if tokens else None)
-            stale = stale_line(args, root, row) if not args.print else None
+            stale = stale_line(args, root, args.resume) if not args.print and not is_marketplace(root) else None
             if stale:
                 print(stale, file=sys.stderr)
             if start is None:
