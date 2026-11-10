@@ -631,6 +631,79 @@ class ReadinessTest(unittest.TestCase):
         runlog.append_event(self.env.repo, runlog.SNAPSHOT, "launched", session="launch", sha=sha,
                             source=source or str(repo_mod.main_checkout(self.env.repo)))
 
+    # A run that loaded its plugin through the stable link gets a merged guard fix at once (#728).
+    def linked_launch(self):
+        """A fresh launch as scripts/launch makes it: a snapshot of origin/main at <old>, the stable link pointing to it, the event.
+
+        Returns (link, old sha). XDG_CACHE_HOME is a temp directory for the test and the merge subprocess alike."""
+        import plugin_dir
+        import repo as repo_mod
+        import runlog
+        cache = Path(self.env.repo).parent / "cache"
+        patch = mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(cache)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        for d in plugin_dir.SNAPSHOT_DIRS:
+            self.env.commit(f"{d}/f.txt", "v1\n", f"chore: {d}")
+        git(self.repo, "push", "-q", "origin", "main")
+        old = git(self.repo, "rev-parse", "origin/main")
+        source = str(repo_mod.main_checkout(self.repo))
+        link = plugin_dir.link_path(source)
+        plugin_dir.point(link, plugin_dir.export(["git", "-C", str(self.repo)], source, old))
+        runlog.append_event(self.repo, runlog.SNAPSHOT, "launched", session="launch", sha=old, source=source, link=str(link))
+        return link, old
+
+    def merged_main(self, *files):
+        """What the merged PR left on origin/main: one commit touching `files`. Returns its sha."""
+        for f in files:
+            sha = self.env.commit(f, "v2\n", f"fix: {f}")
+        git(self.repo, "push", "-q", "origin", "main")
+        return sha
+
+    def test_a_hooks_pr_flips_the_link_to_the_merged_main_and_a_hook_script_alone_stales_nothing(self):
+        link, old = self.linked_launch()
+        new = self.merged_main("hooks/guard.py")
+        p = self.merge(self.approved, files=("hooks/guard.py",), state="MERGED")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(link.resolve().name, new)  # the default branch's commit, never the PR's head
+        self.assertNotEqual(new, self.approved)
+        self.assertEqual((link / "hooks" / "guard.py").read_text(), "v2\n")
+        self.assertIn(f"snapshot: {old[:12]}..{new[:12]}", p.stdout)
+        self.assertEqual(self.snapshot_events(), [])
+        self.assertNotIn("snapshot-stale", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
+
+    def test_a_flip_whose_diff_touches_skills_agents_or_the_hook_table_also_stales_the_run(self):
+        for touched in ("skills/run/SKILL.md", "agents/worker.md", "hooks/hooks.json"):
+            with self.subTest(touched):
+                self.setUp()
+                link, old = self.linked_launch()
+                new = self.merged_main("hooks/guard.py", touched)
+                p = self.merge(self.approved, files=("hooks/guard.py", touched), state="MERGED")
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertEqual(link.resolve().name, new)  # the guard fix applies now all the same
+                self.assertIn(f"snapshot: {old[:12]}..{new[:12]}", p.stdout)
+                self.assertEqual(self.snapshot_events(), [("stale", "7", True)])
+                self.assertIn("snapshot-stale", p.stdout)
+
+    def test_an_ungated_pr_leaves_the_link_alone(self):
+        link, old = self.linked_launch()
+        self.merged_main("docs/x.md")
+        p = self.merge(self.approved, files=("docs/x.md",), state="MERGED")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((link.resolve().name, self.snapshot_events()), (old, []))
+        self.assertNotIn("snapshot:", p.stdout)
+
+    def test_a_link_that_cannot_move_falls_back_to_stale(self):
+        link, old = self.linked_launch()
+        self.merged_main("hooks/guard.py")
+        link.parent.chmod(0o500)  # the rename cannot happen
+        self.addCleanup(link.parent.chmod, 0o700)
+        p = self.merge(self.approved, files=("hooks/guard.py",), state="MERGED")
+        self.assertEqual(link.resolve().name, old)
+        self.assertEqual(self.snapshot_events(), [("stale", "7", True)])
+        self.assertIn("could not repoint", p.stdout)
+
     def test_no_snapshot_launch_means_nothing_to_be_behind(self):
         # a marketplace install, or a repo with its own hooks/ directory: no `launched` event, no stale record
         p = self.merge(self.approved, files=("hooks/pre-commit",), state="MERGED")

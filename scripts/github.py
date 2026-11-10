@@ -510,7 +510,8 @@ def _log(event: dict, cwd=None, args=None) -> None:
     try:
         if os.environ.get("ORCHESTRATE_GH_LOG", "").lower() in ("off", "0", "false", "no"):
             return
-        root = _log_root(cwd)
+        override = os.environ.get(runlog.STATE_DIR_ENV)  # a test's stand-in for the main checkout (#710)
+        root = Path(override) if override else _log_root(cwd)
         if root is None:
             return
         session = os.environ.get(runlog.SESSION_ENV) or json.loads((root / STATE).read_text(encoding="utf-8")).get("session")

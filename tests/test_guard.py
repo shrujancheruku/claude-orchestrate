@@ -16,6 +16,8 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+import harness  # isolates the run log for this module (#710)
+
 GUARD = Path(__file__).resolve().parent.parent / "hooks" / "guard.py"
 
 
@@ -28,6 +30,17 @@ def load_guard():
 
 
 GUARD_MODULE = load_guard()
+
+_undo_isolation = None
+
+
+def setUpModule():
+    global _undo_isolation
+    _undo_isolation = harness.isolate_run_log()
+
+
+def tearDownModule():
+    _undo_isolation()
 
 
 def run_hook(payload):
@@ -1725,6 +1738,8 @@ class UnapprovedCallsAreDeniedTest(unittest.TestCase):
         (self.work / ".git").write_text(f"gitdir: {git_dir}\n")
         (self.main / ".claude" / "orchestration.md").write_text("- **Post reviews:** yes\n")
         (self.main / ".git" / "config").write_text('[remote "origin"]\n\turl = git@github.com:o/r.git\n')
+        (self.main / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True)  # the default branch (#720)
+        (self.main / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text("ref: refs/remotes/origin/main\n")
 
     def reason(self, role, command, tool="Bash", cwd=None):
         out = raw(role, command, cwd or self.work, tool_name=tool, full=True)
@@ -2327,7 +2342,8 @@ class GhCallLogTest(unittest.TestCase):
             (root / ".claude" / "orchestrate-state.json").write_text(json.dumps({"session": "s1"}))
             with unittest.mock.patch.dict(os.environ, {}, clear=False), \
                     unittest.mock.patch.object(GUARD_MODULE, "approval", return_value=True):  # these cases are about the log, not the approval table
-                for name in ("ORCHESTRATE_SESSION", "ORCHESTRATE_GH_LOG", "ORCHESTRATE_ROLE"):
+                # Not the module's override: these cases read the row back from the temp checkout they ran in.
+                for name in ("ORCHESTRATE_SESSION", "ORCHESTRATE_GH_LOG", "ORCHESTRATE_ROLE", "ORCHESTRATE_STATE_DIR"):
                     os.environ.pop(name, None)
                 decision = decide(agent_type, command, cwd=root)
             log = root / ".claude" / "orchestrate-profiles" / "events.jsonl"
@@ -2511,6 +2527,8 @@ class WorkerOwnBranchFormsTest(unittest.TestCase):
         self.git("commit", "-q", "-m", "init")
         self.work = self.main / ".claude" / "worktrees" / "agent-abc"
         self.git("worktree", "add", "-q", "-b", self.BRANCH, str(self.work))
+        (self.main / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True)  # the default branch (#720)
+        (self.main / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text("ref: refs/remotes/origin/main\n")
         (self.work / "untracked.txt").write_text("u\n")
         (self.work / "pr-body.md").write_text("b\n")
         (self.main / "outside.txt").write_text("o\n")
@@ -2536,6 +2554,22 @@ class WorkerOwnBranchFormsTest(unittest.TestCase):
         self.git("worktree", "add", "-q", "-b", "master", str(self.main / ".claude" / "worktrees" / "agent-def"))
         self.assertFalse(approved("orchestrate:worker", "git merge --no-edit origin/main",
                                   self.main / ".claude" / "worktrees" / "agent-def"))
+
+    def test_only_the_branch_origin_head_names_is_the_default_to_merge(self):
+        """#720: `origin/master` on a repo whose default is `main` is another branch, and with origin/HEAD unreadable
+        no branch is the default to approve a merge of (the refusal rules keep main and master as a floor)."""
+        self.assertFalse(self.ok("git merge --no-edit origin/master"))
+        self.assertFalse(self.ok("git switch -c 720-x origin/master"))
+        head = self.main / ".git" / "refs" / "remotes" / "origin" / "HEAD"
+        head.write_text("ref: refs/remotes/origin/trunk\n")
+        self.assertTrue(self.ok("git merge --no-edit origin/trunk"))
+        self.assertFalse(self.ok("git merge --no-edit origin/main"))
+        self.assertEqual(GUARD_MODULE.default_branches(str(self.work)), {"main", "master", "trunk"})
+        head.unlink()
+        self.assertIsNone(GUARD_MODULE.default_branch(str(self.work)))
+        self.assertFalse(self.ok("git merge --no-edit origin/main"))
+        self.assertTrue(self.ok(f"git merge --no-edit origin/{self.BRANCH}"))  # its own branch needs no default
+        self.assertEqual(GUARD_MODULE.default_branches(str(self.work)), {"main", "master"})
 
     def test_another_branch_main_a_rebase_and_a_reset_are_not(self):
         for command in ("git merge --no-edit origin/other", f"git merge origin/{self.BRANCH}", "git merge origin/main",
@@ -2677,6 +2711,24 @@ class ScratchpadWritesTest(unittest.TestCase):
             self.assertFalse(GUARD_MODULE.scratchpad_path_ok(f"{pad}/mine/x", str(self.cwd), self.SID))
             self.assertTrue(GUARD_MODULE.scratchpad_path_ok(f"{pad}/mine2/x", str(self.cwd), self.SID))
 
+    def test_a_checkout_under_any_name_is_never_written_but_the_agents_own_directory_is(self):
+        """#720: the orchestrator runs `gate` and `verify --cwd` in a git worktree of the PR; a reviewer or scout that read
+        an untrusted diff never writes into one, whatever it is called. A directory without a `.git` entry is its own."""
+        pad = self.cwd / "claude-0" / "-proj" / self.SID / "scratchpad"
+        (pad / "tree" / "deep" / "er").mkdir(parents=True)
+        (pad / "tree" / ".git").write_text("gitdir: /x\n")
+        (pad / "upper").mkdir()
+        (pad / "upper" / ".GIT").mkdir()
+        (pad / "mine" / "sub").mkdir(parents=True)
+        (pad / "link").symlink_to(pad / "tree")
+        with unittest.mock.patch.object(GUARD_MODULE, "TEMP_ROOTS", (str(self.cwd),)):
+            for target in ("tree/a.py", "tree/deep/er/a.py", "tree/new/a.py", "upper/a.py", "link/a.py", "tree"):
+                with self.subTest(target=target):
+                    self.assertFalse(GUARD_MODULE.scratchpad_path_ok(f"{pad}/{target}", str(self.cwd), self.SID))
+            for target in ("mine/a.py", "mine/sub/a.py", "mine/new/a.py", "a.py", ""):
+                with self.subTest(target=target):
+                    self.assertTrue(GUARD_MODULE.scratchpad_path_ok(f"{pad}/{target}".rstrip("/"), str(self.cwd), self.SID))
+
     def test_a_worker_is_not_given_these_writes(self):
         self.assertFalse(approved("orchestrate:worker", f"mkdir -p {self.PAD}/a", self.cwd, session_id=self.SID))
 
@@ -2738,7 +2790,8 @@ class CorpusDenyReasonsTest(unittest.TestCase):
 
     def test_the_protected_parts_of_an_edit_path_compare_case_folded(self):
         (self.work / ".claude").mkdir(exist_ok=True)
-        for path in (".Claude/x", ".CLAUDE/x", ".Git/config", ".GIT/config", "sub/../.Git/config", ".Claude/settings.json"):
+        for path in (".Claude/x", ".CLAUDE/x", ".Git/config", ".GIT/config", "sub/../.Git/config", ".Claude/settings.json",
+                     "sub/.claude/Settings.json", ".claude/SETTINGS.json", ".claude/settings.local.JSON", ".CLAUDE/Settings.Json"):
             for tool in ("Edit", "Write"):
                 with self.subTest(path=path, tool=tool):
                     out = raw("orchestrate:worker", None, self.work, tool_name=tool,
@@ -2802,6 +2855,43 @@ class PrCreateFlagsTest(unittest.TestCase):
                 out = raw("orchestrate:worker", command, self.work)
                 self.assertEqual(out["permissionDecision"], "deny")
                 self.assertIn("--web", out["permissionDecisionReason"])
+
+
+class GhCallRowsGoToTheOverrideTest(unittest.TestCase):
+    """#710: with ORCHESTRATE_STATE_DIR set the guard's `gh_call` row goes to that directory's events log, and the
+    events log of the checkout the command ran in is untouched."""
+
+    def test_the_row_lands_in_the_temp_log_and_the_checkout_log_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            checkout, state = root / "checkout", root / "state"
+            (checkout / ".git").mkdir(parents=True)
+            (checkout / ".claude").mkdir()
+            (checkout / ".claude" / "orchestrate-state.json").write_text('{"session": "live-run"}')
+            real = checkout / ".claude" / "orchestrate-profiles" / "events.jsonl"
+            (state / ".claude").mkdir(parents=True)
+            (state / ".claude" / "orchestrate-state.json").write_text('{"session": "test-run"}')
+            with unittest.mock.patch.dict(os.environ, {"ORCHESTRATE_STATE_DIR": str(state)}):
+                os.environ.pop("ORCHESTRATE_SESSION", None)
+                raw("orchestrate:scout", "gh api repos/o/r/issues", checkout)
+            self.assertFalse(real.exists())
+            rows = [json.loads(line) for line in (state / ".claude" / "orchestrate-profiles" / "events.jsonl").read_text().splitlines()]
+            self.assertEqual([(r["kind"], r["session"], r["role"]) for r in rows], [("gh_call", "test-run", "scout")])
+
+
+class FormValuesAreLiteralTest(unittest.TestCase):
+    """#720: an expansion (`$(id)`, a backtick, an unknown `$x`) has no value the guard can read, so no form slot takes it."""
+
+    def test_an_expansion_fills_no_slot_of_any_kind(self):
+        ctx = GUARD_MODULE.FormContext("", "sid")
+        x = GUARD_MODULE.EXP
+        for kind in ("word", "word*", "word+", "num", "float", "hash", "repo", "own", "under"):
+            with self.subTest(kind=kind):
+                self.assertFalse(GUARD_MODULE.value_ok(kind, f"a{x}b", ctx))
+        self.assertFalse(GUARD_MODULE.positional_ok("word", f"a{x}"))
+        self.assertFalse(GUARD_MODULE.positional_ok("pr", f"1{x}"))
+        self.assertFalse(GUARD_MODULE.script_form_ok("park-pr", ["12", "--why", f"{x}"], ctx))
+        self.assertTrue(GUARD_MODULE.script_form_ok("park-pr", ["12", "--why", "waits"], ctx))
 
 
 if __name__ == "__main__":

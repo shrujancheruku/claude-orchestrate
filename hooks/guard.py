@@ -784,7 +784,9 @@ def rule_git_writes(p: Parsed, cwd: str) -> str | None:
         if call.is_sub(*SCOUT_GIT_WRITES) or subcommand_writes(call) or (
                 call.is_sub("worktree") and call.args[:1] and call.args[0].text in WORKTREE_WRITES):
             return "changes git state"
-        if call.is_sub("fetch"):  # the scout, like the reviewer, may fetch only into FETCH_HEAD
+        # The scout, like the reviewer, may fetch no refspec that writes a local ref. A bare `fetch` or `fetch origin`
+        # (#720) updates the remote-tracking refs only (and prunes per `fetch.prune`), which no rule here refuses.
+        if call.is_sub("fetch"):
             problem = reviewer_git_problem(call, cwd)
             if problem:
                 return problem
@@ -834,8 +836,25 @@ def scratchpad_path_ok(value: str, base: str, session: str) -> bool:
             # that read an untrusted diff never writes into one (or makes one): its own writes go in a subdirectory
             # of another name (#713). Case-folded: the temp filesystem on macOS is case-insensitive.
             inside = target[len(t):].split("/scratchpad/", 1)[1:]
-            return not (inside and any(SCRATCH_TREE_ANY_CASE.fullmatch(part) for part in inside[0].split("/")))
+            if not inside:
+                return True  # the scratchpad itself
+            parts = inside[0].split("/")
+            # #720: nor into any checkout, whatever its name: the orchestrator's `gate` and `verify --cwd` run in a git
+            # worktree of the PR, and a tree like that holds a `.git` entry. A directory without one is the agent's own.
+            root = target[:len(target) - len(inside[0])]
+            return not (any(SCRATCH_TREE_ANY_CASE.fullmatch(part) for part in parts)
+                        or any(holds_git_entry(root + "/".join(parts[:k])) for k in range(1, len(parts) + 1)))
     return False
+
+
+def holds_git_entry(directory: str) -> bool:
+    """Whether this directory has a `.git` entry (a checkout's root), compared case-folded. A path that is not a
+    readable directory holds none."""
+    try:
+        with os.scandir(directory) as entries:
+            return any(e.name.casefold() == ".git" for e in entries)
+    except OSError:
+        return False
 
 
 # The flags of the writes a reviewer or scout may make inside its own scratchpad (#687): `mkdir -p`, `tee -a`, and
@@ -1032,19 +1051,28 @@ def rule_force_push(p: Parsed, cwd: str) -> str | None:
     return None
 
 
-def default_branches(cwd: str) -> set:
-    """main and master, plus the branch origin/HEAD points at when that is cheap to read: a file
-    read in the checkout (or the main repo, from a linked worktree), never a git subprocess."""
-    names = {"main", "master"}
+def default_branch(cwd: str) -> str | None:
+    """The one branch origin/HEAD points at, a file read in the checkout (or the main repo, from a linked
+    worktree), never a git subprocess. None when it can't be read: a rule that APPROVES a step on "the default
+    branch" refuses then (#720), instead of guessing `main` or `master`."""
     prefix = "ref: refs/remotes/origin/"
     for git_dir in common_git_dirs(cwd):
         try:
             head = (git_dir / "refs" / "remotes" / "origin" / "HEAD").read_text().strip()
         except (OSError, UnicodeDecodeError):
-            continue  # unreadable here: try the next, and main and master still stand
+            continue  # unreadable here: try the next
         if head.startswith(prefix) and len(head) > len(prefix):
-            names.add(head[len(prefix):])
-            break
+            return head[len(prefix):]
+    return None
+
+
+def default_branches(cwd: str) -> set:
+    """What a rule that REFUSES a step on a default branch protects: main and master, plus the branch
+    origin/HEAD points at. The wider set is the safe one for a refusal; an approval uses `default_branch`."""
+    names = {"main", "master"}
+    found = default_branch(cwd)
+    if found:
+        names.add(found)
     return names
 
 
@@ -1487,7 +1515,8 @@ REMOTE_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+?(?:\.git)?")
 CREDENTIAL_OPTION = "credential.helper=!gh auth git-credential"
 PLUGIN_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 REPO_FLAG = re.compile(r"-R.*|--repo(?:=.*)?")
-SETTINGS_FILE = re.compile(r"settings[^/]*\.json")
+# Case-insensitive (#720): `Settings.json` is `settings.json` on a case-insensitive filesystem, as `.Claude` is `.claude`.
+SETTINGS_FILE = re.compile(r"settings[^/]*\.json", re.IGNORECASE)
 # The only file of `<worktree>/.claude/` a worker may write: the plugin's config. Run state lives in the main checkout.
 PLUGIN_OWNED_CLAUDE_FILES = frozenset(((".claude", "orchestration.md"),))
 
@@ -1623,7 +1652,8 @@ def branch_step_ok(args: list, cwd: str) -> bool:
     if flag not in ("-c", "-C") or not BRANCH_NAME.fullmatch(name) or name in default_branches(cwd):
         return False
     if flag == "-c":
-        return start in {f"origin/{d}" for d in default_branches(cwd)}
+        default = default_branch(cwd)
+        return default is not None and start == f"origin/{default}"  # #720: the one default branch, refused when unreadable
     return start == f"origin/{name}"
 
 
@@ -1677,9 +1707,12 @@ def worker_branch_git_ok(call: Call, worktree: Path, cwd: str) -> bool:
     if call.is_sub("merge"):
         flags = [a for a in args if a.startswith("-")]
         refs = [a for a in args if not a.startswith("-")]
+        # #720: `origin/<branch>` or `origin/<the default branch>`, the one origin/HEAD names (refused when unreadable),
+        # never `origin/master` on a repo whose default is `main`.
+        default = default_branch(cwd)
         return (len(flags) <= 2 and all(f in ("--no-edit", "--ff-only", "-q", "--quiet") for f in flags)
                 and any(f in ("--no-edit", "--ff-only") for f in flags)
-                and len(refs) == 1 and refs[0] in [f"origin/{b}" for b in (branch, *sorted(default_branches(cwd)))])
+                and len(refs) == 1 and (refs[0] == f"origin/{branch}" or (default is not None and refs[0] == f"origin/{default}")))
     if call.is_sub("pull"):
         flags = [a for a in args if a.startswith("-")]
         refs = [a for a in args if not a.startswith("-")]
@@ -1926,6 +1959,8 @@ ORCHESTRATOR_FORMS = (
          need=("--left",), inline=False),  # the script refuses a --left with neither (or both) of the follow-up flags
     Form("threads", ("pr", "followup", "word*"), {"--gist": "word", "--verbose": ""}, inline=False),
     Form("board", (), {"--repo": "repo", "--dry-run": "", "--verbose": ""}),
+    # The lead's breakage sweep (#720): `sweep --repo . [--due]`, and the flags its docstring lists.
+    Form("sweep", (), {"--repo": "repo", "--session": "word", "--snapshot": "snapshot", "--due": ""}),
     # The rescue of a stalled or stopped ticket (#624): `rescue <ticket | branch> --title <title> --repo . [--pr <num>]`, the
     # two forms skills/run documents. --title is any one quoted string (the guard can't know the ticket's title; it only
     # goes into a wip commit message and a branch slug). No other flag, so no `--pr` without a number.
@@ -1987,6 +2022,8 @@ def under_ok(value: str, session: str) -> bool:
 
 
 def value_ok(kind: str, value: str, ctx: FormContext) -> bool:
+    if EXP in value:
+        return False  # #720: an expansion (`$(id)`, a backtick, an unknown `$x`) has no value the guard can read, in any slot
     if kind in ("word", "word*", "word+"):
         return bool(value) and not value.startswith("-")
     if kind in ("num", "num*"):
@@ -1999,6 +2036,8 @@ def value_ok(kind: str, value: str, ctx: FormContext) -> bool:
 
 def positional_ok(token: str, text: str) -> bool:
     kind = token.rstrip("+*?")
+    if EXP in text:
+        return False  # as in value_ok: an expansion is no value
     if kind in ("pr", "n"):
         return text.isascii() and text.isdigit()
     if kind == "word":
@@ -2586,11 +2625,16 @@ def git_read_ok(cmd: Command, cwd: str = "", here: str = ".") -> bool:
         return git_paths_ok(args, here, cwd)
     if sub == "branch":
         return all(a in GIT_BRANCH_READS for a in args)
+    if sub == "worktree":
+        # #720: the listing only (the orchestrator's clean-up and the breakage sweep read it); add, remove and move change state.
+        return args in (["list"], ["list", "--porcelain"])
     if sub == "fetch":
         # No refspec that writes a local ref (`src:dst`, `+src`) and no flag but the quiet or tag ones.
         positional = [a for a in args if not a.startswith("-")]
-        if any(a.startswith("-") and a not in GIT_FETCH_FLAGS for a in args) or not positional:
+        if any(a.startswith("-") and a not in GIT_FETCH_FLAGS for a in args):
             return False
+        if not positional:
+            return True  # #720: a bare `git fetch` reads the configured remote into the remote-tracking refs, as `fetch origin` does
         remote, refs = positional[0], positional[1:]
         return (remote == "origin" or REMOTE_URL.fullmatch(remote) is not None) and all(
             re.fullmatch(r"[\w./@-]+", r) and not r.startswith("+") for r in refs)
