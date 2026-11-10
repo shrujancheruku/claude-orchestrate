@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -63,6 +64,17 @@ class Prompts(unittest.TestCase):
         self.write([entry("2026-11-09T10:00:00+00:00", command="a")])
         r = self.run_prompts()
         self.assertEqual((r.returncode, r.stdout.splitlines()[1]), (0, "by role: main 1"))
+
+    def test_a_hung_claude_agents_falls_back_to_main_within_the_timeout(self):
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "claude").write_text("#!/bin/sh\nexec sleep 120\n")  # exec: the killed process is the sleeper itself
+        (bin_dir / "claude").chmod(0o755)
+        self.write([entry("2026-11-09T10:00:00+00:00", command="a")])
+        start = time.monotonic()
+        r = self.run_prompts()  # run_prompts' own 60s timeout fails the test if the 15s one does not fire
+        self.assertEqual((r.returncode, r.stdout.splitlines()[1]), (0, "by role: main 1"), r.stderr)
+        self.assertLess(time.monotonic() - start, 45)
 
     def test_no_log_is_zero(self):
         r = self.run_prompts()

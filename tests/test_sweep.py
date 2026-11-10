@@ -63,14 +63,29 @@ class Sweep(unittest.TestCase):
         self.serve(claimed=[4])
         self.assertEqual(self.sweep(), ["stale-claim: #4 stalled no-branch lock none", "next: findings 1"])
 
-    def test_failed_rescue_is_a_stalled_claim_whose_worktree_still_holds_work(self):
+    def test_a_stalled_claim_holding_work_with_no_rescue_event_is_only_a_stale_claim(self):
         path = Path(self.wt.name) / "5-widget"
         git(self.env.repo, "worktree", "add", "-b", "5-widget", str(path))
         pid = dead_pid()
         git(self.env.repo, "worktree", "lock", "--reason", f"claude agent agent-abc (pid {pid} start Sat Nov  7 06:14:20 2026)", str(path))
         (path / "work.txt").write_text("unsaved\n")
         self.serve(claimed=[5])
-        self.assertEqual(self.sweep(), ["failed-rescue: #5 worktree holds dirty 1 unpushed 0", "next: findings 1"])
+        out = self.sweep()
+        self.assertEqual(out[-1], "next: findings 1")
+        self.assertTrue(out[0].startswith("stale-claim: #5 stalled"), out)
+
+    def test_a_failed_rescue_is_read_from_the_event_alone(self):
+        runlog.append_event(self.env.repo, runlog.RESCUE, "failed", ref=5, session="s1", branch="5-widget", reason="push of 5-widget failed")
+        self.serve()  # no claim, no worktree: only the event
+        self.assertEqual(self.sweep(), ["failed-rescue: #5 push of 5-widget failed", "next: findings 1"])
+
+    def test_a_later_ok_rescue_clears_the_failure(self):
+        for outcome in ("failed", "ok"):
+            runlog.append_event(self.env.repo, runlog.RESCUE, outcome, ref=5, session="s1", branch="5-widget", reason="x")
+        runlog.append_event(self.env.repo, runlog.RESCUE, "ok", ref=6, session="s1", branch="6-x", reason="x")
+        runlog.append_event(self.env.repo, runlog.RESCUE, "failed", ref=7, session="s1", branch="7-x", reason="boom")
+        self.serve()
+        self.assertEqual(self.sweep(), ["failed-rescue: #7 boom", "next: findings 1"])
 
     def test_orphan_worktree_is_one_under_claude_worktrees_that_no_claim_names(self):
         stray = self.env.repo / ".claude" / "worktrees" / "stray"

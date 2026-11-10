@@ -66,16 +66,20 @@ class Run(NamedTuple):
         return self.code
 
 
-def run(*cmd, cwd=None, env=None, input=None) -> Run:
+def run(*cmd, cwd=None, env=None, input=None, timeout=None) -> Run:
     """Run a command (no shell) and return (code, stdout, stderr), never raising for a missing tool.
 
     A binary that is missing or not executable (OSError) is code 127 with the reason in stderr, so a
     caller treats "gh is not installed" like any failed call instead of crashing.
     `env` replaces the whole environment (pass `dict(os.environ, K=V)` to add to it); `input` is text for stdin.
+    `timeout` (seconds) bounds the call: a command still running then is killed and reported as NOT_FOUND with the
+    reason in stderr, the same fallback a missing binary gets, so a hung tool cannot hang its caller.
     """
     try:
         p = subprocess.run([str(c) for c in cmd], cwd=cwd, env=env, input=input,
-                           capture_output=True, text=True, errors="replace")
+                           capture_output=True, text=True, errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return Run(NOT_FOUND, "", f"{cmd[0]}: timed out after {timeout}s")
     except OSError as e:
         return Run(NOT_FOUND, "", f"{cmd[0]}: {e.strerror or e}")
     return Run(p.returncode, p.stdout, p.stderr)

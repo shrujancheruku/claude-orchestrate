@@ -24,6 +24,10 @@ ticket branch), so a worker stopped before it made the ticket branch, whose work
    or `overlap: could not check (...)`. A rate-limited check waits within the shared backoff (`github.call`); if it still can't
    run, `overlap: unchecked (rate limited; re-run holds before dispatching into these files)` and exit 0.
 
+Run log (#718): once it knows the ticket, every exit but "nothing to rescue" and a live foreign lock (exit 3) appends one `rescue`
+event (ref = the ticket; outcome `ok` after step 6, `failed` on any exit 2; branch; reason), which `sweep` reads as a failed rescue.
+A missing session is `lead`, as in `sweep`; a log that can't be written never fails the rescue.
+
 No worktree on the branch (or for the ticket): `nothing to rescue: no worktree on <branch | #n>`, exit 0 (the remote branch is the whole state).
 Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something held or that could not be checked
 (dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, a lock step 1 lifted put back, or said to be not put back; the worktree stays unless step 5 already removed it, and an exit 2 after that leaves it removed);
@@ -44,6 +48,7 @@ import common
 import github
 import holds
 import repo
+import runlog
 import tracker
 
 
@@ -74,7 +79,26 @@ def undo_branch() -> str:
     return note
 
 
+# (root, ticket, branch) once the rescue knows what it is rescuing: from then on every exit but "nothing to rescue" and
+# "elsewhere" writes one `rescue` run-log event, so `sweep` reads a failed rescue instead of guessing at one (#718).
+CTX: list = []
+
+
+def record(outcome, reason) -> None:
+    """Append the `rescue` event. The log is a record, never a reason to fail: a missing session falls back to `lead`
+    like `sweep`'s, and a write error is dropped."""
+    if not CTX:
+        return
+    root, ticket, branch = CTX
+    try:
+        runlog.append_event(root, runlog.RESCUE, outcome, ref=ticket, session=runlog.current_session(root) or "lead",
+                            branch=branch, reason=common.one_line(reason))
+    except (OSError, ValueError, runlog.NoSession):
+        pass
+
+
 def fail(msg) -> int:
+    record("failed", msg)
     if CREATED:
         msg += undo_branch()
     for lroot, path, reason in LIFTED:
@@ -215,6 +239,7 @@ def run(argv=None) -> int:
     path = wt["path"]
     if Path(path).resolve() == repo.main_checkout(root).resolve():
         return fail(f"{branch} is checked out in the main checkout {path}, not a linked worktree")
+    CTX[:] = [root, ticket, branch]
 
     # A worktree not on a branch of the ticket must be on the harness's branch, and the ticket may already have a
     # branch (an earlier rescue, or a worker elsewhere): reuse that one, never cut a second. All checked before
@@ -244,6 +269,7 @@ def run(argv=None) -> int:
         return fail(line)
     say(line)
     if code == 3:
+        CTX.clear()  # another session's live worker: not a rescue that failed
         return 3
 
     created = target is not None
@@ -316,6 +342,8 @@ def run(argv=None) -> int:
         for line in repo.remove_scratch(args.pr, tip, root):
             say(f"scratch {line}")
 
+    CTX[:] = [root, ticket, branch]  # the branch it ended on, when step 1 created one
+    record("ok", f"saved {branch}")
     return overlap(root, changed, ticket)
 
 
