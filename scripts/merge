@@ -68,6 +68,7 @@ import traceback
 import common
 import config
 import github
+import plugin_dir
 import replay
 import repo
 import runlog
@@ -642,9 +643,12 @@ PLUGIN_LIVE = ("hooks/", ".claude-plugin/")  # a merged change here is what a ru
 
 
 def note_snapshot(cwd, pr, default):
-    """After a merge: when the PR changed `hooks/**` or `.claude-plugin/**`, the run's plugin snapshot is behind main, so
-    log `snapshot stale <sha>` (frontier then dispatches nothing until a fresh launch). Best effort: a file list that
-    can't be read is said, not logged (a guess would stop the run on every unreadable merge).
+    """After a merge: when the PR changed `hooks/**` or `.claude-plugin/**`, the run's plugin snapshot is behind main.
+    The run loads its plugin through a stable symlink (#728), so merge first repoints it at a snapshot of origin/<default>
+    (never a PR head) and says `snapshot: <old>..<new>`: hook scripts then apply at once. Only when the old..new diff
+    also touches `skills/**`, `agents/**` or `hooks/hooks.json`, which a session loads once, or when the link cannot be
+    moved, does it log `snapshot stale <sha>` (frontier then dispatches nothing until a fresh launch). Best effort: a
+    file list that can't be read is said, not logged (a guess would stop the run on every unreadable merge).
 
     Only for the repo the running snapshot was exported from: the newest `launched` event names that checkout (`source`),
     and with no such event (a marketplace install, no launch) or another repo there is no snapshot to be behind. And not
@@ -654,7 +658,9 @@ def note_snapshot(cwd, pr, default):
         return
     tip = run("git", "rev-parse", f"origin/{default}", cwd=cwd) if default else None
     sha = tip.stdout.strip() if tip is not None and tip.code == 0 else None
-    loaded = launched.get("sha")
+    link = launched.get("link")
+    live = link and Path(link).is_symlink() and Path(link) == plugin_dir.link_path(launched["source"])
+    loaded = (plugin_dir.target_sha(link) if live else None) or launched.get("sha")
     if sha and loaded and run("git", "diff", "--quiet", loaded, sha, "--", "hooks", ".claude-plugin", cwd=cwd).code == 0:
         return
     try:
@@ -665,9 +671,37 @@ def note_snapshot(cwd, pr, default):
     hit = next((p for p in paths if p.startswith(PLUGIN_LIVE)), None)
     if hit is None:
         return
+    if live and sha:
+        # The run loads its plugin through the stable link, so repointing it hands the running guard the merged fix (#728).
+        try:
+            flip_link(cwd, link, launched["source"], sha, loaded)
+        except plugin_dir.PluginDirError as e:
+            say(f"snapshot: could not repoint {link} ({e}); the run keeps the old guard")
+        else:
+            if not needs_relaunch(cwd, loaded, sha):
+                return  # only hook scripts changed: they are live now, nothing needs a relaunch
+            hit = "skills/, agents/ or hooks/hooks.json"
     log_event(cwd, runlog.SNAPSHOT, "stale", ref=pr, sha=sha)
     say(f"snapshot-stale {sha[:12] if sha else '?'}: PR #{pr} changed {hit}; the run's plugin snapshot is behind {default or 'main'}, "
         "so no new worker is dispatched until a fresh `scripts/launch --bg` (a resume keeps the old snapshot)")
+
+
+# What Claude Code loads once per session, so a repointed link does not reach it: skills, agents and the hook table.
+NOT_RELOADED = ("skills", "agents", "hooks/hooks.json")
+
+
+def flip_link(cwd, link, source, sha, old):
+    """Export the plugin at `sha` (a commit of origin/<default>, read from the main checkout's repo, never a PR head) and
+    repoint `link` at it atomically; say `snapshot: <old>..<new>`. Raises PluginDirError and leaves the link as it was."""
+    dest = plugin_dir.export(["git", "-C", str(cwd)], source, sha)
+    plugin_dir.point(link, dest)
+    say(f"snapshot: {(old or '?')[:12]}..{sha[:12]}")
+
+
+def needs_relaunch(cwd, old, new):
+    """True when the old..new diff touches what a running session does not reload (see NOT_RELOADED), or cannot be read."""
+    r = run("git", "diff", "--name-only", old or "", new, "--", *NOT_RELOADED, cwd=cwd)
+    return r.code != 0 or bool(r.stdout.strip())
 
 
 def fast_forward_main(cwd, default):

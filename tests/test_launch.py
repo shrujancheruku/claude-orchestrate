@@ -2,6 +2,7 @@
 
 import importlib.machinery
 import importlib.util
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,13 @@ ROOT = Path(__file__).resolve().parent.parent
 LAUNCH = ROOT / "scripts" / "launch"
 
 
-def settings_arg(snap, auto=True, inbound=False):
+def read_rules(link, snap):
+    """The Read rules a line carries: the stable link, and the snapshot it points to (#728)."""
+    snap = Path(snap).resolve()
+    return [f"Read(/{p}/**)" for p in dict.fromkeys([str(link), str(snap)])]
+
+
+def settings_arg(link, snap, auto=True, inbound=False):
     """The --settings argument as launch prints it: single-quoted compact JSON, the snapshot read rule last (#617)."""
     body = {}
     if auto:
@@ -26,7 +33,7 @@ def settings_arg(snap, auto=True, inbound=False):
         body["crossSessionInbound"] = "accept"
     if auto:  # the orchestrator's lines carry the role in the settings env too (#628); the lead's never do
         body["env"] = {"ORCHESTRATE_ROLE": "orchestrator"}
-    body["permissions"] = {"allow": [f"Read(/{snap}/**)"]}
+    body["permissions"] = {"allow": read_rules(link, snap)}
     return "'" + json.dumps(body, separators=(",", ":")) + "'"
 
 CONFIG = """# Orchestration config
@@ -86,6 +93,8 @@ class Launch(unittest.TestCase):
         self.git(self.tmp, "clone", "-q", str(self.origin), str(self.checkout))
         self.sha = self.commit_plugin("v1")
         self.snap = self.cache / "orchestrate" / "plugin" / self.sha
+        key = "r-" + hashlib.sha256(str(self.checkout.resolve()).encode()).hexdigest()[:12]
+        self.link = self.cache / "orchestrate" / "plugin" / key / "current"  # the stable --plugin-dir (#728)
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         self.bin = self.tmp / "bin"
@@ -142,8 +151,8 @@ class Launch(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(
             r.stdout.strip(),
-            f"ORCHESTRATE_ROLE=orchestrator claude --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.snap)} --model opus "
-            f"--plugin-dir {self.snap} \"/orchestrate:run --greedy\"")
+            f"ORCHESTRATE_ROLE=orchestrator claude --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.link, self.snap)} --model opus "
+            f"--plugin-dir {self.link} \"/orchestrate:run --greedy\"")
 
     def test_plugin_dir_is_never_inside_the_repo_in_any_mode(self):
         modes = [(), ("--bg",), ("--lead",), ("--resume", "abc"), ("--permission-mode", "bypassPermissions")]
@@ -173,6 +182,42 @@ class Launch(unittest.TestCase):
         self.launch("--print")
         self.assertEqual((self.snap / "hooks" / "f.txt").read_text(), "v1")
 
+    def snaps(self):
+        """The snapshot directories under the cache (the stable link's directory is not one)."""
+        base = self.cache / "orchestrate" / "plugin"
+        return sorted(p.name for p in base.iterdir() if re.fullmatch(r"[0-9a-f]{40}", p.name))
+
+    def test_plugin_dir_is_the_stable_symlink_to_the_snapshot_of_origin_default(self):
+        r = self.launch("--print")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--plugin-dir {self.link} ", r.stdout)
+        self.assertTrue(self.link.is_symlink())
+        self.assertEqual(self.link.resolve(), self.snap.resolve())
+        self.assertEqual((self.link / "hooks" / "f.txt").read_text(), "v1")
+
+    def test_a_real_launch_repoints_the_link_and_a_print_leaves_a_live_one_alone(self):
+        self.assertEqual(self.launch().returncode, 0)
+        newer = self.commit_plugin("v2")
+        self.assertEqual(self.launch("--print").returncode, 0)  # a running session may be loading the link
+        self.assertEqual(self.link.resolve(), self.snap.resolve())
+        self.assertEqual(self.launch().returncode, 0)
+        self.assertEqual(self.link.resolve().name, newer)
+        self.assertEqual(list(self.link.parent.glob(".current-*")), [])  # no temporary link left
+
+    def test_the_snapshot_a_link_points_to_is_never_pruned(self):
+        base = self.cache / "orchestrate" / "plugin"
+        self.assertEqual(self.launch().returncode, 0)  # the link of the repo launched first points at v1
+        other = base / "r-aaaaaaaaaaaa"  # another repo's link, pointing at v1 as well
+        other.mkdir()
+        (other / "current").symlink_to(self.snap)
+        os.utime(self.snap, (1000, 1000))  # v1 is long unused, and the oldest
+        for n in range(2, 6):
+            sha = self.commit_plugin(f"v{n}")
+            self.assertEqual(self.launch().returncode, 0)
+            os.utime(base / sha, (1000 + n, 1000 + n))  # long ago too, but newer than v1
+        self.assertTrue(self.snap.is_dir(), "the snapshot a link points to was pruned")
+        self.assertEqual(len(self.snaps()), 3)  # v1 (the other link's), the launched one, and the newest of the rest
+
     def test_only_the_three_newest_snapshots_are_kept(self):
         shas = [self.sha]
         for n in range(2, 6):
@@ -181,7 +226,7 @@ class Launch(unittest.TestCase):
             base = self.cache / "orchestrate" / "plugin"
             os.utime(base / shas[-1], (n * 1000, n * 1000))  # long ago, in a deterministic age order
         base = self.cache / "orchestrate" / "plugin"
-        self.assertEqual(sorted(p.name for p in base.iterdir()), sorted(shas[-3:]))
+        self.assertEqual(self.snaps(), sorted(shas[-3:]))
 
     def test_a_snapshot_used_within_a_day_and_a_print_are_never_pruned(self):
         base = self.cache / "orchestrate" / "plugin"
@@ -190,14 +235,14 @@ class Launch(unittest.TestCase):
         for n in range(2, 5):  # all recent: a live session may be loading any of them
             shas.append(self.commit_plugin(f"v{n}"))
             self.assertEqual(self.launch().returncode, 0)
-        self.assertEqual(sorted(p.name for p in base.iterdir()), sorted(shas))
+        self.assertEqual(self.snaps(), sorted(shas))
         for sha in shas:
             os.utime(base / sha, (1000, 1000))
         shas.append(self.commit_plugin("v5"))
         self.assertEqual(self.launch("--print").returncode, 0)  # --print prunes nothing
-        self.assertEqual(len(list(base.iterdir())), 5)
+        self.assertEqual(len(self.snaps()), 5)
         self.assertEqual(self.launch().returncode, 0)  # a real launch prunes the old ones
-        self.assertEqual(len(list(base.iterdir())), 3)
+        self.assertEqual(len(self.snaps()), 3)
 
     def test_a_plugin_root_that_is_not_a_checkout_is_refused(self):
         r = self.launch("--print", root=self.tmp / "bin")
@@ -229,12 +274,12 @@ class Launch(unittest.TestCase):
     def test_bg_adds_the_flag_and_cross_session_inbound(self):
         out = self.launch("--print", "--bg").stdout
         self.assertTrue(out.startswith("ORCHESTRATE_ROLE=orchestrator claude --bg --name orchestrator "), out)
-        self.assertIn(settings_arg(self.snap, inbound=True), out)
+        self.assertIn(settings_arg(self.link, self.snap, inbound=True), out)
 
     def test_bypass_permissions_accepts_inbound_messages(self):
         out = self.launch("--print", "--permission-mode", "bypassPermissions").stdout
         self.assertIn("--permission-mode bypassPermissions", out)
-        self.assertIn(settings_arg(self.snap, inbound=True), out)
+        self.assertIn(settings_arg(self.link, self.snap, inbound=True), out)
 
     def settings_of(self, *args):
         """The parsed --settings JSON of a printed line."""
@@ -243,7 +288,7 @@ class Launch(unittest.TestCase):
         return json.loads(shlex.split(out.stdout)[shlex.split(out.stdout).index("--settings") + 1])
 
     def test_every_line_allows_reads_of_exactly_the_snapshot(self):
-        want = [f"Read(/{self.snap}/**)"]  # `//` + the path without its leading slash
+        want = read_rules(self.link, self.snap)  # `//` + the path without its leading slash
         self.assertTrue(want[0].startswith("Read(//"))
         for mode in [(), ("--bg",), ("--lead",), ("--resume", "abc"), ("--permission-mode", "bypassPermissions")]:
             s = self.settings_of(*mode)
@@ -269,15 +314,15 @@ class Launch(unittest.TestCase):
         out = self.launch("--print", "--resume", "abc-123").stdout.strip()
         self.assertEqual(
             out,
-            f"ORCHESTRATE_ROLE=orchestrator claude --resume abc-123 --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.snap)} "
-            f"--model opus --plugin-dir {self.snap}")
+            f"ORCHESTRATE_ROLE=orchestrator claude --resume abc-123 --name orchestrator --permission-mode acceptEdits --settings {settings_arg(self.link, self.snap)} "
+            f"--model opus --plugin-dir {self.link}")
         self.assertEqual(self.launch("--print", "--resume", "abc", "--greedy=2").returncode, 2)
 
     def test_lead_line_accepts_inbound_messages(self):
         out = self.launch("--print", "--lead").stdout.strip()
         self.assertEqual(
-            out, f"claude --name lead --settings {settings_arg(self.snap, auto=False, inbound=True)} "
-                 f"--plugin-dir {self.snap} \"/orchestrate:lead\"")
+            out, f"claude --name lead --settings {settings_arg(self.link, self.snap, auto=False, inbound=True)} "
+                 f"--plugin-dir {self.link} \"/orchestrate:lead\"")
 
     def test_the_role_variable_is_set_on_the_orchestrator_lines_and_never_on_the_lead(self):
         # The guard tells the orchestrator from the lead by ORCHESTRATE_ROLE, so the environment `claude` is started
@@ -317,11 +362,11 @@ class Launch(unittest.TestCase):
         for mode in [("--bg", "--greedy=4"), ("--lead",), ()]:
             r = self.launch("--print", *mode, root=self.snap)
             self.assertEqual(r.returncode, 0, (mode, r.stderr))
-            self.assertIn(f"--plugin-dir {self.snap} ", r.stdout + " ", mode)
+            self.assertIn(f"--plugin-dir {self.link} ", r.stdout + " ", mode)
             self.assertIn(f"plugin snapshot {self.sha[:12]}", r.stderr)
         r = self.launch("--bg", "--greedy=4", root=self.snap)  # a real launch from a snapshot
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"ARG:--plugin-dir\nARG:{self.snap}\n", r.stdout)
+        self.assertIn(f"ARG:--plugin-dir\nARG:{self.link}\n", r.stdout)
         self.assertTrue((self.snap / "marker").exists())
         self.assertTrue((self.snap / "viewer" / "f.txt").exists())
 
@@ -331,7 +376,8 @@ class Launch(unittest.TestCase):
         r = self.launch("--bg", "--greedy=4", root=self.snap)
         self.assertEqual(r.returncode, 0, r.stderr)
         new_snap = self.cache / "orchestrate" / "plugin" / newer
-        self.assertIn(f"ARG:--plugin-dir\nARG:{new_snap}\n", r.stdout)
+        self.assertIn(f"ARG:--plugin-dir\nARG:{self.link}\n", r.stdout)
+        self.assertEqual(self.link.resolve(), new_snap.resolve())
         self.assertEqual((new_snap / "hooks" / "f.txt").read_text(), "v2")
 
     def test_launch_from_a_snapshot_without_a_usable_source_reuses_it(self):
@@ -440,6 +486,8 @@ class Launch(unittest.TestCase):
         self.live()
         self.assertEqual(self.launch().returncode, 0)
         self.assertEqual(self.snapshot_events(), [("launched", "launch", self.sha, str(self.checkout.resolve()))])  # the sha in its own field, the source checkout named
+        path = self.repo / ".claude" / "orchestrate-profiles" / "events.jsonl"
+        self.assertEqual(json.loads(path.read_text().splitlines()[-1])["link"], str(self.link))  # merge repoints it (#728)
 
     def test_resume_appends_one_resume_event_for_the_session(self):
         self.live({"name": "orchestrator", "pid": None, "sessionId": "s1"})
@@ -479,8 +527,8 @@ class Launch(unittest.TestCase):
         self.set_model("sonnet", lead="opus (used when scripts/launch --lead starts it)")
         out = self.launch("--print", "--lead").stdout.strip()
         self.assertEqual(
-            out, f"claude --name lead --settings {settings_arg(self.snap, auto=False, inbound=True)} --model opus "
-                 f"--plugin-dir {self.snap} \"/orchestrate:lead\"")
+            out, f"claude --name lead --settings {settings_arg(self.link, self.snap, auto=False, inbound=True)} --model opus "
+                 f"--plugin-dir {self.link} \"/orchestrate:lead\"")
         self.set_model("sonnet", lead="--dangerously-skip-permissions")
         self.assertEqual(self.launch("--print", "--lead").returncode, 2)
 
@@ -649,7 +697,7 @@ class Launch(unittest.TestCase):
         self.live(self.bg_row("i1", kind="interactive"))
         out = self.launch("--print", "--resume", "i1").stdout.strip()
         self.assertIn("--name orchestrator --permission-mode acceptEdits", out)
-        self.assertIn(f"--plugin-dir {self.snap}", out)
+        self.assertIn(f"--plugin-dir {self.link}", out)
         self.assertEqual(self.launch("--print", "--resume", "i1", "--greedy=2").returncode, 2)
 
 
