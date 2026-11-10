@@ -211,7 +211,7 @@ The session above one orchestrator: it triages discovered work, writes ADRs and 
 _Avoid_: supervisor, manager, parent orchestrator
 
 **Lead mode**:
-Whether a lead session is live above the orchestrator. Detected, never configured. Source: `docs/adr/0008-lead-above-orchestrator.md`.
+Whether a lead session is live above the orchestrator: a live session named `lead` whose checkout is the orchestrator's own main checkout. A `lead` in another checkout leaves the orchestrator with no lead. Detected, never configured. Source: `docs/adr/0008-lead-above-orchestrator.md`.
 _Avoid_: lead flag, lead setting
 
 **Discovered work**:
@@ -230,9 +230,21 @@ _Avoid_: audit, health check
 The short summary the lead posts in its own session after each pass table from a background orchestrator, since the lead is then the developer's only view of the run. Source: `skills/lead/SKILL.md`.
 _Avoid_: status report, pass table (the table is the orchestrator's; the digest is the lead's)
 
+**Stop**:
+A ticket's work halted until a human (the developer, or the lead when one is live) answers: a question, a `permission-denied` stop, an exhausted transient retry, a third review round, an ADR conflict or a gate. It belongs to the ticket, not the claim: a question stop without a lead leaves the ticket unclaimed and is still the same stop. Source: `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.
+_Avoid_: pause (the orchestrator's own state), block
+
+**Stop wait**:
+How long a **Stop** lasts: from its first sign until work on the ticket resumes (the next worker or reviewer on it, or its merge or close), so it includes the pickup after the answer. Source: `scripts/profile.py`.
+_Avoid_: answer time, response time (the answer is only one point inside it)
+
 **Stop comment**:
 The comment a worker's question is posted as when its stop goes to the lead: its first line is `> *Stopped for the lead.*`, and `scripts/lead-route` reads it for the stop's time. Source: `scripts/lead-route`, `skills/run/SKILL.md`.
 _Avoid_: stop note, question comment
+
+**Session gap**:
+The time an orchestrator session is not running between its end (closed or killed) and its resume under the same session id. A profile reports it as its own figure, outside throughput and the lead's cost window. Source: `scripts/profile.py`.
+_Avoid_: stopped time, downtime, pause (the orchestrator's own state; a **Stop** is a ticket's)
 
 **Lead watermark**:
 `.claude/orchestrate-lead.json`, gitignored: how far the lead has read the tracker, so a restarted lead resumes there. Source: `docs/adr/0008-lead-above-orchestrator.md`.
