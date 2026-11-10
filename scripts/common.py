@@ -109,6 +109,8 @@ VERDICT_WORDS = {
     "rerun": "<pr> <head>", "already-running": "<pr>",
     # park-pr
     "parked": "<pr>", "unparked": "<pr>", "refused": "<why>",
+    # transition: the tracker writes were made, or the ticket already read that way
+    "transitioned": "<verb> <ticket>", "unchanged": "<verb> <ticket>",
     # sweep and fold
     "clean": "", "findings": "<n>", "due": "<n>", "not-due": "<n>", "folded": "<from> <into>",
     # frontier, snapshot, threads, lead-route, rescue: the run happened; rescue's live lock held by another session

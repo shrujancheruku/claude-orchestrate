@@ -41,6 +41,7 @@ new `runlog` event kind, which #657 is changing. Stdlib only, Python 3.9+.
 """
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -120,10 +121,14 @@ class Ticket:
                 last = self.newest(marker)
                 if last and last["body"].strip() == body.strip():
                     return
-        github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{self.n}/comments", "-f", f"body={body}",
-                    cwd=self.root)
+        reply = github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{self.n}/comments", "-f", f"body={body}",
+                            cwd=self.root)
         self.issue["comments"].append({"body": body, "created": None, "edits": []})
-        self.say(f"commented: #{self.n} {marker}")
+        try:  # the comment's URL, for the nudge that points at it
+            url = json.loads(reply).get("html_url") or ""
+        except (ValueError, AttributeError):
+            url = ""
+        self.say(f"commented: #{self.n} {marker}" + (f" {url}" if url else ""))
 
     def add_label(self, name):
         if name in self.labels:
@@ -153,8 +158,25 @@ class Ticket:
         self.say(f"unassigned: #{self.n}")
 
 
-def branch_line(branch, pr=None) -> str:
-    return f"Branch: `{branch}`" + (f" (PR #{pr})" if pr is not None else "")
+def branch_line(branch) -> str:
+    return f"Branch: `{branch}`"
+
+
+# The comment bodies lead-route reads back: the marker first, then the text. Pure, so a test can feed one to lead-route.
+def stop_body(question, branch) -> str:
+    return "\n".join([tracker.STOP_MARKER, "", question, "", branch_line(branch)])
+
+
+def adr_body(conflicts, pr) -> str:
+    return "\n".join([tracker.ADR_MARKER, "", conflicts, "", f"PR #{pr}"])
+
+
+def undelivered_body(head, gist) -> str:
+    return "\n".join([tracker.UNDELIVERED_MARKER, "", f"head {head}", "", gist])
+
+
+def resent_body(head) -> str:
+    return "\n".join([tracker.RESENT_MARKER, "", f"head {head}"])
 
 
 def handback(t, a):
@@ -213,14 +235,14 @@ def abandon(t, a):
 
 def stop_for_lead(t, a):
     question = read_text(a.question_file, "question")
-    t.comment("\n".join([tracker.STOP_MARKER, "", question, "", branch_line(a.branch)]), dedupe=tracker.NEEDS_LEAD in t.labels)
+    t.comment(stop_body(question, a.branch), dedupe=tracker.NEEDS_LEAD in t.labels)
     t.add_label(tracker.NEEDS_LEAD)
     return 0
 
 
 def adr_hold(t, a):
     conflicts = read_text(a.conflicts_file, "conflicts")
-    t.comment("\n".join([tracker.ADR_MARKER, "", conflicts, "", f"PR #{a.pr}"]), dedupe=tracker.NEEDS_LEAD in t.labels)
+    t.comment(adr_body(conflicts, a.pr), dedupe=tracker.NEEDS_LEAD in t.labels)
     t.add_label(tracker.NEEDS_LEAD)
     return 0
 
@@ -233,14 +255,13 @@ def full_head(value):
 
 def undelivered(t, a):
     head = full_head(a.head)
-    t.comment("\n".join([tracker.UNDELIVERED_MARKER, "", f"head {head}", "", read_text(a.gist_file, "gist")]))
+    t.comment(undelivered_body(head, read_text(a.gist_file, "gist")))
     return 0
 
 
 def resent(t, a):
     head = full_head(a.head)
-    body = "\n".join([tracker.RESENT_MARKER, "", f"head {head}"])
-    t.comment(body, any_with_body=True)
+    t.comment(resent_body(head), any_with_body=True)
     return 0
 
 
