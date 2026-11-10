@@ -173,6 +173,31 @@ class GateQueryCheck(unittest.TestCase):
         names = [n for n, _ in gqlcheck.fragments_in((SCRIPTS / "threads").read_text())]
         self.assertIn("batched", names)
 
+    def test_a_page_size_int_is_filled_with_one_not_the_pr_number(self):
+        """#704: GitHub caps a connection at 100, so `last: $limit` with the PR number (699) fails the gate."""
+        q = ("query($owner: String!, $name: String!, $limit: Int!) "
+             "{ repository(owner: $owner, name: $name) { pullRequests(last: $limit) { nodes { id } } } }")
+        args, why = gqlcheck.fixtures(q, 699)
+        self.assertEqual(why, "")
+        self.assertEqual(args, ["-F", "owner={owner}", "-F", "name={repo}", "-F", "limit=1"])
+
+    def test_an_int_that_is_not_a_page_size_keeps_the_pr_number(self):
+        q = ("query($owner: String!, $name: String!, $n: Int!) "
+             "{ repository(owner: $owner, name: $name) { pullRequest(number: $n) { title } } }")
+        args, why = gqlcheck.fixtures(q, 699)
+        self.assertEqual(why, "")
+        self.assertEqual(args, ["-F", "owner={owner}", "-F", "name={repo}", "-F", "n=699"])
+
+    def test_an_int_used_as_a_number_and_a_page_size_is_filled_with_one(self):
+        q = "query($n: Int!) { pullRequest(number: $n) { reviews(first: $n) { nodes { id } } } }"
+        args, _ = gqlcheck.fixtures(q, 699)
+        self.assertEqual(args, ["-F", "n=1"])
+
+    def test_a_page_size_inside_a_string_literal_does_not_make_an_int_a_page_size(self):
+        q = 'query($n: Int!) { pullRequest(number: $n) { title(label: "last: $n") } }'
+        args, _ = gqlcheck.fixtures(q, 699)
+        self.assertEqual(args, ["-F", "n=699"])
+
 
 
 if __name__ == "__main__":

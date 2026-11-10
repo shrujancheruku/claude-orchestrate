@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from harness import ScriptEnv, gh_repo_view, rest_pull
+from harness import ScriptEnv, gh_repo_view, rest_pull, verdict_runs
 from test_threads import Q, comment, reply, thread
 
 ISSUES = "repos/{owner}/{repo}/issues"
@@ -16,7 +16,7 @@ def issue_row(number, body, association="OWNER"):
 
 class Followup(unittest.TestCase):
     def setUp(self):
-        self.env = ScriptEnv()
+        self.env = verdict_runs(ScriptEnv())
         self.addCleanup(self.env.close)
 
     def gh(self, threads, issues=([],), pr_body=("",)):

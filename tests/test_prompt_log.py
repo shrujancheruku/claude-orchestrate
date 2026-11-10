@@ -12,8 +12,11 @@ ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "prompt_log.py"
 
 
-def run_hook(stdin: str, cwd=None):
-    return subprocess.run([sys.executable, "-I", str(HOOK)], input=stdin, capture_output=True, text=True, timeout=60, cwd=cwd)
+def run_hook(stdin: str, cwd=None, role=None):
+    env = {k: v for k, v in os.environ.items() if k != "ORCHESTRATE_ROLE"}
+    if role is not None:
+        env["ORCHESTRATE_ROLE"] = role
+    return subprocess.run([sys.executable, "-I", str(HOOK)], input=stdin, capture_output=True, text=True, timeout=60, cwd=cwd, env=env)
 
 
 class PromptLog(unittest.TestCase):
@@ -115,6 +118,16 @@ class PromptLog(unittest.TestCase):
                 self.assertIn("time", last)
         self.assertEqual(len(self.lines()), len(cases))
         self.assertNotIn("SECRET", self.log.read_text())
+
+    def test_role_recorded_only_when_orchestrate_role_is_set(self):
+        r = run_hook(self.payload("Bash", {"command": "ls"}), role="orchestrator")
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        run_hook(self.payload("Bash", {"command": "ls"}))
+        run_hook(self.payload("Bash", {"command": "ls"}), role="")
+        first, second, third = self.lines()
+        self.assertEqual(first["role"], "orchestrator")
+        self.assertNotIn("role", second)
+        self.assertNotIn("role", third)
 
     def test_agent_type_recorded(self):
         run_hook(self.payload("Bash", {"command": "ls"}, agent_type="orchestrate:worker"))

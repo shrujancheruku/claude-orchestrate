@@ -7,8 +7,10 @@ The worktree-list parser stays in `common.worktrees`, which the liveness block t
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,6 +47,42 @@ def main_checkout(repo) -> Path:
     # A submodule or a GIT_DIR checkout: the common dir isn't `.git`, so use this checkout's own toplevel.
     code, out, _ = common.run("git", "rev-parse", "--show-toplevel", cwd=start)
     return Path(out.strip()) if code == 0 and out.strip() else repo
+
+
+LEAD_NAME = "lead"  # the name `scripts/launch --lead` gives the lead session
+
+
+def lead_session(repo) -> tuple:
+    """(session id, why): the one live session named `lead` whose `cwd` is this repo's main checkout, else (None, why not).
+
+    The one rule for lead mode (#634): a row of `claude agents --json` that is live (it has a pid), named `lead`, with a
+    `cwd` that resolves exactly to the main checkout (the comparison `launch --resume-latest` makes). A `lead` in another
+    checkout or in a linked worktree of this repo is not this repo's lead. None, with the reason, on no match, several
+    matches, a failed call or a reply that is not a list; the caller treats that as lead mode off and never stops a pass.
+    """
+    if not shutil.which("claude"):
+        return None, "`claude` is not installed"
+    code, out, _ = common.run("claude", "agents", "--json")
+    if code != 0:
+        return None, f"`claude agents --json` failed (exit {code})"
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        return None, "`claude agents --json` did not print a list"
+    here = main_checkout(repo).resolve()
+    mine = [r for r in rows
+            if isinstance(r, dict) and r.get("name") == LEAD_NAME and r.get("pid") is not None
+            and isinstance(r.get("cwd"), str) and Path(r["cwd"]).resolve() == here]
+    if not mine:
+        return None, "no live session named lead in this repo's main checkout"
+    if len(mine) > 1:
+        return None, f"{len(mine)} live sessions named lead in this repo's main checkout"
+    sid = mine[0].get("sessionId")
+    if not isinstance(sid, str) or not sid:
+        return None, "the live lead row has no sessionId"
+    return sid, "one live lead in this repo's main checkout"
 
 
 def ticket_of_branch(name) -> int | None:
@@ -120,13 +158,49 @@ def harness_lock(path, cwd):
 
 
 PR_BODY_FILE = ".claude/pr-body.md"
+# Where a worker leaves the PR body it wrote for `gh pr create --body-file`: the old `.claude/` spot (#404), and the
+# worktree root since #582 made a worktree file the place for it (#624). Either, or both, alone goes with the tree.
+PR_BODY_FILES = (PR_BODY_FILE, "pr-body.md")
 
 
-def only_pr_body_untracked(path) -> bool:
-    """True when the one change in the worktree at `path` is an untracked `.claude/pr-body.md`: the file older
-    workers and briefs wrote for `gh pr create --body-file` (#404). Anything else, or a failed call, is False."""
+def only_leftovers(path) -> bool:
+    """True when every change in the worktree at `path` is harmless to discard: an untracked `pr-body.md` (the file
+    workers wrote for `gh pr create --body-file`, #404) or an unstaged mode-only change to a tracked file (no line
+    differs: `git diff --numstat` says `0 0`, #711). Anything else, no change at all or a failed call is False."""
     st = common.run("git", "status", "--porcelain", "-z", "--untracked-files=all", cwd=path)
-    return st.code == 0 and [e for e in st.stdout.split("\0") if e] == [f"?? {PR_BODY_FILE}"]
+    entries = [e for e in st.stdout.split("\0") if e]
+    if st.code != 0 or not entries:
+        return False
+    bodies = {f"?? {f}" for f in PR_BODY_FILES}
+    modified = set()
+    for e in entries:
+        if e in bodies:
+            continue
+        if not e.startswith(" M "):
+            return False
+        modified.add(e[3:])
+    if not modified:
+        return True
+    ns = common.run("git", "diff", "--numstat", "-z", cwd=path)
+    if ns.code != 0:
+        return False
+    # -z numstat records are `added<TAB>deleted<TAB>path`, NUL-separated; a mode-only change adds and deletes nothing
+    seen = set()
+    for rec in (r for r in ns.stdout.split("\0") if r):
+        added, _, rest = rec.partition("\t")
+        deleted, _, name = rest.partition("\t")
+        if added != "0" or deleted != "0":
+            return False
+        seen.add(name)
+    return seen == modified
+
+
+def untracked_names(path, limit=5) -> str:
+    """The untracked paths of the worktree at `path`, named for a refusal (at most `limit`); "" when git can't say."""
+    st = common.run("git", "status", "--porcelain", "-z", "--untracked-files=all", cwd=path)
+    names = [e[3:] for e in st.stdout.split("\0") if e.startswith("?? ")] if st.code == 0 else []
+    more = f" and {len(names) - limit} more" if len(names) > limit else ""
+    return ", ".join(names[:limit]) + more
 
 
 def c_locale():
@@ -135,15 +209,16 @@ def c_locale():
 
 
 def remove_worktree(path, cwd):
-    """Remove the merged PR's worktree and say what happened; never raises, and forces only past an untracked
-    `.claude/pr-body.md` that is the tree's one change (`only_pr_body_untracked`): it goes with the tree.
+    """Remove the merged PR's worktree and say what happened; never raises, and forces only past leftovers
+    (`only_leftovers`): an untracked `pr-body.md` (at the worktree root, or the older `.claude/pr-body.md`) and
+    mode-only changes go with the tree. Any other untracked file is named in the refusal.
 
     A harness-locked tree is unlocked first, then removed plainly, so a dirty tree is still refused;
     if that refusal comes after the unlock, the lock is put back so the tree is left as found."""
     def attempt():
         # LC_ALL=C: the refusal texts below are English, whatever the user's locale.
         w = common.run("git", "worktree", "remove", path, cwd=cwd, env=c_locale())
-        if w.code != 0 and "untracked" in w.stderr and only_pr_body_untracked(path):
+        if w.code != 0 and ("untracked" in w.stderr or "modified" in w.stderr) and only_leftovers(path):
             w = common.run("git", "worktree", "remove", "--force", path, cwd=cwd, env=c_locale())
         return w
 
@@ -155,7 +230,8 @@ def remove_worktree(path, cwd):
         return f"worktree {path} already removed"
     reason = harness_lock(path, cwd) if "locked" in err else None
     if reason is None:
-        return f"worktree {path} NOT removed: {err}"
+        names = untracked_names(path) if "untracked" in err else ""
+        return f"worktree {path} NOT removed: {err}" + (f" (untracked: {names})" if names else "")
     u = common.run("git", "worktree", "unlock", path, cwd=cwd, env=c_locale())
     if u.code != 0:
         return f"worktree {path} NOT removed: could not unlock: {common.one_line(u.stderr)}"

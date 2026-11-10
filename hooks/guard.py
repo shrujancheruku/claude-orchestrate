@@ -25,6 +25,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -604,26 +605,20 @@ class Parsed:
         return [c for c in self.calls if c.tool == name]
 
 
-# The writes a reviewer may make: a comment review posted through the API (its JSON on a
-# heredoc) or through `gh pr review --comment`. The aimed command must be exactly one of
-# these shapes (see review_post); the payload is checked separately. A heredoc delimiter must be
+# The write a reviewer may make: a comment review posted through the API (its JSON on a
+# heredoc), the one form agents/reviewer.md names. The aimed command must be exactly that
+# shape (see review_post); the payload is checked separately. A heredoc delimiter must be
 # quoted, or the shell would expand `$(...)` inside the body, and no word may hold an expansion.
 # An optional leading `cd <path> &&` is allowed, a plain cd and nothing chained after it.
 REVIEWS_PATH = re.compile(r"pulls/\d+/reviews")
 REVIEW_ENDPOINT = re.compile(r"repos/[^/\s]+/[^/\s]+/pulls/\d+/reviews")
-# A finding whose line is outside the diff is posted on its own as a file-level comment (agents/reviewer.md).
+# Aimed but never approved (#700): `gh pr review` and a file-level comment have no form in agents/reviewer.md.
 FILE_COMMENT_PATH = re.compile(r"pulls/\d+/comments")
-FILE_COMMENT_ENDPOINT = re.compile(r"repos/[^/\s]+/[^/\s]+/pulls/\d+/comments")
-FILE_COMMENT_FIELDS = {"path", "subject_type", "commit_id", "body"}
 SHAPES = (
-    "Post exactly one of these (an optional leading `cd <path> &&` is fine, nothing else chained, nothing after the heredoc):\n"
+    "Post exactly this (an optional leading `cd <path> &&` is fine, nothing else chained, nothing after the heredoc):\n"
     "gh api --method POST repos/{owner}/{repo}/pulls/<n>/reviews --input - <<'EOF'\n"
     '{"event": "COMMENT", "body": "<body>", "comments": []}\nEOF\n'
-    "gh pr review <n> --comment --body-file - <<'EOF'\n<body>\nEOF\n"
-    "gh pr review <n> --comment --body '<body, no single quotes>'\n"
-    "A finding outside the diff, posted after the review as a file-level comment:\n"
-    "gh api --method POST repos/{owner}/{repo}/pulls/<n>/comments -f path=<path> -f subject_type=file "
-    "-f commit_id=<head sha> -f body=<finding>"
+    "A finding outside the diff goes in the body under `## Outside the diff`, never in a second request."
 )
 # The config line that turns posting on, e.g. `- **Post reviews:** yes`. Leaving `<` out of
 # the separator keeps the template's `<yes | no>` placeholder from reading as yes.
@@ -826,14 +821,70 @@ def rule_gh_api_writes(p: Parsed, cwd: str) -> str | None:
     return None
 
 
-def rule_fs_writes(p: Parsed, cwd: str) -> str | None:
+def scratchpad_path_ok(value: str, base: str, session: str) -> bool:
+    """A path that, resolved against `base` with symlinks followed, sits inside this session's scratchpad
+    (`<tmp>/claude-<uid>/<project>/<session>/scratchpad/...`). With no session id nothing matches."""
+    if not value or not session:
+        return False
+    target = os.path.realpath(os.path.join(base or ".", value))
+    pad = scratchpad_pattern(session)
+    for t in TEMP_ROOTS:
+        if target.startswith(t + "/") and pad.fullmatch(target[len(t):]):
+            # A `pr-<n>` tree is one the orchestrator runs `gate` and `verify --cwd` in (#624), so a reviewer or scout
+            # that read an untrusted diff never writes into one (or makes one): its own writes go in a subdirectory
+            # of another name (#713). Case-folded: the temp filesystem on macOS is case-insensitive.
+            inside = target[len(t):].split("/scratchpad/", 1)[1:]
+            return not (inside and any(SCRATCH_TREE_ANY_CASE.fullmatch(part) for part in inside[0].split("/")))
+    return False
+
+
+# The flags of the writes a reviewer or scout may make inside its own scratchpad (#687): `mkdir -p`, `tee -a`, and
+# `cp` without a target-directory option, so the last word is always the one target.
+SCRATCH_WRITE_FLAGS = {"mkdir": frozenset(("-p",)), "tee": frozenset(("-a",)),
+                       "cp": frozenset(("-r", "-R", "-p", "-a", "-f", "-n", "-v"))}
+
+
+def scratch_write_ok(cmd: Command, base: str, session: str) -> bool:
+    """One `mkdir -p`, `tee` or `cp` that is the first word of the command, written in plain words, whose every
+    target is inside the session scratchpad (#687). `cp` reads its sources from anywhere and writes only the last word;
+    `mkdir` and `tee` write every operand."""
+    words = cmd.words
+    if not words or any(w.dynamic or w.glob for w in words) or words[0].text not in SCRATCH_WRITE_FLAGS:
+        return False
+    name, rest = words[0].text, [w.text for w in words[1:]]
+    flags = [a for a in rest if a.startswith("-")]
+    operands = [a for a in rest if not a.startswith("-")]
+    if not operands or any(f not in SCRATCH_WRITE_FLAGS[name] for f in flags):
+        return False
+    if name == "cp":
+        return len(operands) >= 2 and scratchpad_path_ok(operands[-1], base, session)
+    return all(scratchpad_path_ok(a, base, session) for a in operands)
+
+
+def scratch_redirects_ok(cmd: Command, base: str, session: str) -> bool:
+    """Every redirect of the command is `2>&1`-style, `/dev/null`, or a `>`/`>>` into the session scratchpad (#687)."""
+    for op, target in cmd.redirects:
+        if target.dynamic or target.glob:
+            return False
+        ok_null = (op in (">", "&>") and target.text == "/dev/null") or (op == ">&" and target.text in ("1", "2"))
+        if not (ok_null or (op in (">", ">>") and scratchpad_path_ok(target.text, base, session))):
+            return False
+    return True
+
+
+def rule_fs_writes(p: Parsed, cwd: str, session: str = "") -> str | None:
     for cmd in p.cmds:
+        if scratch_write_ok(cmd, cwd, session):
+            continue
         words, program = cmd.words, command_index(cmd.words)
         for k, w in enumerate(words):
             # Quoted words are search text, except the one naming the program.
             if w.dynamic or (w.quoted and k != program):
                 continue
             nxt = words[k + 1] if k + 1 < len(words) else None
+            if w.text == "mkdir":
+                return ("writes files or runs a build (`mkdir` is not needed: `git worktree add` and the scratch script "
+                        "make their own directories)")
             if w.text in FS_VERBS:
                 return "writes files or runs a build"
             if w.text in INSTALLERS and nxt is not None and not nxt.dynamic and nxt.text in INSTALL_VERBS:
@@ -845,15 +896,23 @@ def rule_fs_writes(p: Parsed, cwd: str) -> str | None:
     return None
 
 
-def rule_redirects(p: Parsed, cwd: str) -> str | None:
+def rule_redirects(p: Parsed, cwd: str, session: str = "") -> str | None:
     for cmd in p.cmds:
         for op, target in cmd.redirects:
             if op not in WRITE_REDIRECTS:
                 continue
             if not target.dynamic and (target.text == "/dev/null" or (op == ">&" and re.fullmatch(r"\d+|-", target.text))):
                 continue
+            if op in (">", ">>") and not target.dynamic and not target.glob and scratchpad_path_ok(target.text, cwd, session):
+                continue
             return "redirects output into a file"
     return None
+
+
+SCRATCH_ROLES = ("reviewer", "scout")
+
+# The rules that take the session id: a reviewer's or scout's write inside its scratchpad is not a refusal (#687).
+SESSION_RULES = (rule_fs_writes, rule_redirects)
 
 
 def rule_gh_merge(p: Parsed, cwd: str) -> str | None:
@@ -912,6 +971,55 @@ def rule_pr_draft(p: Parsed, cwd: str) -> str | None:
                 "with `gh pr ready`. Only if `gh pr create --draft` itself failed twice, open it ready "
                 "with a body line `Draft unavailable: <reason>` (a `--body-file <path>` must already exist when this "
                 "runs: write it in an earlier call, or pass `--body-file -` with a heredoc, or a literal `--body`)")
+    return None
+
+
+# The flags of `gh pr create` a worker's routine call may carry (#687), long name -> (short name, takes a value).
+# `--template <path>` is left unapproved, and `--web` is refused.
+PR_CREATE_FLAGS = {
+    "--title": ("-t", True), "--body": ("-b", True), "--body-file": ("-F", True), "--base": ("-B", True),
+    "--head": ("-H", True), "--draft": ("-d", False), "--label": ("-l", True), "--assignee": ("-a", True),
+    "--reviewer": ("-r", True), "--fill": ("-f", False),
+}
+
+
+def pr_create_flags_ok(args: list) -> bool:
+    """Every word of a `gh pr create` call is an allowed flag (long, `--flag=value`, short, or short with its value
+    attached) or the value of one that takes a value. A positional word, a cluster of short flags and any other
+    flag fail closed."""
+    shorts = {short: takes for short, takes in PR_CREATE_FLAGS.values()}
+    j = 0
+    while j < len(args):
+        word = args[j]
+        j += 1
+        if word.startswith("--"):
+            name, eq, _ = word.partition("=")
+            if name not in PR_CREATE_FLAGS or (eq and not PR_CREATE_FLAGS[name][1]):
+                return False
+            takes = PR_CREATE_FLAGS[name][1]
+            if takes and not eq:
+                if j >= len(args):
+                    return False
+                j += 1
+        elif word.startswith("-") and len(word) >= 2 and word[:2] in shorts:
+            if shorts[word[:2]]:
+                if len(word) == 2:
+                    if j >= len(args):
+                        return False
+                    j += 1
+            elif len(word) > 2:
+                return False
+        else:
+            return False
+    return True
+
+
+def rule_pr_web(p: Parsed, cwd: str) -> str | None:
+    """`gh pr create --web` opens a browser, and a background agent has nobody to use it (#687)."""
+    for call in p.tool("gh"):
+        if call.is_sub("pr") and call.is_verb("create") and any(
+                a.text in ("--web", "-w") or a.text.startswith("--web=") for a in call.args if not a.dynamic):
+            return "opens a browser (`gh pr create --web`): create the PR from the terminal with `--title` and `--body`"
     return None
 
 
@@ -988,7 +1096,7 @@ READ_ONLY = [rule_expansion, rule_bare_expansion, rule_git_writes, rule_gh_write
 RULES = {
     "scout": READ_ONLY,
     "reviewer": [rule_expansion, rule_bare_expansion, rule_reviewer_git, *READ_ONLY[3:]],
-    "worker": [rule_expansion, rule_gh_merge, rule_pr_draft, rule_force_push, rule_push_default],
+    "worker": [rule_expansion, rule_gh_merge, rule_pr_draft, rule_pr_web, rule_force_push, rule_push_default],
 }
 
 NEXT_STEP = {
@@ -1044,51 +1152,15 @@ def cd_target_plain(cd: Command) -> bool:
 
 
 def review_shape(cmd: Command) -> str | None:
-    """Which accepted shape a `gh` command is: "api" (the review JSON on a heredoc), "body-file" (the
-    body on a heredoc) or "inline" (the body on the command line); None for anything else."""
+    """"api" for the one post form agents/reviewer.md names (the review JSON on a heredoc); None for
+    anything else, `gh pr review` and the file-comment POST included (#700)."""
     words = [w.text for w in cmd.words]
-    if words[:1] != ["gh"] or not only_plain_words(cmd):
+    if words[:2] != ["gh", "api"] or not only_plain_words(cmd):
         return None
-    if words[1:2] == ["api"]:
-        args = words[2:]
-        if (len(args) == 5 and args[0] in ("-X", "--method") and args[1] == "POST"
-                and REVIEW_ENDPOINT.fullmatch(args[2]) and args[3:] == ["--input", "-"]):
-            return "api"
-        if len(args) == 11 and args[0] in ("-X", "--method") and args[1] == "POST" and FILE_COMMENT_ENDPOINT.fullmatch(args[2]):
-            fields = {}
-            for flag, pair in zip(args[3::2], args[4::2]):
-                key, eq, value = pair.partition("=")
-                if flag != "-f" or not eq:
-                    return None
-                fields[key] = value
-            if set(fields) == FILE_COMMENT_FIELDS and fields["subject_type"] == "file":
-                return "file-comment"
-        return None
-    if words[1:3] != ["pr", "review"] or len(words) < 5 or not is_number(words[3]):
-        return None
-    args, comment, body, body_file = words[4:], 0, 0, 0
-    j = 0
-    while j < len(args):
-        a = args[j]
-        j += 1
-        if a == "--comment":
-            comment += 1
-        elif a in ("-b", "--body") and j < len(args):
-            body += 1
-            j += 1
-        elif a.startswith("--body="):
-            body += 1
-        elif a in ("--body-file", "-F") and args[j:j + 1] == ["-"]:
-            body_file += 1
-            j += 1
-        elif a == "--body-file=-":
-            body_file += 1
-        else:
-            return None
-    if comment == 1 and body == 1 and body_file == 0:
-        return "inline"
-    if comment == 1 and body == 0 and body_file == 1:
-        return "body-file"
+    args = words[2:]
+    if (len(args) == 5 and args[0] in ("-X", "--method") and args[1] == "POST"
+            and REVIEW_ENDPOINT.fullmatch(args[2]) and args[3:] == ["--input", "-"]):
+        return "api"
     return None
 
 
@@ -1120,7 +1192,14 @@ def review_post(p: Parsed) -> str | None:
             return "it isn't in the accepted shape"
     post = cmds[at]
     shape = review_shape(post)
-    if shape is None or len(post.heredocs) != (0 if shape in ("inline", "file-comment") else 1):
+    if shape is None:
+        if post.words[1:3] and [w.text for w in post.words[1:3]] == ["pr", "review"]:
+            return "`gh pr review` is not a reviewer's post form (the review goes through the reviews API as one comment review)"
+        if any(FILE_COMMENT_PATH.search(w.text) for w in post.words):
+            return ("a file-level comment is not a reviewer's post form (a finding outside the diff goes in the "
+                    "review body under `## Outside the diff`)")
+        return "it isn't in the accepted shape"
+    if len(post.heredocs) != 1:
         return "it isn't in the accepted shape"
     heredoc = post.heredocs[0] if post.heredocs else None
     if heredoc and not heredoc.quoted:
@@ -1130,8 +1209,6 @@ def review_post(p: Parsed) -> str | None:
     # Anything after the review would run unchecked.
     if len(cmds) > at + 1:
         return "it runs more after the review"
-    if shape != "api":
-        return ""
     try:
         payload = json.loads(heredoc.body)
     except json.JSONDecodeError:
@@ -1295,29 +1372,32 @@ def threads_refusal(role: str, parsed: "Parsed") -> str | None:
     return f"this threads call is refused because {what}. The {role} may run {THREADS_FORMS[role]}."
 
 
-def verdict(role: str, command: str, cwd: str, background: bool = False, timeout: object = None) -> str | None:
+def verdict(role: str, command: str, cwd: str, background: bool = False, timeout: object = None,
+            session: str = "") -> str | None:
     """The reason to deny this command for this role, or None to let it run.
 
-    `background` is the call's `run_in_background`: a worker that leaves a command in the background is
-    woken by each completion and hands back again (#229, #255, #259), and has no command that needs it,
-    so every backgrounded worker call is refused. This only sees the flag the worker set; when the harness
-    itself moves a long foreground call to the background, the worker waits for it (see agents/worker.md).
-    `timeout` is the call's Bash `timeout`: a worker's verify call must carry one of VERIFY_TIMEOUT_MS or more
-    so the harness keeps it in the foreground (#301). Anything but a real number fails closed."""
+    `background` is the call's `run_in_background`: a worker or reviewer that leaves a command in the background
+    is woken by each completion and hands back again (#229, #255, #259), and has no command that needs it,
+    so every backgrounded call of theirs is refused. This only sees the flag the agent set; when the harness
+    itself moves a long foreground call to the background, the agent waits for it (see agents/worker.md).
+    `timeout` is the call's Bash `timeout`: a worker's or reviewer's verify call must carry one of VERIFY_TIMEOUT_MS
+    or more so the harness keeps it in the foreground (#301). Anything but a real number fails closed.
+    `session` is the hook input's `session_id`: the reviewer's and scout's writes are allowed inside that
+    session's scratchpad only, and with no session id nothing is (#687)."""
     who, role = role_label(role), rules_role(role)
     try:
         parsed = Parsed(parse(command))
     except ParseError as err:
         return (f"the guard couldn't parse this command ({err}), so it can't check it. "
                 f"Rewrite it with balanced quotes and brackets. {NEXT_STEP[role]}")
-    if background and role == "worker":
+    if background and role in ("worker", "reviewer"):
         if runs_verify(parsed):
             return (f"{who} can't run verify in the background (it would hand back before verify finishes). "
                     "Run it in the foreground and let it finish. If the harness moves it to the background "
                     "after a few minutes, wait for it to exit (a Monitor) before you go on.")
-        return (f"{who} can't run a command in the background (each time it reports, the worker is woken "
+        return (f"{who} can't run a command in the background (each time it reports, the {role} is woken "
                 "and hands back again). Run it in the foreground and wait for it to finish.")
-    if role == "worker" and runs_verify(parsed) and not (
+    if role in ("worker", "reviewer") and runs_verify(parsed) and not (
             isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout >= VERIFY_TIMEOUT_MS):
         return (f"{who} must run verify with a Bash timeout (the harness moves a call without one to the "
                 f"background after 180s, and verify would hand back before it finishes). Run it again in the "
@@ -1337,7 +1417,7 @@ def verdict(role: str, command: str, cwd: str, background: bool = False, timeout
         return (f"{who} can't run a command that merges a PR (merging belongs to the orchestrator). "
                 f"{NEXT_STEP[role]}")
     for rule in RULES[role]:
-        what = rule(parsed, cwd)
+        what = rule(parsed, cwd, session) if rule in SESSION_RULES else rule(parsed, cwd)
         if what:
             return f"{who} can't run a command that {what}. {NEXT_STEP[role]}"
     if role == "worker":
@@ -1386,6 +1466,10 @@ def chained_external_writes(parsed: "Parsed") -> list:
     chain with no external write."""
     if not any(c.joiner in CHAIN_BREAKS for c in parsed.cmds):
         return []
+    cmds = parsed.cmds
+    if (len(cmds) == 2 and len(cmds[0].words) == 2 and cmds[0].words[0].text == "cd" and not cmds[0].depth
+            and cmds[1].joiner == "&&" and only_plain_words(cmds[0]) and not cmds[0].heredocs):
+        return []  # a lone leading `cd <dir> &&` is no chain: approval accepts it only for the worker's own worktree (#624)
     return [w for w in (external_write(c) for c in parsed.cmds) if w]
 
 
@@ -1404,6 +1488,8 @@ CREDENTIAL_OPTION = "credential.helper=!gh auth git-credential"
 PLUGIN_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 REPO_FLAG = re.compile(r"-R.*|--repo(?:=.*)?")
 SETTINGS_FILE = re.compile(r"settings[^/]*\.json")
+# The only file of `<worktree>/.claude/` a worker may write: the plugin's config. Run state lives in the main checkout.
+PLUGIN_OWNED_CLAUDE_FILES = frozenset(((".claude", "orchestration.md"),))
 
 
 def worker_worktree(cwd: str) -> Path | None:
@@ -1445,9 +1531,17 @@ def edit_decision(tool_name: str, tool_input: object, cwd: str) -> tuple | None:
         # Writes that change the worker's own permissions or git internals are refused: a background worker
         # has nobody to answer the prompt they would get (#567).
         parts = target.relative_to(worktree).parts if target != worktree else ()
-        if parts[:1] == (".git",) or (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
+        # Case-folded (#713): `.Claude` and `.GIT` are the same directories on macOS's case-insensitive filesystem.
+        folded = tuple(part.casefold() for part in parts)
+        if folded[:1] == (".git",) or (len(folded) >= 2 and folded[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1])):
             return "deny", (f"the worker role can't edit {path}: it is git internals or a settings file. "
                             "Change only your ticket's files.")
+        if folded[:1] == (".claude",) and parts not in PLUGIN_OWNED_CLAUDE_FILES:
+            # A stray file under `<worktree>/.claude/` (a `pr-body.md`) is left behind untracked and blocks the
+            # worktree's removal (#404): refused like a write outside the worktree.
+            return "deny", (f"the worker role can't edit {path}: it is outside your worktree ({worktree}). "
+                            "Write scratch files inside your worktree (stage by explicit path so they never ship), "
+                            "or pass a PR body with `--body-file -`.")
         # Only `default` mode reaches this allow (an Edit there would prompt). `acceptEdits` and `bypassPermissions`
         # pass the edit anyway, and under `auto` the classifier skips a subagent's edit before a hook allow
         # matters (#378, #407). Kept: it costs nothing and covers a worker run in `default`.
@@ -1533,6 +1627,82 @@ def branch_step_ok(args: list, cwd: str) -> bool:
     return start == f"origin/{name}"
 
 
+def tracked(path: Path, worktree: Path) -> bool | None:
+    """Whether git tracks this path of the worker's worktree: True or False, or None when git can't say (a failure
+    to ask is never read as "untracked"). The one git subprocess the guard runs, for `rm` of an untracked file."""
+    try:
+        done = subprocess.run(["git", "-C", str(worktree), "ls-files", "--error-unmatch", "--", str(path)],
+                              capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode == 0:
+        return True
+    return False if done.returncode == 1 else None
+
+
+def worker_rm_ok(args: list, here: str, worktree: Path | None) -> bool:
+    """A worker's `rm [-f] <file>...` of an UNTRACKED regular file inside its own worktree (#624): the leftover of a
+    probe or a `pr-body.md`, which would block removing the worktree. A tracked file goes through `git rm`; a
+    directory, a path outside the worktree and a glob are not approved."""
+    files = [a for a in args if a not in ("-f", "--force")]
+    if not files or any(f.startswith("-") for f in files) or not all(inside_worktree(f, here, worktree) for f in files):
+        return False
+    for f in files:
+        path = Path(os.path.join(here, f))
+        if path.is_symlink() or not path.is_file() or tracked(Path(os.path.realpath(path)), worktree) is not False:
+            return False
+    return True
+
+
+def ref_ok(ref: str, branch: str, cwd: str) -> bool:
+    """A ref a worker may restore a file from: HEAD, its own branch, or an `origin/` branch."""
+    return ref in ("HEAD", branch) or bool(re.fullmatch(r"origin/[\w.-]+(?:/[\w.-]+)*", ref))
+
+
+def worker_branch_git_ok(call: Call, worktree: Path, cwd: str) -> bool:
+    """A worker's git steps on its own branch and files (#624), from inside its worktree:
+    - `git merge --no-edit|--ff-only origin/<B>` and `git pull --no-rebase|--ff-only origin <B>`, with <B> the branch
+      checked out in the worktree and not a default branch (the recovery from a push rejected after the
+      orchestrator's sweep updated the branch; agents/worker.md). No other ref, no `--rebase`.
+    - `git merge --no-edit|--ff-only origin/<default>` (#708): bringing the default branch into its own branch, as a
+      conflict-list follow-up asks. Only a merge takes it: `git pull` stays on the worker's own branch.
+    - `git rm [-q] <path>...` of a file inside the worktree (`-r` on a directory inside it).
+    - `git checkout <ref> -- <path>...` and `git restore [--source <ref>] -- <path>...`, to bring back a file."""
+    if any(a.dynamic or a.glob for a in call.args):
+        return False
+    args, here = [a.text for a in call.args], os.path.realpath(cwd or ".")
+    branch = worktree_branch(worktree)
+    if branch is None or branch in default_branches(cwd):
+        return False
+    if call.is_sub("merge"):
+        flags = [a for a in args if a.startswith("-")]
+        refs = [a for a in args if not a.startswith("-")]
+        return (len(flags) <= 2 and all(f in ("--no-edit", "--ff-only", "-q", "--quiet") for f in flags)
+                and any(f in ("--no-edit", "--ff-only") for f in flags)
+                and len(refs) == 1 and refs[0] in [f"origin/{b}" for b in (branch, *sorted(default_branches(cwd)))])
+    if call.is_sub("pull"):
+        flags = [a for a in args if a.startswith("-")]
+        refs = [a for a in args if not a.startswith("-")]
+        return (len(flags) <= 2 and all(f in ("--no-rebase", "--ff-only", "--no-edit", "-q", "--quiet") for f in flags)
+                and any(f in ("--no-rebase", "--ff-only") for f in flags) and refs == ["origin", branch])
+    if call.is_sub("rm"):
+        flags = [a for a in args if a.startswith("-")]
+        paths = [a for a in args if not a.startswith("-")]
+        return (all(f in ("-q", "--quiet", "-r") for f in flags) and bool(paths)
+                and all(inside_worktree(p, here, worktree) for p in paths))
+    if "--" not in args:
+        return False
+    i = args.index("--")
+    before, paths = args[:i], args[i + 1:]
+    if not paths or not all(inside_worktree(p, here, worktree) for p in paths):
+        return False
+    if call.is_sub("checkout"):
+        return len(before) == 1 and ref_ok(before[0], branch, cwd)
+    if before == []:
+        return True
+    return len(before) == 2 and before[0] == "--source" and ref_ok(before[1], branch, cwd)
+
+
 def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
     """A worker's `git add`, `git commit` or push of its own ticket branch, from inside its worktree."""
     worktree = worker_worktree(cwd)
@@ -1543,6 +1713,8 @@ def routine_git(cmd: Command, parsed: "Parsed", cwd: str) -> bool:
         return not call.options
     if call.is_sub("switch"):
         return not call.options and branch_step_ok(call.args, cwd)
+    if call.is_sub("merge", "pull", "rm", "checkout", "restore"):
+        return not call.options and worker_branch_git_ok(call, worktree, cwd)
     if not call.is_sub("push"):
         return False
     if [(n, v.text if v else None) for n, v in call.options] not in ([], [("-c", CREDENTIAL_OPTION)]):
@@ -1634,7 +1806,7 @@ def routine_pr(call: Call, cwd: str = "", session: str = "") -> bool:
     if not body_files_ok(args, cwd, session):
         return False
     if call.is_verb("create"):
-        return "--draft" in args
+        return ("--draft" in args or "-d" in args) and pr_create_flags_ok(args)
     if call.is_verb("ready"):
         return args == []
     return call.is_verb("edit") and numberless_edit(args)
@@ -1725,7 +1897,7 @@ SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
 # `<pr>` or its head), or a literal word such as "resolve"; a trailing "+", "*" or "?" repeats the last token.
 # Flag value kinds, one per value, space separated: "" (a switch), "word", "num", "float", "hash", "repo" (only `.`),
 # "snapshot" (only the pass's own snapshot file), "cwd" (gate's: a worktree of this repo), "under" (scratch's: this
-# session's scratchpad), and "word*" / "word+" / "num*" for a list.
+# session's scratchpad), "own" (only the caller's own session id), and "word*" / "word+" / "num*" for a list.
 class Form(NamedTuple):
     script: str
     shape: tuple = ()
@@ -1754,8 +1926,15 @@ ORCHESTRATOR_FORMS = (
          need=("--left",), inline=False),  # the script refuses a --left with neither (or both) of the follow-up flags
     Form("threads", ("pr", "followup", "word*"), {"--gist": "word", "--verbose": ""}, inline=False),
     Form("board", (), {"--repo": "repo", "--dry-run": "", "--verbose": ""}),
+    # The rescue of a stalled or stopped ticket (#624): `rescue <ticket | branch> --title <title> --repo . [--pr <num>]`, the
+    # two forms skills/run documents. --title is any one quoted string (the guard can't know the ticket's title; it only
+    # goes into a wip commit message and a branch slug). No other flag, so no `--pr` without a number.
+    Form("rescue", ("ticket",), {"--title": "word", "--repo": "repo", "--pr": "num"}, need=("--title", "--repo")),
     # Making CI run again (once), and the scratch worktree add; scratch's `--under` is this session's scratchpad.
     Form("ci-rerun", ("pr",), {"--job": "num num", "--repo": "repo"}),
+    # Taking an open PR out of the merge queue (#708): `park-pr <pr> --why "<text>"` and `park-pr <pr> --unpark`, nothing else.
+    Form("park-pr", ("pr",), {"--why": "word", "--repo": "repo"}, need=("--why",)),
+    Form("park-pr", ("pr",), {"--unpark": "", "--repo": "repo"}, need=("--unpark",)),
     Form("scratch", ("pr", "hash"), {"--under": "under", "--repo": "repo"}, need=("--under",)),
     # worker-report: a worker's completion, and a reviewer's (which may post its risk notes once).
     Form("worker-report", ("n",), {"--branch": "word", "--repo": "repo"}, need=("--branch",)),
@@ -1768,11 +1947,14 @@ ORCHESTRATOR_FORMS = (
                           "--repo": "repo"}),
     Form("holds", (), {**SESSION_FLAGS, "--touch-map": "word+", "--literal": "", "--ticket": "num", "--pr": "num"}),
     Form("gate", ("pr",), {"--session": "word", "--cwd": "cwd", "--base": "word", "--timeout": "float", "--retry-delay": "float"}),
+    # The suite run in a scratch tree (#624): the config's commands only, in a worktree or scratch tree the run made.
+    Form("verify", (), {"--config": "", "--cwd": "cwd", "--timeout": "float"}, need=("--config", "--cwd")),
     Form("ci-times", (), {"--since": "word"}),
     Form("watch-ci", ("target+",), {"--no-run-after": "float", "--interval": "float", "--stuck-after": "float"}),
-    Form("lead-route", (), {**SESSION_FLAGS, "--lead": "word", "--cap": "num", "--now": "word"}, need=("--lead", "--cap")),
+    Form("lead-route", (), {**SESSION_FLAGS, "--cap": "num", "--now": "word"}, need=("--cap",)),
     Form("lead-brief", (), {"--repo": "repo", "--now": "word", "--checkpoint": "num", "--watch": "", "--interval": "float"}),
-    Form("prompts", (), {"--repo": "repo", "--session": "word", "--since": "word", "--watermark": "", "--mark": ""}),
+    # `--session` is the caller's own id (#634): the mark and the watermark are per session, so another session's id is refused.
+    Form("prompts", (), {"--repo": "repo", "--session": "own", "--since": "word", "--watermark": "", "--mark": ""}),
     # One ticket, through the trust rule (every role may read one).
     Form("issue", ("n",), {"--repo": "repo"}),
     # profile.py, run as `python3 -I <plugin>/scripts/profile.py`: the pass record and the profile build.
@@ -1809,9 +1991,10 @@ def value_ok(kind: str, value: str, ctx: FormContext) -> bool:
         return bool(value) and not value.startswith("-")
     if kind in ("num", "num*"):
         return value.isascii() and value.isdigit()
-    return {"float": lambda: FLOAT.fullmatch(value) is not None, "hash": lambda: HEX.fullmatch(value) is not None,
+    return {"own": lambda: bool(ctx.session) and value == ctx.session,
+            "float": lambda: FLOAT.fullmatch(value) is not None, "hash": lambda: HEX.fullmatch(value) is not None,
             "repo": lambda: value == ".", "snapshot": lambda: value == SNAPSHOT_FILE,
-            "cwd": lambda: gate_cwd_ok(value, ctx.cwd), "under": lambda: under_ok(value, ctx.session)}.get(kind, lambda: False)()
+            "cwd": lambda: gate_cwd_ok(value, ctx.cwd, ctx.session), "under": lambda: under_ok(value, ctx.session)}.get(kind, lambda: False)()
 
 
 def positional_ok(token: str, text: str) -> bool:
@@ -1824,6 +2007,8 @@ def positional_ok(token: str, text: str) -> bool:
         return HEX.fullmatch(text) is not None
     if kind == "target":
         return WATCH_TARGET.fullmatch(text) is not None
+    if kind == "ticket":  # rescue's argument: a ticket number, or the branch grammar `<n>-<slug>`
+        return (text.isascii() and text.isdigit()) or BRANCH_NAME.fullmatch(text) is not None
     if kind == "sid":  # a session id: not one of profile.py's own subcommands
         return re.fullmatch(r"[A-Za-z0-9][\w-]*", text) is not None and text not in ("record", "compare")
     return text == kind
@@ -1881,13 +2066,22 @@ def script_form_ok(name: str, words: list, ctx: FormContext) -> bool:
     return any(f.script == name and form_matches(f, words, ctx) for f in ORCHESTRATOR_FORMS)
 
 
-def gate_cwd_ok(value: str | None, cwd: str) -> bool:
-    """gate's `--cwd` (#562): a literal directory that resolves under `<repo>/.claude/worktrees/`, the worktree
-    of a PR's branch. Any other value aims the gate's checks at a place the run didn't make."""
+SCRATCH_TREE = re.compile(r"pr-\d+[a-z]?(?:-[\w.]+)?")
+SCRATCH_TREE_ANY_CASE = re.compile(SCRATCH_TREE.pattern, re.IGNORECASE)
+
+
+def gate_cwd_ok(value: str | None, cwd: str, session: str = "") -> bool:
+    """gate's and verify's `--cwd` (#562): a literal directory that resolves under `<repo>/.claude/worktrees/`, the
+    worktree of a PR's branch, or (#624) a scratch tree `scripts/scratch` made: `<scratchpad>/pr-<n>[letter]`, the
+    same root `scratch --under` takes, so never `..`, a path in the checkout, or a missing session id. Any other value
+    aims the checks at a place the run didn't make."""
     if not value or value.startswith("-"):
         return False
     real = Path(os.path.realpath(os.path.join(cwd or ".", value)))
-    return any((root.resolve() / ".claude" / "worktrees") in real.parents for root in repo_roots(cwd))
+    if any((root.resolve() / ".claude" / "worktrees") in real.parents for root in repo_roots(cwd)):
+        return True
+    return (value.startswith("/") and ".." not in value.split("/") and SCRATCH_TREE.fullmatch(real.name) is not None
+            and under_ok(str(real.parent), session) and not any(r.resolve() in (real, *real.parents) for r in repo_roots(cwd)))
 
 
 def chain_cat_ok(args: list, cwd: str) -> bool:
@@ -2008,7 +2202,7 @@ LOOP_VAR = re.compile(r"[A-Za-z_]\w*")
 LOOP_ITEM = re.compile(r"[A-Za-z0-9_./:@=+,%][A-Za-z0-9_./:@=+,%-]*")
 # A flag that writes or runs a program, by the prefix git, ripgrep or find would accept (getopt takes
 # abbreviations): refused whatever its spelling.
-GIT_READ_VERBS = frozenset(("status", "log", "diff", "show", "ls-remote", "ls-files", "rev-parse", "rev-list", "grep"))
+GIT_READ_VERBS = frozenset(("status", "log", "diff", "show", "ls-remote", "ls-files", "ls-tree", "rev-parse", "rev-list", "grep"))
 GIT_UNSAFE_LONG = ("--output", "--ext-diff", "--upload-pack", "--exec", "--open-files-in-pager")
 GIT_BRANCH_READS = frozenset(("-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--list", "--show-current"))
 GIT_FETCH_FLAGS = frozenset(("-q", "--quiet", "-v", "--verbose", "--no-tags", "--tags"))
@@ -2198,7 +2392,8 @@ def inside_worktree(path: str, here: str, worktree: Path | None) -> bool:
         return False
     parts = resolved.relative_to(worktree).parts
     # The same files edit_decision keeps behind a prompt for the Edit tool: git internals and the settings files.
-    return ".git" not in parts and not (len(parts) >= 2 and parts[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1]))
+    folded = tuple(part.casefold() for part in parts)  # #713: `.GIT` is `.git` on a case-insensitive filesystem
+    return ".git" not in folded and not (len(folded) >= 2 and folded[-2] == ".claude" and SETTINGS_FILE.fullmatch(parts[-1]))
 
 
 def remote_names(cwd: str) -> set:
@@ -2409,7 +2604,9 @@ def gh_read_ok(cmd: Command) -> bool:
         return not any(a in ("-w", "--web", "--watch") for a in args)
     if call.is_sub("api"):
         scan = scan_api(call.args)
-        return (not scan.other and not scan.fields and scan.endpoint is not None and scan.endpoint.text != "graphql")
+        if scan.endpoint is not None and not scan.endpoint.dynamic and scan.endpoint.text == "graphql":
+            return graphql_refusal(call.args) is None  # one literal read-only query (no mutation), as the gate runs it (#667)
+        return (not scan.other and not scan.fields and scan.endpoint is not None)
     return False
 
 
@@ -2554,6 +2751,8 @@ def read_command_ok(cmd: Command, here: str = ".", cwd: str = "") -> bool:
     the read bound (#566). A relative glob is expanded and its matches are held to the bound (#567)."""
     first = cmd.words[0]
     name, words = first.text, cmd.words[1:]
+    if name == "/usr/bin/diff":
+        name = "diff"  # the absolute spelling of the same read (#624)
     if first.dynamic or any(w.dynamic for w in words) or (first.glob and name != "["):
         return False
     if name in SYMLINK_SHORT or name == "diff":
@@ -2614,6 +2813,8 @@ def worker_work_ok(cmd: Command, here: str, worktree: Path | None) -> bool:
         if args[0] == "-m" and len(args) > 2 and args[1] == "py_compile":
             return all(inside_worktree(a, here, worktree) for a in args[2:])
         return Path(os.path.realpath(os.path.join(here, args[0]))) == worktree / "tests" / "run_parallel.py"
+    if name == "rm":
+        return worker_rm_ok(args, here, worktree)
     if name == "sed":
         parsed = sed_args(args)
         return (parsed is not None and parsed[0] and bool(parsed[2]) and all(sed_script_ok(s) for s in parsed[1])
@@ -2776,7 +2977,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
         elif head.text == "done" and loop is not None and len(cmd.words) == 1 and not cmd.redirects:
             loop = None
             continue
-        if not allowed_redirects(cmd):
+        if not (allowed_redirects(cmd) or (role in SCRATCH_ROLES and scratch_redirects_ok(cmd, here, session))):
             return False
         cmd = Command(cmd.words, [], [], cmd.depth, cmd.joiner, cmd.ends)
         if k == 0 and cmd.words[0].text == "cd" and not cmd.words[0].dynamic and loop is None:
@@ -2819,8 +3020,10 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                 continue
             if not (read_command_ok(sub, here, cwd) or (plain is not None and routine_single(role, one, plain, cwd, session))
                     or (role == "worker" and worker_work_ok(sub, here, worktree))
+                    or (role in SCRATCH_ROLES and scratch_write_ok(sub, here, session))
                     or (role == "reviewer" and (reviewer_verify_ok(sub, here, cwd)
                                                 or plugin_script_command_ok(sub, here, session, "scratch")))
+                    or (role == "scout" and plugin_script_command_ok(sub, here, session, "claims"))
                     or (role is not None and plugin_script_command_ok(sub, here, session, "issue"))):
                 return False
     return loop is None and pending is None and waiting is None
@@ -2846,6 +3049,8 @@ def read_only_threads(role: str | None, parsed: "Parsed", cwd: str) -> bool:
 
 
 def parsed_approval(role: str | None, parsed: "Parsed", cwd: str, session: str = "") -> bool:
+    if role is None and len(parsed.cmds) > 1 and "rescue" in plugin_scripts_run(parsed):
+        return False  # rescue commits, pushes and removes a worktree: it runs alone, never in a chain (#624)
     if read_only_threads(role, parsed, cwd):
         return True
     if role == "reviewer":
@@ -2975,6 +3180,30 @@ def is_script_edit(parsed: "Parsed") -> bool:
     return False
 
 
+READ_ONLY_EDIT_REASON = ("you write no file and run no inline script: read code with `grep`, `sed -n`, `git show <ref>:<path>` or "
+                         "`gh pr diff`; a reviewer runs the tests with `<plugin>/scripts/verify --config --cwd <scratch checkout>`")
+WAIT_ROLE_REASON = ("workers never wait: report what you have and end the turn, and the orchestrator watches CI and the PR. "
+                    "A wait is approved only as `until <read-only test>; do sleep N; done`")
+PUSH_REASON = "push with the explicit form `git push -u origin <your-branch>` (the branch checked out in your worktree)"
+PR_COMMENT_REASON = ("a worker doesn't comment on a PR: put the text in the PR body (`gh pr edit --body-file - <<'EOF' ... EOF`), "
+                     "or answer a review thread through the plugin's `threads resolve <id> --left <why> --followup <n>`")
+
+
+def shape_reason(role: str, parsed: "Parsed") -> str | None:
+    """The named approved form for a refused shape seen in real runs (#624), or None."""
+    for cmd in parsed.cmds:
+        if cmd.words and not cmd.words[0].dynamic and cmd.words[0].text in ("until", "while"):
+            return WAIT_ROLE_REASON
+    for call in parsed.tool("git"):
+        if call.is_sub("push") and len([a for a in call.args if not a.text.startswith("-")]) < 2:
+            return PUSH_REASON
+    if rules_role(role) == "worker":
+        for call in parsed.tool("gh"):
+            if call.is_sub("pr") and call.is_verb("comment"):
+                return PR_COMMENT_REASON
+    return None
+
+
 def unknown_long_option(cmd: Command) -> tuple | None:
     """(command, option) for the first long option of a read command that LONG_OPTIONS doesn't spell in full."""
     if not cmd.words or cmd.words[0].dynamic or cmd.words[0].text not in LONG_OPTIONS:
@@ -2987,6 +3216,67 @@ def unknown_long_option(cmd: Command) -> tuple | None:
         if w.text.startswith("--") and w.text.partition("=")[0] not in allowed:
             return name, w.text.partition("=")[0]
     return None
+
+
+# The plugin scripts each background role may run, and how (#624). Kept beside the approval rules they describe
+# (worker_work_ok, reviewer_verify_ok, read_only_threads, numberless_threads_form): the keys are the scripts that
+# have such a rule, and a denied call of any other plugin script gets the whole list as its reason.
+ROLE_SCRIPT_FORMS = {
+    "worker": {
+        "verify": "`{p}/verify --config --branch <branch>` (the brief's `Verify:` line, run once, in the foreground)",
+        "threads": "`{p}/threads` with no PR number (`threads`, `threads --all`, `threads resolve <id>... --fixed <sha>`, "
+                   "`threads resolve <id>... --left <why> --followup <n>`)",
+    },
+    "reviewer": {
+        "verify": "`{p}/verify --config --cwd <scratch checkout>`",
+        "threads": "`{p}/threads <pr>`, `threads <pr> --all` and `threads <pr> reopen <id>... --why <why>`",
+        "scratch": "`{p}/scratch <pr> <head> --under <your scratchpad>`",
+    },
+    "scout": {
+        "threads": "`{p}/threads <pr>` and `threads <pr> --all` (list only)",
+        "claims": "`{p}/claims --repo .` (a read of the claims)",
+    },
+}
+PLUGIN_SCRIPT_WORD = re.compile(r"(?:^|/)scripts/([\w.-]+)$")
+
+
+def plugin_scripts_run(parsed: "Parsed") -> list:
+    """The names of the plugin scripts the line runs: a command word, or the script an interpreter runs
+    (`python3 <path>/scripts/rescue`), never a path given as an argument (`py_compile scripts/holds.py`)."""
+    names = []
+    for cmd in parsed.cmds:
+        found = script_call(Parsed([cmd]), PLUGIN_SCRIPT_WORD, dynamic_ok=True)
+        if found is None:
+            continue
+        word = found[0].words[len(found[0].words) - len(found[1]) - 1].text
+        name = PLUGIN_SCRIPT_WORD.search(word).group(1)
+        if (PLUGIN_SCRIPTS / name).is_file():
+            names.append(name)
+    return names
+
+
+def script_reason(role: str, parsed: "Parsed") -> str | None:
+    """The reason for a denied call that runs a plugin script this role has no form for, or whose form the call
+    got wrong: what the role may run (#624). None when the call runs no plugin script."""
+    names = plugin_scripts_run(parsed)
+    if not names:
+        return None
+    forms = ROLE_SCRIPT_FORMS.get(rules_role(role), {})
+    mine = [n for n in names if n in forms]
+    if mine and role == "worker" and "threads" in mine and any(
+            is_number(w.text) for c in parsed.cmds for w in c.words[1:]):
+        return "a worker's `threads` call has no PR number: it resolves the PR of your checked-out branch. Drop the number"
+    if mine and role == "worker" and "threads" in mine and len(mine) == len(names):
+        return (f"this `threads` call isn't in an approved shape. Run `{PLUGIN_SCRIPTS}/threads` with no other words to list "
+                "(there is no `list` subcommand, no `--help`, and no pipe), `threads --all`, or "
+                "`threads resolve <id>... --fixed <sha>` / `--left <why> --followup <n>`")
+    if mine and len(mine) == len(names):
+        return None  # the script is one the role runs, in a shape the more specific advice below covers
+    listing = "; ".join(f.format(p=PLUGIN_SCRIPTS) for f in forms.values())
+    extra = ("; test a change to a script with `python3 -m unittest`, never by running it" if role == "worker" else "")
+    bad = [n for n in names if n not in forms][0]
+    return (f"`{bad}` is a plugin script this role doesn't run. "
+            f"The only plugin scripts you may run: {listing}{extra}")
 
 
 def checkout_script_reason(parsed: "Parsed", cwd: str) -> str | None:
@@ -3048,8 +3338,11 @@ def hand_run_script(parsed: "Parsed") -> str | None:
             args = [a.text for a in call.args]
             if call.is_sub("pr") and call.is_verb("merge"):
                 return "scripts/merge"
+            if call.is_sub("pr") and call.is_verb("ready"):  # parse_gh drops flags, so `--undo` is not visible
+                return "scripts/park-pr <pr> --why \"<text>\" (it takes the PR out of the merge queue)"
             if call.is_sub("pr") and call.is_verb("close", "reopen"):
-                return "scripts/ci-rerun (it closes and reopens a PR whose head has no CI run, once)"
+                return ("scripts/park-pr <pr> --why \"<text>\" or --unpark (park a PR behind a newer PR's fix), or "
+                        "scripts/ci-rerun (it closes and reopens a PR whose head has no CI run, once)")
             if call.is_sub("pr") and call.is_verb("comment"):
                 return "scripts/worker-report <pr> --reviewer --post-risk-notes (the risk notes comment, once)"
             if call.is_sub("pr") and call.is_verb("edit"):
@@ -3072,6 +3365,11 @@ def orchestrator_reason(parsed: "Parsed", cwd: str, tool: str = "Bash") -> str:
     unapproved_reason)."""
     if tool == "Monitor":
         return ORCHESTRATOR_HEAD + ORCHESTRATOR_MONITOR
+    if "rescue" in plugin_scripts_run(parsed):
+        return ORCHESTRATOR_HEAD + (
+            f"rescue takes exactly one of `{PLUGIN_SCRIPTS}/rescue <branch> --title <title> --repo . [--pr <num>]` or "
+            f"`{PLUGIN_SCRIPTS}/rescue <ticket> --title <title> --repo .`: the script word first (no env or wrapper prefix), "
+            "a plain number or `<n>-<slug>` branch, one quoted title, no other flag, and nothing chained")
     checkout = checkout_script_reason(parsed, cwd)
     if checkout:
         return ORCHESTRATOR_HEAD + checkout
@@ -3099,6 +3397,12 @@ def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool:
             if advice:
                 return head + advice
     checkout = checkout_script_reason(parsed, cwd)
+    forms = ROLE_SCRIPT_FORMS.get(rules_role(role), {})
+    if checkout and all(n in forms for n in plugin_scripts_run(parsed)):
+        return head + checkout  # a script the role runs, called through the checkout's copy
+    script = script_reason(role, parsed)
+    if script:
+        return head + script
     if checkout:
         return head + checkout
     if any(c.is_sub("commit") for c in parsed.tool("git")) and (
@@ -3108,7 +3412,10 @@ def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool:
            for c in parsed.cmds):
         return head + PR_BODY_REASON
     if is_script_edit(parsed):
-        return head + EDIT_REASON
+        return head + (EDIT_REASON if rules_role(role) == "worker" else READ_ONLY_EDIT_REASON)
+    shape = shape_reason(role, parsed)
+    if shape:
+        return head + shape
     for cmd in parsed.cmds:
         unknown = unknown_long_option(cmd)
         if unknown:
@@ -3230,7 +3537,7 @@ def _hook(data: dict) -> None:
         if not isinstance(command, str):
             raise TypeError("command is not a string")
         reason = verdict(role, command, cwd, tool == "Bash" and tool_input.get("run_in_background") is True,
-                         tool_input.get("timeout") if tool == "Bash" else None)
+                         tool_input.get("timeout") if tool == "Bash" else None, session)
     except Exception as err:  # fail closed: a crash here would let the command run unchecked
         reason = (f"the guard couldn't parse or check this command ({type(err).__name__}), so it refuses it. "
                   f"Rewrite it more simply. {NEXT_STEP[rules_role(role)]}")

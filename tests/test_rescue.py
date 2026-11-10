@@ -12,7 +12,8 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from harness import ScriptEnv, gh_pr_list, gh_repo_view, git, rest_pull
+from harness import ScriptEnv, gh_pr_list, gh_repo_view, git, rest_pull, verdict_runs
+import github  # noqa: E402  (harness puts scripts/ on sys.path)
 from test_holds import dead_pid, live_reason
 
 BRANCH = "42-the-ticket"
@@ -25,7 +26,7 @@ def graphql(nodes=()):
 
 class Rescue(unittest.TestCase):
     def setUp(self):
-        self.env = ScriptEnv()
+        self.env = verdict_runs(ScriptEnv())  # every run is checked for exactly one closing `next:` line
         self.addCleanup(self.env.close)
         wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(wt_dir.cleanup)
@@ -87,6 +88,24 @@ class Rescue(unittest.TestCase):
         files = git(self.env.origin, "diff", "--name-only", f"main..{BRANCH}").split()
         self.assertEqual(files, ["a.txt"])
         self.assertFalse(self.wt.exists())  # a lone pr-body.md goes with the tree
+
+    def test_a_pr_body_at_the_worktree_root_is_not_committed_and_goes_with_the_tree(self):
+        self.worktree()
+        (self.wt / "a.txt").write_text("a\n")
+        (self.wt / "pr-body.md").write_text("body\n")
+        r = self.rescue("--title", "Fix the thing")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"committed 1 paths [0-9a-f]+")
+        files = git(self.env.origin, "diff", "--name-only", f"main..{BRANCH}").split()
+        self.assertEqual(files, ["a.txt"])
+        self.assertFalse(self.wt.exists())
+
+    def test_a_worktree_holding_only_a_root_pr_body_is_removed(self):
+        self.worktree()
+        (self.wt / "pr-body.md").write_text("body\n")
+        r = self.rescue("--title", "Fix the thing")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(self.wt.exists())
 
     def test_without_title_the_message_names_the_ticket(self):
         self.worktree()
@@ -391,7 +410,60 @@ class Rescue(unittest.TestCase):
         r = self.rescue()
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("overlap: shared.txt (held by open PR #9)", r.stdout.splitlines())
+        self.assertEqual(r.verdict, "next: ask-user overlap")
         self.assertFalse(self.wt.exists())  # saved all the same
+
+    def test_every_exit_ends_one_next_line(self):
+        # saved, nothing to overlap: done
+        self.worktree(push=True)
+        self.env.set_gh([])
+        done = self.rescue()
+        self.assertEqual((done.returncode, done.verdict), (0, "next: done"))
+        # nothing to rescue is done as well
+        nothing = self.rescue()
+        self.assertEqual((nothing.returncode, nothing.verdict), (0, "next: done"))
+        # a program error
+        bad = self.env.run("rescue", "not-a-ticket", check=False)
+        self.assertEqual((bad.returncode, bad.verdict), (2, "next: could-not-run"))
+
+    def test_a_swallowed_rate_limit_leaves_no_retry_time_behind(self):
+        import contextlib
+        import io
+
+        mod = self.load_script()
+
+        def limited(*a, **k):
+            raise github.GhError(github.RATELIMITED, "rate limit until 2026-01-01T00:05:00Z")
+
+        self.addCleanup(setattr, github, "rate_limited_until", None)
+        github.rate_limited_until = "2026-01-01T00:05:00Z"  # as a limited gh call leaves it, whatever raised after
+        with unittest.mock.patch.object(mod.tracker.Snapshot, "open", limited), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mod.overlap(self.env.repo, ["a.txt"], 42), 0)
+        self.assertIsNone(github.rate_limited_until)
+
+    def test_a_live_foreign_lock_ends_elsewhere(self):
+        self.worktree()
+        self.lock("keep me")
+        r = self.rescue()
+        self.assertEqual((r.returncode, r.verdict), (3, "next: elsewhere"))
+
+    def test_a_crash_ends_could_not_run_with_its_class_and_a_rate_limit_ends_retry_after(self):
+        import contextlib
+        import io
+
+        mod = self.load_script()
+        def limited(argv):  # raised inside the run, as a limited gh call would
+            raise github.GhError(github.RATELIMITED, "rate limit until 2026-01-01T00:05:00Z")
+
+        def crashed(argv):
+            raise OSError("boom")
+
+        for run, want in ((crashed, "next: could-not-run OSError: boom"), (limited, "next: retry-after 2026-01-01T00:05:00Z")):
+            out = io.StringIO()
+            with unittest.mock.patch.object(mod, "run", run), \
+                    contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(out):
+                code = mod.main([BRANCH, "--repo", str(self.env.repo)])
+            self.assertEqual((code, out.getvalue().strip()), (2, want))
 
     def test_holds_that_cannot_run_is_an_overlap_that_could_not_be_checked(self):
         self.worktree()

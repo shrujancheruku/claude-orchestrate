@@ -6,7 +6,8 @@ the file list of each open PR (but release-please's), and the closed `wontfix` t
 <repo>/.claude/orchestrate-snapshot.json, gitignored). `claims`, `frontier`, `holds` and `lead-route` take
 `--snapshot FILE` and read it instead of fetching, so a reconcile pass reads the tracker once. Prints the path, one line.
 Exit codes: 0 written; 2 could not run (no `gh`, a failed `gh` call, a malformed reply, not a repository), one line on
-stderr. Stdlib only, Python 3.9+.
+stderr. Ends with the one verdict line (ADR-0014): `next: done` (0) | `retry-after <time>` (2, a rate limit) |
+`could-not-run [<Class>: <message>]` (2). Stdlib only, Python 3.9+.
 """
 
 import argparse
@@ -20,7 +21,7 @@ import tracker
 SNAPSHOT = ".claude/orchestrate-snapshot.json"
 
 
-def main(argv=None) -> int:
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     ap.add_argument("--out", default=None, help=f"the file to write (default: <repo>/{SNAPSHOT})")
@@ -42,6 +43,11 @@ def main(argv=None) -> int:
         common.die(f"snapshot: cannot run: cannot write {out}: {e.strerror or e}")
     print(out)
     return 0
+
+
+def main(argv=None) -> int:
+    """Run, then end with the one `next:` line (see the module docstring)."""
+    return common.finish(run, argv, {0: ("done",)})
 
 
 if __name__ == "__main__":

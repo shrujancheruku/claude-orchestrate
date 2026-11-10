@@ -37,6 +37,7 @@ class Config(NamedTuple):
     check_commands: tuple = ()  # the `run:` commands of the repo-specific checks, in order
     post_reviews: bool = False
     risk_paths: tuple = ()  # globs; a PR touching one is reviewed as L
+    merge_gates: tuple = ()  # globs of the Gates section's Merge gates line; a PR touching one is merged by the developer (#656)
     tier_s_lines: int | None = None  # S: at most this many changed lines ...
     tier_s_files: int | None = None  # ... in at most this many files
     tier_l_lines: int | None = None  # L: more than this many changed lines
@@ -92,6 +93,7 @@ class Config(NamedTuple):
             # Same pattern as hooks/guard.py's POST_FLAG, over the whole file as the guard reads it.
             post_reviews=_post_reviews(text),
             risk_paths=_risk_paths(review),
+            merge_gates=_merge_gates(common.section_of(text, "Gates")),
             tier_s_lines=s_lines,
             tier_s_files=s_files,
             tier_l_lines=l_lines,
@@ -138,6 +140,15 @@ class Config(NamedTuple):
     def risk_hit(self, paths) -> bool:
         """Whether any of `paths` matches a risk path glob (a `dir/` touch-map entry stands for a file under it)."""
         return any(shared_match(p + "x" if p.endswith("/") else p, self.risk_paths) for p in paths)
+
+    def merge_gate_for(self, paths):
+        """The first Merge gates glob (config order) that any of `paths` matches, else None (a `dir/` entry stands for a file under it).
+
+        A gated PR is never merged by a script (#656): `merge` refuses it and the developer merges it by hand."""
+        for glob in self.merge_gates:
+            if any(shared_match(p + "x" if p.endswith("/") else p, (glob,)) for p in paths):
+                return glob
+        return None
 
     def tier_for(self, lines, files, labels=(), risk_hit=False) -> str:
         """The reviewer tier `S`, `M` or `L` from a diff's changed lines and file count.
@@ -266,6 +277,12 @@ def _risk_paths(review):
     text = _item_text(review, "Risk paths")
     # Globs come after the "):" that closes the parenthetical; `none` gives no backticked glob.
     return tuple(re.findall(r"`([^`]+)`", text.split("):", 1)[-1]))
+
+
+def _merge_gates(gates):
+    """The backticked globs of the Merge gates item's first sentence; a later sentence may quote a PR title in backticks."""
+    text = _item_text(gates, "Merge gates")
+    return tuple(re.findall(r"`([^`]+)`", re.split(r"\.\s", text, maxsplit=1)[0]))
 
 
 def _tiers(review):

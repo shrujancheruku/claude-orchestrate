@@ -10,6 +10,8 @@ The state, decided in this order:
               progress marker, not a review request: it counts as no PR here (ADR 0011), so the ticket is
               building (or stalled, or elsewhere) and `Claim.pr` still names the draft to link it
   done        the ticket's branch has a merged PR, or the ticket is in the state file but not among the open issues
+  parked      no open PR, and the ticket's newest `park` event is `parked` (scripts/park-pr closed its PR to let a newer
+              PR's fix land first): the branch and the claim are kept, nothing is rescued, redispatched or held for it
   building    a worker record from this session in the state file, or no record but the worktree's lock is this
               session's own live worker (`worker unknown`: a dispatch the state file couldn't join)
   idle        a building claim whose newest non-duplicate worker-report is an `interim` one, newer than the worker's
@@ -175,7 +177,16 @@ def fmt_ts(dt) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW)  # the only kinds a claim's state reads
+CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK)  # the only kinds a claim's state reads
+
+
+def _parked(events) -> set:
+    """The tickets whose newest `park` event is `parked` (scripts/park-pr), from the run-log events."""
+    last = {}
+    for e in events:
+        if e.get("kind") == runlog.PARK and e.get("ticket") is not None:
+            last[str(e["ticket"])] = e.get("outcome")
+    return {int(t) for t, outcome in last.items() if outcome == "parked" and t.isdigit()}
 
 
 def _reports(events) -> dict:
@@ -256,7 +267,7 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     tickets = sorted({n for n, i in open_issues.items() if i.get("claimed")} | (set(records) - set(open_issues)))
     # One pass over the events log, parsing only the kinds a claim reads (it grows with every `gh_call` line, #683).
     events, nudges = runlog.read_kinds(repo, CLAIM_EVENT_KINDS), _nudges(repo)
-    reports, cfg = _reports(events), _LazyConfig(repo)
+    reports, cfg, parked = _reports(events), _LazyConfig(repo), _parked(events)
     out = {}
     for n in tickets:
         record = records.get(n) if isinstance(records.get(n), dict) else None
@@ -275,6 +286,8 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.state = "in-review"
         elif n in merged_branch or n not in open_issues:
             claim.state = "done"
+        elif n in parked:
+            claim.state = "parked"
         elif record is not None:
             claim.state = "building"
         elif claim.lock and claim.lock[0] == "ours":

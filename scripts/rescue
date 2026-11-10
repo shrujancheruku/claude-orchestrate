@@ -27,7 +27,9 @@ ticket branch), so a worker stopped before it made the ticket branch, whose work
 No worktree on the branch (or for the ticket): `nothing to rescue: no worktree on <branch | #n>`, exit 0 (the remote branch is the whole state).
 Exit codes: 0 saved (or nothing to do); 1 saved, but the paths overlap something held or that could not be checked
 (dispatch no worker; the user decides); 2 could not run, or a step failed (one line on stderr, a lock step 1 lifted put back, or said to be not put back; the worktree stays unless step 5 already removed it, and an exit 2 after that leaves it removed);
-3 a live lock that is not this session's (`live <pid | ?> <worktree>`). Stdlib only, Python 3.9+.
+3 a live lock that is not this session's (`live <pid | ?> <worktree>`).
+Last line, always (ADR-0014): `next: done` (0) | `ask-user overlap` (1) | `elsewhere` (3) | `retry-after <time>` (2, a rate limit)
+| `could-not-run [<Class>: <message>]` (2). Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
@@ -156,6 +158,7 @@ def overlap(root, changed, ticket) -> int:
     except github.GhError as e:
         if e.kind == github.RATELIMITED:
             # The rescue itself is done; only the lookup was limited. Not a failure: the orchestrator checks holds later.
+            github.rate_limited_until = None  # swallowed: a later exit 2 is a failure, not a rate limit
             say("overlap: unchecked (rate limited; re-run holds before dispatching into these files)")
             return 0
         say(f"overlap: could not check ({common.one_line(e.message) or 'no reason given'})")
@@ -175,14 +178,14 @@ def overlap(root, changed, ticket) -> int:
 
 
 def main(argv=None) -> int:
-    try:
-        return run(argv)
-    except Exception as e:  # unexpected (an OSError from a subprocess, say): put the lifted locks back like any exit 2
+    """Run, then end with the one `next:` line (see the module docstring)."""
+    def crashed(e):  # unexpected (an OSError from a subprocess, say): put the lifted locks back like any exit 2
         return fail(f"unexpected {type(e).__name__}: {common.one_line(e)}")
+    return common.finish(run, argv, {0: ("done",), 1: ("ask-user", "overlap"), 3: ("elsewhere",)}, on_error=crashed)
 
 
 def run(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)  # the guard approves it by flag name
     ap.add_argument("branch", metavar="ticket|branch", help="the ticket number, or its branch `<number>-<slug>`")
     ap.add_argument("--title", help="the ticket title, for the wip commit message")
     ap.add_argument("--pr", type=int, help="the ticket's open PR: its reviewer scratch worktrees are removed too")
@@ -270,11 +273,12 @@ def run(argv=None) -> int:
     say(f"changed {len(changed)} paths")
 
     # Nothing under .claude/ belongs in a PR (#413): a leaked pr-body.md or agent file is left behind, not staged.
-    status = git(path, "status", "--porcelain", "--", ".", ":!.claude")
+    # A worker's `pr-body.md` at the worktree root (#582) is the same kind of leftover: it is not staged either (#624).
+    status = git(path, "status", "--porcelain", "--", ".", ":!.claude", ":(top,exclude)pr-body.md")
     if status.code != 0:
         return fail(f"git status failed in {path}: {common.one_line(status.stderr)}")
     if status.stdout.strip():
-        add = git(path, "add", "-A", "--", ".", ":!.claude")
+        add = git(path, "add", "-A", "--", ".", ":!.claude", ":(top,exclude)pr-body.md")
         msg = f"chore(wip): rescue #{ticket}" if created else f"chore(wip): {args.title}" if args.title else f"chore(wip): #{ticket} work in progress" if ticket is not None \
             else "chore(wip): work in progress"
         c = git(path, "commit", "--no-verify", "-m", msg) if add.code == 0 else add

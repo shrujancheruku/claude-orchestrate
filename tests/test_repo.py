@@ -133,6 +133,45 @@ class WorktreeHelpers(unittest.TestCase):
         self.assertIn("removed", repo.remove_worktree(str(self.wt), self.root))
         self.assertFalse(self.wt.exists())
 
+    def test_a_pr_body_at_the_worktree_root_alone_goes_with_the_worktree(self):
+        (self.wt / "pr-body.md").write_text("body\n")
+        self.assertIn("removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertFalse(self.wt.exists())
+
+    def test_both_pr_body_spots_together_go_with_the_worktree(self):
+        (self.wt / ".claude").mkdir()
+        (self.wt / ".claude" / "pr-body.md").write_text("body\n")
+        (self.wt / "pr-body.md").write_text("body\n")
+        self.assertIn("removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertFalse(self.wt.exists())
+
+    def test_a_mode_only_change_goes_with_the_worktree(self):
+        (self.wt / "a.txt").chmod(0o755)
+        (self.wt / "pr-body.md").write_text("body\n")
+        self.assertIn("removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertFalse(self.wt.exists())
+
+    def test_a_mode_change_plus_a_content_edit_keeps_the_worktree(self):
+        (self.wt / "a.txt").write_text("changed\n")
+        (self.wt / "a.txt").chmod(0o755)
+        self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertTrue(self.wt.exists())
+
+    def test_a_mode_change_beside_an_untracked_file_keeps_the_worktree(self):
+        (self.wt / "a.txt").chmod(0o755)
+        (self.wt / "u.txt").write_text("u\n")
+        self.assertIn("NOT removed", repo.remove_worktree(str(self.wt), self.root))
+        self.assertTrue(self.wt.exists())
+
+    def test_another_untracked_file_is_named_in_the_refusal(self):
+        (self.wt / "pr-body.md").write_text("body\n")
+        (self.wt / "probe.py").write_text("x\n")
+        out = repo.remove_worktree(str(self.wt), self.root)
+        self.assertIn("NOT removed", out)
+        self.assertIn("untracked: ", out)
+        self.assertIn("probe.py", out)
+        self.assertTrue(self.wt.exists())
+
     def test_an_untracked_pr_body_beside_another_change_still_blocks_removal(self):
         (self.wt / ".claude").mkdir()
         (self.wt / ".claude" / "pr-body.md").write_text("body\n")

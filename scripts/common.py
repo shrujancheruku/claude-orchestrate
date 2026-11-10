@@ -103,6 +103,12 @@ VERDICT_WORDS = {
     "stuck": "<pr> <run id> <job id>", "head-not-reached": "<pr> <sha>", "gave-up": "<pr> <why>",
     # ci-rerun
     "rerun": "<pr> <head>", "already-running": "<pr>",
+    # park-pr
+    "parked": "<pr>", "unparked": "<pr>", "refused": "<why>",
+    # sweep and fold
+    "clean": "", "findings": "<n>", "due": "<n>", "not-due": "<n>", "folded": "<from> <into>",
+    # frontier, snapshot, threads, lead-route, rescue: the run happened; rescue's live lock held by another session
+    "done": "", "elsewhere": "",
     # every script: a rate limit, and a run that could not happen
     "retry-after": "<time>", "could-not-run": "[<why>]",
 }
@@ -119,6 +125,43 @@ def verdict(word, *args, exit_code) -> int:
     """Print the run's one `next: <word> <args>` line and return `exit_code`, for `return common.verdict(...)`."""
     print("next: " + _verdict_line(word, args), flush=True)
     return exit_code
+
+
+def finish(run, argv, words, on_error=None) -> int:
+    """Run a CLI's `run(argv)` and end it with the one `next:` line (ADR-0014), returning its exit code unchanged.
+    `words` maps an exit code to its verdict, `(word, *args)` or a callable returning that tuple (read after the run,
+    for a word that carries what the run found). Exit 2 is `retry-after <time>` when this process gave up on a rate
+    limit, else `could-not-run`, with `<Class>: <message>` after it when the run crashed (the traceback goes to stderr,
+    unless `on_error(e)` is given: it reports the crash itself, cleans up and returns the exit code). An exit code
+    `words` lacks is `could-not-run`."""
+    import github  # here, not at the top: github imports this module
+    github.rate_limited_until = None
+    crash = ""
+    try:
+        code = run(argv)
+    except SystemExit as e:  # die() or an argparse usage error (2); --help (0) prints no verdict
+        if e.code in (0, None):
+            raise
+        if not isinstance(e.code, int):
+            print(e.code, file=sys.stderr)
+        code = e.code if isinstance(e.code, int) else 2
+    except Exception as e:  # a program error is could-not-run, never a decision
+        if on_error is None:  # a script with its own handler says it in its own words (rescue: one stderr line)
+            import traceback
+            traceback.print_exc()
+        crash = f"{type(e).__name__}: {one_line(e)}"
+        code = on_error(e) if on_error else 2
+    if code == 2:
+        until = github.rate_limit_verdict(code)
+        if until:
+            return verdict("retry-after", until, exit_code=code)
+        return verdict("could-not-run", crash, exit_code=code)
+    word = words.get(code)
+    if callable(word):
+        word = word()
+    if word is None:
+        return verdict("could-not-run", exit_code=code)
+    return verdict(*word, exit_code=code)
 
 
 def also(word, *args) -> None:

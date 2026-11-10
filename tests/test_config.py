@@ -61,6 +61,34 @@ class SharedRule(unittest.TestCase):
                 self.assertEqual(cfg.is_shared(path), want)
 
 
+class MergeGates(unittest.TestCase):
+    TEXT = ("## Gates\n\n- **Start gates:** none beyond the label filter.\n"
+            "- **Merge gates:** PRs touching `hooks/**`, `release-please-config.json` or `docs/` are merged by the developer. "
+            "release-please's `chore(main): release` PRs too.\n\n## Review\n\n- **Merge gates:** `nope`\n")
+
+    def test_the_globs_come_from_the_first_sentence_of_the_gates_section(self):
+        self.assertEqual(config.Config.parse(self.TEXT).merge_gates, ("hooks/**", "release-please-config.json", "docs/"))
+
+    def test_merge_gate_for_names_the_first_glob_a_path_hits(self):
+        cfg = config.Config.parse(self.TEXT)
+        self.assertEqual(cfg.merge_gate_for(["a.py", "hooks/guard.py"]), "hooks/**")
+        self.assertEqual(cfg.merge_gate_for(["release-please-config.json", "hooks/x"]), "hooks/**")
+        self.assertEqual(cfg.merge_gate_for(["scripts/merge"]), None)
+        self.assertEqual(cfg.merge_gate_for([]), None)
+
+    def test_none_and_the_templates_placeholder_gate_nothing(self):
+        for line in ("none", "<tickets, labels or paths that wait for the user's go-ahead to merge>"):
+            cfg = config.Config.parse(f"## Gates\n\n- **Merge gates:** {line}\n")
+            self.assertEqual((cfg.merge_gates, cfg.merge_gate_for(["hooks/x"])), ((), None))
+        self.assertEqual(config.Config.parse(filled()).merge_gates, ())
+
+    def test_the_repos_own_config_gates_the_guard(self):
+        cfg = config.Config.load(ROOT)
+        self.assertEqual(cfg.merge_gate_for(["hooks/guard.py"]), "hooks/**")
+        self.assertEqual(cfg.merge_gate_for([".release-please-manifest.json"]), ".release-please-manifest.json")
+        self.assertIsNone(cfg.merge_gate_for(["scripts/merge"]))
+
+
 class TrustedAuthors(unittest.TestCase):
     def test_logins_on_the_backlog_line_are_read_lowercase(self):
         text = "## Backlog\n\n- **Trusted authors:** `Alice`, `@bob`, `ci-bot[bot]`\n\n## Slots\n- **Trusted authors:** `nope`\n"

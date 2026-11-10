@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """frontier [--parent <n> | --ticket <n>] [--all] [--fix-drift] [--snapshot FILE] [--repo DIR] : which tickets are takeable now?
 
-Default: one line per takeable ticket, `#<n> <title> model <name>`, ascending, nothing else (an empty frontier prints nothing).
+Default: one line per takeable ticket, `#<n> <title> model <name>`, ascending, then the verdict line.
 `model <name>` is the model to dispatch the ticket's worker with (Config.model_for: the Worker row of the config's Models
 table, the ticket's `size:` label, "investigate"/"design" in its title or body, and the touch map). The scout's map is not
 known yet when the line first prints, so an unlabelled ticket shows the default model; `--ticket <n> --touch-map '<map>'`
@@ -20,7 +20,9 @@ An unreadable docs/agents/triage-labels.md is exit 2 with one stderr line; a mis
 The rules are in scripts/tracker.py. Reads the open issues through a Snapshot (every page of one `gh api graphql` query;
 --snapshot FILE reads the file `snapshot` wrote instead of fetching) and the label strings from
 docs/agents/triage-labels.md (the defaults when it is missing). Exit codes: 0 ran; 2 could not run
-(no `gh`, a failed `gh` call, a malformed reply), one line on stderr and no partial output. Stdlib only, Python 3.9+.
+(no `gh`, a failed `gh` call, a malformed reply), one line on stderr and no partial output. The output ends with the
+one verdict line (ADR-0014; an empty frontier prints only it): `next: done` (0) | `retry-after <time>` (2, a rate limit) |
+`could-not-run [<Class>: <message>]` (2). Stdlib only, Python 3.9+.
 """
 
 import argparse
@@ -84,7 +86,7 @@ def fix_drift(issues, scope, root) -> None:
             print(f"added #{issue['number']} blocked by #{n}", flush=True)
 
 
-def main(argv=None) -> int:
+def run(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     which = ap.add_mutually_exclusive_group()
     which.add_argument("--parent", type=int, help="only this parent's sub-issues")
@@ -139,6 +141,11 @@ def main(argv=None) -> int:
     except runlog.NoSession as e:
         print(e, file=sys.stderr)  # the answer is already printed; the missing log is not a failure
     return 0
+
+
+def main(argv=None) -> int:
+    """Run, then end with the one `next:` line (see the module docstring)."""
+    return common.finish(run, argv, {0: ("done",)})
 
 
 if __name__ == "__main__":

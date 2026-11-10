@@ -163,7 +163,8 @@ def claimed_paths(found: dict, own, base: str, warn=None) -> tuple:
     A Building claim holds its touch map (the state-file entries, through `plain`); a Building claim with no record
     (this session's own worker, `worker unknown`) has no touch map, so it holds its worktree's changes and is labelled
     building. An Elsewhere claim holds its worktree's changes, the ones a live worker has made so far (ADR 0009). An
-    open PR is a different claim state, so a ticket with a PR is held through the PR (`pr_paths`), not here. A Building
+    open PR is a different claim state, so a ticket with a PR is held through the PR (`pr_paths`), not here. A Parked
+    claim (scripts/park-pr closed its PR, #708) is neither, so it holds nothing. A Building
     claim with a record and a worktree holds its touch map plus the worktree's changes (#398). `warn(text)` is told of a
     building ticket whose touch map is unparsed (it holds every path)."""
     tickets, others = {}, {}

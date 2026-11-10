@@ -68,6 +68,7 @@ STUCK_AFTER = 300.0  # seconds a job with every step completed may stay in_progr
 RUN_URL = re.compile(r"/actions/runs/(\d+)/")  # a check's detailsUrl names its workflow run
 FIELDS = "number,statusCheckRollup,mergeStateStatus,headRefOid,state,isDraft"
 BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
+SKIPPED = {"SKIPPED", "NEUTRAL"}  # a check that did not run: alone it proves nothing (see judge)
 PENDING_STATES = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
 
@@ -89,7 +90,18 @@ def judge(view: dict):
         if r in PENDING_STATES or not r:
             return None
         results.append(r)
-    return "fail" if any(r in BAD for r in results) else "pass"
+    if any(r in BAD for r in results):
+        return "fail"
+    # Every check skipped is not a pass: a push to a draft skips the `test` job, and until the ready_for_review run
+    # joins the rollup the head's only checks are those skips. Pending, so the no-run clock below can end the wait.
+    # A mix with a real result (SUCCESS beside SKIPPED) stays a pass: path-filtered jobs skip legitimately.
+    return None if all(r in SKIPPED for r in results) else "pass"
+
+
+def has_ran(checks) -> bool:
+    """True when the rollup holds a check that ran or is on its way (anything but a skip): the no-run clock stops."""
+    return any((c.get("conclusion") or c.get("state") or "").upper() not in SKIPPED | {""} or c.get("status") not in (None, "COMPLETED")
+               for c in checks or [])
 
 
 def parse_targets(tokens):
@@ -285,7 +297,7 @@ def watch(argv=None) -> int:
                     continue
                 unreached.pop(pr, None)
                 result = judge(view)
-                if result is None and not view.get("isDraft") and not view.get("statusCheckRollup"):
+                if result is None and not view.get("isDraft") and not has_ran(view.get("statusCheckRollup")):
                     seen = empty_since.get(pr)
                     if seen is None or seen[0] != head_now:
                         seen = empty_since[pr] = (head_now, time.monotonic())

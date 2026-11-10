@@ -429,6 +429,47 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertNotIn("NOT removed", p.stdout)
         self.assertFalse(wt.exists())
 
+    def test_a_pr_body_at_the_worktree_root_alone_does_not_block_the_removal(self):
+        wt = self.agent_tree()
+        (wt / "pr-body.md").write_text("body\n")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertNotIn("NOT removed", p.stdout)
+        self.assertFalse(wt.exists())
+
+    def test_a_pr_body_and_a_mode_only_change_do_not_block_the_removal(self):
+        wt = self.agent_tree()
+        (wt / "pr-body.md").write_text("body\n")
+        (wt / "README.md").chmod(0o755)
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertNotIn("NOT removed", p.stdout)
+        self.assertFalse(wt.exists())
+
+    def test_a_real_edit_beside_the_pr_body_and_a_mode_change_is_named_and_kept(self):
+        wt = self.agent_tree()
+        (wt / "pr-body.md").write_text("body\n")
+        (wt / "README.md").chmod(0o755)
+        (wt / "probe.py").write_text("x\n")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertIn("NOT removed", p.stdout)
+        self.assertIn("probe.py", p.stdout)
+        self.assertTrue(wt.exists())
+
+    def test_a_real_edit_to_a_tracked_file_keeps_the_worktree(self):
+        wt = self.agent_tree()
+        (wt / "README.md").write_text("edited\n")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertIn("NOT removed", p.stdout)
+        self.assertTrue(wt.exists())
+
+    def test_another_untracked_file_is_named_when_it_blocks_the_removal(self):
+        wt = self.agent_tree()
+        (wt / "pr-body.md").write_text("body\n")
+        (wt / "probe.py").write_text("x\n")
+        p = self.merged_at(wt, git(wt, "rev-parse", "HEAD"))
+        self.assertIn("NOT removed", p.stdout)
+        self.assertIn("probe.py", p.stdout)
+        self.assertTrue(wt.exists())
+
     def test_another_untracked_file_beside_the_pr_body_still_blocks_the_removal(self):
         wt = self.agent_tree()
         (wt / ".claude").mkdir()
@@ -590,7 +631,7 @@ class MergeTest(MergeMixin, unittest.TestCase):
     def test_forces_worktree_removal_only_past_a_lone_pr_body(self):
         body = (Path(__file__).resolve().parent.parent / "scripts" / "repo.py").read_text().split("def remove_worktree")[1]
         self.assertEqual(body.count("--force"), 1)
-        guarded = body.split("only_pr_body_untracked(path):")[1].split("return w")[0]
+        guarded = body.split("only_leftovers(path):")[1].split("return w")[0]
         self.assertIn("--force", guarded)
 
     def test_gh_missing_at_the_merge_call_is_could_not_run(self):

@@ -356,6 +356,36 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(m["span_s"], (79 - 1) * 60 - 38 * 60 + 60)  # at(1) to at(80), minus the gap
         self.assertEqual(m["unexplained_silences"], [])
 
+    def test_throughput_is_merged_tickets_per_hour_of_the_span_and_a_resume_gap_shortens_it(self):
+        plain = self.fx.run()["metrics"]
+        self.assertGreater(plain["tickets_merged"], 0)
+        self.assertAlmostEqual(plain["throughput_per_hour"], plain["tickets_merged"] / (plain["span_s"] / 3600))
+        self.late_entry(80)
+        ungapped = self.fx.run()["metrics"]["throughput_per_hour"]
+        self.fx.events([MERGED_50, self.resume(79)])
+        m = self.fx.run()["metrics"]
+        self.assertAlmostEqual(m["throughput_per_hour"], m["tickets_merged"] / (m["span_s"] / 3600))
+        self.assertGreater(m["throughput_per_hour"], ungapped)  # the gap is out of the denominator
+        self.assertIn("merged/hour", prof.summary(self.fx.run(), Path("x.json")))
+
+    def test_viewer_renders_the_throughput_tile(self):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        p = self.fx.run()
+        path = Path(self.tmp.name) / "t.json"
+        path.write_text(json.dumps(p))
+        out = subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(path), "throughputTile"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("Throughput", out.stdout)
+        self.assertIn(f"{p['metrics']['throughput_per_hour']:.2f} merged/hour", out.stdout)
+        self.assertIn("merged over", out.stdout)
+        cmp = subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(path), "compare"],
+                             capture_output=True, text=True)
+        self.assertEqual(cmp.returncode, 0, cmp.stderr)
+        self.assertIn("Merged / hour", cmp.stdout)
+        self.assertIn(f"{p['metrics']['throughput_per_hour']:.2f}", cmp.stdout)
+
     def test_a_silence_over_30_minutes_with_no_event_is_noted_and_not_excluded(self):
         self.late_entry(80)
         p = self.fx.run()
@@ -1044,6 +1074,24 @@ class CommandTest(unittest.TestCase):
         self.assertIn('"session": "sess-1"', html)
         self.assertNotIn('type="application/json">null<', html)
 
+    def test_missing_viewer_writes_only_the_json_with_one_stderr_line(self):
+        # A plugin copy without viewer/ (#628): the scripts copied beside no viewer directory.
+        fx = Fixture(self.root)
+        self.env["ORCHESTRATE_USAGE_LOG"] = str(fx.usage)
+        bare = self.root / "bare-plugin"
+        shutil.copytree(SCRIPTS, bare / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        r = subprocess.run([sys.executable, "-I", str(bare / "scripts" / "profile.py"), SESSION],
+                           capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stderr.strip().splitlines()
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertIn(str(bare / "viewer" / "profile.html"), lines[0])
+        self.assertIn("only the JSON", lines[0])
+        self.assertIn("2 slots", r.stdout)  # the summary still prints
+        saved = fx.repo / prof.PROFILES / f"{at(1)[:10]}-{SESSION[:8]}.json"
+        self.assertTrue(saved.is_file())
+        self.assertFalse(saved.with_suffix(".html").exists())
+
     def test_viewer_shows_a_banner_for_rejected_files(self):
         html = prof.VIEWER.read_text()
         self.assertIn("regenerate it with scripts/profile.py", html)
@@ -1067,7 +1115,7 @@ class CompareTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def profile(self, name, tiers, orchestrator=0.5, changes=(10, 20), outright=5, rounds=1.5, schema=3, passes=3):
+    def profile(self, name, tiers, orchestrator=0.5, changes=(10, 20), outright=5, rounds=1.5, schema=3, passes=3, span_h=4.0):
         """tiers: {tier: (merged tickets, $ per merged ticket)}. The orchestrator's $ is the only overhead."""
         merged = sum(n for n, _ in tiers.values())
         tier_rows = {t: {"merged": n, "cost": n * c, "reviewed_prs": n, "rounds": round(n * rounds),
@@ -1079,6 +1127,7 @@ class CompareTest(unittest.TestCase):
         path.write_text(json.dumps({"schema": schema, "metrics": {
             "context": {"idle_wakes": {"passes": passes, "idle": 0}},
             "tickets_merged": merged,
+            "throughput_per_hour": merged / span_h,
             "cost": {"per_merged_ticket": per, "per_merged_ticket_by_role": {"orchestrator": orchestrator}},
             "review": {"round1_changes_rate": changes[0] / changes[1], "round1_outright_rate": outright / changes[1],
                        "rounds_per_pr": rounds},
@@ -1109,6 +1158,13 @@ class CompareTest(unittest.TestCase):
         self.assertRegex(self.line(r.stdout, "L-tier share"), r"50%\s+50%\s+\+0 pts")
         self.assertRegex(self.line(r.stdout, "tier L"), r"20\s+\$4\.00\s+20\s+\$2\.00")
         self.assertNotIn("INCONCLUSIVE", r.stdout)
+
+    def test_throughput_row_is_informational_with_no_gate(self):
+        before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)}, span_h=8.0)
+        after = self.profile("a.json", {"L": (20, 4.0), "M": (20, 1.0)}, span_h=4.0)
+        out = self.compare(before, after).stdout
+        self.assertRegex(self.line(out, "throughput (merged/hour)"), r"5\.00\s+10\.00\s+\+5\.00")
+        self.assertNotIn("throughput", out[out.index("gating,"):])
 
     def test_targets_come_from_the_flags_not_from_code(self):
         before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)})

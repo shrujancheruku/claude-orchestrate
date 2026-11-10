@@ -2,13 +2,15 @@
 one blocker rule, and `frontier --fix-drift`."""
 
 import json
+import os
 import sys
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import ScriptEnv, gh_pr_list, gh_repo_rest  # noqa: E402
+from harness import ScriptEnv, gh_pr_list, gh_repo_rest, verdict_runs  # noqa: E402
 import github  # noqa: E402
 import tracker  # noqa: E402
 
@@ -32,7 +34,7 @@ def issues_reply(nodes):
 
 class SnapshotTest(unittest.TestCase):
     def setUp(self):
-        self.env = ScriptEnv()
+        self.env = verdict_runs(ScriptEnv(), "snapshot", "frontier", "lead-route")  # these end in exactly one `next:` line, checked on every run
         self.addCleanup(self.env.close)
 
     def serve(self, nodes, prs=()):
@@ -52,7 +54,7 @@ class SnapshotTest(unittest.TestCase):
         self.env.run("snapshot", "--repo", ".")
         after_snapshot = len(self.env.gh_calls())
         self.assertEqual(len(self.issue_reads()), 1)
-        for script, args in (("frontier", ["--all"]), ("claims", []), ("lead-route", ["--lead", "none", "--cap", "2"]),
+        for script, args in (("frontier", ["--all"]), ("claims", []), ("lead-route", ["--cap", "2"]),
                              ("holds", ["--touch-map", "a.py", "--ticket", "9"])):
             r = self.env.run(script, *args, "--snapshot", FILE, check=False)
             self.assertIn(r.returncode, (0, 1), (script, r.stdout, r.stderr))
@@ -120,6 +122,25 @@ class SnapshotTest(unittest.TestCase):
             self.assertEqual(snap.pr_files({"number": 5, "headRefOid": "new"}), ["new"])  # now cached
         self.assertEqual(fetch.call_count, 1)
 
+    def test_snapshot_ends_next_done_after_the_path(self):
+        self.serve([node(1)])
+        r = self.env.run("snapshot", "--repo", ".")
+        self.assertEqual((r.returncode, r.verdict), (0, "next: done"))
+        self.assertEqual(r.stdout.strip(), str((self.env.repo / FILE).resolve()))
+
+    def test_a_program_error_ends_could_not_run(self):
+        self.env.set_gh([gh_repo_rest(REPO), {"args": ["api", "graphql"], "stderr": "HTTP 500", "exit": 1}])
+        r = self.env.run("snapshot", "--repo", ".", check=False)
+        self.assertEqual((r.returncode, r.stdout, r.verdict), (2, "", "next: could-not-run"))
+
+    def test_a_rate_limit_ends_retry_after_with_the_reset_time(self):
+        self.env.set_gh([{"args": ["api"], "exit": 1,
+                          "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
+        with tempfile.TemporaryDirectory() as cache, unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
+            r = self.env.run("snapshot", "--repo", ".", check=False)
+        self.assertEqual((r.returncode, r.stdout), (2, ""))
+        self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
     def test_a_missing_snapshot_file_could_not_run(self):
         r = self.env.run("frontier", "--snapshot", "nope.json", check=False)
         self.assertEqual(r.returncode, 2)
@@ -129,7 +150,7 @@ class SnapshotTest(unittest.TestCase):
         self.serve([node(1), node(5, claimed=True, body="Blocked by: #1")])
         self.env.run("snapshot", "--repo", ".")
         self.assertEqual(self.env.run("frontier", "--snapshot", FILE).stdout, "#1 title 1 model sonnet\n")
-        route = self.env.run("lead-route", "--lead", "none", "--cap", "2", "--snapshot", FILE).stdout
+        route = self.env.run("lead-route", "--cap", "2", "--snapshot", FILE).stdout
         self.assertIn("HANDBACK #5 blocked-by #1", route.splitlines())
 
     def test_fix_drift_posts_one_edge_and_the_next_run_has_no_drift(self):

@@ -63,7 +63,7 @@ LEAD_LINE = re.compile(r"^LEAD-(TICKET|PR) #(\d+)(?: (\d+))?$")
 # The board is the coarse view: every claim state that is not in review or done is Building. Liveness and stalls
 # stay in the pass table (`claims`).
 CLAIM_STAGE = {"building": BUILDING, "idle": BUILDING, "waiting": WAITING, "elsewhere": BUILDING, "stalled": BUILDING, "with-lead": BUILDING,
-               "in-review": REVIEW, "done": DONE}
+               "parked": BUILDING, "in-review": REVIEW, "done": DONE}
 
 
 def desired(issues, found, backlog=(), lead=None):
@@ -107,9 +107,9 @@ def lead_stages(lines, open_prs) -> dict:
 
 def lead_lines(snapshot_file, root) -> list:
     """lead-route's output for this snapshot. It decides which open tickets are the lead's and where their PRs are;
-    the board decides nothing of that itself. --lead none and --cap 1 only satisfy its arguments: the lines used here
-    do not depend on them."""
-    r = common.run(sys.executable, str(LEAD_ROUTE), "--lead", "none", "--cap", "1", "--repo", str(root),
+    the board decides nothing of that itself. --cap 1 only satisfies its arguments: the lines used here do not
+    depend on it, nor on the lead lookup lead-route makes."""
+    r = common.run(sys.executable, str(LEAD_ROUTE), "--cap", "1", "--repo", str(root),
                    "--snapshot", str(snapshot_file), cwd=root)
     if r.code != 0:
         raise github.GhError(github.FAILED, (r.stderr.strip().splitlines() or ["lead-route failed"])[0])
