@@ -234,7 +234,7 @@ Profiles live in `.claude/orchestrate-profiles/` (gitignore it). Open the `.html
 
 **Plan headroom is not measured.** Claude Code gives plan usage only to the status line, and a plugin cannot add to or wrap the user's status line (a plugin's `settings.json` honors only `agent` and `subagentStatusLine`; checked against Claude Code 2.1.311), so the profile has no 5-hour or 7-day figures and says so. Limit hits and reset times still come from transcripts and the pass log. If you added the old `usage-tap.py` line to your status-line script, you can remove it; if `~/.claude/orchestrate/usage.jsonl` still has samples in the session, the profile reads them.
 
-A profile prints the span it covers and warns when a transcript has records later than its end, which means it is partial (a session still running). The JSON is `schema` 2; the viewer reads only that.
+A profile prints the span it covers and warns when a transcript has records later than its end, which means it is partial (a session still running). The JSON is `schema` 3; the viewer reads only that, and `compare` refuses a profile of any other schema or one with no pass log.
 
 Any past session can be profiled after the fact, without `--profile`, by its ID or transcript path:
 
