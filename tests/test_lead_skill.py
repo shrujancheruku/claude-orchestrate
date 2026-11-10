@@ -126,7 +126,8 @@ class RunSkillLeftThreads(unittest.TestCase):
             self.assertIn("--pr <num>", head)
 
     def test_lead_pr_worktree_has_one_named_form_and_the_not_removed_reasons(self):
-        self.assertIn("worktree add <scratchpad>/pr-<n> <head>", self.run)
+        self.assertIn("scripts/scratch\" <pr> <head> --under <your scratchpad>", self.run)
+        self.assertNotIn("worktree add <scratchpad>", self.run)
         for reason in ("not on the PR's branch", "detached at another sha", "foreign-live", "not a registered worktree"):
             self.assertIn(reason, self.run)
 

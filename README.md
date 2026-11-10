@@ -277,14 +277,17 @@ Every mechanical rule the prompts once restated is a script under `scripts/`, fo
 | `lead-route` | orchestrator, each pass | Prints one routing verdict per ticket that needs one, from the tracker and the state file |
 | `rescue` | orchestrator, for a stalled or stopped ticket | Commits, pushes and removes the ticket's worktree, then checks the saved paths for overlap |
 | `holds` | orchestrator and `gate` | Decides what is held and whether a ticket or PR overlaps it |
-| `worker-report` | orchestrator, on each worker completion | Classifies the completion text into one verdict and logs it |
-| `threads` | worker, reviewer, orchestrator | Lists a PR's review threads, and resolves or reopens one or several (one request for all) with a reply (`fixed in <sha>`, `left: <why>`, `reopened: <why>`) |
+| `worker-report` | orchestrator, on each worker or reviewer completion | Classifies the completion text into one verdict and logs it; with `--reviewer --post-risk-notes` also posts an unposted review's risk notes once |
+| `threads` | worker, reviewer, orchestrator | Lists a PR's review threads, and resolves or reopens one or several (one request for all) with a reply (`fixed in <sha>`, `left: <why>`, `reopened: <why>`); `followup` files the PR's one follow-up ticket |
 | `prompts` | orchestrator, each pass | Counts the permission-prompt log (`.claude/orchestrate-prompts.jsonl`, written by the `PermissionRequest` hook `hooks/prompt_log.py`) by role and tool, and lists the newest prompts |
 | `verify` | worker | Runs the config's verify commands, one line per result |
 | `watch-ci` | orchestrator, via a Monitor | Prints one line per PR as its checks settle, with the head commit; takes `merge`'s `<pr> <head>` hint, ends a PR with an `error` line on no CI run in five minutes or a head never reached, and withholds any pass after an error; one `gh` request per tick for all PRs, every 30 s (60 s with three or more) |
 | `gate` | orchestrator, before review | Title, mergeability, held paths, dependencies, secrets, lockfiles and the config's `run:` checks |
 | `merge` | orchestrator, after approval | Readiness, merge, re-check, cleanup, then the sweep with shared-file replay |
 | `board` | orchestrator, each pass | Syncs the optional GitHub Projects board |
+| `ci-rerun` | orchestrator, on a `no-run` or `stuck` line | Makes a ready PR's CI run again, once per head or job: closes and reopens the PR, or reruns one job |
+| `scratch` | lead and reviewer | The one way to add a PR's scratch worktree: a detached `pr-<n>` tree under the caller's scratchpad, outside every checkout |
+| `issue` | every agent | Reads one ticket and keeps only a trusted author's comments (the tracker doc's **Read an issue**) |
 | `lead-brief` | lead, at start-up | The lead's index, and the watermark it resumes from |
 | `ci-times` | lead, every ten merges | Push-to-green median and p90, and whether CI is over the limit |
 | `profile.py` | orchestrator with `--profile` | Records each pass and builds the JSON profile and HTML viewer |

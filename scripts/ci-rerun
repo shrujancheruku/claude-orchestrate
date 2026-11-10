@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""ci-rerun <pr> [--job <run-id> <job-id>] [--repo DIR] : make a ready PR's CI run again (the one owner of a CI rerun, #545)
+
+`watch-ci` only names the need (its `no-run` and `stuck` `also:` lines); this script does it, at most once:
+    ci-rerun <pr>                       the PR's head has no check at all (`no-run`): close the PR and reopen it, which
+                                        makes GitHub start the workflows. Refuses, exit 1 `next: already-running <pr>`,
+                                        when the head already has a check; refuses, exit 1 `next: ask-user ...`, when a
+                                        `ci rerun` for this head is already in the run log (the second `no-run` goes to
+                                        the user, it is not tried again).
+    ci-rerun <pr> --job <run> <job>     a job left `in_progress` with every step done (`stuck`): `gh run rerun <run> --job
+                                        <job>` once. A second rerun of the same job in the same run is refused the same way.
+Both print the one verdict line `next: rerun <pr> <head>` and append a `ci` event with outcome `rerun` (ref = the PR; head,
+and run and job for a job rerun), which is also how the "once" is remembered across passes. A PR that is not open is
+exit 2 (could not run), as is a failed `gh`; a failed reopen after the close says so on stderr, and the PR is left closed
+for `gh pr reopen <pr>`.
+Exit codes: 0 reran; 1 refused (a verdict line says why); 2 could not run (one line on stderr, or `next: retry-after <time>`).
+Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import sys
+
+import common
+import github
+import runlog
+
+
+def reran_before(repo, pr, **match) -> bool:
+    """True when the run log already holds a `ci rerun` event for this PR whose fields all equal `match`."""
+    for e in common.read_jsonl(runlog.log_path(repo, runlog.EVENTS_LOG)):
+        if (e.get("kind") == runlog.CI and e.get("outcome") == "rerun" and str(e.get("ref")) == str(pr)
+                and all(e.get(k) == v for k, v in match.items())):
+            return True
+    return False
+
+
+def run(args) -> int:
+    _, pr = common.pr_ref(args.pr)
+    cwd = args.repo
+    try:
+        view = github.pr_view(pr, "state,headRefOid,statusCheckRollup", cwd=cwd)
+        head = view.get("headRefOid") or ""
+        if view.get("state") != "OPEN":
+            print(f"ci-rerun: PR #{pr} is {str(view.get('state')).lower()}, not open", file=sys.stderr)
+            return 2
+        if args.job:
+            run_id, job_id = args.job
+            if reran_before(cwd, pr, run=run_id, job=job_id):
+                print(f"ci-rerun: job {job_id} of run {run_id} was already rerun once", file=sys.stderr)
+                return common.verdict("ask-user", f"job {job_id} of run {run_id} stuck again after a rerun", exit_code=1)
+            github.call("run", "rerun", run_id, "--job", job_id, cwd=cwd)
+            extra = {"run": run_id, "job": job_id}
+        else:
+            if view.get("statusCheckRollup"):
+                print(f"ci-rerun: PR #{pr} head {head[:7]} already has a check", file=sys.stderr)
+                return common.verdict("already-running", pr, exit_code=1)
+            if reran_before(cwd, pr, head=head, run=None, job=None):
+                print(f"ci-rerun: PR #{pr} head {head[:7]} was already closed and reopened once", file=sys.stderr)
+                return common.verdict("ask-user", f"PR {pr} head {head[:7]} still has no CI run after a close and reopen",
+                                      exit_code=1)
+            github.set_pr_state(pr, "closed", cwd=cwd)
+            try:
+                github.set_pr_state(pr, "open", cwd=cwd)
+            except github.GhError as e:
+                print(f"ci-rerun: PR #{pr} was closed and could not be reopened ({e.message}): run `gh pr reopen {pr}`",
+                      file=sys.stderr)
+                raise
+            extra = {}
+    except github.GhError as e:
+        print(f"ci-rerun: gh failed: {common.one_line(e.message)}", file=sys.stderr)
+        return 2
+    try:
+        runlog.append_event(cwd, runlog.CI, "rerun", ref=pr, head=head, **extra)
+    except runlog.NoSession as e:
+        print(e, file=sys.stderr)  # the rerun happened; only its log line is lost
+    except OSError as e:
+        print(f"ci-rerun: reran, but the run log is unwritable: {e.strerror or e}", file=sys.stderr)
+    return common.verdict("rerun", pr, head, exit_code=0)
+
+
+def main(argv=None) -> int:
+    github.rate_limited_until = None
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("pr", help="PR number")
+    ap.add_argument("--job", nargs=2, metavar=("RUN_ID", "JOB_ID"), help="rerun this one stuck job instead of closing and reopening")
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    args = ap.parse_args(argv)
+    for value in args.job or ():
+        if not (value.isascii() and value.isdigit()):
+            ap.error("--job takes a run id and a job id, both numbers")
+    code = run(args)
+    until = github.rate_limit_verdict(code)
+    if until:
+        return common.verdict("retry-after", until, exit_code=code)
+    if code == 2:
+        return common.verdict("could-not-run", exit_code=2)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

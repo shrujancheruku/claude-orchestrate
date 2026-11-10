@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""issue <n> [--repo DIR] : read one issue, keeping only what a trusted author wrote (ADR-0015, #545)
+
+The one way an agent reads a ticket (the tracker doc's "Read an issue"): the trust rule lives in `github.is_trusted` and
+the config's `Trusted authors:` line, never in a hand-written `gh issue view --jq` filter (ADR-0006). Prints, bounded:
+
+    #<n> <title>
+    state: open | closed
+    labels: <a>, <b>
+    body: trusted | untrusted (an untrusted author edited it last; text withheld)
+    <the body, then one `--- comment <k> of <m> · <created>` block per trusted comment, oldest first>
+    untrusted comments dropped: <count>          (only when there are some)
+    older comments not shown: <count>            (only when the issue has more than the newest 100)
+
+A comment is kept when its author is OWNER, MEMBER or COLLABORATOR or on the config's `Trusted authors:` line (a bot such
+as `dependabot` there counts); the others are counted, never shown. A body whose last editor is untrusted is withheld
+(`tracker.from_nodes` rule, #572), and an `## Agent Brief` in a stranger's comment is therefore never the spec. A long body
+or comment is cut at 20,000 characters with a `[truncated: <n> more characters]` line.
+Exit codes: 0 read; 2 could not run (no such issue, `gh` failed, a rate limit as `next: retry-after <time>`). Stdlib only,
+Python 3.9+.
+"""
+
+import argparse
+import sys
+
+import common
+import github
+import tracker
+
+LIMIT = 20000  # characters of one body or comment
+
+
+def clip(text: str) -> str:
+    text = text.rstrip()
+    return text if len(text) <= LIMIT else f"{text[:LIMIT]}\n[truncated: {len(text) - LIMIT} more characters]"
+
+
+def render(node: dict, trusted) -> list:
+    (issue,) = tracker.from_nodes([node], trusted)
+    comments = node.get("comments") or {}
+    total = int(comments.get("totalCount") or 0)
+    shown = len(comments.get("nodes") or [])
+    lines = [f"#{issue['number']} {issue['title']}", f"state: {str(node.get('state') or '').lower()}",
+             f"labels: {', '.join(sorted(issue['labels']))}"]
+    if issue["body_trusted"]:
+        lines += ["body: trusted", clip(issue["body"])]
+    else:
+        lines.append("body: untrusted (an untrusted author edited it last; text withheld)")
+    kept = issue["comments"]
+    for k, c in enumerate(kept, 1):
+        lines += [f"--- comment {k} of {len(kept)} · {c['created'] or 'unknown time'}", clip(c["body"])]
+    if issue["untrusted_comments"]:
+        lines.append(f"untrusted comments dropped: {issue['untrusted_comments']}")
+    if total > shown:
+        lines.append(f"older comments not shown: {total - shown}")
+    return lines
+
+
+def run(args) -> int:
+    try:
+        node = github.issue_node(args.number, cwd=args.repo)
+        lines = render(node, github.trusted_logins(args.repo))
+    except github.GhError as e:
+        print(f"issue: {common.one_line(e.message)}", file=sys.stderr)
+        return 2
+    except (KeyError, TypeError, ValueError):
+        print("issue: gh returned an unexpected reply", file=sys.stderr)
+        return 2
+    print("\n".join(lines))
+    return 0
+
+
+def main(argv=None) -> int:
+    github.rate_limited_until = None
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("number", help="the issue number")
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    args = ap.parse_args(argv)
+    if not args.number.lstrip("#").isdigit():
+        ap.error("the issue must be a number")
+    code = run(args)
+    until = github.rate_limit_verdict(code)
+    if until:
+        return common.verdict("retry-after", until, exit_code=code)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

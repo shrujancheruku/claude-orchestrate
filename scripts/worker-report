@@ -22,6 +22,12 @@ nothing for a resent report with the same round, head and outcome), which `claim
 such as `pass (py_compile, run_parallel)` or `fail 2`) or `not run (<reason>)`,
 else `incomplete <why>` (`suite-missing`, `suite-not-run-without-reason` or `suite-unrecognised`): the orchestrator
 sends an incomplete report back to the reviewer once.
+`--reviewer --post-risk-notes` also posts the report's `risk-notes:` lines (`path:line-range — what to look at`, word for
+word) as one PR comment whose first line is `> *Risk notes (review not posted).*`, when the report says `posted: off` or
+`posted: failed...`, and never twice: a trusted author's comment with that first line already on the PR is left alone. It
+prints a second line after the verdict: `risk-notes posted`, `risk-notes exists` or `risk-notes none` (a posted review
+carries them, or there are none) or `risk-notes unparsed` (the report has a `risk-notes:` line that holds no
+`path:line-range — what to look at` note; the orchestrator posts nothing and tells the user). A failed post is exit 2.
 Stop reasons: held-path, no-spec, ambiguous, adr-conflict, human-only, verify-outside-ticket, already-done,
 no-primary-source, worktree-gone, transient (a host failure nobody decides: the event carries `retry_after` and
 `failed_command`; a `permission-denied` or `human-only` report whose text names a rate limit or a wait-until time is
@@ -203,19 +209,73 @@ def record_review(repo, pr, words, text) -> None:
         common.die(f"worker-report: cannot write the run log: {e.strerror or e}")
 
 
+# The first line of the fallback comment `--post-risk-notes` posts (scripts/lead-brief reads it back by this line).
+RISK_MARKER = "> *Risk notes (review not posted).*"
+RISK_NOTE = re.compile(r"^\s*[-*]?\s*`?([^\s`]+:\d+(?:-\d+)?)`?\s+—\s+(\S.*?)\s*$")  # backticks round the location are dropped
+
+
+def risk_notes(text: str) -> list:
+    """The notes of a reviewer's `risk-notes:` block, word for word: the rest of that line when it is a note, then each
+    following line that is one (`path:line-range — what to look at`, bulleted or not), up to the first line that is not."""
+    lines = text.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        m = re.match(r"^[ \t>*-]*risk-notes:[ \t]*`*(.*?)`*[ \t]*$", lines[i], re.I)
+        if not m:
+            continue
+        found = [f"{n.group(1)} — {n.group(2)}" for n in [RISK_NOTE.match(m.group(1))] if n]
+        for line in lines[i + 1:]:
+            n = RISK_NOTE.match(line)
+            if not n:
+                break
+            found.append(f"{n.group(1)} — {n.group(2)}")
+        return found
+    return []
+
+
+def post_risk_notes(repo, pr, text) -> str:
+    """Post the report's risk notes as one PR comment when the review was not posted (`posted: off` or `failed`), once:
+    `posted`, `exists` (the PR already has a trusted author's comment starting with RISK_MARKER) or `none` (a posted
+    review carries them, or the report has none). The script that reads the report posts it, so the orchestrator's
+    own pass holds no hand-made dedupe (#545)."""
+    notes = risk_notes(text)
+    if not (_field("posted", text) or "").lower().startswith(("off", "failed")):
+        return "none"
+    if not notes:
+        # A `risk-notes:` line with text that is no `path:line-range — what to look at` note: say so, never drop it silently.
+        stated = (_field("risk-notes", text) or "").lower().rstrip(".")
+        return "unparsed" if stated and stated != "none" else "none"
+    try:
+        trusted = github.trusted_logins(repo)
+        if any(str(c.get("body") or "").strip().split("\n", 1)[0].strip() == RISK_MARKER
+               and github.is_trusted(c.get("author_association"), (c.get("user") or {}).get("login"), trusted)
+               for c in github.conversation_comments(pr, cwd=repo)):
+            return "exists"
+        github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{pr}/comments", "-f",
+                    "body=" + "\n".join([RISK_MARKER, "", *notes]), cwd=repo)
+    except github.GhError as e:
+        common.die(f"worker-report: cannot post the risk notes: {e.message}")
+    return "posted"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("ticket", help="the ticket number")
     ap.add_argument("--branch", help="the ticket's branch (required unless --reviewer)")
     ap.add_argument("--reviewer", action="store_true", help="classify a reviewer's report by its `suite:` line")
+    ap.add_argument("--post-risk-notes", action="store_true",
+                    help="with --reviewer: post the report's risk notes as one PR comment when its review was not posted (once)")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
     args = ap.parse_args(argv)
+    if args.post_risk_notes and not args.reviewer:
+        ap.error("--post-risk-notes goes with --reviewer")
     _, ticket = common.pr_ref(args.ticket)
     text = sys.stdin.read()
     if args.reviewer:
         words = classify_reviewer(text)
         record_review(args.repo, ticket, words, text)
         print(" ".join(words))
+        if args.post_risk_notes:
+            print("risk-notes " + post_risk_notes(args.repo, ticket, text))
         return 0
     if not args.branch:
         common.die("worker-report: --branch is required (unless --reviewer)")
