@@ -460,16 +460,16 @@ def sync(owner, number, repo, writes=None):
         if card.get(FIELD.lower()) != stage:
             set_stage(card["id"], stage, t)
         mirror(card, t, stage)
-    now =datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     for t, at in sorted(merged.items()):
         card = cards.get(t)
         if card is None or t in want:
             continue
         if now - at > ARCHIVE_AFTER:
             archive(card["id"], t)
-        elif card.get(FIELD.lower()) != DONE:
-            set_stage(card["id"], DONE, t)
-        if now - at <= ARCHIVE_AFTER:
+        else:
+            if card.get(FIELD.lower()) != DONE:
+                set_stage(card["id"], DONE, t)
             mirror(card, t, DONE)
         cards.pop(t)
     open_numbers = {i["number"] for i in issues}

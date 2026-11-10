@@ -239,6 +239,30 @@ class Board(unittest.TestCase):
         self.assertEqual(self.edits(), {"I8": "Done"})
         self.assertEqual(self.archives(), ["I9"])
 
+    def test_a_card_merged_under_a_day_ago_gets_stage_and_status_done_and_a_done_one_makes_no_write(self):
+        self.config()
+        self.gh(prs=[{"headRefName": "8-a", "state": "MERGED", "mergedAt": ago(hours=2)}],
+                cards=[card(8, "In review", status="In Progress")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual(self.edits(), {"I8": "Done"})
+        self.assertEqual(self.status_edits(), {"I8": "Done"})
+
+    def test_a_card_merged_under_a_day_ago_already_done_and_done_makes_no_write(self):
+        self.config()
+        self.gh(prs=[{"headRefName": "8-a", "state": "MERGED", "mergedAt": ago(hours=2)}],
+                cards=[card(8, "Done", status="Done")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual(self.writes(), [])
+
+    def test_an_in_review_card_mirrors_to_in_progress(self):
+        self.config()
+        self.gh(tickets=[ticket(2, claimed=True)],
+                prs=[{"number": 12, "headRefName": "2-thing", "state": "OPEN", "mergedAt": None, "isDraft": False}],
+                cards=[card(2, "In review", status="Todo")])
+        self.assertEqual(self.env.run("board", check=False).returncode, 0)
+        self.assertEqual(self.edits(), {})
+        self.assertEqual(self.status_edits(), {"I2": "In Progress"})
+
     def test_the_stage_field_is_created_when_missing(self):
         self.config()
         self.gh(fields=[])
