@@ -158,6 +158,28 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(r.stdout.splitlines(), ["also: no-run 504 " + "5ba15c1" + "c" * 33, SETTLED])
         self.assertEqual(r.returncode, 3)
 
+    def test_an_all_skipped_rollup_is_pending_then_no_run_never_a_pass(self):
+        # a draft head skipped its jobs; marked ready, GitHub never adds the ready_for_review run
+        sha = "5ba15c1" + "c" * 33
+        self.seq_with_workflows({"504": [view("SKIPPED", head=sha, draft=True), view("SKIPPED", head=sha)]},
+                                {"stdout": '[{"name": "ci.yml"}]'})
+        r = self.env.run("watch-ci", "--interval", "0", "--no-run-after", "0", "504", check=False)
+        self.assertEqual(r.stdout.splitlines(), ["also: no-run 504 " + sha, SETTLED])
+        self.assertEqual(r.returncode, 3)
+
+    def test_skipped_then_the_real_run_arrives_passes(self):
+        self.seq({"7": [view("SKIPPED", head="abc1234"), view("NEUTRAL", head="abc1234"), view("SUCCESS", head="abc1234")]})
+        self.assertEqual(self.watch("7").stdout.splitlines(), ["also: ci-pass 7 abc1234", SETTLED])
+
+    def test_success_beside_skipped_is_a_pass_and_a_bad_conclusion_a_fail(self):
+        def mixed(*results):
+            v = view("SUCCESS", head="abc1234")
+            v["statusCheckRollup"] = [{"status": "COMPLETED", "conclusion": r} for r in results]
+            return v
+        self.seq({"7": [mixed("SKIPPED", "SUCCESS")], "8": [mixed("SKIPPED", "FAILURE")]})
+        self.assertEqual(self.watch("7", "8").stdout.splitlines(),
+                         ["also: ci-pass 7 abc1234", "also: ci-fail 8 abc1234", SETTLED])
+
     def test_a_head_without_workflow_files_is_not_a_missing_run(self):
         # ADR-0012: no workflow files means no run is expected; the watch keeps waiting and settles once checks appear
         empty = {"statusCheckRollup": [], "mergeStateStatus": "CLEAN", "headRefOid": "abc1234", "state": "OPEN"}
