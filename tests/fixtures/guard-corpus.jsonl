@@ -987,3 +987,11 @@
 {"role": "orchestrate:scout", "command": "cp /repo/src/a.py /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/a.py", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "echo x > /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/n.txt", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "mkdir -p /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/scout-1/sub", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/claims\" --slots --session x --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/frontier\" --all --slots --session x --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/frontier\" --slots --state /etc/x", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:lead-session", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief\" --repo . --velocity", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/claims\" --slots --session x --repo .", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/frontier\" --all --slots --session x --repo .", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief\" --repo . --velocity", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "\"${CLAUDE_SKILL_DIR}/../../scripts/lead-brief\" --repo . --velocity", "expected": "unapproved", "source": "hand"}

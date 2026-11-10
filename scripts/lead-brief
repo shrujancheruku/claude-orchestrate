@@ -339,7 +339,7 @@ def watch_hits(nodes, ready, newest, lead_set) -> list:
     return hits
 
 
-def velocity(root, cfg=None):
+def velocity(root, cfg=None, lazy=False):
     """(building, cap, parked, dispatchable, holders) of the tracker now, from `claims` and `frontier`'s rules only (#716).
     `dispatchable` are the takeable tickets with no hold: the ticket's `Lands in:` paths (holds.ticket_paths) run through
     `holds`, so one with no declared paths counts as free. `holders` is {PR: [takeable tickets it holds]}. The cap is the
@@ -348,6 +348,9 @@ def velocity(root, cfg=None):
     snap = tracker.Snapshot.open(None, root)
     found = claims.claims(root, root / STATE, snap.issues, snap.prs, snap.merged, changes=lambda path, branch: None)
     building, parked = claims.slot_use(found)
+    if lazy and (cfg.slots is None or building >= cfg.slots):  # the watch needs no hold check when every slot is full
+        return building, cfg.slots, parked, [], {}
+    snap.use_cache(root / tracker.SNAPSHOT_FILE)  # the PR file lists are cached by head SHA (#446)
     take = tracker.takeable(snap.issues, tracker.label_strings(root))
     declared = {i["number"]: holds.ticket_paths(i.get("body")) for i in take}
     held, holders = holds.held_tickets(snap, root, {n: p for n, p in declared.items() if p}, cfg=cfg)
@@ -382,7 +385,7 @@ def run_watch(root, interval, read=None, clock=time.monotonic, sleep=time.sleep,
         slots = None
     elif slots is None and cfg.slots is not None:
         def slots():  # noqa: E306
-            building, cap, _, free, _ = velocity(root, cfg)
+            building, cap, _, free, _ = velocity(root, cfg, lazy=True)
             return building, cap, free
     idle_since = None
     try:
@@ -419,7 +422,7 @@ def run_watch(root, interval, read=None, clock=time.monotonic, sleep=time.sleep,
         if until:
             return common.verdict("retry-after", until, exit_code=2)
         return common.verdict("could-not-run", exit_code=2)
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, OSError) as e:  # OSError: an unreadable state file (claims, holds)
         print(f"lead-brief: cannot watch: unexpected reply ({e.__class__.__name__})", file=sys.stderr)
         return common.verdict("could-not-run", exit_code=2)
 

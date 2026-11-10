@@ -263,20 +263,23 @@ def overlaps(held: list, candidates: list, cfg, own_pr=None, pr_tickets=None) ->
     return out
 
 
-LANDS_IN = re.compile(r"^[\s>*_-]*Lands in\b:?\**:?\s*(.*)$", re.IGNORECASE)
+LANDS_IN = re.compile(r"^[\s#>*_-]*Lands in\b:?\**:?\s*(.*)$", re.IGNORECASE)
 
 
 def ticket_paths(body) -> list:
     """The paths a ticket's `Lands in:` line (and the lines after it up to a blank one) names in backticks: the map a
     ticket declares before any scout reads it. [] when it has none or a token is off the touch-map grammar. The lead's
     watch uses it to ask `find` whether a takeable ticket is held, with no model judgement (#716)."""
-    lines, inside, found = (body or "").splitlines(), False, []
+    lines, inside, heading, found = (body or "").splitlines(), False, False, []
     for line in lines:
         m = LANDS_IN.match(line)
         if m:
-            inside = True
+            inside, heading = True, line.lstrip().startswith("#")  # a `## Lands in` heading runs to the next heading
             text = m.group(1)
-        elif inside and line.strip():
+        elif inside and line.lstrip().startswith("#"):
+            inside = False
+            continue
+        elif inside and (line.strip() or heading):
             text = line
         else:
             inside = False

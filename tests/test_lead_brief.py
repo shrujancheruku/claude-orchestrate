@@ -434,6 +434,18 @@ class Velocity(unittest.TestCase):
         self.assertEqual(holds.ticket_paths(body), ["scripts/merge", "scripts/claims", "docs/guide.md"])
         self.assertEqual(holds.ticket_paths("**Lands in:** `a.py`\n`b.py`\n\n`c.py`"), ["a.py", "b.py"])
         self.assertEqual(holds.ticket_paths("nothing declared"), [])
+        template = "## Lands in\n\n- Module: `scripts/merge` (the verdict)\n- Docs: `docs/guide.md`\n\n## Notes\n`x/y.py`"
+        self.assertEqual(holds.ticket_paths(template), ["scripts/merge", "docs/guide.md"])
+
+    def test_an_unreadable_state_file_ends_the_watch_could_not_run_with_a_next_line(self):
+        def boom():
+            raise OSError("state file unreadable")
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = lead_brief.run_watch(self.env.repo, 0, read=lambda: [], clock=lambda: 0.0, sleep=lambda s: None, slots=boom)
+        self.assertEqual((code, out.getvalue()), (2, "next: could-not-run\n"))
 
 
 class LeadPassReports(unittest.TestCase):
