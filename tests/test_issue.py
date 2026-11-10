@@ -50,8 +50,8 @@ class Issue(unittest.TestCase):
 
     def test_a_configured_bot_login_is_trusted(self):
         (self.env.repo / ".claude").mkdir(exist_ok=True)
-        (self.env.repo / ".claude" / "orchestration.md").write_text("## Backlog\n\n- **Trusted authors:** `dependabot`\n")
-        r = self.read(node([comment("dependabot", "bump it", "NONE"), comment("eve", "no", "NONE")]))
+        (self.env.repo / ".claude" / "orchestration.md").write_text("## Backlog\n\n- **Trusted authors:** `dependabot[bot]`\n")
+        r = self.read(node([comment("dependabot[bot]", "bump it", "NONE"), comment("eve", "no", "NONE")]))
         self.assertIn("bump it", r.stdout)
         self.assertNotIn("\nno\n", r.stdout)
         self.assertIn("untrusted comments dropped: 1", r.stdout)

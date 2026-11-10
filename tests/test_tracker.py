@@ -52,14 +52,29 @@ class TrustedAuthors(unittest.TestCase):
         self.assertEqual([c["body"] for c in got["comments"]], ["hi"])
         self.assertEqual(got["untrusted_comments"], 0)
 
-    def test_bot_logins_match_with_or_without_the_suffix(self):
-        # GraphQL's author.login for a bot comes back without `[bot]`; the config may carry it.
-        self.assertTrue(github.is_trusted(None, "dependabot", ("dependabot[bot]",)))
-        self.assertTrue(github.is_trusted(None, "dependabot[bot]", ("dependabot",)))
+    def test_a_login_matches_exactly_so_a_user_and_a_bot_of_one_name_differ(self):
+        self.assertFalse(github.is_trusted(None, "foo[bot]", ("foo",)))
+        self.assertFalse(github.is_trusted(None, "foo", ("foo[bot]",)))
+        self.assertTrue(github.is_trusted(None, "foo[bot]", ("foo[bot]",)))
         self.assertTrue(github.is_trusted("NONE", "Dependabot[bot]", ("dependabot[bot]",)))
         self.assertFalse(github.is_trusted(None, "renovate", ("dependabot[bot]",)))
-        got = tracker.from_nodes([node(1, [cnode("bump", "NONE", "dependabot")])], ("dependabot[bot]",))[0]
-        self.assertEqual(got["untrusted_comments"], 0)
+
+    def test_a_graphql_bot_actor_is_spelled_with_its_suffix(self):
+        # GraphQL drops `[bot]` from a bot's login; its __typename says it is a Bot.
+        self.assertEqual(github.actor_login({"__typename": "Bot", "login": "foo"}), "foo[bot]")
+        self.assertEqual(github.actor_login({"__typename": "Bot", "login": "foo[bot]"}), "foo[bot]")
+        self.assertEqual(github.actor_login({"__typename": "User", "login": "foo"}), "foo")
+        self.assertEqual(github.actor_login({"login": "foo"}), "foo")
+        self.assertEqual(github.actor_login(None), "")
+        bot, user = {"__typename": "Bot", "login": "foo"}, {"__typename": "User", "login": "foo"}
+        self.assertTrue(github.is_trusted(None, github.actor_login(bot), ("foo[bot]",)))
+        self.assertFalse(github.is_trusted(None, github.actor_login(user), ("foo[bot]",)))
+        self.assertFalse(github.is_trusted(None, github.actor_login(bot), ("foo",)))
+
+    def test_a_bot_comment_is_kept_only_for_a_config_naming_it_with_the_suffix(self):
+        c = dict(cnode("bump", "NONE"), author={"__typename": "Bot", "login": "dependabot"})
+        self.assertEqual(tracker.from_nodes([node(1, [c])], ("dependabot[bot]",))[0]["untrusted_comments"], 0)
+        self.assertEqual(tracker.from_nodes([node(1, [c])], ("dependabot",))[0]["untrusted_comments"], 1)
 
     def test_fork_prs_are_not_the_runs_own(self):
         prs = [{"number": 1, "isCrossRepository": False}, {"number": 2, "isCrossRepository": True}, {"number": 3}]

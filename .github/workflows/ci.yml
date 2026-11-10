@@ -3,13 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+  # ready_for_review starts CI when a worker's draft is marked ready; pushes to a draft run nothing
+  # (each job's `if` below), since a draft is building and nothing reads its result.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
 
 jobs:
   test:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -28,6 +32,7 @@ jobs:
       - run: python3 tests/run_parallel.py
 
   validate:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
