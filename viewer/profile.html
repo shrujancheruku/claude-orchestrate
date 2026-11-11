@@ -470,7 +470,8 @@ function stopWait(p) {
     return card;
   }
   card.append(el("p", { class: "sub" }, `${stopsLine(st)}. Median is over closed stops; open ones count in the total up to the profile's end.`));
-  const entries = Object.entries(st.by_kind).filter(([, v]) => v.count);
+  // `prompt` is the run's permission-prompt stall, not a ticket stop: it is outside the count and Overall median, so no row here.
+  const entries = Object.entries(st.by_kind).filter(([k, v]) => v.count && k !== "prompt");
   const med = (v) => (v.median_s == null ? 0 : v.median_s);
   const max = Math.max(...entries.map(([, v]) => med(v)), 1);
   const W = 1000, L = 150, R = 80, ROW = 30, BAR = 18;

@@ -245,7 +245,7 @@ scripts/board [--repo .] [--dry-run] [--verbose]
 
 ```
 Profile · session 346d1ea2 · 2026-11-03T16:01Z → 2026-11-03T16:22Z (21m) · 2 slots
-proxy $ $3.09 per merged ticket (2 merged): opus $1.52 · sonnet $1.35 · haiku $0.22 · orchestrator $1.52
+proxy $ $3.09 per merged ticket (2 merged): opus $1.52 · sonnet $1.35 · haiku $0.22 · orchestrator $1.52 · lead 1a2b3c4d: $0.40 proxy in the window, $2.10 outside it (not in $ per merged ticket). The developer's own time is not measured and is never estimated.
 slots   occupied 59%  (building 37%, review/merge 22%)  idle: overlap 5m, empty 7m
 plan    5h window 22% → 51%, peak 51%, 14.5 pts per merged ticket (7d 2.0) · 0 limit hits
 saved   .claude/orchestrate-profiles/2026-11-03-346d1ea2.json  (+ .html)

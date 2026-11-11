@@ -1442,7 +1442,7 @@ def summary(p: dict, saved: Path) -> str:
     lines = [
         f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {throughput} · {slots_label(p)}",
         f"proxy $ {spend} · {lead_line}",
-        f"slots  occupied {m['occupancy']:.0%}  (building {m['building_share']:.0%}, review/merge {m['review_share']:.0%})  idle: {idle}",
+        f"slots   occupied {m['occupancy']:.0%}  (building {m['building_share']:.0%}, review/merge {m['review_share']:.0%})  idle: {idle}",
         f"plan    {plan}",
         *gh_lines(m.get("gh_calls") or {"available": False}),
     ]
