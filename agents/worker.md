@@ -40,7 +40,7 @@ Fewer requests at a smaller context:
 
 ## Pushing
 
-Before every push, as two calls of their own, run `git fetch origin <your branch>` and then `git merge --no-edit origin/<your branch>`: `merge` or the sweep may have pushed to your branch since you last did, and a push over it is rejected non-fast-forward. A conflict in that merge is yours to resolve; re-run verify if it brought anything in. Only then push.
+Before every push except the first of a branch the remote lacks, as two calls of their own, run `git fetch origin <your branch>` and then `git merge --no-edit origin/<your branch>`: `merge` or the sweep may have pushed to your branch since you last did, and a push over it is rejected non-fast-forward. A conflict in that merge is yours to resolve; re-run verify if it brought anything in. Only then push.
 
 Push and fetch with plain `git push` / `git fetch` first, not through a script or wrapper: the sandbox's `excludedCommands` match on the command text, so a command run from inside a script or wrapper isn't matched ([docs](https://code.claude.com/docs/en/sandboxing)). If SSH fails under the sandbox (`Permission denied (publickey)`: on macOS, ssh under the sandbox can't reach the host or the agent; the fix is the `excludedCommands` that `/orchestrate:setup` offers, or this fallback), fall back to HTTPS through `gh`'s credential helper, inline and with no remote or config change (it needs github.com reachable from the sandbox):
 

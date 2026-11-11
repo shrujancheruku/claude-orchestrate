@@ -442,31 +442,26 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
     return out
 
 
-BUSY_STATES = ("building", "idle", "paused")  # a claim whose worker may still be pushing to the branch
-
-
-def worker_busy(repo, branch, state_file=None, draft=False, session=None) -> str | None:
-    """Why a worker may still be building or fixing on `branch`, else None (#757).
+def worker_busy(repo, branch, state_file=None, session=None) -> str | None:
+    """Why a worker may still be fixing on `branch`, else None (#757).
 
     `merge` and its sweep push, or ask the host to merge, the default branch into a PR's branch; a worker with commits of
-    its own then finds its push rejected non-fast-forward. So no update goes to a branch while its ticket's claim is
-    `building`, `idle` or `paused` (a draft PR is building, ADR 0011), or while the ticket's worktree holds work the
-    remote lacks: uncommitted paths or unpushed commits, which is a worker still fixing a ready PR (its claim reads
-    in-review). A branch with no ticket number, and a ticket with no worktree, has no worker to wait for. Only the
-    host-free parts of the claim are read (the state file, `git worktree list`, the run log), so no host call is made;
-    a worktree whose git state can't be read counts as busy (fail closed: the update waits for the next call)."""
+    its own then finds its push rejected non-fast-forward. Only a ready PR reaches them (a draft is skipped), and a ready
+    PR's claim reads in-review whatever the worker does, so the signal is the ticket's worktree: uncommitted paths or
+    unpushed commits mean a worker still fixing. A branch with no ticket number, and a ticket with no worktree, has no
+    worker to wait for. Only the host-free parts of the claim are read (the state file, `git worktree list`, the run
+    log), so no host call is made; a worktree whose git state can't be read counts as busy (fail closed: the update
+    waits for the next call)."""
     ticket = ticket_of_branch(branch)
     if ticket is None:
         return None
     repo = Path(repo)
-    prs = [{"number": 0, "headRefName": branch, "isDraft": bool(draft)}]
+    prs = [{"number": 0, "headRefName": branch, "isDraft": False}]
     found = claims(repo, state_file or repo / STATE, [{"number": ticket, "claimed": True, "labels": []}], prs, [],
                    session=session, changes=lambda path, br: (0, 0))
     claim = found.get(ticket)
     if claim is None:
         return None
-    if claim.state in BUSY_STATES:
-        return f"its ticket's claim is {claim.state}"
     if claim.worktree and claim.branch == branch:
         try:
             dirty, unpushed = worktree_state(claim.worktree, branch)

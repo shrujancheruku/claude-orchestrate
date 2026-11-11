@@ -31,8 +31,8 @@ file and outcome (line-replay|word-merge|handed-back). The method decides how: s
 merge main into the branch (a plain push); rebase rebases it and pushes with --force-with-lease.
 A conflict the script can't resolve (a file that isn't shared, or overlapping words) aborts that
 branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
-No update goes to a branch while a worker may be building or fixing on it (`claims.worker_busy`, #757): the ticket's claim is
-building, idle or paused, or its worktree holds uncommitted paths or unpushed commits. Readiness then ends `next: retry` (exit 3)
+No update goes to a branch while a worker may be building or fixing on it (`claims.worker_busy`, #757): the ticket's worktree
+holds uncommitted paths or unpushed commits (a ready PR's claim reads in-review, so the worktree is the signal). Readiness then ends `next: retry` (exit 3)
 and the sweep and --also-approved leave the PR alone, so the worker's own push is never rejected non-fast-forward.
 A gated PR is kept up to date too, by the host's update-branch under the same rules, so it is mergeable when the developer gets to it.
 A Merge gates line that names no glob (and is not `none`) is `could-not-run`; a PR whose file list the host cut off at 3000 files is gated.
@@ -273,11 +273,12 @@ def gate_of(cwd, pr):
 
 
 def worker_building(cwd, branch):
-    """Why no update may go to `branch` now, or None: its worker may be building or fixing on it (`claims.worker_busy`,
-    #757). A pushed merge of the default branch would make the worker's own push non-fast-forward, so the update waits
-    for the worker's report. A state that can't be read counts as busy: the update waits for the next call."""
+    """Why no update may go to `branch` now, or None: its worker may be fixing on it (`claims.worker_busy`, #757: the
+    ticket's worktree holds uncommitted or unpushed work). A pushed merge of the default branch would make the worker's
+    own push non-fast-forward, so the update waits for the worker's report. A state that can't be read counts as busy:
+    the update waits for the next call."""
     try:
-        return claims.worker_busy(repo.main_checkout(cwd), branch)
+        return claims.worker_busy(repo.main_checkout(cwd), branch, session=os.environ.get(runlog.SESSION_ENV))
     except (OSError, ValueError, KeyError, TypeError) as e:
         return f"its claim could not be read ({common.one_line(e)})"
 
@@ -1027,7 +1028,10 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
             continue
         if glob is not None:  # the developer merges a gated PR: replay never pushes to it, but it is kept up to date (#757)
             say(f"sweep: PR #{n} {b} touches the merge gate {glob}; the developer merges it by hand")
-            refresh_gated(cwd, n, b, default, glob, r.get("headRefOid"))
+            # Only one already on the developer's waits file (approved and held, `gate_rule`): a gated PR still in review
+            # or being fixed must not get a push that moves its head under the reviewer.
+            if any(str(w.get("pr")) == str(n) for w in waits.live(cwd)):
+                refresh_gated(cwd, n, b, default, glob, r.get("headRefOid"))
             continue
         busy = worker_building(cwd, b)
         if busy:  # the worker's own push would be rejected after ours (#757)

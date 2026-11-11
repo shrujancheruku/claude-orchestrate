@@ -758,14 +758,10 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
         self.assertEqual(self.called(UPDATE), [UPDATE])
 
-    def test_a_building_claim_blocks_the_update(self):
-        # A draft PR is building (ADR 0011): the claim, not only the worktree, holds the update.
+    def test_a_branch_with_no_ticket_number_has_no_worker_to_wait_for(self):
         import claims
-        self.ticket_worktree(unpushed=False)
-        (self.repo / ".claude" / "orchestrate-state.json").write_text(json.dumps({"tickets": {"9": {"agent_id": "agent-x"}}}))
-        self.assertEqual(claims.worker_busy(self.repo, "9-feat", draft=True), "its ticket's claim is building")
-        self.assertIsNone(claims.worker_busy(self.repo, "9-feat"))  # a ready PR is in review, and the tree is all pushed
-        self.assertIsNone(claims.worker_busy(self.repo, "feat-br", draft=True))  # no ticket number: no worker to wait for
+        self.ticket_worktree(unpushed=True)
+        self.assertIsNone(claims.worker_busy(self.repo, "feat-br"))
 
     def test_a_release_pr_says_so(self):
         p = self.merge(self.approved, files=(".release-please-manifest.json", "hooks/x"), title="chore(main): release 1.2.3")
