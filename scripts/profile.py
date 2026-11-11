@@ -288,6 +288,85 @@ def build_tickets(agents: list, main: Transcript, end: datetime, events: list | 
     return out
 
 
+# A Stop (GLOSSARY) is measured from its first sign until work on the ticket resumes (#641), the same with or without a lead.
+# Kinds, in display order. A worker's `stop_reason` names its kind; the orchestrator-side ones (a third review round, a
+# gate hold) have no worker report and come from the pass record's `claimed` word. A plain `transient` is retried
+# without anyone deciding and `worktree-gone` is redispatched: neither is a stop.
+STOP_KINDS = ("question", "permission-denied", "transient-exhausted", "adr-conflict", "third-review-round", "gate")
+QUESTION_REASONS = ("held-path", "no-spec", "ambiguous", "human-only", "verify-outside-ticket", "no-primary-source", "already-done")
+# `claimed` word `waiting <reason>` -> kind (the reasons are claims.Claim.reason); a ticket `with-lead` is a question.
+WAITING_KINDS = {"permission-denied": "permission-denied", "exhausted": "transient-exhausted", "gate": "gate",
+                 "round-3": "third-review-round", "question": "question", "adr-conflict": "adr-conflict", "info": "question"}
+
+
+def report_stop_kind(e: dict) -> str | None:
+    """The stop kind of a `worker-report` event, or None when it is not a stop."""
+    if e.get("kind") != runlog.WORKER_REPORT or e.get("outcome") != "valid" or e.get("status") != "stopped":
+        return None
+    reason = e.get("stop_reason")
+    if reason == "transient":
+        return "transient-exhausted" if e.get("exhausted") else None
+    if reason in QUESTION_REASONS:
+        return "question"
+    return reason if reason in ("permission-denied", "adr-conflict") else None
+
+
+def claimed_stop_kind(word) -> str | None:
+    """The stop kind a pass record's `claimed` word for a ticket shows (`waiting <reason>`, `with-lead`), else None."""
+    if word == "with-lead":
+        return "question"
+    head, _, reason = (word or "").partition(" ")
+    return WAITING_KINDS.get(reason) if head == "waiting" else None
+
+
+def stop_block(stops: list) -> dict:
+    """count, median and total (seconds) for the stops. Open stops are out of the median and in the total."""
+    closed = [s["wait_s"] for s in stops if not s["open"]]
+    return {"count": len(stops), "open": sum(1 for s in stops if s["open"]),
+            "median_s": statistics.median(closed) if closed else None, "total_s": sum(s["wait_s"] for s in stops)}
+
+
+def stop_metrics(events: list | None, passes: list, tickets: list, agents: list, end: datetime) -> dict:
+    """Stops by kind. Matched by ticket number, not claim, so a question stop that unassigns the ticket is still the run's.
+
+    A stop starts at the `worker-report` stopped event, or with no report (a third review round, an ADR-conflict hold, a
+    gate) at the first pass whose `claimed` shows the ticket waiting or with-lead. It ends at the next worker or reviewer
+    dispatched on the ticket, or its merge or close. A start inside a stop already running is the same stop."""
+    starts = {}
+    for e in events or ():
+        kind, ts = report_stop_kind(e), parse_ts(e.get("ts"))
+        if kind and ts and str(e.get("ref", "")).isdigit():
+            starts.setdefault(int(e["ref"]), []).append((ts, kind))
+    for p in passes:
+        ts, claimed = parse_ts(p.get("ts")), p.get("claimed")
+        if ts and isinstance(claimed, dict):
+            for n, word in claimed.items():
+                kind = claimed_stop_kind(word)
+                if kind and n.isdigit():
+                    starts.setdefault(int(n), []).append((ts, kind))
+    items = []
+    for tk in tickets:
+        n = tk["ticket"]
+        ends = sorted(a["dispatched"] for a in agents if a.get("ticket") == n and a["dispatched"])
+        if tk["outcome"] != "open":
+            ends.append(tk["end"])
+        resumed = None  # when the stop running now ends; the far future while it is still open
+        for ts, kind in sorted(starts.get(n, ())):
+            if resumed is not None and ts < resumed:
+                continue
+            stop_end = next((x for x in sorted(ends) if x > ts), None)
+            resumed = stop_end or datetime.max.replace(tzinfo=timezone.utc)
+            items.append({"ticket": n, "kind": kind, "start": iso(ts), "end": iso(stop_end) if stop_end else None,
+                          "open": stop_end is None, "wait_s": ((stop_end or end) - ts).total_seconds()})
+    open_ = [s for s in items if s["open"]]
+    return {
+        **stop_block(items),
+        "oldest_open_s": max((s["wait_s"] for s in open_), default=None),
+        "by_kind": {k: stop_block([s for s in items if s["kind"] == k]) for k in STOP_KINDS},
+        "items": items,
+    }
+
+
 def assign_slots(tickets: list) -> None:
     """Lay tickets into slot rows for the timeline: each takes the first row free at its start."""
     free_at = []
@@ -1124,6 +1203,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "depth2": depth2,
             **orchestrator_metrics(main, agents, passes, len(merged), events),
             "events": event_metrics(events, review),
+            "stops": stop_metrics(events, passes, tickets, agents, end),
             "gh_calls": gh_metrics(events, passes),
         },
         "recommendation": recommend(slots, occupancy, wins, limits),
@@ -1184,6 +1264,10 @@ def summary(p: dict, saved: Path) -> str:
         lines.append(f"note    {p['metrics']['merges_unverified']} merged ticket(s) unverified: no events log, counted from merge commands in the transcript")
     if not p["sources"]["pass_log"]:
         lines.append("note    no pass log for this session: idle reasons and window pressure are unknown")
+    stops = m.get("stops")
+    if stops and stops["count"]:
+        median = "no closed stop" if stops["median_s"] is None else f"median wait {fmt_dur(stops['median_s'])}"
+        lines.append(f"stops   {stops_line(stops)} · {median}")
     lines.append(f"saved   {saved}  (+ .html)")
     return "\n".join(lines)
 
@@ -1302,7 +1386,9 @@ def derive_pass(args) -> dict:
         "scope": args.scope,
         "slots": slots,
         "greedy": args.greedy,
-        "claimed": {str(n): found[n].state for n in sorted(found)},
+        # A waiting claim carries its reason (`waiting round-3`): the profile reads the stop kind from it (#641).
+        "claimed": {str(n): f"{found[n].state} {found[n].reason}" if found[n].state == "waiting" and found[n].reason else found[n].state
+                    for n in sorted(found)},
         "free": max(slots - len(held), 0),
         # A ticket dispatched this pass can still read as takeable in a snapshot taken before it.
         "takeable_waiting": len(takeable - set(args.dispatched)),
@@ -1363,6 +1449,9 @@ def figures(p: dict) -> dict:
         "l_share": _rate(tiers.get("L", {}).get("merged", 0), tiered),
         "untiered": tiers.get("?", {}).get("merged", 0),
         "unparsed": r.get("unparsed_reviewers"),
+        # Informational, no gate and no mix adjustment; None for a profile saved before stops were measured.
+        "stop_median": (m.get("stops") or {}).get("median_s"),
+        "stops": m.get("stops"),
         "tiers": tiers,
         # What the tier columns don't hold per merged ticket: the orchestrator, and agents on tickets that never merged.
         "overhead": None if not merged else c["per_merged_ticket"] - sum(t["cost"] for t in tiers.values()) / merged,
@@ -1445,18 +1534,28 @@ def compare(before: dict, after: dict, max_cost=None, max_orch=None) -> dict:
 def _show(x, kind) -> str:
     if x is None:
         return "–"
-    return {"usd": fmt_usd, "pct": lambda v: f"{v:.0%}", "num": lambda v: f"{v:.2f}"}[kind](x)
+    return {"usd": fmt_usd, "pct": lambda v: f"{v:.0%}", "num": lambda v: f"{v:.2f}", "dur": fmt_dur}[kind](x)
 
 
 def _delta(b, a, kind) -> str:
     if b is None or a is None:
         return "–"
     d = a - b
-    return {"usd": f"{'+' if d >= 0 else '-'}${abs(d):.2f}", "pct": f"{d * 100:+.0f} pts", "num": f"{d:+.2f}"}[kind]
+    return {"usd": f"{'+' if d >= 0 else '-'}${abs(d):.2f}", "pct": f"{d * 100:+.0f} pts", "num": f"{d:+.2f}", "dur": f"{'+' if d >= 0 else '-'}{fmt_dur(abs(d))}"}[kind]
 
 
 def _verdict(v) -> str:
     return "n/a" if v is None else "pass" if v else "FAIL"
+
+
+def stops_line(st) -> str:
+    """"N stops · M open at end, oldest Xh" (the open part only when some are open); "no stop data" for an older profile."""
+    if not st:
+        return "no stop data"
+    line = f"{st['count']} stop{'s' if st['count'] != 1 else ''}"
+    if st["open"]:
+        line += f" · {st['open']} open at end, oldest {fmt_dur(st['oldest_open_s'])}"
+    return line
 
 
 def compare_report(before_name: str, after_name: str, r: dict) -> str:
@@ -1471,6 +1570,9 @@ def compare_report(before_name: str, after_name: str, r: dict) -> str:
     row("throughput (merged/hour)", b["throughput"], a["throughput"], "num")
     for key, label, kind, _ in ROWS:
         row(label, b[key], a[key], kind)
+    row("median stop wait", b["stop_median"], a["stop_median"], "dur")
+    for name, f in (("before", b), ("after", a)):
+        lines.append(f"  {name}: {stops_line(f['stops'])}")
     row("round-1 approvals (outright)", b["outright"], a["outright"], "pct")
     row("L-tier share of merged tickets", b["l_share"], a["l_share"], "pct")
     for name, f in (("before", b), ("after", a)):

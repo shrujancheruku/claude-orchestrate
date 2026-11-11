@@ -1000,6 +1000,14 @@ class CommandTest(unittest.TestCase):
         path = runlog.log_path(repo, runlog.PASS_LOG)
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def test_record_names_the_waiting_reason_in_claimed(self):
+        repo = self.record_repo()
+        runlog.append_event(repo, runlog.WORKER_REPORT, "valid", ref="1", session="s", status="stopped",
+                            stop_reason="permission-denied", denied_command="gh pr create")
+        r = self.record(repo, "--idle", "overlap=1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.rows(repo)[-1]["claimed"], {"1": "waiting permission-denied"})
+
     def test_record_derives_claimed_slots_free_takeable_and_greedy(self):
         repo = self.record_repo()
         r = self.record(repo, "--idle", "overlap=1", "--dispatched", "2", "--merged", "9", "--suggestion", "2 → 3")
@@ -1160,6 +1168,27 @@ class CompareTest(unittest.TestCase):
     def gate(self, out, start):
         """The row under the gating header: the figure as measured, its verdict, then mix-adjusted."""
         return self.line(out[out.index("gating,"):], start)
+
+    def with_stops(self, path, median, count, open_=0, oldest=None):
+        data = json.loads(path.read_text())
+        data["metrics"]["stops"] = {"count": count, "open": open_, "median_s": median, "total_s": 0, "oldest_open_s": oldest}
+        path.write_text(json.dumps(data))
+        return path
+
+    def test_compare_prints_the_median_stop_wait_row_and_a_stop_line_per_side(self):
+        before = self.with_stops(self.profile("b.json", {"M": (20, 1.0)}), 1800, 4)
+        after = self.with_stops(self.profile("a.json", {"M": (20, 1.0)}), 600, 3, 1, 7200)
+        r = self.compare(before, after)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.line(r.stdout, "median stop wait"), r"30m\s+10m\s+-20m")
+        self.assertIn("before: 4 stops", r.stdout)
+        self.assertIn("after: 3 stops · 1 open at end, oldest 2.0h", r.stdout)
+
+    def test_a_profile_saved_before_stops_were_measured_reads_as_no_stop_data(self):
+        r = self.compare(self.profile("b.json", {"M": (20, 1.0)}), self.profile("a.json", {"M": (20, 1.0)}))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(self.line(r.stdout, "median stop wait"), r"–\s+–\s+–")
+        self.assertIn("before: no stop data", r.stdout)
 
     def test_headline_figures_side_by_side_with_deltas(self):
         before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)}, orchestrator=1.0, changes=(10, 20), outright=6)
@@ -1331,6 +1360,142 @@ class TierTest(unittest.TestCase):
         self.assertEqual(prof.dispatched_tier("Tier M, round 2"), "M")
         self.assertEqual(prof.dispatched_tier("Review PR 5 (S, proto)"), "S")
         self.assertIsNone(prof.dispatched_tier("Review PR 5 round 2"))
+
+
+class StopWaitTest(unittest.TestCase):
+    """Stop wait by kind (#641). The base fixture: #10 (worker at 1, reviewer at 20, PR 50 merged at 30), #11 (worker at 1,
+    handed back at 31), and the transcript ends at 41. `extra_dispatch` adds worker dispatches to the main transcript."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(Path(self.tmp.name))
+
+    def tearDown(self):
+        os.environ.pop("ORCHESTRATE_USAGE_LOG", None)
+        self.tmp.cleanup()
+
+    def dispatch(self, minutes, description):
+        with open(self.fx.main, "a") as f:
+            f.write(json.dumps(assistant(minutes, f"d{minutes}", "claude-opus-5-5", [
+                tool_use(f"ud{minutes}", "Agent", subagent_type="orchestrate:worker", description=description)])) + "\n")
+            f.write(json.dumps({"type": "user", "timestamp": at(41)}) + "\n")  # the transcript still ends at 41
+
+    def report(self, minutes, ticket, reason, **extra):
+        return {"ts": at(minutes), "session": SESSION, "kind": "worker-report", "ref": ticket, "outcome": "valid",
+                "status": "stopped", "stop_reason": reason, **extra}
+
+    def stops(self, events=(), passes=()):
+        self.fx.events([MERGED_50, *events])
+        if passes:
+            self.fx.passes(passes)
+        return self.fx.run()["metrics"]["stops"]
+
+    def only(self, st):
+        self.assertEqual(len(st["items"]), 1, st["items"])
+        return st["items"][0]
+
+    def test_a_worker_report_starts_a_stop_that_a_reviewer_dispatch_ends(self):
+        s = self.only(self.stops([self.report(5, 10, "held-path")]))
+        self.assertEqual((s["ticket"], s["kind"], s["start"], s["end"], s["open"], s["wait_s"]), (10, "question", at(5), at(20), False, 900))
+
+    def test_a_worker_dispatch_ends_a_stop(self):
+        self.dispatch(15, "Build #11 again")
+        s = self.only(self.stops([self.report(8, 11, "adr-conflict")]))
+        self.assertEqual((s["kind"], s["end"], s["wait_s"]), ("adr-conflict", at(15), 420))
+
+    def test_a_merge_ends_a_stop(self):
+        s = self.only(self.stops([self.report(25, 10, "permission-denied")]))
+        self.assertEqual((s["end"], s["wait_s"]), (at(30), 300))
+
+    def test_a_close_ends_a_stop(self):
+        s = self.only(self.stops([self.report(20, 11, "human-only")]))
+        self.assertEqual((s["end"], s["wait_s"]), (at(31), 660))
+
+    def test_a_waiting_pass_starts_a_stop_with_no_worker_report(self):
+        st = self.stops(passes=[{"ts": at(22), "slots": 2, "free": 0, "idle": {}, "claimed": {"10": "waiting round-3"}}])
+        s = self.only(st)
+        self.assertEqual((s["kind"], s["start"], s["end"]), ("third-review-round", at(22), at(30)))
+
+    def test_a_with_lead_pass_starts_a_question_stop(self):
+        st = self.stops(passes=[{"ts": at(12), "slots": 2, "free": 1, "idle": {"empty": 1}, "claimed": {"11": "with-lead"}}])
+        s = self.only(st)
+        self.assertEqual((s["kind"], s["start"], s["end"]), ("question", at(12), at(31)))
+
+    def test_later_signs_of_the_same_stop_are_one_stop(self):
+        st = self.stops([self.report(5, 10, "ambiguous")], [
+            {"ts": at(6), "slots": 2, "free": 0, "idle": {}, "claimed": {"10": "with-lead"}},
+            {"ts": at(10), "slots": 2, "free": 0, "idle": {}, "claimed": {"10": "waiting question"}}])
+        self.assertEqual(self.only(st)["start"], at(5))
+
+    def test_a_second_stop_after_the_first_ended_counts_again(self):
+        st = self.stops([self.report(5, 10, "held-path"), self.report(25, 10, "no-spec")])
+        self.assertEqual([(s["start"], s["end"]) for s in st["items"]], [(at(5), at(20)), (at(25), at(30))])
+        self.assertEqual((st["by_kind"]["question"]["count"], st["by_kind"]["question"]["median_s"]), (2, 600))
+
+    def test_a_question_stop_that_unassigns_the_ticket_still_counts(self):
+        # The pass shows no claim for #10 (a no-lead question unassigns it); the worker report is matched by ticket number.
+        st = self.stops([self.report(5, 10, "no-primary-source")], [{"ts": at(6), "slots": 2, "free": 2, "idle": {"empty": 2}, "claimed": {}}])
+        self.assertEqual(self.only(st)["wait_s"], 900)
+
+    def test_each_kind_is_produced_and_a_plain_transient_or_worktree_gone_is_not_a_stop(self):
+        events = [self.report(2, 10, "held-path"), self.report(22, 10, "permission-denied"),
+                  self.report(3, 11, "transient", exhausted=True), self.report(5, 11, "worktree-gone"),
+                  self.report(7, 11, "transient"), self.report(9, 11, "adr-conflict")]
+        passes = [{"ts": at(26), "slots": 2, "free": 0, "idle": {}, "claimed": {"10": "waiting round-3"}},
+                  {"ts": at(24), "slots": 2, "free": 0, "idle": {}, "claimed": {"10": "waiting gate"}}]
+        st = self.stops(events, passes)
+        kinds = {k: v["count"] for k, v in st["by_kind"].items()}
+        # #10: question 2-20, permission-denied 22-30 (the passes at 24 and 26 are inside it); #11: transient exhausted 3-31
+        # (the adr-conflict report at 9 is inside it).
+        self.assertEqual(kinds, {"question": 1, "permission-denied": 1, "transient-exhausted": 1, "adr-conflict": 0,
+                                 "third-review-round": 0, "gate": 0})
+        events = [self.report(5, 10, "worktree-gone"), self.report(6, 10, "transient"), self.report(7, 11, "adr-conflict")]
+        passes = [{"ts": at(21), "slots": 2, "free": 0, "idle": {}, "claimed": {"10": "waiting gate"}},
+                  {"ts": at(31), "slots": 2, "free": 0, "idle": {}, "claimed": {}}]
+        st = self.stops(events, passes)
+        self.assertEqual({k: v["count"] for k, v in st["by_kind"].items() if v["count"]}, {"adr-conflict": 1, "gate": 1})
+
+    def test_an_open_stop_is_out_of_the_median_and_in_the_total(self):
+        self.dispatch(36, "Build #12 new")
+        st = self.stops([self.report(5, 10, "held-path"), self.report(38, 12, "permission-denied")])
+        self.assertEqual((st["count"], st["open"], st["median_s"]), (2, 1, 900))
+        self.assertEqual((st["total_s"], st["oldest_open_s"]), (900 + 180, 180))  # the transcript ends at 41
+        self.assertEqual(st["by_kind"]["permission-denied"], {"count": 1, "open": 1, "median_s": None, "total_s": 180})
+        self.assertIn("1 open at end, oldest 3m", prof.summary(self.fx.run(), Path("x.json")))
+
+    def test_no_stops_gives_an_empty_block(self):
+        st = self.stops()
+        self.assertEqual((st["count"], st["median_s"], st["items"]), (0, None, []))
+
+    def test_viewer_renders_the_tile_and_card_with_zero_stop_kinds_hidden(self):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        self.dispatch(36, "Build #12 new")
+        self.stops([self.report(5, 10, "held-path"), self.report(38, 12, "permission-denied")])
+        path = Path(self.tmp.name) / "p.json"
+        path.write_text(json.dumps(self.fx.run()))
+        run = lambda card: subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(path), card],
+                                          capture_output=True, text=True)
+        tile, card = run("stopWaitTile"), run("stopWait")
+        self.assertEqual((tile.returncode, card.returncode), (0, 0), tile.stderr + card.stderr)
+        self.assertIn("Stop wait", tile.stdout)
+        self.assertIn("15m", tile.stdout)
+        self.assertIn("2 stops · 1 open at end", tile.stdout)
+        self.assertIn("Question", card.stdout)
+        self.assertIn("Permission denied", card.stdout)
+        self.assertIn("Overall", card.stdout)
+        self.assertIn("1 open at end, oldest 3m", card.stdout)
+        for hidden in ("Gate", "ADR conflict", "Third review round", "Transient exhausted"):
+            self.assertNotIn(hidden, card.stdout)
+        cmp = run("compare")
+        self.assertIn("Median stop wait", cmp.stdout)
+        self.assertIn("2 stops · 1 open at end, oldest 3m", cmp.stdout)
+
+
+class ClaimedStopKindTest(unittest.TestCase):
+    def test_words(self):
+        self.assertEqual([prof.claimed_stop_kind(w) for w in ("with-lead", "waiting gate", "waiting info", "waiting exhausted", "building", "paused limit", None)],
+                         ["question", "gate", "question", "transient-exhausted", None, None, None])
 
 
 if __name__ == "__main__":
