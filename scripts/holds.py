@@ -337,9 +337,13 @@ def find(snap, repo, state_file=None, candidates=None, ticket=None, pr=None, cfg
     own_pr, own_ticket = None, ticket
     if pr is not None:
         own_pr = common.pr_ref(pr)[0]
-        view = github.pr_view(own_pr, "headRefName,body", cwd=repo)
+        # The PR is already in the Snapshot's open PRs (branch, body, head commit) and its file list is cached there, so a
+        # populated snapshot costs no call here (#546); a PR it does not list (a fork's, or one opened since) is read live.
+        # A row from a snapshot file an older version wrote has no `body` key: it is read live, the body names the ticket.
+        row = next((p for p in snap.prs if isinstance(p, dict) and str(p.get("number")) == str(own_pr) and "body" in p), None)
+        view = row if row is not None else github.pr_view(own_pr, "headRefName,body", cwd=repo)
         own_ticket = pr_ticket(view.get("headRefName"), view.get("body"))[0]  # the closing reference first (#695)
-        candidates = github.pr_files(own_pr, cwd=repo)
+        candidates = snap.pr_files(row) if row is not None else github.pr_files(own_pr, cwd=repo)
     open_prs = [p for p in github.own_prs(snap.prs) if isinstance(p, dict) and p.get("baseRefName", base) == base]
     # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
     # `changes` is a no-op: holds needs each worktree's changed paths, not the dirty and unpushed counts claims

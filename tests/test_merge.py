@@ -43,6 +43,18 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
         self.assertEqual(p.stdout.count("next:"), 1)
 
+    def test_the_session_flag_labels_the_merge_event_not_the_last_rebuilder(self):
+        # Two sessions share the state file: the one that rebuilt last is `test-session`; `--session mine` is the caller.
+        for flag, want in ((None, "test-session"), ("mine", "mine")):
+            with self.subTest(session=flag):
+                self.env.clear_events()
+                self.seq({PR_VIEW: [pr("OPEN"), pr("MERGED")], PR_MERGE: [OK], ISSUE_VIEW: OPEN_ISSUE,
+                          ISSUE_CLOSE: [OK], REF_GET: [OK]})
+                p = self.merge(*(["--session", flag] if flag else []))
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual([e["session"] for e in self.env.events()], [want])
+                git(self.env.repo, "branch", "-f", "feat-br")
+
     def test_no_session_refuses_before_the_merge(self):
         # The merged event is written after the merge; refusing then would exit 2 on a merge that happened.
         (self.env.repo / ".claude" / "orchestrate-state.json").unlink()
@@ -165,6 +177,9 @@ class MergeTest(MergeMixin, unittest.TestCase):
     def test_default_or_protected_branch_never_deleted(self):
         for branch, default in (("main", "main"), ("master", "trunk"), ("trunk", "trunk")):
             with self.subTest(branch=branch):
+                # git answers first (#546): origin/HEAD names the default; the host is asked only when git has none.
+                git(self.env.repo, "update-ref", f"refs/remotes/origin/{default}", "HEAD")
+                git(self.env.repo, "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{default}")
                 self.seq({PR_VIEW: [pr("MERGED", branch=branch)], ISSUE_VIEW: CLOSED_ISSUE,
                           REPO_VIEW: [{"stdout": json.dumps({"default_branch": default})}]})
                 p = self.merge()
@@ -192,7 +207,15 @@ class MergeTest(MergeMixin, unittest.TestCase):
         self.assertEqual(self.deletes(), [])
         self.assertTrue(self.local_branch())
 
+    def test_the_default_branch_is_read_from_git_without_a_host_call(self):
+        self.seq({PR_VIEW: [pr("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REF_GET: [OK]})
+        self.assertEqual(self.merge().returncode, 0)
+        self.assertEqual(self.called(list(REPO_VIEW)), [])  # the test repo has `main`: git says so, gh is not asked
+
     def test_unknown_default_deletes_nothing(self):
+        # Neither git (no origin/HEAD, no main or master) nor the host can say.
+        git(self.env.repo, "branch", "-m", "main", "elsewhere")
+        git(self.env.repo, "update-ref", "-d", "refs/remotes/origin/main")
         self.seq({PR_VIEW: [pr("MERGED")], ISSUE_VIEW: CLOSED_ISSUE, REPO_VIEW: [{"exit": 1}]})
         self.assertEqual(self.merge().returncode, 0)
         self.assertEqual(self.deletes(), [])

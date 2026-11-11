@@ -27,8 +27,9 @@ in-progress run of a watched PR, so the count grows with those runs; a run is no
 are reported, until its checks change): a job whose steps are all `completed` yet whose status has stayed `in_progress` for
 5 minutes (`--stuck-after` overrides) prints its `stuck` line once and the watch carries on. Nothing is rerun. A failed
 jobs read is skipped for that tick.
-Each tick is one `gh pr list` request for every PR still watched, so the read load does not grow with the
-number of PRs. The default interval is 30 seconds with one or two PRs and 60 with three or more
+Each tick is one REST pulls read of the open PRs (`github.open_prs_with_heads`), plus one check-rollup query for each
+watched PR that is open and ready (a draft is not asked, a merged or closed one costs one REST read), and the verdict is
+`github.ci_verdict` (#546). The default interval is 30 seconds with one or two PRs and 60 with three or more
 (`--interval` overrides it).
 A ready PR whose head has no check at all for 5 minutes (`--no-run-after` overrides) while the head has workflow files
 (`github.has_workflows`; with none, no run is expected and the watch just waits) did not get a workflow run (GitHub
@@ -64,16 +65,18 @@ FEW, FEW_INTERVAL, MANY_INTERVAL = 2, 30.0, 60.0  # up to FEW PRs poll every FEW
 EXIT_ERROR = 3
 NO_RUN_AFTER = 300.0  # seconds a ready PR may show no check at all before it is reported as having no CI run
 HEAD_ARG = re.compile(r"\?|[0-9a-fA-F]{7,40}")  # the head half of merge's `wait-ci <pr> <head>` hint
-STUCK_AFTER = 300.0  # seconds a job with every step completed may stay in_progress before it is reported as stuck
+NOT_FOUND = re.compile(r"\bHTTP 404\b")  # the host's answer for a PR number it does not know
+STUCK_AFTER = 300.0 # seconds a job with every step completed may stay in_progress before it is reported as stuck
 RUN_URL = re.compile(r"/actions/runs/(\d+)/")  # a check's detailsUrl names its workflow run
-FIELDS = "number,statusCheckRollup,mergeStateStatus,headRefOid,state,isDraft"
-BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"}
-SKIPPED = {"SKIPPED", "NEUTRAL"}  # a check that did not run: alone it proves nothing (see judge)
-PENDING_STATES = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
 
 def judge(view: dict):
-    """'pass' | 'fail' | None (still pending) from one `gh pr view --json` result."""
+    """'pass' | 'fail' | None (still pending) from one PR view (state, isDraft, statusCheckRollup).
+
+    The CI classification is `github.ci_verdict`, the one the gate and merge use (#546), asked to wait while any check is
+    pending. It keeps #669's rule: a rollup of only skipped checks is pending, never a pass (a push to a draft skips
+    the `test` job, and until the ready_for_review run joins the rollup those skips are the head's only checks); the
+    no-run clock below can end that wait. A mix with a real result stays a pass: path-filtered jobs skip legitimately."""
     if view.get("state") in ("MERGED", "CLOSED"):
         return "pass" if view["state"] == "MERGED" else "fail"
     if view.get("isDraft"):
@@ -81,26 +84,12 @@ def judge(view: dict):
     checks = view.get("statusCheckRollup") or []
     if not checks:
         return None
-    results = []
-    for c in checks:
-        # CheckRun has status+conclusion; a commit StatusContext has only state.
-        if "status" in c and c.get("status") != "COMPLETED":
-            return None
-        r = (c.get("conclusion") or c.get("state") or "").upper()
-        if r in PENDING_STATES or not r:
-            return None
-        results.append(r)
-    if any(r in BAD for r in results):
-        return "fail"
-    # Every check skipped is not a pass: a push to a draft skips the `test` job, and until the ready_for_review run
-    # joins the rollup the head's only checks are those skips. Pending, so the no-run clock below can end the wait.
-    # A mix with a real result (SUCCESS beside SKIPPED) stays a pass: path-filtered jobs skip legitimately.
-    return None if all(r in SKIPPED for r in results) else "pass"
+    return {"pass": "pass", "failed": "fail"}.get(github.ci_verdict(checks, wait_for_all=True)[0])
 
 
 def has_ran(checks) -> bool:
     """True when the rollup holds a check that ran or is on its way (anything but a skip): the no-run clock stops."""
-    return any((c.get("conclusion") or c.get("state") or "").upper() not in SKIPPED | {""} or c.get("status") not in (None, "COMPLETED")
+    return any((c.get("conclusion") or c.get("state") or "").upper() not in github.CI_SKIPPED | {""} or c.get("status") not in (None, "COMPLETED")
                for c in checks or [])
 
 
@@ -145,22 +134,43 @@ def interval_for(count: int, given=None) -> float:
     return FEW_INTERVAL if count <= FEW else MANY_INTERVAL
 
 
-def view_prs(root):
-    """({number: view}, None) on success, (None, reason) after a `gh` failure to retry. One request covers every
-    PR; merged and closed ones are listed too (--state all) so they settle at once. Raises GhError when
-    retrying cannot help: `gh` missing, no repository, or a reply that is not a list."""
-    # Trade-off: this reads statusCheckRollup for up to 200 PRs per tick, a heavier reply than one `pr view`, but
-    # still one request instead of one per PR. Watched PRs are pending, so they are among the newest.
+def view_prs(root, watched):
+    """({number: view}, None) on success, (None, reason) after a `gh` failure to retry. The open PRs come from one REST
+    pulls read (every watched PR that is open, with its draft flag); a watched PR not in it is read on its own to see
+    whether it merged or closed (so it settles at once), and an open, ready one has its check rollup read through
+    `github.pr_view` (one GraphQL query, the rollup having no REST form). A draft is not asked for its checks. A PR the
+    host does not know is left out of the result. Raises GhError when retrying cannot help: `gh` missing, no
+    repository, or a malformed reply."""
+    views = {}
     try:
-        rows = github.call_json("pr", "list", "--state", "all", "--limit", "200", "--json", FIELDS,
-                                shape=list, cwd=root)
+        listed = {str(r["number"]): r for r in github.open_prs_with_heads(cwd=root)}
+        for pr in watched:
+            row = listed.get(pr)
+            if row is not None and row["isDraft"]:
+                views[pr] = {"state": "OPEN", "isDraft": True, "headRefOid": row["headRefOid"], "statusCheckRollup": []}
+            elif row is not None:
+                views[pr] = dict(github.pr_view(pr, "state,headRefOid,statusCheckRollup", cwd=root), isDraft=False)
+            else:
+                try:
+                    views[pr] = dict(github.pr_view(pr, "state,headRefOid", cwd=root), isDraft=False, statusCheckRollup=[])
+                except github.GhError as e:
+                    if e.kind != github.FAILED or not NOT_FOUND.search(e.message):
+                        raise  # only a 404 means the host does not know the PR; the rest is a failed tick
     except github.GhError as e:
         # A 5xx that outlasted the retries is one more failed tick, counted against MAX_FAILURES like any other.
         if github.could_not_run(e) and e.kind != github.SERVER_ERROR:
             raise
         print(f"watch-ci: gh failed: {e.message}", file=sys.stderr, flush=True)
         return None, e.message
-    return {str(r["number"]): r for r in rows if isinstance(r, dict) and "number" in r}, None
+    return views, None
+
+
+def merge_state(root, pr) -> str:
+    """The PR's merge state for its `ci` event, read once when it settles; UNKNOWN when the read fails (best effort)."""
+    try:
+        return github.pr_view(pr, "mergeStateStatus", cwd=root)["mergeStateStatus"]
+    except github.GhError:
+        return "UNKNOWN"
 
 
 def in_progress_runs(view: dict):
@@ -267,7 +277,7 @@ def watch(argv=None) -> int:
         github.reset_wait_budget()  # a tick of a loop that runs for hours gets its own wait budget
         github.rate_limited_until = None  # only a limit that ends the run counts for its verdict
         try:
-            views, reason = view_prs(root)
+            views, reason = view_prs(root, pending)
         except github.GhError as e:
             print(f"watch-ci: cannot run gh: {e.message}", file=sys.stderr, flush=True)
             return 2
@@ -319,7 +329,7 @@ def watch(argv=None) -> int:
                                 done.add((run_id, urls))
                     continue
                 pending.remove(pr)
-                merge, head = view.get("mergeStateStatus", "UNKNOWN"), (view.get("headRefOid") or "")[:7]
+                merge, head = merge_state(root, pr), (view.get("headRefOid") or "")[:7]
                 common.also("ci-" + result, pr, view.get("headRefOid") or "?")
                 try:
                     # root is the main checkout resolved at startup, where the run log lives.

@@ -114,27 +114,6 @@ def git(path, *args):
     return common.run("git", *args, cwd=path)
 
 
-def default_base(root):
-    """The default branch's name from git alone (no `gh`): origin/HEAD, else main or master; None when none exists."""
-    r = git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    if r.code == 0 and r.stdout.strip().startswith("origin/"):
-        return r.stdout.strip()[len("origin/"):]
-    for name in ("main", "master"):
-        if any(git(root, "rev-parse", "--verify", "-q", ref).code == 0 for ref in (f"origin/{name}", name)):
-            return name
-    return None
-
-
-def unpushed(path, branch) -> int | None:
-    """Commits no remote has: those past origin/<branch>, or every commit no remote ref has when the branch was never
-    pushed. None when git can't say."""
-    if git(path, "rev-parse", "--verify", "-q", f"origin/{branch}").code == 0:
-        r = git(path, "log", "--format=%H", f"origin/{branch}..")
-    else:
-        r = git(path, "rev-list", "HEAD", "--not", "--remotes")
-    return len(r.stdout.split()) if r.code == 0 else None
-
-
 def liveness(root, branch, wt):
     """(exit code or None, line). Unlocks this session's own lock and a dead one; refuses any other."""
     reason = wt["locked"]
@@ -290,7 +269,7 @@ def run(argv=None) -> int:
         say(f"branch: {'reused' if existing else 'created'} {target}")
         branch = target
 
-    base = default_base(root)
+    base = repo.default_branch(root)
     if base is None:
         return fail("cannot find the default branch (no origin/HEAD, main or master)")
     try:
@@ -319,7 +298,7 @@ def run(argv=None) -> int:
     if left:
         say(f"left behind (not committed): {len(left)} paths under .claude/: " + ", ".join(x[3:] for x in left))
 
-    n = unpushed(path, branch)
+    n = repo.unpushed(path, branch)
     if n is None:
         return fail(f"cannot list the unpushed commits in {path}")
     has_remote = git(path, "rev-parse", "--verify", "-q", f"origin/{branch}").code == 0

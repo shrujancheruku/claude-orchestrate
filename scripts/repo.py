@@ -65,7 +65,32 @@ def main_checkout(repo) -> Path:
     return Path(out.strip()) if code == 0 and out.strip() else repo
 
 
-LEAD_NAME = "lead"  # the name `scripts/launch --lead` gives the lead session
+def default_branch(root, fallback=None):
+    """The default branch's name, one source for every script (#546): git first (`origin/HEAD`, else `main` or `master`
+    when one exists), then `fallback()` when git has none, else None. A caller with a Snapshot passes `lambda:
+    snap.default_branch`, one with only the host passes `github.default_branch`. This module never imports `github`
+    (it sits below it), so the host lookup is the caller's to hand in. `hooks/guard.py` keeps its own file read: it
+    runs under `python3 -I` and imports nothing from here."""
+    r = common.run("git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD", cwd=root)
+    if r.code == 0 and r.stdout.strip().startswith("origin/"):
+        return r.stdout.strip()[len("origin/"):]
+    for name in ("main", "master"):
+        if any(common.run("git", "rev-parse", "--verify", "-q", ref, cwd=root).code == 0 for ref in (f"origin/{name}", name)):
+            return name
+    return fallback() if fallback else None
+
+
+def unpushed(path, branch) -> int | None:
+    """Commits no remote has: those past origin/<branch>, or every commit no remote ref has when the branch was never
+    pushed. None when git can't say. The one count `rescue` and `claims.worktree_state` share (#546)."""
+    if common.run("git", "rev-parse", "--verify", "-q", f"origin/{branch}", cwd=path).code == 0:
+        r = common.run("git", "log", "--format=%H", f"origin/{branch}..", cwd=path)
+    else:
+        r = common.run("git", "rev-list", "HEAD", "--not", "--remotes", cwd=path)
+    return len(r.stdout.split()) if r.code == 0 else None
+
+
+LEAD_NAME = "lead" # the name `scripts/launch --lead` gives the lead session
 
 
 def lead_session(repo) -> tuple:

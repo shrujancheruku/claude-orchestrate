@@ -59,6 +59,7 @@ import config
 import runlog
 import tracker
 from repo import parse_ts, ticket_of_branch
+from repo import unpushed as unpushed_commits  # the one count rescue shares (#546)
 
 LEAD_LABEL = "lead"  # a ticket the lead owns: no worker is dispatched for it
 
@@ -173,11 +174,10 @@ def worktree_state(path, branch) -> tuple:
     """(dirty paths, unpushed commits) in the worktree at `path`. A branch never pushed counts every commit that no
     remote has. A failed git call is ValueError (could not run): an empty answer would read as clean."""
     dirty = len([ln for ln in _git(path, "status", "--porcelain").splitlines() if ln.strip()])
-    if common.run("git", "rev-parse", "--verify", "-q", f"origin/{branch}", cwd=path).code == 0:
-        unpushed = len(_git(path, "log", "--format=%H", f"origin/{branch}..").split())
-    else:
-        unpushed = len(_git(path, "rev-list", "HEAD", "--not", "--remotes").split())
-    return dirty, unpushed
+    count = unpushed_commits(path, branch)
+    if count is None:
+        raise ValueError(f"git could not count the unpushed commits in {path}")
+    return dirty, count
 
 
 def _lock(wt) -> tuple | None:
@@ -294,7 +294,7 @@ class _LazyConfig:
         if name.startswith("_"):
             raise AttributeError(name)
         if self._cfg is None:
-            self._cfg = config.Config.load(self._repo)
+            self._cfg = config.for_checkout(self._repo)  # the main checkout's, never a PR worktree's (#546)
         return getattr(self._cfg, name)
 
 

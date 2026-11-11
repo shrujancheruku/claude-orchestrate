@@ -48,14 +48,14 @@ class Holds(unittest.TestCase):
         self.wt_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.wt_dir.cleanup)
 
-    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=(), shas=None, forks=(), blocked_by=None):
+    def gh(self, prs=None, branches=None, issues=None, merged=(), unclaimed=(), open_tickets=(), lead=(), drafts=(), shas=None, forks=(), blocked_by=None, bodies=None):
         """prs: {number: [paths]}; branches: {number: head branch}; issues: {ticket: state}, where CLOSED leaves the
         ticket out of the open issues and OPEN lists it; merged: head branches of merged PRs; unclaimed: open tickets with
         no assignee; open_tickets: open tickets assigned to the user (as is every other open ticket listed here);
         lead: open tickets labelled `lead`."""
         prs, branches = prs or {}, branches or {}
         listing = [{"number": n, "headRefName": branches.get(n, f"b{n}"), "isCrossRepository": n in forks,
-                    "isDraft": n in drafts, "headRefOid": (shas or {}).get(n)} for n in prs]
+                    "isDraft": n in drafts, "headRefOid": (shas or {}).get(n), "body": (bodies or {}).get(n)} for n in prs]
         open_nums = set(open_tickets) | set(unclaimed) | set(lead) | {n for n, st in (issues or {}).items() if st == "OPEN"}
         nodes = [{"number": n, "labels": {"nodes": [{"name": "lead"}] if n in lead else []},
                   "assignees": {"totalCount": 0 if n in unclaimed else 1},
@@ -192,6 +192,16 @@ class Holds(unittest.TestCase):
         self.assertEqual(r.returncode, 3)
         self.assertEqual(r.stdout.splitlines(), [
             "b.py (held by open PR #10, building #11)", "waits for #11 (still building) to merge: b.py"])
+
+    def test_pr_check_reads_the_prs_branch_body_and_files_from_the_snapshot_not_from_gh(self):
+        # The open PRs list holds the head branch and the body (#546): no `pulls/9` view, and the files are read once.
+        self.gh({9: ["a.py"]}, branches={9: "12-mine"}, bodies={9: "Closes #7"}, open_tickets=[7])
+        self.state({7: ["a.py"]})
+        r = self.holds("--pr", "9")
+        self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (0, "overlap: none"), r.stdout + r.stderr)
+        calls = [c[1] for c in self.env.gh_calls() if len(c) > 1]
+        self.assertNotIn("repos/{owner}/{repo}/pulls/9", calls)
+        self.assertEqual(len([c for c in calls if c.endswith("/pulls/9/files?per_page=100")]), 1, calls)
 
     def test_the_younger_of_two_open_prs_waits_for_the_older_and_exits_3(self):
         self.gh({9: ["a.py", "b.py"], 5: ["b.py", "c.py"]}, branches={9: "7-mine", 5: "4-older"})

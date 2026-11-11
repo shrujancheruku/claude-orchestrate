@@ -167,7 +167,7 @@ def dependencies_check(view, snap, cwd="."):
     if blockers:
         problems.append(f"#{ticket} has {len(blockers)} open blocker(s): "
                         + " ".join(f"#{n} (body)" if from_body else f"#{n}" for n, from_body in blockers))
-    default = github.default_branch(cwd)
+    default = snap.default_branch  # the Snapshot already holds it (#546)
     if view.get("baseRefName") != default:
         problems.append(f"based on {view.get('baseRefName')}, not {default}: a dependency is not merged")
     return check(name, not problems, "\n".join(problems))
