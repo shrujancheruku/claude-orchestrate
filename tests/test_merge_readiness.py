@@ -891,6 +891,24 @@ class ReadinessTest(unittest.TestCase):
                 self.assertEqual(self.snapshot_events(), [("stale", "7", True)])
                 self.assertIn("snapshot-stale", p.stdout)
 
+    def test_a_truncated_file_list_is_judged_by_the_old_to_new_diff_not_the_listed_files(self):
+        # 30 pages of 100 files fill the host's cap, so a skills/ path past them is never listed (#776).
+        link, old = self.linked_launch()
+        new = self.merged_main("hooks/guard.py", "skills/run/SKILL.md")
+        listed = tuple(f"docs/f{i}.md" for i in range(100))
+        p = self.merge(self.approved, files=listed, state="MERGED")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(link.resolve().name, new)
+        self.assertEqual(self.snapshot_events(), [("stale", "7", True)])
+        self.assertIn("snapshot-stale", p.stdout)
+
+    def test_a_truncated_file_list_with_only_a_hook_script_change_stales_nothing(self):
+        link, old = self.linked_launch()
+        new = self.merged_main("hooks/guard.py")
+        p = self.merge(self.approved, files=tuple(f"docs/f{i}.md" for i in range(100)), state="MERGED")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((link.resolve().name, self.snapshot_events()), (new, []))
+
     def test_an_ungated_pr_leaves_the_link_alone(self):
         link, old = self.linked_launch()
         self.merged_main("docs/x.md")

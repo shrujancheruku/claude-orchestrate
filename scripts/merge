@@ -283,13 +283,13 @@ def worker_building(cwd, branch):
         return f"its claim could not be read ({common.one_line(e)})"
 
 
-METHOD_FLAGS = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}
+METHOD_FLAGS = waits.METHOD_FLAGS
 
 
 def merge_command(pr, method, head):
     """The command the developer runs for a gated PR (#706): the config's method, the branch deleted, pinned to the
     reviewed head so a push after the review makes it fail rather than merge unreviewed code."""
-    return f"gh pr merge {pr} {METHOD_FLAGS[method]} --delete-branch --match-head-commit {head}"
+    return waits.merge_command(pr, method, head)
 
 
 def record_wait(cwd, pr, v, title, glob, command):
@@ -825,11 +825,13 @@ def note_snapshot(cwd, pr, default):
     if sha and loaded and run("git", "diff", "--quiet", loaded, sha, "--", "hooks", ".claude-plugin", cwd=cwd).code == 0:
         return
     try:
-        paths = github.pr_touched_paths(pr, cwd)
+        paths, truncated = github.pr_touched(pr, cwd)
     except github.GhError as e:
         say(f"snapshot: could not read the changed files of PR #{pr} ({e.message}); if it touched hooks/ or .claude-plugin/, relaunch")
         return
     hit = next((p for p in paths if p.startswith(PLUGIN_LIVE)), None)
+    if hit is None and truncated:
+        hit = "a file list too long to read"  # a path past the host's cap may sit under hooks/ or skills/: the old..new diff below decides (#776)
     if hit is None:
         return
     if live and sha:

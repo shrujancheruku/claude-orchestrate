@@ -128,6 +128,37 @@ class Waiting(unittest.TestCase):
                       pull(20, title="chore(main): release 1.2.0"), pull(21, title="feat: other")]
         self.assertEqual(self.footer("--plain"), ["\U0001fa75 Release PRs (1)", "  PR #20 chore(main): release 1.2.0"])
 
+    def gated_pr(self, head=HEAD):
+        """An open PR 30 touching hooks/**, green, for the optional `merge-gates` source."""
+        self.config("## Gates\n\n- **Merge gates:** PRs touching `hooks/**` are merged by the developer.\n\n"
+                    "## Developer waits\n\n- sections: merge-gates\n")
+        self.extra = [gh_pulls([{"number": 30, "headRefName": "30-x"}], "open"),
+                      {"args": ["api", "~repos/{owner}/{repo}/pulls/30/files"], "stdout": json.dumps([{"filename": "hooks/guard.py"}])},
+                      pull(30, title="fix: gated", headRefOid=head), checks({"headRefOid": head, "statusCheckRollup": GREEN, "state": "OPEN"})]
+
+    def review(self, outcome, head):
+        runlog.append_event(self.env.repo, runlog.REVIEW, outcome, ref=30, session="s1", round=1, head=head)
+
+    def test_merge_gates_lists_a_green_gated_pr_whose_current_head_is_approved(self):
+        self.gated_pr()
+        self.review("approve", HEAD)
+        self.assertEqual(self.footer("--plain"), [
+            "\U0001f7ea Merge gates (1)",
+            f"  PR #30 fix: gated: approved, green. Merge: ! gh pr merge 30 --squash --delete-branch --match-head-commit {HEAD}"])
+
+    def test_merge_gates_does_not_list_a_green_gated_pr_without_an_approval_of_its_head(self):
+        cases = {"no review": None, "approval of an older head": ("approve", "b" * 40),
+                 "sent back": ("request-changes", HEAD), "approval then a send-back": ("request-changes", HEAD)}
+        for name, event in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.gated_pr()
+                if name == "approval then a send-back":
+                    self.review("approve", HEAD)
+                if event:
+                    self.review(*event)
+                self.assertEqual(self.footer("--plain"), ["Waiting on you: nothing"])
+
     def test_an_entry_for_a_closed_pr_is_dropped_and_cleared(self):
         waits.add(self.env.repo, "PR #7 (#3) x", source="merge", kind="merge-gate", pr=7, ticket=3, head=HEAD, command=COMMAND)
         self.extra = [pull(7, state="CLOSED")]
