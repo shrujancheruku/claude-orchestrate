@@ -124,6 +124,22 @@ class Prompts(unittest.TestCase):
         self.assertEqual(out[2], "by tool: Bash 3, ? 2")
         self.assertEqual(out[4], "2026-11-09T10:05:00+00:00 worker ? Claude requested permissions to edit /r/hooks/guard.py which is a sensitive file.")
 
+    def test_a_notification_seven_seconds_after_its_request_counts_once(self):
+        base = {"session_id": "s1", "agent_type": None, "cwd": "/x", "permission_mode": "default"}
+        self.write([
+            {**base, "time": "2026-11-09T03:34:46+00:00", "source": "request", "tool_name": "AskUserQuestion", "tool_input": {}},
+            {**base, "time": "2026-11-09T03:34:53+00:00", "source": "notification", "tool_name": None, "tool_input": [], "message": "m"},
+        ])
+        self.assertEqual(self.run_prompts().stdout.splitlines()[0], "prompts: 1")
+
+    def test_no_role_and_an_orchestrator_role_under_another_name_are_both_main(self):
+        self.fake_claude([{"sessionId": "H", "name": "mine"}])
+        self.write([
+            entry("2026-11-09T10:00:00+00:00", tool="AskUserQuestion", session="H"),
+            {**entry("2026-11-09T10:01:00+00:00", session="H", command="x"), "role": "orchestrator"},  # a logged orchestrator role on a session named otherwise
+        ])
+        self.assertEqual(self.run_prompts().stdout.splitlines()[1], "by role: main 2")
+
     def test_one_notification_pairs_with_one_request(self):
         base = {"session_id": "s1", "agent_type": None, "cwd": "/x", "permission_mode": "default"}
         self.write([

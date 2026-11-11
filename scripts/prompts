@@ -41,11 +41,12 @@ LOG = Path(".claude") / "orchestrate-prompts.jsonl"
 MARK = Path(".claude") / "orchestrate-prompts.mark"
 LIST_LIMIT = 40
 DETAIL_WIDTH = 200
-PAIR_WINDOW = 2  # seconds between a notification and the request of the same prompt
+PAIR_WINDOW = 10  # seconds between a notification and the request of the same prompt (#766: real gaps run 6-7 s)
 
 
 AGENTS_TIMEOUT = 15  # seconds `claude agents` may take: a hung call falls back to {} (#718) instead of hanging prompts, and the sweep with it
 LEAD_NAME = "lead"  # the name scripts/launch --lead gives the lead's session
+ORCHESTRATOR_NAME = "orchestrator"  # the name scripts/launch gives the orchestrator's session
 _names = None
 
 
@@ -68,19 +69,24 @@ def session_names() -> dict:
 
 
 def role(entry: dict) -> str:
-    """Whose prompt it is (#642): `agent_type` set -> that role; else the `role` field the hook logged from
-    ORCHESTRATE_ROLE (`orchestrator`); else a session named `lead` in `claude agents --json --all` -> `lead`; else
-    `main`, a hand-started session. Lines logged before the `role` field fall to the name lookup, then `main`."""
+    """Whose prompt it is (#642, #766): `agent_type` set -> that role; else a session named `lead` in
+    `claude agents --json --all` -> `lead`; else the `role` field the hook logged from ORCHESTRATE_ROLE
+    (`orchestrator`), only when the session is unnamed there or named `orchestrator` (a session with another name
+    is hand-started); else `main`, a hand-started session. Lines logged before the `role` field fall to the
+    name lookup, then `main`."""
     agent = entry.get("agent_type")
     if isinstance(agent, str) and agent:
         return agent.split(":", 1)[-1]
     # A notification of a worker's prompt may carry no agent_type, but its type says whose prompt it is.
     if entry.get("notification_type") == "worker_permission_prompt":
         return "worker"
-    if entry.get("role") == "orchestrator":
-        return "orchestrator"
-    if session_names().get(entry.get("session_id")) == LEAD_NAME:
+    name = session_names().get(entry.get("session_id"))
+    if name == LEAD_NAME:
         return LEAD_NAME
+    # Trust a logged `orchestrator` role only for a session scripts/launch could have named `orchestrator`; a session
+    # `claude agents` knows under another name is a hand-started one (#766), so it falls to `main`.
+    if entry.get("role") == "orchestrator" and name in (None, ORCHESTRATOR_NAME):
+        return "orchestrator"
     return "main"
 
 
