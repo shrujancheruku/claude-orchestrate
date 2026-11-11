@@ -151,6 +151,8 @@ def view_prs(root, watched):
             if row is not None and row["isDraft"]:
                 views[pr] = {"state": "OPEN", "isDraft": True, "headRefOid": row["headRefOid"], "statusCheckRollup": []}
             elif row is not None:
+                if pr not in rollups:  # a PR the batch did not return is a malformed reply, not a crash
+                    raise github.GhError(github.MALFORMED, f"gh returned no rollup for PR {pr}")
                 views[pr] = dict(rollups[pr], isDraft=False)
             else:
                 try:

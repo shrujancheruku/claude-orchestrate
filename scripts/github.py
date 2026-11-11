@@ -750,12 +750,22 @@ ROLLUPS_QUERY = ("query($owner: String!, $name: String!) {\n  repository(owner: 
                  + ROLLUP_ALIAS + "\n  }\n}")
 
 
+# The query's cost grows as (1 + 2N)/100 points for N aliases (#774), so past a set size it splits into chunks of
+# ROLLUP_CHUNK: each chunk then costs (1 + 2 * 25)/100, i.e. the 1-point minimum, however many PRs are watched.
+ROLLUP_CHUNK = 25
+
+
 def pr_rollups(prs, cwd=None) -> dict:
     """{pr: {"state", "headRefOid", "statusCheckRollup"}} for each PR in `prs`, each equal to
     `pr_view(pr, "state,headRefOid,statusCheckRollup")`, from one GraphQL query for all of them."""
-    prs = [_pr_number(p) for p in prs]
-    if not prs:
-        return {}
+    prs = list(dict.fromkeys(_pr_number(p) for p in prs))  # one key form ("12", never 12 or "#12"), each PR once
+    out = {}
+    for i in range(0, len(prs), ROLLUP_CHUNK):  # a fixed-size chunk per query keeps its cost inside the budget
+        out.update(_pr_rollups_chunk(prs[i:i + ROLLUP_CHUNK], cwd))
+    return out
+
+
+def _pr_rollups_chunk(prs, cwd=None) -> dict:
     aliases = "\n".join(ROLLUP_ALIAS.replace("pr0: pullRequest(number: 0)", f"pr{int(n)}: pullRequest(number: {int(n)})")
                         for n in prs)
     query = ROLLUPS_QUERY.replace(ROLLUP_ALIAS, aliases)

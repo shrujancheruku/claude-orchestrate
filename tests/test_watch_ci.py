@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -134,6 +135,18 @@ class WatchCi(unittest.TestCase):
         mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(mod)
         return mod
+
+    def test_a_pr_missing_from_the_rollups_is_a_gh_error_not_a_key_error(self):
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(sys.path.remove, str(SCRIPTS))
+        mod = self.load()
+        row = {"number": 5, "isDraft": False, "headRefOid": "abc"}
+        with mock.patch.object(mod.github, "open_prs_with_heads", return_value=[row]), \
+                mock.patch.object(mod.github, "pr_rollups", return_value={}), \
+                mock.patch.object(mod.github, "could_not_run", return_value=True):
+            with self.assertRaises(mod.github.GhError) as caught:
+                mod.view_prs(".", ["5"])
+        self.assertEqual(caught.exception.kind, mod.github.MALFORMED)
 
     def test_parse_targets_takes_merges_hint_shape(self):
         parse = self.load().parse_targets
@@ -454,6 +467,23 @@ class PrRollups(unittest.TestCase):
             got = self.github.pr_rollups(["1", "2"])
         self.assertEqual(got, {"1": {"own": 1}, "2": {"own": 1}})
         self.assertEqual(view.call_count, 2)
+
+    def test_a_large_batch_splits_into_chunks_within_the_cost_budget(self):
+        """(1 + 2N)/100 points per query (#774): no query holds more than ROLLUP_CHUNK aliases, so none costs over 1 point."""
+        n = 3 * self.github.ROLLUP_CHUNK + 7
+        sizes = []
+
+        def reply(*args, **kw):
+            query = next(a for a in args if a.startswith("query="))
+            aliases = [int(m) for m in re.findall(r"pr(\d+): pullRequest", query)]
+            sizes.append(len(aliases))
+            return {"data": {"repository": {f"pr{i}": self.node() for i in aliases}}}
+
+        with mock.patch.object(self.github, "call_json", side_effect=reply):
+            got = self.github.pr_rollups([str(i) for i in range(1, n + 1)] + [1])  # a repeat is read once
+        self.assertEqual(sorted(got), sorted(str(i) for i in range(1, n + 1)))
+        self.assertEqual(sizes, [self.github.ROLLUP_CHUNK] * 3 + [7])
+        self.assertTrue(all((1 + 2 * s) / 100 <= 1 for s in sizes))
 
     def test_no_ready_pr_makes_no_call(self):
         with mock.patch.object(self.github, "call_json") as call:
