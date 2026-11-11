@@ -90,6 +90,8 @@ class RunLogTest(unittest.TestCase):
             {**PASS, "greedy": "yes"},
             {**PASS, "dispatched": ["7"]},
             {**PASS, "claimed": {"1": 2}},
+            {**PASS, "lead": 7},  # the lead is a session id or null
+            {**PASS, "lead": ["a"]},
             {"scope": "nudge", "nudged": []},
             {"scope": "nudge", "nudged": [3], "slots": 2},
             [1],
@@ -105,6 +107,11 @@ class RunLogTest(unittest.TestCase):
         runlog.append_pass(self.repo, "s", {"scope": "wake", "slots": 2, "free": 1})
         runlog.append_pass(self.repo, "s", {"scope": runlog.NUDGE_SCOPE, "nudged": [4]})
         self.assertEqual(len(runlog.read_passes(self.repo, "s")), 5)  # the nudge is not a pass
+
+    def test_a_pass_record_takes_a_lead_session_id_or_null(self):
+        runlog.append_pass(self.repo, "s", {**PASS, "lead": "abc-123"})
+        runlog.append_pass(self.repo, "s", {**PASS, "lead": None})
+        self.assertEqual([p["lead"] for p in runlog.read_passes(self.repo, "s")], ["abc-123", None])
 
     def test_a_removed_worktree_still_resolves_to_the_main_checkout(self):
         # The harness removes a worktree when its agent ends, but a transcript still names its path.
