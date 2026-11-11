@@ -1970,6 +1970,25 @@ ORCHESTRATOR_FORMS = (
     # Taking an open PR out of the merge queue (#708): `park-pr <pr> --why "<text>"` and `park-pr <pr> --unpark`, nothing else.
     Form("park-pr", ("pr",), {"--why": "word", "--repo": "repo"}, need=("--why",)),
     Form("park-pr", ("pr",), {"--unpark": "", "--repo": "repo"}, need=("--unpark",)),
+    # The tracker writes of a stop, a hand-back and a marker comment (#661): one row per verb of `transition`. A file flag
+    # ("under") names a file in this session's scratchpad, so the text a comment carries is text the run itself wrote.
+    Form("transition", ("handback", "n"), {"--branch": "word", "--pr": "num", "--blocked-by": "num*", "--title": "word", "--repo": "repo"},
+         need=("--branch",)),
+    Form("transition", ("fallback", "n"), {"--repo": "repo"}),
+    Form("transition", ("abandon", "n"), {"--pr": "num", "--repo": "repo"}),
+    Form("transition", ("stop-for-lead", "n"), {"--question-file": "under", "--branch": "word", "--repo": "repo"},
+         need=("--question-file", "--branch")),
+    Form("transition", ("adr-hold", "n"), {"--pr": "num", "--conflicts-file": "under", "--repo": "repo"},
+         need=("--pr", "--conflicts-file")),
+    Form("transition", ("undelivered", "n"), {"--head": "hash", "--gist-file": "under", "--repo": "repo"},
+         need=("--head", "--gist-file")),
+    Form("transition", ("resent", "n"), {"--head": "hash", "--repo": "repo"}, need=("--head",)),
+    Form("transition", ("to-human", "n"), {"--question-file": "under", "--branch": "word", "--repo": "repo"},
+         need=("--question-file",)),
+    Form("transition", ("to-info", "n"), {"--question-file": "under", "--branch": "word", "--repo": "repo"},
+         need=("--question-file",)),
+    # fold <from> <into>: the lead's and the orchestrator's duplicate fold (#660), on any main session.
+    Form("fold", ("n", "n"), {"--repo": "repo", "--session": "word", "--snapshot": "snapshot"}),
     Form("scratch", ("pr", "hash"), {"--under": "under", "--repo": "repo"}, need=("--under",)),
     # worker-report: a worker's completion, and a reviewer's (which may post its risk notes once).
     Form("worker-report", ("n",), {"--branch": "word", "--repo": "repo"}, need=("--branch",)),

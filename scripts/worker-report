@@ -48,6 +48,7 @@ import common
 import github
 import runlog
 import session
+import tracker
 
 STOP_REASONS = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
                 "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied", "worktree-gone", "transient")
@@ -211,7 +212,7 @@ def record_review(repo, pr, words, text) -> None:
 
 
 # The first line of the fallback comment `--post-risk-notes` posts (scripts/lead-brief reads it back by this line).
-RISK_MARKER = "> *Risk notes (review not posted).*"
+RISK_MARKER = tracker.RISK_MARKER  # one definition, shared with the transition and lead-brief readers
 RISK_NOTE = re.compile(r"^\s*[-*]?\s*`?([^\s`]+:\d+(?:-\d+)?)`?\s+—\s+(\S.*?)\s*$")  # backticks round the location are dropped
 
 

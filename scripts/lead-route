@@ -45,7 +45,6 @@ Stdlib only, Python 3.9+.
 """
 
 import argparse
-import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,15 +55,11 @@ import github
 import tracker
 from repo import STATE, first_line, lead_session, parse_ts, ticket_of_branch
 
-STOP_MARKER = "> *Stopped for the lead.*"  # the first line of every stop comment; run posts it verbatim
-ADR_MARKER = "> *ADR conflict held for the lead.*"  # the first line of an ADR-conflict comment; run posts it verbatim
-# A failure on a lead PR that run could not deliver to the lead, and the comment run posts after resending it. Both
-# carry a line `head <sha>`, the head commit the failure was about: that line is what dedupes a resend.
-UNDELIVERED_MARKER = "> *Waiting on lead (not delivered).*"
-RESENT_MARKER = "> *Resent to lead.*"
-HEAD_LINE = re.compile(r"^head ([0-9a-f]{40})$", re.MULTILINE)
+# The marker strings (the first line of a stop, an ADR-conflict, an undelivered and a resent comment) live in tracker.py;
+# `scripts/transition` writes them, so a typed one never drifts (#661). The two `head <sha>` comments carry the head
+# commit the failure was about: that line is what dedupes a resend.
+from tracker import ADR_MARKER, HEAD_LINE, NEEDS_LEAD, RESENT_MARKER, STOP_MARKER, UNDELIVERED_MARKER
 BRIEF_HEADING = "## Agent Brief"
-NEEDS_LEAD = "needs-lead"
 LEAD_LABEL = "lead"  # a ticket the lead owns: its PR is the pipeline's, and no worker is dispatched for it
 UNCAP_AFTER = timedelta(minutes=30)
 
