@@ -182,12 +182,13 @@ def wait_add(path: Path, entry: dict) -> None:
 
 def wait_clear(path: Path, payload: dict) -> None:
     """The prompt was answered or the session moved on (a tool finished, or the turn stopped): clear its entries.
-    Matched by session and agent type, since a subagent shares its parent's session id."""
+    Matched by session and agent type (None for the main session, also on a Stop), since a subagent shares its
+    parent's session id: the orchestrator's end of turn must not clear a worker's open prompt."""
     agent = payload.get("agent_type")
     agent = agent if isinstance(agent, str) and agent else None
     session = payload.get("session_id")
     for wait_id, s, a in prompt_waits(path):
-        if s == session and (a == agent or payload.get("hook_event_name") == "Stop"):
+        if s == session and a == agent:  # a Stop has no agent type: it ends the main session's turn, never a worker's prompt
             append(path, json.dumps({"op": "done", "id": wait_id}, separators=(",", ":")) + "\n")
 
 

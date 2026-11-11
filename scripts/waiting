@@ -7,7 +7,7 @@ With no action it prints the footer: one section per source in the order of the 
 else the terminal, else 100). An empty section is left out; when every section is empty the footer is the one line
 `Waiting on you: nothing`. Colours are the config's `colours:` (16-colour ANSI, defaults red, yellow, blue). `--plain`
 has no ANSI codes and puts one square emoji (red, yellow, blue, ...) before each heading, for the markdown box the lead
-prints after every turn (a Stop hook's output does not reach the terminal, so the lead skill prints this itself).
+prints after every turn (a Stop hook's output is reported not to reach the terminal, untested, so the lead skill prints this itself).
 `enabled: no` prints nothing. A `Developer waits` section that does not parse is one line on stderr, and the defaults.
 
 Sources:
@@ -189,7 +189,7 @@ def optional(name, root, reader) -> Source:
                 continue
             rollup = github.pr_view(p["number"], "statusCheckRollup", root).get("statusCheckRollup")
             if rollup and github.ci_verdict(rollup)[0] == "pass":
-                items.append(f"PR #{p['number']} {pr_title(root, p['number'])}: CI green, waits for your merge")
+                items.append(f"PR #{p['number']} {pr_title(root, p['number'])}: CI green, not checked for approval")
         return Source(items)
     parked = {}
     for ev in runlog.read_kinds(root, [runlog.PARK]):

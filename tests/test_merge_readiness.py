@@ -740,6 +740,16 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual((entry["pr"], entry["gate"], "command" in entry), (7, "hooks/**", False))
         self.assertEqual(self.called(MERGE), [])
 
+    def test_a_gated_pr_behind_main_is_updated_ends_wait_ci_and_records_no_command(self):
+        head = self.push({"hooks/guard.py": "x\n"})
+        self.main_moves("hooks/guard.py", "other\n")  # file overlap: the update cannot be skipped
+        p = self.merge(head, behind="1", approved=head, merge_state="CLEAN", files=("hooks/guard.py",))
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (5, "next: wait-ci 7 ?"), p.stdout + p.stderr)
+        self.assertEqual(self.called(UPDATE), [UPDATE])
+        self.assertEqual(self.called(MERGE), [])
+        (entry,) = self.waits()
+        self.assertEqual((entry["pr"], "command" in entry), (7, False))
+
     def test_a_gated_pr_without_the_approved_head_records_no_command(self):
         self.merge(self.approved, flag=False, files=("gated.txt",))
         (entry,) = self.waits()

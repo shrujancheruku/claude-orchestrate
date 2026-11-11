@@ -231,10 +231,11 @@ class PromptWaits(unittest.TestCase):
         self.send("PostToolUse", tool_name="Read", tool_input={}, agent_type="orchestrate:worker")
         self.assertEqual(len(self.live()), 1)
 
-    def test_the_end_of_a_turn_clears_the_session(self):
-        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "x"}, agent_type="orchestrate:worker")
+    def test_the_end_of_a_main_session_turn_clears_its_own_prompt_only(self):
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "x"})
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "y"}, agent_type="orchestrate:worker")
         self.send("Stop")
-        self.assertEqual(self.live(), [])
+        self.assertEqual([e["agent_type"] for e in self.live()], ["orchestrate:worker"])
 
     def test_a_post_tool_event_with_no_waits_file_writes_nothing(self):
         self.send("PostToolUse", tool_name="Bash", tool_input={})
