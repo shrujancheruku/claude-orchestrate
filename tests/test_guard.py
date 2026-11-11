@@ -2490,6 +2490,9 @@ class SubagentScriptBoundaryTest(unittest.TestCase):
             ("reviewer", "threads"): f"{SCRIPTS}/threads 12",
             ("scout", "threads"): f"{SCRIPTS}/threads 12",
             ("scout", "claims"): f"{SCRIPTS}/claims --repo .",
+            ("worker", "issue"): f"{SCRIPTS}/issue 7 --repo .",
+            ("reviewer", "issue"): f"{SCRIPTS}/issue 7 --repo .",
+            ("scout", "issue"): f"{SCRIPTS}/issue 7 --repo .",
         }
         for role, names in GUARD_MODULE.ROLE_SCRIPT_FORMS.items():
             for name in names:
@@ -2500,6 +2503,41 @@ class SubagentScriptBoundaryTest(unittest.TestCase):
                         self.assertTrue(out and out["permissionDecision"] == "allow")
                 else:
                     self.assertEqual((role, name), ("reviewer", name), "add the approved form of this key to the test")
+
+    def test_every_script_a_role_is_approved_to_run_is_in_its_forms(self):
+        # The reason lists from ROLE_SCRIPT_FORMS; these are the scripts compound_approved approves per role (#789).
+        approved_for = {"worker": {"verify", "threads", "issue"}, "reviewer": {"verify", "threads", "scratch", "issue"},
+                        "scout": {"threads", "claims", "issue"}}
+        for role, names in approved_for.items():
+            with self.subTest(role):
+                self.assertLessEqual(names, set(GUARD_MODULE.ROLE_SCRIPT_FORMS[role]))
+
+    def test_a_refusal_never_says_a_role_doesnt_run_issue(self):
+        for role in ("worker", "reviewer", "scout"):
+            with self.subTest(role):
+                reason = self.deny(role, f"{SCRIPTS}/issue 7 --repo /other")
+                self.assertNotIn("doesn't run", reason)
+
+    def test_a_variable_script_path_is_refused_with_the_literal_path_reason(self):
+        for role in ("worker", "reviewer", "scout"):
+            for command in (f"P={GUARD.parent.parent}; $P/scripts/issue 782 --repo . | head -80",
+                            f"P={GUARD.parent.parent}; $P/scripts/issue 782 --repo ."):
+                with self.subTest((role, command)):
+                    reason = self.deny(role, command)
+                    self.assertIn("write the plugin script path literally", reason)
+                    self.assertIn("/issue <n> --repo .", reason)
+                    self.assertNotIn("doesn't run", reason)
+
+    def test_the_literal_issue_path_is_approved_from_a_versioned_and_a_current_root(self):
+        # `r-<hash>/current` is a symlink to the commit-hash root; both spellings resolve to the same scripts.
+        current = self.work / "r-1d8cfc970653" / "current"
+        current.parent.mkdir()
+        current.symlink_to(GUARD.parent.parent)
+        for script in (SCRIPTS, f"{current}/scripts"):
+            for role in ("worker", "reviewer", "scout"):
+                with self.subTest((role, script)):
+                    out = raw(f"orchestrate:{role}", f"{script}/issue 782 --repo .", self.work)
+                    self.assertTrue(out and out["permissionDecision"] == "allow")
 
     def test_a_scout_has_no_verify(self):
         self.assertIn("doesn't run", self.deny("scout", f"{SCRIPTS}/verify --config"))

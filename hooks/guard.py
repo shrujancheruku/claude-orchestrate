@@ -3321,20 +3321,24 @@ def unknown_long_option(cmd: Command) -> tuple | None:
 # The plugin scripts each background role may run, and how (#624). Kept beside the approval rules they describe
 # (worker_work_ok, reviewer_verify_ok, read_only_threads, numberless_threads_form): the keys are the scripts that
 # have such a rule, and a denied call of any other plugin script gets the whole list as its reason.
+ISSUE_FORM = "`{p}/issue <n> --repo .` (a ticket read with the trust filter, ADR-0015; piping it to `head` is fine)"
 ROLE_SCRIPT_FORMS = {
     "worker": {
         "verify": "`{p}/verify --config --branch <branch>` (the brief's `Verify:` line, run once, in the foreground)",
         "threads": "`{p}/threads` with no PR number (`threads`, `threads --all`, `threads resolve <id>... --fixed <sha>`, "
                    "`threads resolve <id>... --left <why> --followup <n>`)",
+        "issue": ISSUE_FORM,
     },
     "reviewer": {
         "verify": "`{p}/verify --config --cwd <scratch checkout>`",
         "threads": "`{p}/threads <pr>`, `threads <pr> --all` and `threads <pr> reopen <id>... --why <why>`",
         "scratch": "`{p}/scratch <pr> <head> --under <your scratchpad>`",
+        "issue": ISSUE_FORM,
     },
     "scout": {
         "threads": "`{p}/threads <pr>` and `threads <pr> --all` (list only)",
         "claims": "`{p}/claims --repo .` (a read of the claims)",
+        "issue": ISSUE_FORM,
     },
 }
 PLUGIN_SCRIPT_WORD = re.compile(r"(?:^|/)scripts/([\w.-]+)$")
@@ -3387,6 +3391,11 @@ def script_reason(role: str, parsed: "Parsed", session: str = "") -> str | None:
         if why:
             return why
     forms = ROLE_SCRIPT_FORMS.get(rules_role(role), {})
+    if any(c.words and c.words[0].dynamic and PLUGIN_SCRIPT_WORD.search(c.words[0].text) for c in parsed.cmds):
+        # plugin_script_command_ok refuses any expansion in the command word, so name that cause first.
+        listing = "; ".join(f.format(p=PLUGIN_SCRIPTS) for f in forms.values())
+        return ("write the plugin script path literally, not through a variable such as `$P` or `$(...)`: "
+                f"a script word the guard can't read is refused. The plugin scripts you may run: {listing}")
     mine = [n for n in names if n in forms]
     if mine and role == "worker" and "threads" in mine and any(
             is_number(w.text) for c in parsed.cmds for w in c.words[1:]):
