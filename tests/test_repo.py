@@ -32,6 +32,26 @@ class TicketOfBranch(unittest.TestCase):
         self.assertEqual(repo.first_line(None), "")
 
 
+class PrTicket(unittest.TestCase):
+    """The PR's ticket is its body's closing reference; the branch's number breaks a tie among several (#751)."""
+
+    def test_a_body_mentioning_another_ticket_first_still_picks_the_branch_number(self):
+        body = "closes #123 was the old behaviour\n\nCloses #751"
+        self.assertEqual(repo.pr_ticket("751-pr-ticket-prefers-branch-closes", body), (751, 751))
+
+    def test_only_matches_that_differ_from_the_branch_return_the_first_one(self):
+        body = "Closes #123\n\nCloses #456"
+        self.assertEqual(repo.pr_ticket("751-x", body), (123, 751))
+
+    def test_no_match_falls_back_to_the_branch_number(self):
+        self.assertEqual(repo.pr_ticket("751-x", "no reference here"), (751, 751))
+        self.assertEqual(repo.pr_ticket("751-x", None), (751, 751))
+
+    def test_a_branch_without_a_number_keeps_the_first_match(self):
+        self.assertEqual(repo.pr_ticket("main", "closes #9\n\ncloses #4"), (9, None))
+        self.assertEqual(repo.pr_ticket("main", "nothing"), (None, None))
+
+
 class ParseTs(unittest.TestCase):
     def test_z_suffix(self):
         self.assertEqual(repo.parse_ts("2026-11-07T10:00:00Z"), datetime(2026, 11, 7, 10, tzinfo=UTC))
