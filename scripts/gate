@@ -64,7 +64,6 @@ SECRET_LINE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|g
 LOCKFILES = {"package-lock.json": "package.json", "yarn.lock": "package.json", "pnpm-lock.yaml": "package.json",
              "poetry.lock": "pyproject.toml", "uv.lock": "pyproject.toml", "Cargo.lock": "Cargo.toml",
              "Gemfile.lock": "Gemfile", "go.sum": "go.mod", "composer.lock": "composer.json"}
-CLOSES = re.compile(r"\bcloses\s+#(\d+)", re.I)
 DIFF_HEADER = re.compile(r"^diff --git a/.* b/(.*)$")
 
 TITLE_RE = re.compile(
@@ -73,6 +72,27 @@ TITLE_RE = re.compile(
 
 def check(name, ok, why=""):
     return checks.Result(name, "pass" if ok else "fail", 0.0, None if ok else 1, why)
+
+
+def title_checks(view, cfg):
+    """The title checks: Conventional Commits, plus the ticket suffix ` (#<n>)` when the config's PR title convention asks
+    for it (#695). The suffix names the ticket the body closes (`Closes #<n>`), so a title with no closing reference to
+    match, a wrong number or a doubled suffix fails, and the reason names the expected ending."""
+    title = view.get("title") or ""
+    results = [check("title follows Conventional Commits", bool(TITLE_RE.match(title)),
+                     f"title: {view.get('title')!r}\nexpected: type(scope): description")]
+    if not cfg.pr_title_ticket:
+        return results
+    m = repo.CLOSES.search(view.get("body") or "")
+    if m is None:
+        results.append(check("title ends with the ticket number", False,
+                             "the body has no closing reference `Closes #<n>`, so the title's ticket cannot be matched"))
+        return results
+    want = f" (#{m.group(1)})"
+    ok = title.endswith(want) and not re.search(r"\(#\d+\)\s*$", title[:-len(want)])
+    results.append(check("title ends with the ticket number", ok,
+                         f"title: {title!r}\nexpected: the title ends with {want.strip()!r}, once (fix with `gh pr edit --title`)"))
+    return results
 
 
 def parse_diff(diff):
@@ -114,10 +134,7 @@ def review_tier(view, changed, diff, snap, cwd) -> str:
     """The reviewer tier `S|M|L` of the PR (Config.tier_for): its diff against the config's thresholds, a risk path
     as L, and the ticket's `size:` label as a floor. The ticket is the branch's, else the body's `Closes #n`."""
     cfg = config.for_checkout(cwd)  # the main checkout's config, not the PR's (#535)
-    ticket = repo.ticket_of_branch(view.get("headRefName"))
-    if ticket is None:
-        m = CLOSES.search(view.get("body") or "")
-        ticket = int(m.group(1)) if m else None
+    ticket = repo.pr_ticket(view.get("headRefName"), view.get("body"))[0]
     labels = next((i["labels"] for i in snap.issues if i["number"] == ticket), ())
     return cfg.tier_for(changed_lines(diff), len(set(changed)), labels, cfg.risk_hit(changed))
 
@@ -142,10 +159,7 @@ def lockfiles_without_manifest(changed):
 def dependencies_check(view, snap, cwd="."):
     """Pass when the PR's ticket has no open blocker and the PR is based on the default branch."""
     name = "dependencies merged"
-    ticket = repo.ticket_of_branch(view.get("headRefName"))
-    if ticket is None:
-        m = CLOSES.search(view.get("body") or "")
-        ticket = int(m.group(1)) if m else None
+    ticket = repo.pr_ticket(view.get("headRefName"), view.get("body"))[0]
     if ticket is None:
         return check(f"{name} (no ticket)", True)
     problems = []
@@ -201,6 +215,7 @@ def overlap_check(pr, cwd, snap):
         return f"holds could not run: {common.one_line(str(e) or type(e).__name__)}"
     except Exception as e:  # any other crash is could-not-run, never an overlap or a send-back (#424, #618)
         return f"holds could not run: {type(e).__name__}: {common.one_line(str(e))}"
+    NEXT.setdefault("notes", []).extend(w.render() for w in result.waived)
     if result.code == 0:
         return check("no overlap with held paths", True)
     if result.code == 1:
@@ -212,11 +227,10 @@ def overlap_check(pr, cwd, snap):
     return checks.Result("no overlap with held paths: " + "; ".join(result.wait_lines()), WAIT, 0.0, None, "")
 
 
-def outside_map(branch, changed, cwd) -> int:
+def outside_map(ticket, changed, cwd) -> int:
     """How many of the PR's changed files lie outside its ticket's touch map (the worker record in the state file); 0
     when there is no record or no map, or the state cannot be read."""
     try:
-        ticket = repo.ticket_of_branch(branch)
         state = claims.read_state(Path(repo.main_checkout(cwd)) / repo.STATE)
         record = state.get(str(ticket)) if ticket is not None else None
         mapped = touchmap.parse(record.get("touch_map")) if isinstance(record, dict) and isinstance(record.get("touch_map"), str) else []
@@ -241,8 +255,10 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
         if view.get("mergeable", "UNKNOWN") != "UNKNOWN" or attempt == retries:
             break
         time.sleep(delay)
-    results = [check("title follows Conventional Commits", bool(TITLE_RE.match(view.get("title", ""))),
-                     f"title: {view.get('title')!r}\nexpected: type(scope): description")]
+    results = title_checks(view, config.for_checkout(cwd))  # the main checkout's config, not the PR's (#535)
+    ticket, by_branch = repo.pr_ticket(view.get("headRefName"), view.get("body"))
+    if ticket is not None and by_branch is not None and ticket != by_branch:
+        NEXT.setdefault("notes", []).append(f"ticket #{ticket} (branch says #{by_branch})")
     base = base_override or view.get("baseRefName") or "main"
     mergeable = view.get("mergeable", "UNKNOWN")
     behind = None
@@ -282,7 +298,7 @@ def pr_checks(pr, base_override, retries=4, delay=2.5, cwd="."):
         results += query_checks(pr, changed, base, cwd)
     except github.GhError as e:
         return None, f"graphql query check could not run: {e.message}"
-    outside = outside_map(view.get("headRefName"), changed, cwd)
+    outside = outside_map(ticket, changed, cwd)
     if outside:  # information, not a failure: the drift shows at gate time (#398)
         results.append(check(f"touch map: +{outside} files outside the map", True))
     return results, (behind, mergeable == "UNKNOWN", view.get("headRefOid"))
@@ -353,6 +369,8 @@ def run_gate(argv=None) -> int:
         results.append(check("repo-specific checks: malformed run: marker", False,
                              f"{len(malformed)} `run:` marker(s) without a single `backticked` command"))
     print(f"PR #{pr} head {head}")
+    for note in NEXT.get("notes", ()):  # `gate: ...` lines: the PR's ticket source, a waived overlap (#695)
+        print(f"gate: {note}")
     print(checks.format_results(results))
     failed = [r.command for r in results if r.status == "fail"]
     # An UNKNOWN mergeability that was the only failure is not a verdict: rerun, don't send to the worker.
