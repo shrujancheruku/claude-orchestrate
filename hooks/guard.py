@@ -3370,7 +3370,8 @@ def scratch_reason(parsed: "Parsed", session: str) -> str | None:
             value = texts[texts.index("--under") + 1]
             if not any(under_ok(value, s) and not value.startswith("-") for s in scratch_sessions(session)):
                 return (f"`scratch --under {value}` is outside your session scratchpad "
-                        "(`<tmp>/claude-<uid>/<project>/<session>/scratchpad/...`, your own, or your parent session's): "
+                        "(`<tmp>/claude-<uid>/<project>/<session>/scratchpad/...` or `~/.claude/jobs/<session>/tmp`, "
+                        "your own session's or your parent session's): "
                         "name a directory inside it, spelled out in full")
     return None
 

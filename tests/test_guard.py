@@ -2310,8 +2310,9 @@ class ScriptFormsTest(unittest.TestCase):
         self.assertIn("outside your session scratchpad", self.reviewer_reason(command))
         # A transcript that is not a subagent's names no parent.
         flat = self.root / "proj" / parent / "agent-a1.jsonl"
-        self.assertFalse(approved("orchestrate:reviewer", command, self.main, session_id=self.SID))
-        self.assertEqual(self.reviewer_reason(f"{SCRIPTS}/scratch 12 abc1234 --under {pad}", transcript=flat).count("outside"), 1)
+        out = raw("orchestrate:reviewer", command, self.main, session_id=self.SID, transcript=flat, full=True)
+        self.assertNotEqual(out["permissionDecision"], "allow")
+        self.assertIn("outside your session scratchpad", out["permissionDecisionReason"])
 
     def test_every_role_reads_a_ticket_with_the_issue_script(self):
         for role, cwd in (("orchestrate:worker", self.work), ("orchestrate:reviewer", self.main), ("orchestrate:scout", self.main)):
