@@ -737,6 +737,51 @@ def pr_view(pr, fields: str, cwd=None) -> dict:
     return {f: PR_FIELDS[f](pull) for f in wanted}
 
 
+# The ready PRs' rollups of one watch-ci tick, as one aliased query (#770): the first page of each PR's checks,
+# `pr<number>` naming the alias. A PR the page does not settle (more checks, or no node in the reply) is read on its
+# own through `pr_view`, so its result, or its error, is the unbatched one.
+# ROLLUPS_QUERY holds one alias (`pr0`, the unit its cost is priced on); `pr_rollups` repeats that block per PR.
+ROLLUP_ALIAS = """    pr0: pullRequest(number: 0) { state headRefOid
+      commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
+        pageInfo { hasNextPage } nodes {
+        __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state } } } } } } }
+    }"""
+ROLLUPS_QUERY = ("query($owner: String!, $name: String!) {\n  repository(owner: $owner, name: $name) {\n"
+                 + ROLLUP_ALIAS + "\n  }\n}")
+
+
+def pr_rollups(prs, cwd=None) -> dict:
+    """{pr: {"state", "headRefOid", "statusCheckRollup"}} for each PR in `prs`, each equal to
+    `pr_view(pr, "state,headRefOid,statusCheckRollup")`, from one GraphQL query for all of them."""
+    prs = [_pr_number(p) for p in prs]
+    if not prs:
+        return {}
+    aliases = "\n".join(ROLLUP_ALIAS.replace("pr0: pullRequest(number: 0)", f"pr{int(n)}: pullRequest(number: {int(n)})")
+                        for n in prs)
+    query = ROLLUPS_QUERY.replace(ROLLUP_ALIAS, aliases)
+    data = call_json("api", "graphql", "-f", f"query={query}", "-F", "owner={owner}", "-F", "name={repo}", cwd=cwd)
+    try:
+        repo = data["data"]["repository"]
+        if not isinstance(repo, dict):
+            raise TypeError
+    except (KeyError, TypeError):
+        raise GhError(MALFORMED, "gh returned an unexpected reply (pull requests)") from None
+    out = {}
+    for n in prs:
+        node = repo.get(f"pr{int(n)}")
+        try:
+            commits = (node.get("commits") or {}).get("nodes") or []
+            rollup = ((commits[0].get("commit") or {}).get("statusCheckRollup") or {}) if commits else {}
+            contexts = rollup.get("contexts") or {}
+            if (contexts.get("pageInfo") or {}).get("hasNextPage"):
+                raise ValueError
+            checks = [c for c in contexts.get("nodes") or [] if isinstance(c, dict) and c.get("__typename")]
+            out[n] = {"state": node["state"], "headRefOid": node["headRefOid"], "statusCheckRollup": checks}
+        except (KeyError, TypeError, IndexError, AttributeError, ValueError):
+            out[n] = pr_view(n, "state,headRefOid,statusCheckRollup", cwd=cwd)
+    return out
+
+
 def _pr_view_graphql(pr, wanted, cwd=None) -> dict:
     checks, after, seen = [], None, set()
     for _ in range(PR_CHECK_PAGES):

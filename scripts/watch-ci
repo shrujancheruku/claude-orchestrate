@@ -27,8 +27,8 @@ in-progress run of a watched PR, so the count grows with those runs; a run is no
 are reported, until its checks change): a job whose steps are all `completed` yet whose status has stayed `in_progress` for
 5 minutes (`--stuck-after` overrides) prints its `stuck` line once and the watch carries on. Nothing is rerun. A failed
 jobs read is skipped for that tick.
-Each tick is one REST pulls read of the open PRs (`github.open_prs_with_heads`), plus one check-rollup query for each
-watched PR that is open and ready (a draft is not asked, a merged or closed one costs one REST read), and the verdict is
+Each tick is one REST pulls read of the open PRs (`github.open_prs_with_heads`), plus one check-rollup query for all
+the watched PRs that are open and ready (a draft is not asked, a merged or closed one costs one REST read), and the verdict is
 `github.ci_verdict` (#546). The default interval is 30 seconds with one or two PRs and 60 with three or more
 (`--interval` overrides it).
 A ready PR whose head has no check at all for 5 minutes (`--no-run-after` overrides) while the head has workflow files
@@ -138,18 +138,20 @@ def view_prs(root, watched):
     """({number: view}, None) on success, (None, reason) after a `gh` failure to retry. The open PRs come from one REST
     pulls read (every watched PR that is open, with its draft flag); a watched PR not in it is read on its own to see
     whether it merged or closed (so it settles at once), and an open, ready one has its check rollup read through
-    `github.pr_view` (one GraphQL query, the rollup having no REST form). A draft is not asked for its checks. A PR the
+    `github.pr_rollups` (one aliased GraphQL query for all of them, the rollup having no REST form). A draft is not asked for its checks. A PR the
     host does not know is left out of the result. Raises GhError when retrying cannot help: `gh` missing, no
     repository, or a malformed reply."""
     views = {}
     try:
         listed = {str(r["number"]): r for r in github.open_prs_with_heads(cwd=root)}
+        ready = [pr for pr in watched if pr in listed and not listed[pr]["isDraft"]]
+        rollups = github.pr_rollups(ready, cwd=root)  # one query for every ready PR, not one each (#770)
         for pr in watched:
             row = listed.get(pr)
             if row is not None and row["isDraft"]:
                 views[pr] = {"state": "OPEN", "isDraft": True, "headRefOid": row["headRefOid"], "statusCheckRollup": []}
             elif row is not None:
-                views[pr] = dict(github.pr_view(pr, "state,headRefOid,statusCheckRollup", cwd=root), isDraft=False)
+                views[pr] = dict(rollups[pr], isDraft=False)
             else:
                 try:
                     views[pr] = dict(github.pr_view(pr, "state,headRefOid", cwd=root), isDraft=False, statusCheckRollup=[])
