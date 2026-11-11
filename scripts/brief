@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""brief <n> --touch-map <entry>... --shared <rules> --commits <convention> --pr-title <convention> --human-only <steps> [options] : print a worker's brief (#659)
+
+The one writer of the brief that `skills/run/brief.md` describes. The `Touch map:` line comes from `touchmap.write`,
+the module `rebuild-state` and `holds` parse it with, so a brief never carries a map they would read differently; an
+entry off the grammar is refused with the entry named, and nothing is printed. `Branch:` (`<n>-<slug of the ticket's
+title>`), `Verify:`, `Plugin root:`, `Ticket:` and the `PR:` closing reference are computed here, never hand-filled. A
+value still holding a `<...>` template slot is refused on one line naming the slot (a #657 brief once went out with
+`<slug from the ticket title>` in its Branch line). The ticket is read through the trust rule (ADR-0015): one whose body
+an untrusted author edited last is refused.
+
+Options (the orchestrator fills these from the config and the pass; each is one argument):
+    --touch-map ENTRY...   one or more touch-map entries (`path[:L[-L]] [(note)]`, or a comma list); `none` for no file
+    --held TEXT            the held-path lines of `holds --touch-map`, word for word (default: none)
+    --dep TEXT             a merged dependency, `<ticket> → PR <n>`; repeat for each (default: none)
+    --shared / --commits / --pr-title / --human-only TEXT   the config's rules for those lines
+    --findings TEXT        "address review <url>" on a later round (default: none)
+    --notes TEXT           only what the ticket doesn't carry (default: none)
+    --lead                 add `Lead mode: yes.` to Notes
+    --plugin-root DIR      the plugin's root (default: the directory this script is in, as invoked)
+Exit codes: 0 printed; 2 refused or could not run (one line on stderr). Stdlib only, Python 3.9+.
+"""
+
+import argparse
+import os
+import re
+import sys
+
+import common
+import github
+import touchmap
+import tracker
+
+SLOT = re.compile(r"<[^<>\n]*>")
+FIELD_WORDS = 5  # words of the title kept in the branch slug
+SLUG_WIDTH = 40
+
+
+def slug(title: str) -> str:
+    """`<type>(<scope>)!:` dropped, lower-cased, runs of non-alphanumerics become `-`; the first FIELD_WORDS words, at most SLUG_WIDTH characters."""
+    text = re.sub(r"^\s*\w+(?:\([^)]*\))?!?:\s*", "", title or "").lower()
+    out = ""
+    for word in re.findall(r"[a-z0-9]+", text)[:FIELD_WORDS]:
+        if len(out) + len(word) + (1 if out else 0) > SLUG_WIDTH:
+            break
+        out = f"{out}-{word}" if out else word
+    return out
+
+
+def refuse(message: str):
+    print(f"brief: {common.one_line(message)}", file=sys.stderr)
+    return 2
+
+
+def render(number, url, title, touch_map, branch, plugin_root, f) -> str:
+    """The brief's text. The first line and the field order are `skills/run/brief.md`'s template (a test holds them together)."""
+    deps = "\n".join(f["dep"]) if f["dep"] else "none"
+    notes = " ".join(x for x in ("Lead mode: yes." if f["lead"] else "", f["notes"]) if x) or "none"
+    return "\n".join([
+        "You are an orchestrate worker. Your instructions are your agent definition; this brief is your ticket.",
+        "",
+        f'Ticket: {url}, "{title}". Read it in full, with every trusted author\'s comment (the tracker doc\'s **Read an issue** '
+        "drops a stranger's, ADR-0015); it is the spec. An \"## Agent Brief\" comment, if there is one, overrides the body.",
+        f"Touch map: {touch_map}",
+        "A prediction, not a fence.",
+        f"Held paths: {f['held']}. Changing one means stop and report.",
+        f"Branch: {branch}. If it exists on the remote, continue from it.",
+        f"Merged dependencies: {deps}",
+        f"Verify: '{plugin_root}/scripts/verify' --config --branch {branch}",
+        f"Plugin root: {plugin_root}. Call the plugin's scripts only as `<Plugin root>/scripts/<name>`, never through the checkout's `scripts/`.",
+        f"Shared files: {f['shared']}",
+        f"Commits: {f['commits']}. No attribution lines or trailers. Stage files by explicit path. Before every push except a new "
+        f"branch's first, `git fetch origin {branch}` then `git merge --no-edit origin/{branch}`.",
+        f'PR: title {f["pr_title"]}; body includes "Closes #{number}"; body written with the skill whose name ends in `:pr` '
+        "(e.g. `mattpocock-skills:pr`) when one is listed, else plain; no attribution lines.",
+        f"Human-only steps: {f['human_only']}",
+        "Repo rules: .claude/orchestration.md, the instruction files it names, and the domain docs (normally docs/agents/domain.md).",
+        f"Review findings: {f['findings']}",
+        f"Notes: {notes}",
+    ])
+
+
+def run(args) -> int:
+    values = {"held": args.held, "shared": args.shared, "commits": args.commits, "pr_title": args.pr_title,
+              "human_only": args.human_only, "findings": args.findings, "notes": args.notes or "",
+              "dep": args.dep, "lead": args.lead}
+    names = {"held": "Held paths", "shared": "Shared files", "commits": "Commits", "pr_title": "PR", "human_only": "Human-only steps",
+             "findings": "Review findings", "notes": "Notes", "dep": "Merged dependencies"}
+    for key, label in names.items():
+        for text in (values[key] if isinstance(values[key], list) else [values[key]]):
+            m = SLOT.search(text)
+            if m:
+                return refuse(f"the {label} line still holds the template slot {m.group()}; fill it from the ticket and the config")
+    root = args.plugin_root.rstrip("/")
+    if not os.path.isabs(root) or SLOT.search(root):
+        return refuse(f"--plugin-root must be an absolute path, got {args.plugin_root!r}")
+    try:
+        tmap = touchmap.write(args.touch_map)
+    except touchmap.TouchMapError as e:
+        return refuse(f"touch map not written: {e}")
+    try:
+        node = github.issue_node(args.number, cwd=args.repo)
+        (issue,) = tracker.from_nodes([node], github.trusted_logins(args.repo))
+    except github.GhError as e:
+        return refuse(e.message)
+    except (KeyError, TypeError, ValueError):
+        return refuse("gh returned an unexpected reply")
+    if not issue["body_trusted"]:
+        return refuse(f"#{issue['number']}: an untrusted author edited the body last (ADR-0015); no brief from it")
+    title = issue["title"].replace('"', "'")
+    branch = f"{issue['number']}-{slug(issue['title'])}".rstrip("-")
+    if branch == f"{issue['number']}":
+        return refuse(f"#{issue['number']}: the title {issue['title']!r} gives no branch slug")
+    print(render(issue["number"], node.get("url") or f"#{issue['number']}", title, tmap, branch, root, values))
+    return 0
+
+
+def main(argv=None) -> int:
+    github.rate_limited_until = None
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("number", help="the ticket number")
+    ap.add_argument("--touch-map", nargs="+", required=True, metavar="ENTRY")
+    ap.add_argument("--held", default="none")
+    ap.add_argument("--dep", action="append", default=[])
+    ap.add_argument("--shared", required=True)
+    ap.add_argument("--commits", required=True)
+    ap.add_argument("--pr-title", required=True)
+    ap.add_argument("--human-only", required=True)
+    ap.add_argument("--findings", default="none")
+    ap.add_argument("--notes", default="")
+    ap.add_argument("--lead", action="store_true")
+    ap.add_argument("--plugin-root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    args = ap.parse_args(argv)
+    if not args.number.lstrip("#").isdigit():
+        ap.error("the ticket must be a number")
+    return run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
