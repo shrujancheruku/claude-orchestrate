@@ -799,6 +799,47 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual((entry["pr"], entry["gate"], "command" in entry), (7, "hooks/**", False))
         self.assertEqual(self.called(MERGE), [])
 
+    def test_gate_hold_is_logged_again_when_a_gated_pr_is_not_ready(self):
+        red = [{"name": "verify", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        p = self.merge(self.approved, files=("hooks/guard.py",), checks=red)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: send-back 7", p.stdout + p.stderr)
+        self.assertEqual([e["gate"] for e in self.gate_events()], ["hooks/**"])
+
+    def test_a_readiness_exit_2_on_a_gated_pr_ends_ask_user_not_could_not_run(self):
+        head = self.push({"b.txt": "x\n"})
+        p = self.merge(head, approved=head, files=("hooks/guard.py",), closing=[9], issues={"stdout": "lots"})
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (1, "next: ask-user gate hooks/**"), p.stdout + p.stderr)
+        self.assertEqual((len(self.gate_events()), self.called(MERGE)), (1, []))
+        (entry,) = self.waits()
+        self.assertNotIn("command", entry)
+
+    def test_a_gated_ask_names_both_heads_and_the_own_change_since_the_review(self):
+        approved = self.push({"b.txt": "x\n"})
+        current = self.push({"b.txt": "x\ny\n"})
+        p = self.merge(current, approved=approved, files=("hooks/guard.py",))
+        self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user gate hooks/**", p.stdout + p.stderr)
+        note = f"(approved head {approved[:12]}, current head {current[:12]}: the PR's own change since the review: 1 line(s) in 1 file(s))"
+        self.assertIn(f"approved, green. {note} Merge: ! gh pr merge 7 --squash --delete-branch --match-head-commit {current}", p.stdout)
+        (entry,) = self.waits()
+        self.assertEqual(entry["heads"], note)
+
+    def test_a_gated_ask_says_when_the_new_head_is_only_main_merged_in(self):
+        approved = self.push({"b.txt": "x\n"})
+        self.main_moves("m.txt")
+        git(self.repo, "checkout", "-q", "feat-br")
+        git(self.repo, "merge", "-q", "--no-edit", "main")
+        git(self.repo, "push", "-q", "origin", "feat-br")
+        current = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "main")
+        p = self.merge(current, approved=approved, files=("hooks/guard.py",))
+        self.assertIn("a main-only update, no change of the PR's own", p.stdout, p.stdout + p.stderr)
+
+    def test_a_gated_ask_for_the_approved_head_itself_names_one_head(self):
+        p = self.merge(self.approved, files=("hooks/guard.py",))
+        self.assertNotIn("current head", p.stdout)
+        (entry,) = self.waits()
+        self.assertNotIn("heads", entry)
+
     def test_a_gated_pr_behind_main_is_updated_ends_wait_ci_and_records_no_command(self):
         head = self.push({"hooks/guard.py": "x\n"})
         self.main_moves("hooks/guard.py", "other\n")  # file overlap: the update cannot be skipped

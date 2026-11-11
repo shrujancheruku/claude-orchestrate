@@ -292,14 +292,14 @@ def merge_command(pr, method, head):
     return waits.merge_command(pr, method, head)
 
 
-def record_wait(cwd, pr, v, title, glob, command):
+def record_wait(cwd, pr, v, title, glob, command, heads=None):
     """Put the PR on the developer's waits file (scripts/waits.py), so the lead's footer lists it with no relay (#706).
     The id is the PR's, so recording again replaces the entry. Best effort: an unwritable file loses the footer line only."""
     ticket = repo.pr_ticket(v.get("headRefName"), v.get("body"))[0]
     label = f"PR #{pr}" + (f" (#{ticket})" if ticket else "") + f" {title}".rstrip()
     try:
         waits.add(cwd, label, source="merge", wait_id=f"pr-{pr}", kind="merge-gate", pr=int(pr), ticket=ticket,
-                  head=v.get("headRefOid") or None, gate=glob, command=command)
+                  head=v.get("headRefOid") or None, gate=glob, command=command, heads=heads)
     except OSError as e:
         print(f"merge: could not record the wait for PR #{pr}: {e}", file=sys.stderr)
 
@@ -320,6 +320,22 @@ def clear_wait(cwd, pr):
         waits.clear_pr(cwd, pr)
     except OSError as e:
         print(f"merge: could not clear the wait for PR #{pr}: {e}", file=sys.stderr)
+
+
+def heads_note(cwd, approved, head) -> str:
+    """For the developer's ask: `` (approved <sha>, current <sha>: ...) `` when the head moved since the review (the
+    pinned command names the current one), saying whether the delta is only the default branch merged in; empty when
+    the heads are the same. Readiness already judged the delta within the S thresholds (#776)."""
+    if not approved or approved == head:
+        return ""
+    changes = own_changes(cwd, approved, head, default_branch(cwd))
+    if changes is None:
+        delta = "delta unreadable"
+    elif not changes[0]:
+        delta = "a main-only update, no change of the PR's own"
+    else:
+        delta = f"the PR's own change since the review: {changes[1]} line(s) in {len(changes[0])} file(s)"
+    return f"(approved head {approved[:12]}, current head {head[:12]}: {delta}) "
 
 
 def gate_rule(cwd, pr, branch, v=None, approved=None, method="squash"):
@@ -345,14 +361,20 @@ def gate_rule(cwd, pr, branch, v=None, approved=None, method="squash"):
     not_ready = readiness(cwd, pr, v, approved) if approved else None
     head = v.get("headRefOid") or ""
     ready = bool(approved) and not_ready is None and bool(head)
-    record_wait(cwd, pr, v, title, glob, merge_command(pr, method, head) if ready else None)
+    note = heads_note(cwd, approved, head).strip() if ready else ""
+    record_wait(cwd, pr, v, title, glob, merge_command(pr, method, head) if ready else None, note or None)
     if not_ready is not None:
+        log_event(cwd, "merge", "gate-hold", ref=pr, branch=branch, gate=glob)  # a gated PR is held whether or not it is ready (#776)
+        if not_ready == 2 and github.rate_limited_until is None:
+            # Readiness could not be decided: the gate still holds, so the developer is asked, not `could-not-run` (as before #771).
+            verdict(f"ask-user gate {glob}")
+            return 1
         return not_ready
     kind = "a release PR, " if title.startswith("chore(main): release") else ""
     say(f"PR #{pr} is not merged by a script: {kind}it touches the merge gate {glob}; the developer merges it by hand "
         f"(web UI or `! gh pr merge {pr}`), then run merge again to clean up")
     if ready:
-        say(f"PR #{pr} is ready: approved, green. Merge: ! {merge_command(pr, method, head)}")
+        say(f"PR #{pr} is ready: approved, green. {note + ' ' if note else ''}Merge: ! {merge_command(pr, method, head)}")
     log_event(cwd, "merge", "gate-hold", ref=pr, branch=branch, gate=glob)
     verdict(f"ask-user gate {glob}")
     return 1
