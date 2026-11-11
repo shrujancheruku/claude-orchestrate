@@ -81,6 +81,7 @@ class Claim:
     nudged: str | None = None      # idle only: the same, of the pass's nudge after the dispatch, kept until a real completion
     repeat: tuple = ()             # worker-report outcomes seen twice or more from this ticket's worker (REPEAT_WORDS)
     incomplete: int = 0            # `incomplete` reviewer reports in a row at the end of the open PR's reviews
+    resumed: str | None = None     # paused only: UTC time of the `pause-resume` event that ended this pause (same `since`), else None
     escalate: str | None = None    # the model to escalate to: a haiku worker whose PR hit a mechanical trigger (see escalation)
 
 
@@ -193,7 +194,7 @@ def fmt_ts(dt) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK, runlog.MERGE, runlog.TRANSITION)  # the only kinds a claim's state reads
+CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK, runlog.MERGE, runlog.TRANSITION, runlog.PAUSE_RESUME)  # the only kinds a claim's state reads
 ROUND_LIMIT = 3  # a review of this round is the user's to allow: a PR whose round ROUND_LIMIT-1 asked for changes waits
 REPEAT_WORDS = ("not-a-stop", "missing-report-none")  # worker-report outcomes whose second occurrence the run skill acts on
 
@@ -263,6 +264,28 @@ def greedy_cap(repo) -> int | None:
         last = e
     cap = (last or {}).get("cap")
     return cap if last and last.get("outcome") == "set" and isinstance(cap, int) and not isinstance(cap, bool) else None
+
+
+def _resumed(events, ticket, since) -> str | None:
+    """The time of the newest `pause-resume` event for `ticket` that ended the pause starting at `since`, else None (#788)."""
+    found = None
+    for e in events:
+        if e.get("kind") == runlog.PAUSE_RESUME and str(e.get("ref")) == str(ticket) and e.get("since") == since:
+            found = e.get("ts")
+    return found
+
+
+def resume(repo, claim, session=None) -> tuple:
+    """(True, "") after writing the `pause-resume` event for a paused `claim` not yet resumed, else (False, why).
+
+    The run log, not the skill's memory, says a resume went out: `claims` keeps saying `paused` until the worker's newer
+    report, so a second call for the same `since` is refused (`already resumed <ts>`); a newer pause has a new `since`."""
+    if claim.state != "paused":
+        return False, f"not paused ({claim.state})"
+    if claim.resumed:
+        return False, f"already resumed {claim.resumed}"
+    runlog.append_event(repo, runlog.PAUSE_RESUME, "sent", ref=str(claim.ticket), session=session, since=claim.since)
+    return True, ""
 
 
 def _parked(events) -> set:
@@ -412,6 +435,7 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             # The worker hit a usage-limit or API error: a pass resumes it; only a newer report ends the pause.
             claim.reason, claim.state = report["outcome"], "paused"
             claim.since = fmt_ts(reported) if reported else None
+            claim.resumed = _resumed(events, n, claim.since)
         elif claim.state == "in-review" and _pr_wait(events, pr["number"])[0]:
             claim.reason, event = _pr_wait(events, pr["number"])
             at = parse_ts(event.get("ts"))

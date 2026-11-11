@@ -22,6 +22,9 @@ repeat / incomplete: a line may end `repeat not-a-stop` and `repeat missing-repo
 With `--slots` under greedy (the newest `greedy` run-log event, written by `launch`, is `set`) the cap is the greedy cap and the line ends ` greedy`.
 escalate: a line ends `escalate <model>` when the ticket's haiku worker met a mechanical trigger on its PR (a second `ci fail`, or a `review`
 event of round 2 or later that requested changes): hand the ticket to a new worker on that model. An unanswerable `stopped` report is the orchestrator's judgement, not this word's.
+`claims <n> --resume` (#788): for a paused ticket not yet resumed, writes the `pause-resume` run-log event (ticket, `since` of the pause it ends)
+and prints `#<n> resume send`; any other ticket prints `#<n> resume skip <why>` (`not paused (<state>)` or `already resumed <ts>`) and writes nothing.
+A paused line carries ` resumed <ts>` once the event exists. The run skill sends its resume message only on `send`.
 `claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line, unless `--slots` ends the listing with
 `slots: <building>/<cap> building, <k> parked` (#716): the claims that occupy a slot against the config's Slots count, and the parked
 ones apart. A `parked` claim is listed but never counted against the cap; `done` and `with-lead` claims are not counted either.
@@ -51,7 +54,7 @@ def line(c) -> str:
     lock = "none" if c.lock is None else f"{c.lock[0]} {c.lock[1] if c.lock[1] is not None else '?'}"
     state = c.state
     if c.state in ("waiting", "paused"):
-        state += f" {c.reason} since {c.since or '?'}"
+        state += f" {c.reason} since {c.since or '?'}" + (f" resumed {c.resumed}" if c.resumed else "")
     elif c.state == "idle":
         state += f" since {c.since or '?'}" + (f" nudged {c.nudged}" if c.nudged else "")
     out = (f"#{c.ticket} {state} {c.branch or ('none-yet' if c.pending_branch else 'no-branch')} pr {c.pr if c.pr is not None else 'none'}{' draft' if c.draft else ''} "
@@ -83,6 +86,8 @@ def run(argv=None) -> int:
     ap.add_argument("--session", default=None,
                     help="this session's id: its state-file entry is the current one, not the last rebuilder's (#532)")
     ap.add_argument("--snapshot", default=None, help="read the tracker from this file (scripts/snapshot) instead of fetching")
+    ap.add_argument("--resume", action="store_true",
+                    help="with <ticket>: write the pause-resume event for a paused, not yet resumed claim; print send or skip (#788)")
     ap.add_argument("--slots", action="store_true", help="end the listing with `slots: <building>/<cap> building, <k> parked`")
     args = ap.parse_args(argv)
     if args.session:
@@ -103,6 +108,16 @@ def run(argv=None) -> int:
         found = {args.ticket: found[args.ticket]} if args.ticket in found else {}
         if not found:
             print(f"#{args.ticket} not claimed")
+    if args.resume:
+        if args.ticket is None:
+            common.die("claims: cannot run: --resume needs a <ticket>")
+        if args.ticket in found:
+            try:
+                sent, why = claims.resume(root, found[args.ticket], session=args.session)
+            except runlog.NoSession as e:
+                common.die(f"claims: cannot run: {e}")
+            print(f"#{args.ticket} resume " + ("send" if sent else f"skip {why}"))
+        return 0
     for n in sorted(found):
         print(line(found[n]))
     if args.slots:

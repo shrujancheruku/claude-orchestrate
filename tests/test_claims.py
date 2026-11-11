@@ -359,17 +359,39 @@ class WaitingAndIdle(unittest.TestCase):
         self.report(5, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
         self.assertEqual(self.one(5).state, "waiting")
 
-    def test_p_a_resume_message_does_not_end_the_pause_so_the_skill_sends_it_once_per_since(self):
-        # #747/#757: a SendMessage resume leaves no event `claims` reads; only the worker's newer report ends the pause.
-        # `claims` keeps saying `paused limit since <ts>` with the same ts, and Running out of usage tells the orchestrator
-        # to send one resume per `since` time instead of one per pass.
+    def test_p_a_resume_writes_an_event_and_does_not_end_the_pause(self):
+        # #788: `resume` writes one `pause-resume` event naming the pause it ends; the claim stays `paused` (only the
+        # worker's newer report ends it), now with `resumed` set, and a second resume for that `since` is refused.
+        import runlog
         self.report(6, "limit")
         first = self.one(6, state={"6": WORKER})
+        self.assertIsNone(first.resumed)
+        self.assertEqual(claims.resume(self.tmp.name, first, session="s"), (True, ""))
+        events = runlog.read_kinds(self.tmp.name, (runlog.PAUSE_RESUME,))
+        self.assertEqual([(e["ref"], e["outcome"], e["since"]) for e in events], [("6", "sent", first.since)])
         self.event("ci", "pass", 106)  # other traffic in the log, even on this ticket
         again = self.one(6, state={"6": WORKER})
         self.assertEqual((again.state, again.reason, again.since), (first.state, first.reason, first.since))
+        self.assertEqual(again.resumed, events[0]["ts"])
+        sent, why = claims.resume(self.tmp.name, again, session="s")
+        self.assertFalse(sent)
+        self.assertIn("already resumed", why)
+        self.assertEqual(len(runlog.read_kinds(self.tmp.name, (runlog.PAUSE_RESUME,))), 1)
         self.report(6, "valid")
         self.assertNotEqual(self.one(6, state={"6": WORKER}).state, "paused")
+
+    def test_p_a_new_pause_can_be_resumed_again_and_a_claim_not_paused_is_refused(self):
+        self.report(8, "limit", ts="2026-01-01T00:00:00+00:00")
+        first = self.one(8, state={"8": WORKER})
+        self.assertTrue(claims.resume(self.tmp.name, first, session="s")[0])
+        self.report(8, "error", ts="2026-01-02T00:00:00+00:00")  # a newer pause: a new `since`
+        second = self.one(8, state={"8": WORKER})
+        self.assertNotEqual(second.since, first.since)
+        self.assertIsNone(second.resumed)
+        self.assertTrue(claims.resume(self.tmp.name, second, session="s")[0])
+        self.report(8, "valid")
+        sent, why = claims.resume(self.tmp.name, self.one(8, state={"8": WORKER}), session="s")
+        self.assertEqual((sent, why.startswith("not paused")), (False, True))
 
     def test_p_a_paused_claim_occupies_a_slot(self):
         self.report(6, "limit")
@@ -766,6 +788,25 @@ class Cli(unittest.TestCase):
         line = self.line("7")
         self.assertRegex(line, r"^#7 paused limit since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ none-yet pr none ")
         self.assertTrue(line.endswith(" repeat not-a-stop"), line)
+
+    def test_resume_sends_once_per_pause_and_the_line_shows_resumed(self):
+        self.nodes = [(7, True)]
+        self.harness_worktree("x1")
+        self.record(7, "x1")
+        import runlog
+        runlog.append_event(self.env.repo, runlog.WORKER_REPORT, "limit", ref="7", session="s")
+        self.assertEqual(self.line("7", "--resume", "--session", "s"), "#7 resume send")
+        self.assertRegex(self.line("7"), r"^#7 paused limit since \S+ resumed \S+ none-yet ")
+        self.assertRegex(self.line("7", "--resume", "--session", "s"), r"^#7 resume skip already resumed \d{4}-")
+        self.assertEqual(len(runlog.read_kinds(self.env.repo, (runlog.PAUSE_RESUME,))), 1)
+
+    def test_resume_skips_a_ticket_that_is_not_paused(self):
+        self.nodes = [(7, True)]
+        self.harness_worktree("x1")
+        self.record(7, "x1")
+        import runlog
+        self.assertRegex(self.line("7", "--resume", "--session", "s"), r"^#7 resume skip not paused \(")
+        self.assertEqual(runlog.read_kinds(self.env.repo, (runlog.PAUSE_RESUME,)), [])
 
     def test_slots_reads_the_greedy_cap_back_from_the_run_log(self):
         import runlog
