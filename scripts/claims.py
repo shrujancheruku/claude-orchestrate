@@ -39,7 +39,7 @@ A ticket's worktree is found first from its worker's record (the harness path `.
 checkout on `worktree-agent-<id>`), then by the ticket branch. A worker that stopped before Orient's branch step has
 only the harness branch: its claim has `branch None` and `pending_branch` set, and its worktree is never "gone".
 Annotations, not states, on any open claim: `repeat` lists the worker-report outcomes (`not-a-stop`,
-`missing-report-none`) this ticket's worker has reported twice or more since its dispatch, and `incomplete` counts the
+`fix-report`, `missing-report-none`) this ticket's worker has reported twice or more since its dispatch, and `incomplete` counts the
 `incomplete` reviewer reports in a row that end the PR's reviews, so the run skill applies a word instead of counting
 from its context (#657).
 The run log and the pass log are read from the main checkout (runlog.py); a missing log is no events.
@@ -196,7 +196,7 @@ def fmt_ts(dt) -> str:
 
 CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK, runlog.MERGE, runlog.TRANSITION, runlog.PAUSE_RESUME)  # the only kinds a claim's state reads
 ROUND_LIMIT = 3  # a review of this round is the user's to allow: a PR whose round ROUND_LIMIT-1 asked for changes waits
-REPEAT_WORDS = ("not-a-stop", "missing-report-none")  # worker-report outcomes whose second occurrence the run skill acts on
+REPEAT_WORDS = ("not-a-stop", "fix-report", "missing-report-none")  # worker-report outcomes whose second occurrence the run skill acts on
 
 
 def _repeats(events, ticket, since) -> tuple:

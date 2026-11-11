@@ -98,6 +98,9 @@ def run(args) -> int:
         tmap = touchmap.write(args.touch_map)
     except touchmap.TouchMapError as e:
         return refuse(f"touch map not written: {e}")
+    m = SLOT.search(tmap)  # a note may hold a slot the grammar accepts (`a.py (<files the scout expects>)`)
+    if m:
+        return refuse(f"the Touch map line still holds the template slot {m.group()}; fill it from the ticket and the config")
     try:
         node = github.issue_node(args.number, cwd=args.repo)
         (issue,) = tracker.from_nodes([node], github.trusted_logins(args.repo))

@@ -67,6 +67,12 @@ class Brief(unittest.TestCase):
         self.assertEqual(len(r.stderr.strip().splitlines()), 1)
         self.assertIn("<slug from the ticket title>", r.stderr)
 
+    def test_a_slot_in_a_touch_map_note_is_refused(self):
+        r = self.brief(["a.py (<files the scout expects>)"], check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("<files the scout expects>", r.stderr)
+
     def test_a_slot_in_a_required_line_is_refused_too(self):
         r = self.brief(["a.py"], "--held", "<held-path lines>", check=False)
         self.assertNotEqual(r.returncode, 0)

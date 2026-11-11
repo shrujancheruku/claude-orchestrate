@@ -466,6 +466,12 @@ class WaitingAndIdle(unittest.TestCase):
         self.report(1, "missing-report")
         self.assertEqual(self.one(1, state={"1": WORKER}).repeat, ("not-a-stop", "missing-report-none"))
 
+    def test_a_second_fix_report_is_a_repeat(self):
+        self.report(3, "fix-report")
+        self.assertEqual(self.one(3, state={"3": WORKER}).repeat, ())
+        self.report(3, "fix-report")
+        self.assertEqual(self.one(3, state={"3": WORKER}).repeat, ("fix-report",))
+
     def test_n_a_redispatch_starts_the_count_again_and_a_duplicate_is_not_counted(self):
         self.report(2, "not-a-stop", ts="2026-01-01T08:30:00+00:00")
         self.report(2, "not-a-stop", ts="2026-01-01T09:30:00+00:00")
