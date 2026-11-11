@@ -121,6 +121,39 @@ class Transition(unittest.TestCase):
             self.assertTrue(self.verdict(r).startswith("next: ask-user "))
         self.assertEqual(self.writes(), [])
 
+    def transition_events(self):
+        return [e for e in self.env.events() if e["kind"] == "transition"]
+
+    def test_stop_for_lead_adr_hold_and_to_info_each_write_a_transition_event(self):
+        q = self.file("q.md", "Which?")
+        self.gh()
+        self.run_t("stop-for-lead", 7, "--question-file", q, "--branch", "7-x")
+        self.run_t("adr-hold", 7, "--pr", "9", "--conflicts-file", q)
+        self.run_t("to-info", 7, "--question-file", q)
+        self.assertEqual([(e["outcome"], e["ref"]) for e in self.transition_events()],
+                         [("stop-for-lead", 7), ("adr-hold", 7), ("to-info", 7)])
+        self.assertEqual(self.transition_events()[0]["branch"], "7-x")
+        self.assertEqual(self.transition_events()[1]["pr"], 9)
+
+    def test_a_refused_call_and_the_other_verbs_write_no_transition_event(self):
+        self.gh()
+        self.run_t("stop-for-lead", 7, "--question-file", str(self.tmp / "missing.md"), "--branch", "7-x", check=False)
+        self.run_t("resent", 7, "--head", HEAD)
+        self.assertEqual(self.transition_events(), [])
+
+    def test_claims_reads_the_wait_a_transition_wrote(self):
+        import claims
+        import runlog
+        q = self.file("q.md", "Which?")
+        self.gh()
+        for verb, extra, label, reason in (("stop-for-lead", ["--question-file", q, "--branch", "7-x"], "needs-lead", "question"),
+                                           ("adr-hold", ["--pr", "9", "--conflicts-file", q], "needs-lead", "adr-conflict"),
+                                           ("to-info", ["--question-file", q], "needs-info", "info")):
+            with self.subTest(verb=verb):
+                self.run_t(verb, 7, *extra)
+                events = runlog.read_kinds(self.env.repo, claims.CLAIM_EVENT_KINDS)
+                self.assertEqual(claims._transition_wait(events, 7, {label})[0], reason)
+
     # --- adr-hold ------------------------------------------------------------------------------------------------
 
     def test_adr_hold_posts_the_conflicts_and_the_pr_and_repeats_quietly(self):

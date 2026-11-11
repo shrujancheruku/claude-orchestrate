@@ -26,7 +26,10 @@ The state, decided in this order:
               `permission-denied` stop or an `exhausted` transient one (`permission-denied`, `exhausted`), and only a
               newer report ends it. On a ready PR it replaces in-review: the PR's newest `merge` event is `gate-hold`
               (`gate`: scripts/merge refused it under a config Merge gate), else its newest `review` event asked for
-              changes in round ROUND_LIMIT-1 or later, so the next review is a third round (`round-3`)
+              changes in round ROUND_LIMIT-1 or later, so the next review is a third round (`round-3`). On either, the
+              ticket's newest `transition` event (scripts/transition) while its label is still on is a stop for the lead
+              (`question`: stop-for-lead, `needs-lead`), an ADR conflict (`adr-conflict`: adr-hold, `needs-lead`) or a
+              question for the ticket's author (`info`: to-info, `needs-info`); removing the label ends it (#747)
   paused      replaces building and stalled (never a ready PR): the ticket's newest worker-report event is `limit`
               or `error` (the worker ended on a usage-limit or API error). `reason` is that word, `since` its time. A
               pass resumes it; only a newer report ends it. It occupies a slot and holds its touch map like building
@@ -38,7 +41,7 @@ only the harness branch: its claim has `branch None` and `pending_branch` set, a
 Annotations, not states, on any open claim: `repeat` lists the worker-report outcomes (`not-a-stop`,
 `missing-report-none`) this ticket's worker has reported twice or more since its dispatch, and `incomplete` counts the
 `incomplete` reviewer reports in a row that end the PR's reviews, so the run skill applies a word instead of counting
-from its context (#657). A question and an ADR conflict are not here yet: their writers are #661's.
+from its context (#657).
 The run log and the pass log are read from the main checkout (runlog.py); a missing log is no events.
 """
 
@@ -54,6 +57,7 @@ import common
 import github
 import config
 import runlog
+import tracker
 from repo import parse_ts, ticket_of_branch
 
 LEAD_LABEL = "lead"  # a ticket the lead owns: no worker is dispatched for it
@@ -71,7 +75,7 @@ class Claim:
     changes: tuple | None = None   # (dirty paths, unpushed commits) for a claim with a worktree and no PR
     draft: bool = False            # `pr` is a draft: the ticket is building, not in review
     pending_branch: bool = False   # the worktree is on a `worktree-agent-*` branch: the worker never made the ticket branch
-    reason: str | None = None      # waiting: `permission-denied` | `exhausted` | `gate` | `round-3`; paused: `limit` | `error`
+    reason: str | None = None      # waiting: `permission-denied` | `exhausted` | `gate` | `round-3` | `question` | `adr-conflict` | `info`; paused: `limit` | `error`
     since: str | None = None       # waiting, paused and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report
     nudged: str | None = None      # idle only: the same, of the pass's nudge after the dispatch, kept until a real completion
     repeat: tuple = ()             # worker-report outcomes seen twice or more from this ticket's worker (REPEAT_WORDS)
@@ -189,7 +193,7 @@ def fmt_ts(dt) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK, runlog.MERGE)  # the only kinds a claim's state reads
+CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK, runlog.MERGE, runlog.TRANSITION)  # the only kinds a claim's state reads
 ROUND_LIMIT = 3  # a review of this round is the user's to allow: a PR whose round ROUND_LIMIT-1 asked for changes waits
 REPEAT_WORDS = ("not-a-stop", "missing-report-none")  # worker-report outcomes whose second occurrence the run skill acts on
 
@@ -222,6 +226,22 @@ def _pr_wait(events, pr) -> tuple:
     if last and last.get("outcome") == "request-changes" and isinstance(last.get("round"), int) and last["round"] >= ROUND_LIMIT - 1:
         return "round-3", last
     return None, None
+
+
+# transition verb -> (reason, the label that keeps it waiting)
+TRANSITION_WAITS = {"stop-for-lead": ("question", tracker.NEEDS_LEAD), "adr-hold": ("adr-conflict", tracker.NEEDS_LEAD),
+                    "to-info": ("info", tracker.NEEDS_INFO)}
+
+
+def _transition_wait(events, ticket, labels) -> tuple:
+    """(reason, event) when `ticket`'s newest `transition` event is a stop for the lead, an ADR hold or a to-info whose
+    label is still on the ticket, else (None, None). The label is the evidence the question is unanswered (#747)."""
+    last = None
+    for e in events:
+        if e.get("kind") == runlog.TRANSITION and str(e.get("ref")) == str(ticket):
+            last = e
+    reason, label = TRANSITION_WAITS.get((last or {}).get("outcome"), (None, None))
+    return (reason, last) if reason and label in labels else (None, None)
 
 
 def _incomplete(events, pr) -> int:
@@ -394,6 +414,10 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.since = fmt_ts(reported) if reported else None
         elif claim.state == "in-review" and _pr_wait(events, pr["number"])[0]:
             claim.reason, event = _pr_wait(events, pr["number"])
+            at = parse_ts(event.get("ts"))
+            claim.state, claim.since = "waiting", fmt_ts(at) if at else None
+        elif claim.state in ("building", "stalled", "in-review") and _transition_wait(events, n, labels)[0]:
+            claim.reason, event = _transition_wait(events, n, labels)
             at = parse_ts(event.get("ts"))
             claim.state, claim.since = "waiting", fmt_ts(at) if at else None
         elif claim.state == "building" and record is not None and report and report.get("outcome") == "interim":
