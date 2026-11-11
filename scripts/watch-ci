@@ -138,14 +138,14 @@ def view_prs(root, watched):
     """({number: view}, None) on success, (None, reason) after a `gh` failure to retry. The open PRs come from one REST
     pulls read (every watched PR that is open, with its draft flag); a watched PR not in it is read on its own to see
     whether it merged or closed (so it settles at once), and an open, ready one has its check rollup read through
-    `github.pr_rollups` (one aliased GraphQL query for all of them, the rollup having no REST form). A draft is not asked for its checks. A PR the
+    `github.pr_rollups` (one aliased GraphQL query per 25 PRs, the rollup having no REST form). A draft is not asked for its checks. A PR the
     host does not know is left out of the result. Raises GhError when retrying cannot help: `gh` missing, no
     repository, or a malformed reply."""
     views = {}
     try:
         listed = {str(r["number"]): r for r in github.open_prs_with_heads(cwd=root)}
         ready = [pr for pr in watched if pr in listed and not listed[pr]["isDraft"]]
-        rollups = github.pr_rollups(ready, cwd=root)  # one query for every ready PR, not one each (#770)
+        rollups = github.pr_rollups(ready, cwd=root)  # one query per chunk of 25 ready PRs, not one each (#770)
         for pr in watched:
             row = listed.get(pr)
             if row is not None and row["isDraft"]:

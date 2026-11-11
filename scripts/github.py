@@ -757,7 +757,7 @@ ROLLUP_CHUNK = 25
 
 def pr_rollups(prs, cwd=None) -> dict:
     """{pr: {"state", "headRefOid", "statusCheckRollup"}} for each PR in `prs`, each equal to
-    `pr_view(pr, "state,headRefOid,statusCheckRollup")`, from one GraphQL query for all of them."""
+    `pr_view(pr, "state,headRefOid,statusCheckRollup")`, from one aliased GraphQL query per ROLLUP_CHUNK PRs."""
     prs = list(dict.fromkeys(_pr_number(p) for p in prs))  # one key form ("12", never 12 or "#12"), each PR once
     out = {}
     for i in range(0, len(prs), ROLLUP_CHUNK):  # a fixed-size chunk per query keeps its cost inside the budget
