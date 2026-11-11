@@ -35,7 +35,7 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertLess(fetch, merge)
         self.assertLess(merge, push)
         brief = (ROOT / "skills/run/brief.md").read_text()
-        self.assertIn("before every push, `git fetch origin <Branch>` then `git merge --no-edit origin/<Branch>`", brief)
+        self.assertIn("Before every push, `git fetch origin <Branch>` then `git merge --no-edit origin/<Branch>`", brief)
 
     def test_worker_never_ends_its_turn_to_wait_and_the_rate_limit_notice_is_advisory(self):
         s = (ROOT / "agents/worker.md").read_text()
