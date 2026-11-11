@@ -15,7 +15,7 @@ Otherwise it writes, one line each:
     left: #<n> body untrusted, Blocked by: line not rewritten   a dependent whose body an untrusted author last edited keeps its body (ADR-0015); only its native edge moves
     closed: #<from> duplicate of #<into>    closed as `duplicate`, and `ready-for-agent` removed
     next: folded <from> <into>
-The absorber's `## Agent Brief` comment is the caller's judgement and is not written here. It has no guard row yet, so a call prompts.
+The absorber's `## Agent Brief` comment is the caller's judgement and is not written here. The guard approves a call on any main session (#661).
 Exit codes: 0 folded; 1 refused; 2 could not run (no `gh`, a failed `gh` call, not a repository), one line on stderr; a rate limit it
 would not sleep through also ends `next: retry-after <time>`. A failed `gh` write leaves the steps before it done; the donor is closed
 last, so a re-run finishes the fold (it appends and comments nothing twice: an absorber that already holds the `## Also, folded` heading is skipped). Stdlib only, Python 3.9+.

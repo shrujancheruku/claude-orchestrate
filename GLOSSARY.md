@@ -43,7 +43,7 @@ A ticket assigned to the user; it holds a slot until it merges or is handed back
 _Avoid_: taken, locked, in progress
 
 **Claim**:
-A claimed ticket together with what decides its state: its branch, worktree and lock, its PR, the worker the state file records for it, and its newest **Worker report** in the **Run log**. The state is one of **Building**, **Idle**, **Waiting**, **Stalled**, **Elsewhere**, **In review**, with the lead, or done; **Paused** is the orchestrator's own. `scripts/claims` is the one source: it reports each claim, and the pass table, the board, the lead and every script that needs a claimed ticket's state read its state word. Source: `scripts/claims`, `skills/run/SKILL.md`.
+A claimed ticket together with what decides its state: its branch, worktree and lock, its PR, the worker the state file records for it, and its newest **Worker report** in the **Run log**. The state is one of **Building**, **Idle**, **Paused**, **Waiting**, **Stalled**, **Elsewhere**, **In review**, with the lead, or done. It also carries annotations the run skill applies instead of counting: a repeated `not-a-stop` or `missing-report none` from the worker, and the reviewer's `incomplete` reports in a row. `scripts/claims` is the one source: it reports each claim, and the pass table, the board, the lead and every script that needs a claimed ticket's state read its state word. Source: `scripts/claims`, `skills/run/SKILL.md`.
 _Avoid_: ticket record, worker state, claim state
 
 **Building**:
@@ -51,7 +51,7 @@ A claimed ticket with no ready PR yet (none, or only a **Draft PR**) and a worke
 _Avoid_: running, active
 
 **Paused**:
-A claimed ticket whose worker ended on an API or usage-limit error. Source: `skills/run/SKILL.md` (Running out of usage).
+A **Claim** state: a claimed ticket with no ready PR whose newest **Worker report** is a `limit` or `error` outcome (the worker ended on an API or usage-limit error). A pass resumes it once the limit lifts; it keeps its slot and touch map, and a newer report ends it. Source: `scripts/claims`, `skills/run/SKILL.md` (Running out of usage).
 _Avoid_: suspended, rate-limited
 
 **Stalled**:
@@ -75,7 +75,7 @@ The PR a worker opens as a draft at the end of its Orient, after an empty `chore
 _Avoid_: WIP PR, early PR
 
 **Waiting**:
-A **Claim** state: a claimed ticket with no ready PR that only the user can move, reported with its reason (a `permission-denied` stop, an exhausted transient retry, a gate, a question, a third review round). It is never resumed, rescued or redispatched by a pass, and it does not expire. With a lead live it waits on the lead instead and carries `needs-lead`. Source: `scripts/claims`, `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.
+A **Claim** state: a claimed ticket that only the user can move, reported with its reason and `since` time. With no ready PR: a `permission-denied` stop or an exhausted transient retry. On a ready PR: a gate (`merge` refused it under a config Merge gate) or a third review round (`round-3`: the newest review asked for changes in round 2 or later); a question and an ADR conflict follow with #661. It is never resumed, rescued or redispatched by a pass, and it does not expire: a newer worker-report, merge or review event ends it. With a lead live it waits on the lead instead and carries `needs-lead`. Source: `scripts/claims`, `skills/run/SKILL.md`, `docs/adr/0008-lead-above-orchestrator.md`.
 _Avoid_: blocked, on hold, stalled (a stalled ticket has nobody on it; a waiting one has the user)
 
 **Idle**:
@@ -163,7 +163,7 @@ The PR head commit the reviewer approved. `scripts/merge --approved-head` measur
 _Avoid_: approved SHA, reviewed commit, last-reviewed head
 
 **Hand-back**:
-A swept branch the script could not update and left untouched, reported as a `HANDBACK PR #n <branch>: <path> (<why>)` line (merge exit 4). Not the same as handing a ticket back to the tracker, not a reviewer's result, and not a **Worker report**. Source: `skills/run/SKILL.md`, `agents/worker.md`.
+A swept branch the script could not update and left untouched, reported as a `HANDBACK PR #n <branch>: <path> (<why>)` line (merge exit 4). Not a reviewer's result and not a **Worker report**. Handing a *ticket* back to the tracker (unassign, comment the branch that holds the work and the blockers, rescue the worktree) is a different thing, done by `scripts/transition handback`, which owns every such write (the other verbs: `fallback`, `abandon`, `stop-for-lead`, `adr-hold`, `undelivered`, `resent`, `to-human`, `to-info`). Source: `skills/run/SKILL.md`, `agents/worker.md`, `scripts/transition`.
 _Avoid_: bounce, kick-back
 
 **Conflict list**:
@@ -251,7 +251,7 @@ How long a **Stop** lasts: from its first sign until work on the ticket resumes 
 _Avoid_: answer time, response time (the answer is only one point inside it)
 
 **Stop comment**:
-The comment a worker's question is posted as when its stop goes to the lead: its first line is `> *Stopped for the lead.*`, and `scripts/lead-route` reads it for the stop's time. Source: `scripts/lead-route`, `skills/run/SKILL.md`.
+The comment a worker's question is posted as when its stop goes to the lead: its first line is `> *Stopped for the lead.*`, and `scripts/lead-route` reads it for the stop's time. `scripts/transition stop-for-lead` is the only writer, and the marker string lives in `scripts/tracker.py`, so a typed copy cannot drift. Source: `scripts/transition`, `scripts/tracker.py`, `scripts/lead-route`.
 _Avoid_: stop note, question comment
 
 **Session gap**:

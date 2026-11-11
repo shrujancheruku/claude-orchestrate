@@ -327,6 +327,101 @@ class WaitingAndIdle(unittest.TestCase):
         self.report(7, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
         self.assertEqual(self.one(7, state={"7": self.worker()}).state, "waiting")
 
+    # --- #657: paused, waiting gate / round-3, repeat and incomplete annotations, all from run-log events ---
+
+    def event(self, kind, outcome, ref, **extra):
+        import runlog
+        runlog.append_event(self.tmp.name, kind, outcome, ref=ref, session="s", **extra)
+
+    def test_p_a_limit_or_error_report_pauses_building_and_stalled(self):
+        self.report(1, "limit")
+        self.report(2, "error")
+        c1, c2 = self.one(1, state={"1": WORKER}), self.one(2)
+        self.assertEqual((c1.state, c1.reason, c2.state, c2.reason), ("paused", "limit", "paused", "error"))
+        self.assertTrue(c1.since.endswith("Z"))
+
+    def test_p_a_ready_pr_beats_paused_and_a_newer_report_or_a_draft_ends_it(self):
+        self.report(3, "limit")
+        self.assertEqual(self.one(3, prs=[self.pr(3, "3-x")]).state, "in-review")
+        self.assertEqual(self.one(3, prs=[dict(self.pr(3, "3-x"), isDraft=True)]).state, "paused")
+        self.report(3, "valid")
+        self.assertEqual(self.one(3).state, "stalled")
+
+    def test_p_paused_beats_idle_and_a_permission_denied_report_is_waiting_not_paused(self):
+        self.report(4, "interim")
+        self.report(4, "limit")
+        self.assertEqual(self.one(4, state={"4": self.worker()}).state, "paused")
+        self.report(5, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
+        self.assertEqual(self.one(5).state, "waiting")
+
+    def test_p_a_paused_claim_occupies_a_slot(self):
+        self.report(6, "limit")
+        found = {6: self.one(6, state={"6": WORKER})}
+        self.assertEqual(claims.slot_use(found), (1, 0))
+
+    def test_g_a_gate_hold_on_the_ready_pr_is_waiting_gate_and_a_newer_merge_event_ends_it(self):
+        self.event("merge", "gate-hold", 107, gate="hooks/**")
+        c = self.one(7, prs=[self.pr(7, "7-x")])
+        self.assertEqual((c.state, c.reason), ("waiting", "gate"))
+        self.assertTrue(c.since.endswith("Z"))
+        self.event("merge", "timeout", 107)
+        self.assertEqual(self.one(7, prs=[self.pr(7, "7-x")]).state, "in-review")
+
+    def test_g_a_gate_hold_on_another_pr_or_with_no_ready_pr_changes_nothing(self):
+        self.event("merge", "gate-hold", 199)
+        self.assertEqual(self.one(7, prs=[self.pr(7, "7-x")]).state, "in-review")
+        self.event("merge", "gate-hold", 107)
+        self.assertEqual(self.one(7).state, "stalled")
+
+    def test_r_a_round_two_request_for_changes_makes_the_third_round_wait(self):
+        self.event("review", "request-changes", 108, round=1)
+        self.assertEqual(self.one(8, prs=[self.pr(8, "8-x")]).state, "in-review")
+        self.event("review", "request-changes", 108, round=2)
+        c = self.one(8, prs=[self.pr(8, "8-x")])
+        self.assertEqual((c.state, c.reason), ("waiting", "round-3"))
+        self.event("review", "approve", 108, round=3)
+        self.assertEqual(self.one(8, prs=[self.pr(8, "8-x")]).state, "in-review")
+
+    def test_r_a_gate_beats_round_3(self):
+        self.event("review", "request-changes", 109, round=2)
+        self.event("merge", "gate-hold", 109)
+        self.assertEqual(self.one(9, prs=[self.pr(9, "9-x")]).reason, "gate")
+
+    def test_c_waiting_gate_is_the_same_in_a_fresh_session(self):  # a compaction keeps no context: only the log
+        self.event("merge", "gate-hold", 107)
+        first = self.one(7, prs=[self.pr(7, "7-x")])
+        second = self.one(7, prs=[self.pr(7, "7-x")])
+        self.assertEqual((first.state, first.reason, first.since), (second.state, second.reason, second.since))
+
+    def test_n_a_second_not_a_stop_or_missing_report_none_is_a_repeat(self):
+        self.report(1, "not-a-stop", status="done")
+        self.assertEqual(self.one(1, state={"1": WORKER}).repeat, ())
+        self.report(1, "not-a-stop", status="done")
+        self.report(1, "missing-report")
+        self.report(1, "missing-report", pr=101, head="a" * 40)
+        self.assertEqual(self.one(1, state={"1": WORKER}).repeat, ("not-a-stop",))
+        self.report(1, "missing-report")
+        self.assertEqual(self.one(1, state={"1": WORKER}).repeat, ("not-a-stop", "missing-report-none"))
+
+    def test_n_a_redispatch_starts_the_count_again_and_a_duplicate_is_not_counted(self):
+        self.report(2, "not-a-stop", ts="2026-01-01T08:30:00+00:00")
+        self.report(2, "not-a-stop", ts="2026-01-01T09:30:00+00:00")
+        self.assertEqual(self.one(2, state={"2": self.worker("2026-01-01T08:00:00Z")}).repeat, ("not-a-stop",))
+        self.assertEqual(self.one(2, state={"2": self.worker("2026-01-01T10:00:00Z")}).repeat, ())
+        self.report(3, "not-a-stop")
+        self.report(3, "duplicate")
+        self.assertEqual(self.one(3).repeat, ())
+
+    def test_n_a_reviewer_incomplete_in_a_row_is_counted_on_the_open_pr(self):
+        pr = [self.pr(4, "4-x")]
+        self.assertEqual(self.one(4, prs=pr).incomplete, 0)
+        self.event("review", "incomplete", 104)
+        self.assertEqual(self.one(4, prs=pr).incomplete, 1)
+        self.event("review", "incomplete", 104)
+        self.assertEqual(self.one(4, prs=pr).incomplete, 2)
+        self.event("review", "approve", 104, round=1)
+        self.assertEqual(self.one(4, prs=pr).incomplete, 0)
+
     def test_i_an_interim_after_dispatch_is_idle_though_the_lock_is_ours(self):
         self.report(8, "interim", ts="2026-01-01T10:05:00+00:00")
         c = self.one(8, state={"8": self.worker()}, locked=own_start_reason())
@@ -619,6 +714,32 @@ class Cli(unittest.TestCase):
                             stop_reason="permission-denied", denied_command="gh pr create", session="s")
         self.assertRegex(self.line("7"), r"^#7 waiting permission-denied since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ none-yet pr none ")
         self.assertIn(f"worktree {path} ", self.line("7"))
+
+    def test_a_paused_ticket_and_the_annotations_print_their_words(self):
+        self.nodes = [(7, True)]
+        self.harness_worktree("x1")
+        self.record(7, "x1")
+        import runlog
+        for outcome in ("not-a-stop", "not-a-stop", "limit"):
+            runlog.append_event(self.env.repo, runlog.WORKER_REPORT, outcome, ref="7", session="s")
+        line = self.line("7")
+        self.assertRegex(line, r"^#7 paused limit since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ none-yet pr none ")
+        self.assertTrue(line.endswith(" repeat not-a-stop"), line)
+
+    def test_slots_reads_the_greedy_cap_back_from_the_run_log(self):
+        import runlog
+        self.nodes = [(1, True)]
+        self.worktree("1-widget", reason=own_start_reason())
+        (self.env.repo / ".claude").mkdir(exist_ok=True)
+        (self.env.repo / ".claude" / "orchestration.md").write_text("## Slots\n\n- **Slots:** 2. throttle\n")
+        self.serve()
+        self.assertEqual(self.cli("--slots").stdout.strip().splitlines()[-1], "slots: 1/2 building, 0 parked")
+        runlog.append_event(self.env.repo, runlog.GREEDY, "set", session="launch", cap=6)
+        self.serve()
+        self.assertEqual(self.cli("--slots").stdout.strip().splitlines()[-1], "slots: 1/6 building, 0 parked greedy")
+        runlog.append_event(self.env.repo, runlog.GREEDY, "off", session="launch", cap=None)  # a later plain launch
+        self.serve()
+        self.assertEqual(self.cli("--slots").stdout.strip().splitlines()[-1], "slots: 1/2 building, 0 parked")
 
     def test_an_agent_id_with_the_agent_prefix_finds_it_too(self):
         self.nodes = [(7, True)]

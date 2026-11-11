@@ -43,6 +43,9 @@ An interactive or unknown-kind row keeps the flags above, and takes no prompt.
 --resume-latest resumes for the caller: with no live `orchestrator` row, the stopped row of this repo (its `cwd`)
 with the newest `startedAt`; a tie or a missing `startedAt` falls back to the row `claude agents --json --all`
 lists last. One line on stderr says which sessionId was chosen and why.
+--greedy[=N] takes N from 1 to 8 (5 alone), checked here and nowhere else: `--check-greedy` with it prints `greedy cap N` and launches
+nothing, which is how the run skill refuses a bad cap. A fresh orchestrator launch (not --resume, not --lead, not --print) logs a
+`greedy` run-log event, `set` with the cap or `off`, and `claims --slots` and `frontier --slots` read the newest one back (#657).
 --no-model drops --model whatever the config says. --lead builds the lead's line instead: `--name lead`, crossSessionInbound accepted (a lead in a prompting mode
 holds every pass table from a bypass orchestrator otherwise), `--model` from the config's Lead row (none when the
 row is missing or blank), the plugin flag, prompt "/orchestrate:lead" followed by the same `--greedy[=N]` or ticket
@@ -443,6 +446,8 @@ def parse(argv):
     ap = argparse.ArgumentParser(prog="launch", description=__doc__.split("\n")[0])
     ap.add_argument("ticket", nargs="?", help="a ticket number: run narrows to it")
     ap.add_argument("--greedy", nargs="?", const="", default=None, metavar="N", help="greedy mode, as --greedy=N")
+    ap.add_argument("--check-greedy", action="store_true",
+                    help="with --greedy[=N]: check the cap (1 to 8), print `greedy cap N`, launch nothing")
     ap.add_argument("--profile", action="store_true", help="the run also records itself and saves a profile")
     ap.add_argument("--bg", action="store_true", help="run as a background session")
     ap.add_argument("--resume", metavar="SESSION_ID",
@@ -459,8 +464,17 @@ def parse(argv):
         args.ticket = args.ticket.lstrip("#")
         if not DIGITS.fullmatch(args.ticket):
             common.die(f"launch: cannot run: {args.ticket!r} is not a ticket number")
-    if args.greedy and not DIGITS.fullmatch(args.greedy):
-        common.die(f"launch: cannot run: --greedy={args.greedy} is not a number")
+    args.greedy_cap = None
+    if args.check_greedy and args.greedy is None:
+        common.die("launch: cannot run: --check-greedy needs --greedy[=N]")
+    if args.greedy is not None:
+        try:
+            args.greedy_cap = runlog.greedy_cap(args.greedy)  # the one 1..8 check; the run skill calls it through --check-greedy
+        except ValueError as e:
+            common.die(f"launch: cannot run: {e}")
+    if args.check_greedy:
+        print(f"greedy cap {args.greedy_cap}")
+        sys.exit(0)
     if args.ticket and args.greedy is not None:
         common.die("launch: cannot run: give --greedy or a ticket, not both")
     if args.resume is not None and not TOKEN.fullmatch(args.resume):
@@ -530,6 +544,14 @@ def main(argv=None) -> int:
         # The printed line carries the variable as a shell prefix, so running it by hand starts the same session.
         print("".join(f"{k}={v} " for k, v in extra.items()) + render(cmd))
         return 0
+    if not args.resume and not args.lead:
+        # The greedy cap outlives a compaction in the run log: `claims --slots` and `frontier --slots` read the newest
+        # event back. A start that is not greedy writes `off`, so an older run's cap never carries over (#657).
+        try:
+            runlog.append_event(args.repo, runlog.GREEDY, "off" if args.greedy_cap is None else "set", session="launch",
+                                cap=args.greedy_cap)
+        except (OSError, ValueError, runlog.NoSession) as e:
+            print(f"launch: the greedy event was not logged: {e}", file=sys.stderr)
     if not args.resume and not args.lead and plugin_dir:
         # A fresh orchestrator loads the current snapshot: it ends a `snapshot stale` that merge logged (#727).
         # Best effort, like the resume event; a log that cannot be written leaves frontier holding, which is the safe side.

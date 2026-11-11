@@ -55,7 +55,7 @@ import holds
 import tracker
 from repo import STATE, first_line, parse_ts
 
-RISK_MARKER = "> *Risk notes (review not posted).*"  # the first line of the fallback comment; run posts it verbatim
+from tracker import RISK_MARKER  # the first line of the fallback comment (tracker.py, #661)
 WATERMARK = Path(".claude") / "orchestrate-lead.json"
 FALLBACK_DAYS = 7
 FALLBACK_CAP = 20

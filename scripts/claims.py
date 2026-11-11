@@ -21,15 +21,24 @@ The state, decided in this order:
               record with no `dispatched` is never idle. `since` is that report's time; `nudged` is the time of the pass
               log's `record --nudged` after that dispatch, kept until a real completion (a later interim does not clear it).
               A pass nudges it once, then hands it back
-  waiting     replaces building and stalled (never a ready PR): the ticket's newest worker-report event is a
-              `permission-denied` stop or an `exhausted` transient one. The developer must act; it never expires, and
-              only a newer report ends it. `reason` is `permission-denied` or `exhausted`, `since` the report's time
+  waiting     the user must act; it never expires. `reason` and `since` (the event's time) say which kind:
+              with no ready PR it replaces building and stalled: the ticket's newest worker-report event is a
+              `permission-denied` stop or an `exhausted` transient one (`permission-denied`, `exhausted`), and only a
+              newer report ends it. On a ready PR it replaces in-review: the PR's newest `merge` event is `gate-hold`
+              (`gate`: scripts/merge refused it under a config Merge gate), else its newest `review` event asked for
+              changes in round ROUND_LIMIT-1 or later, so the next review is a third round (`round-3`)
+  paused      replaces building and stalled (never a ready PR): the ticket's newest worker-report event is `limit`
+              or `error` (the worker ended on a usage-limit or API error). `reason` is that word, `since` its time. A
+              pass resumes it; only a newer report ends it. It occupies a slot and holds its touch map like building
   elsewhere   no record, and the worktree on its branch is locked by another live session (ADR 0009)
   stalled     otherwise: no PR, no record, no live lock (dead lock, no lock, no worktree, no branch)
 A ticket's worktree is found first from its worker's record (the harness path `.claude/worktrees/agent-<id>`, or the
 checkout on `worktree-agent-<id>`), then by the ticket branch. A worker that stopped before Orient's branch step has
 only the harness branch: its claim has `branch None` and `pending_branch` set, and its worktree is never "gone".
-`paused` is not here: it is the orchestrator's own overlay (as are a gate, a question and a third review round).
+Annotations, not states, on any open claim: `repeat` lists the worker-report outcomes (`not-a-stop`,
+`missing-report-none`) this ticket's worker has reported twice or more since its dispatch, and `incomplete` counts the
+`incomplete` reviewer reports in a row that end the PR's reviews, so the run skill applies a word instead of counting
+from its context (#657). A question and an ADR conflict are not here yet: their writers are #661's.
 The run log and the pass log are read from the main checkout (runlog.py); a missing log is no events.
 """
 
@@ -62,9 +71,11 @@ class Claim:
     changes: tuple | None = None   # (dirty paths, unpushed commits) for a claim with a worktree and no PR
     draft: bool = False            # `pr` is a draft: the ticket is building, not in review
     pending_branch: bool = False   # the worktree is on a `worktree-agent-*` branch: the worker never made the ticket branch
-    reason: str | None = None      # waiting only: `permission-denied` | `exhausted`
-    since: str | None = None       # waiting and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report
+    reason: str | None = None      # waiting: `permission-denied` | `exhausted` | `gate` | `round-3`; paused: `limit` | `error`
+    since: str | None = None       # waiting, paused and idle: UTC `YYYY-MM-DDTHH:MM:SSZ` of the report
     nudged: str | None = None      # idle only: the same, of the pass's nudge after the dispatch, kept until a real completion
+    repeat: tuple = ()             # worker-report outcomes seen twice or more from this ticket's worker (REPEAT_WORDS)
+    incomplete: int = 0            # `incomplete` reviewer reports in a row at the end of the open PR's reviews
     escalate: str | None = None    # the model to escalate to: a haiku worker whose PR hit a mechanical trigger (see escalation)
 
 
@@ -178,7 +189,60 @@ def fmt_ts(dt) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK)  # the only kinds a claim's state reads
+CLAIM_EVENT_KINDS = (runlog.WORKER_REPORT, runlog.CI, runlog.REVIEW, runlog.PARK, runlog.MERGE)  # the only kinds a claim's state reads
+ROUND_LIMIT = 3  # a review of this round is the user's to allow: a PR whose round ROUND_LIMIT-1 asked for changes waits
+REPEAT_WORDS = ("not-a-stop", "missing-report-none")  # worker-report outcomes whose second occurrence the run skill acts on
+
+
+def _repeats(events, ticket, since) -> tuple:
+    """The REPEAT_WORDS that `ticket`'s worker-report events (a duplicate passed over) carry twice or more after `since`
+    (the worker's dispatch time; None counts the whole log)."""
+    seen = {}
+    for e in events:
+        if e.get("kind") != runlog.WORKER_REPORT or str(e.get("ref")) != str(ticket) or e.get("outcome") == "duplicate":
+            continue
+        ts = parse_ts(e.get("ts"))
+        if since and (not ts or ts <= since):
+            continue
+        word = e.get("outcome")
+        if word == "missing-report" and e.get("pr") is None:
+            word = "missing-report-none"
+        seen[word] = seen.get(word, 0) + 1
+    return tuple(w for w in REPEAT_WORDS if seen.get(w, 0) >= 2)
+
+
+def _pr_wait(events, pr) -> tuple:
+    """(reason, event) when the open PR `pr` waits on the user, else (None, None): `gate` when its newest `merge` event
+    is a `gate-hold`, else `round-3` when its newest `review` event asked for changes in round ROUND_LIMIT-1 or later."""
+    merge = [e for e in events if e.get("kind") == runlog.MERGE and str(e.get("ref")) == str(pr)]
+    if merge and merge[-1].get("outcome") == "gate-hold":
+        return "gate", merge[-1]
+    review = [e for e in events if e.get("kind") == runlog.REVIEW and str(e.get("ref")) == str(pr)]
+    last = review[-1] if review else None
+    if last and last.get("outcome") == "request-changes" and isinstance(last.get("round"), int) and last["round"] >= ROUND_LIMIT - 1:
+        return "round-3", last
+    return None, None
+
+
+def _incomplete(events, pr) -> int:
+    """How many `incomplete` reviewer reports end the PR's `review` events, back to back."""
+    n = 0
+    for e in reversed([e for e in events if e.get("kind") == runlog.REVIEW and str(e.get("ref")) == str(pr)]):
+        if e.get("outcome") != "incomplete":
+            break
+        n += 1
+    return n
+
+
+def greedy_cap(repo) -> int | None:
+    """The greedy cap in force: the `cap` of the newest `greedy` event when it is `set` (scripts/launch writes one per
+    fresh start, `off` for a start that is not greedy), else None. It survives a compaction, which the report line alone
+    did not (#657)."""
+    last = None
+    for e in runlog.read_kinds(repo, [runlog.GREEDY]):
+        last = e
+    cap = (last or {}).get("cap")
+    return cap if last and last.get("outcome") == "set" and isinstance(cap, int) and not isinstance(cap, bool) else None
 
 
 def _parked(events) -> set:
@@ -250,9 +314,12 @@ def slot_use(found) -> tuple:
             sum(1 for c in found.values() if c.state == "parked"))
 
 
-def slots_line(found, cap) -> str:
-    """`slots: <building>/<cap> building, <k> parked` (the cap is `?` when the config has no Slots line)."""
+def slots_line(found, cap, greedy=None) -> str:
+    """`slots: <building>/<cap> building, <k> parked` (the cap is `?` when the config has no Slots line). Under greedy
+    (`greedy_cap`) the cap is the greedy one and the line ends ` greedy`."""
     building, parked = slot_use(found)
+    if greedy is not None:
+        return f"slots: {building}/{greedy} building, {parked} parked greedy"
     return f"slots: {building}/{cap if cap is not None else '?'} building, {parked} parked"
 
 
@@ -321,6 +388,14 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.reason = "permission-denied" if report.get("stop_reason") == "permission-denied" else "exhausted"
             claim.since = fmt_ts(reported) if reported else None
             claim.state = "waiting"
+        elif pr is None and claim.state in ("building", "stalled") and report and report.get("outcome") in ("limit", "error"):
+            # The worker hit a usage-limit or API error: a pass resumes it; only a newer report ends the pause.
+            claim.reason, claim.state = report["outcome"], "paused"
+            claim.since = fmt_ts(reported) if reported else None
+        elif claim.state == "in-review" and _pr_wait(events, pr["number"])[0]:
+            claim.reason, event = _pr_wait(events, pr["number"])
+            at = parse_ts(event.get("ts"))
+            claim.state, claim.since = "waiting", fmt_ts(at) if at else None
         elif claim.state == "building" and record is not None and report and report.get("outcome") == "interim":
             # The worker ended its turn without handing back. Only an interim newer than this worker's own dispatch
             # counts, so a redispatch never reads an older worker's interim as its own.
@@ -331,9 +406,13 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
                 # reads `idle nudged` and the pass hands it back (#690). Only this dispatch's own nudge counts.
                 if n in nudges and nudges[n] > dispatched:
                     claim.nudged = fmt_ts(nudges[n])
-        if wt and pr is None and claim.state in ("building", "idle", "stalled", "waiting", "elsewhere"):
+        if wt and pr is None and claim.state in ("building", "idle", "stalled", "waiting", "paused", "elsewhere"):
             claim.changes = changes(wt["path"], wt["branch"])
-        if claim.state in ("building", "in-review", "idle"):
+        if claim.state in ("building", "in-review", "idle") or (claim.state == "waiting" and claim.pr is not None):
+            # A round-2 request for changes is a `waiting round-3` claim too, and a haiku worker still escalates on it.
             claim.escalate = escalation(events, claim.pr, record, cfg)
+        if claim.state not in ("done", "parked"):
+            claim.repeat = _repeats(events, n, parse_ts((record or {}).get("dispatched")))
+            claim.incomplete = _incomplete(events, shown["number"]) if pr is not None else 0
         out[n] = claim
     return out

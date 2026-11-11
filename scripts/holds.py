@@ -186,7 +186,7 @@ def claimed_paths(found: dict, own, base: str, warn=None) -> tuple:
     for n, c in sorted(found.items()):
         if n == own:
             continue
-        if c.state == "building":
+        if c.state in ("building", "paused"):  # a paused worker is resumed, so its map stays held (#657)
             if c.worker is None:
                 paths = worktree_changes(c.worktree, base) if c.worktree else []
             else:

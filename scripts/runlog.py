@@ -34,6 +34,7 @@ SWEEP = "sweep"  # scripts/sweep: `ran` is the watermark `--due` counts merges f
 PARK = "park"  # scripts/park-pr: a PR taken out of the merge queue (`parked`) or put back (`unparked`); ref = the PR; ticket, branch, why
 SNAPSHOT = "snapshot"  # scripts/merge: `stale` after a merged hooks/** or .claude-plugin/** change (sha = origin/<default>); scripts/launch: `launched` on a fresh launch, which clears it (#727)
 RESCUE = "rescue"  # scripts/rescue: one per rescue that ran (ref = the ticket; branch, reason); `sweep` reports the failed ones
+GREEDY = "greedy"  # scripts/launch: one per fresh start: `set` (cap = the greedy cap) or `off`; `claims` reads the newest back (#657)
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
     GATE: (PASS, FAIL, UNKNOWN),
@@ -51,7 +52,23 @@ OUTCOMES = {
     PARK: ("parked", "unparked"),
     SNAPSHOT: ("stale", "launched"),
     RESCUE: ("ok", "failed"),
+    GREEDY: ("set", "off"),
 }
+GREEDY_DEFAULT, GREEDY_MAX = 5, 8  # `--greedy` alone caps at 5; `--greedy=N` takes N from 1 to 8 (ADR 0007)
+
+
+def greedy_cap(text) -> int:
+    """The greedy cap `--greedy[=N]` names (`text` is N, or empty for the default), the one 1..8 check launch and the
+    run skill share. ValueError, with the line to print, for anything else (#657)."""
+    if text in ("", None):
+        return GREEDY_DEFAULT
+    if not re.fullmatch(r"[0-9]+", str(text)):
+        raise ValueError(f"--greedy={text} is not a number")
+    cap = int(text)
+    if not 1 <= cap <= GREEDY_MAX:
+        raise ValueError(f"--greedy={text}: the cap is 1 to {GREEDY_MAX}")
+    return cap
+
 EVENT_KINDS = tuple(OUTCOMES)
 HANDED_BACK = "handed-back"
 NUDGE_SCOPE = "nudge"  # the pass-log record `record --nudged <ticket>` writes: {"scope": "nudge", "nudged": [<ticket>]}
