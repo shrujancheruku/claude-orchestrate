@@ -7,7 +7,7 @@ rebuilds each card's `Stage` from the tracker, the PRs and `claims` only, so a s
 read left to right as a ticket's life:
     Backlog          open, unclaimed `ready-for-agent` tickets that are not parents, `lead` or `wayfinder:`: the
                      takeable ones in `frontier` order, then the held ones by number (tracker.backlog)
-    Building         claimed, and `claims` says building, idle, elsewhere, stalled or with-lead (a draft PR is building)
+    Building         claimed, and `claims` says building, idle, paused, elsewhere, stalled or with-lead (a draft PR is building)
     In review        claimed, and `claims` says in-review (a ready PR)
     Needs lead       labelled `needs-lead`
     Waiting on you   labelled `ready-for-human` or `needs-info`, or claimed and `claims` says waiting (a
@@ -72,7 +72,7 @@ PROJECT_URL = re.compile(r"^https://[^/]+/(?:orgs|users)/([^/]+)/projects/(\d+)/
 LEAD_LINE = re.compile(r"^LEAD-(TICKET|PR) #(\d+)(?: (\d+))?$")
 # The board is the coarse view: every claim state that is not in review or done is Building. Liveness and stalls
 # stay in the pass table (`claims`).
-CLAIM_STAGE = {"building": BUILDING, "idle": BUILDING, "waiting": WAITING, "elsewhere": BUILDING, "stalled": BUILDING, "with-lead": BUILDING,
+CLAIM_STAGE = {"building": BUILDING, "idle": BUILDING, "paused": BUILDING, "waiting": WAITING, "elsewhere": BUILDING, "stalled": BUILDING, "with-lead": BUILDING,
                "parked": BUILDING, "in-review": REVIEW, "done": DONE}
 
 

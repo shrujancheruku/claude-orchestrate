@@ -281,6 +281,35 @@ class Launch(unittest.TestCase):
         self.assertEqual(self.launch("--print", "--greedy=4", "403").returncode, 2)
         self.assertEqual(self.launch("--print", "abc").returncode, 2)
 
+    def test_a_greedy_cap_outside_1_to_8_is_refused_by_launch_and_by_the_check(self):  # #657
+        for cap in ("9", "0", "100"):
+            for extra in ((), ("--check-greedy",)):
+                with self.subTest(cap=cap, extra=extra):
+                    r = self.launch("--print", f"--greedy={cap}", *extra)
+                    self.assertEqual(r.returncode, 2, r.stdout)
+                    self.assertIn("the cap is 1 to 8", r.stderr)
+        for arg, want in (("--greedy=8", "8"), ("--greedy=1", "1"), ("--greedy", "5")):
+            self.assertEqual(self.launch(arg, "--check-greedy").stdout.strip(), f"greedy cap {want}")
+        self.assertEqual(self.launch("--check-greedy").returncode, 2)
+
+    def greedy_events(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import runlog
+        return [(e["outcome"], e.get("cap")) for e in runlog.read_kinds(self.repo, [runlog.GREEDY])]
+
+    def test_a_print_launch_logs_no_greedy_event(self):
+        self.launch("--print", "--greedy=4")
+        self.assertEqual(self.greedy_events(), [])
+
+    def test_a_fresh_launch_logs_the_greedy_cap_or_off_and_a_resume_logs_none(self):  # #657
+        self.assertEqual(self.launch("--bg", "--greedy=4").returncode, 0)
+        self.assertEqual(self.launch("--bg", "--greedy").returncode, 0)
+        self.assertEqual(self.launch("--bg").returncode, 0)
+        self.assertEqual(self.greedy_events(), [("set", 4), ("set", 5), ("off", None)])
+        (self.tmp / "agents.json").write_text(json.dumps([self.bg_row()]))
+        self.launch("--resume", "abc", "--greedy=2")
+        self.assertEqual(len(self.greedy_events()), 3)
+
     def test_bg_adds_the_flag_and_cross_session_inbound(self):
         out = self.launch("--print", "--bg").stdout
         self.assertTrue(out.startswith("ORCHESTRATE_ROLE=orchestrator claude --bg --name orchestrator "), out)

@@ -5,13 +5,19 @@ One line per claimed ticket in ascending ticket order, or the one named (the rul
     #<n> <state word> <branch | none-yet | no-branch> pr <num | none> worker <agent-id> <model> | unknown | none worktree <path | gone> lock <lock> [<changes>]
 branch `none-yet`: the worktree is on the harness's `worktree-agent-*` branch, so the worker stopped before it created the ticket branch (`rescue <n>` saves it).
 worker `unknown`: a building claim with no state record, this session's own live worker that the state file couldn't join.
-state: with-lead | in-review | done | building | idle | waiting | elsewhere | stalled (`paused` is the orchestrator's own).
+state: with-lead | in-review | done | building | idle | paused | waiting | elsewhere | stalled | parked.
        `waiting <permission-denied | exhausted> since <ts>`: the newest worker-report needs the developer; it never expires.
+       `waiting <gate | round-3> since <ts>` (a ready PR): the PR's newest `merge` event is `gate-hold`, or its newest `review` event asked
+       for changes in round 2 or later so the next review is a third round; the user decides, and a newer event ends it.
+       `paused <limit | error> since <ts>`: the newest worker-report is a usage-limit or API error; a pass resumes it.
        `idle since <ts> [nudged <ts>]`: a building claim whose worker ended its turn with an `interim` report after its dispatch and has reported nothing since;
        `nudged` is the pass log's `record --nudged` time. Both timestamps are UTC, `YYYY-MM-DDTHH:MM:SSZ`.
 lock:  `ours <pid>` (this session's own worker); `foreign-live <pid>`; `foreign-live ?` (the line then ends ` (lock: <reason>)`: the reason doesn't parse, which counts as live;
        unlock the worktree if it is stale); `dead <pid>` (unlock it, then rescue it); `none` (no lock or no worktree).
 changes (only with a worktree and no PR): `clean`, `dirty <k>`, `unpushed <k>` or `dirty <k> unpushed <j>`.
+repeat / incomplete: a line may end `repeat not-a-stop` and `repeat missing-report-none` (the worker has reported that twice since its dispatch) and
+`incomplete <k>` (the PR's last k reviewer reports in a row were `incomplete`), in that order after `escalate`: the run skill applies the word, it counts nothing.
+With `--slots` under greedy (the newest `greedy` run-log event, written by `launch`, is `set`) the cap is the greedy cap and the line ends ` greedy`.
 escalate: a line ends `escalate <model>` when the ticket's haiku worker met a mechanical trigger on its PR (a second `ci fail`, or a `review`
 event of round 2 or later that requested changes): hand the ticket to a new worker on that model. An unanswerable `stopped` report is the orchestrator's judgement, not this word's.
 `claims <n>` for an unclaimed ticket prints `#<n> not claimed`. No summary line, unless `--slots` ends the listing with
@@ -42,7 +48,7 @@ def line(c) -> str:
     worker = ("unknown" if c.state in ("building", "idle") else "none") if not c.worker else f"{c.worker.get('agent_id') or '?'} {c.worker.get('model') or '?'}"
     lock = "none" if c.lock is None else f"{c.lock[0]} {c.lock[1] if c.lock[1] is not None else '?'}"
     state = c.state
-    if c.state == "waiting":
+    if c.state in ("waiting", "paused"):
         state += f" {c.reason} since {c.since or '?'}"
     elif c.state == "idle":
         state += f" since {c.since or '?'}" + (f" nudged {c.nudged}" if c.nudged else "")
@@ -56,6 +62,9 @@ def line(c) -> str:
         out += f" (lock: {c.lock[2]})"
     if c.escalate:
         out += f" escalate {c.escalate}"
+    out += "".join(f" repeat {word}" for word in c.repeat)
+    if c.incomplete:
+        out += f" incomplete {c.incomplete}"
     return out
 
 
@@ -95,7 +104,7 @@ def run(argv=None) -> int:
     for n in sorted(found):
         print(line(found[n]))
     if args.slots:
-        print(claims.slots_line(all_found, config.for_checkout(root).slots))
+        print(claims.slots_line(all_found, config.for_checkout(root).slots, claims.greedy_cap(root)))
     return 0
 
 

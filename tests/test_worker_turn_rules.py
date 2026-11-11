@@ -179,7 +179,9 @@ class HandBackRules(unittest.TestCase):
         s = (ROOT / "skills/run/SKILL.md").read_text()
         reports = s[s.index("## Worker reports"):s.index("## Choosing the worker model")]
         self.assertIn("scripts/worker-report", reports)
-        self.assertIn("a second `not-a-stop` from the same worker is a normal stop", reports)
+        # #657: the second one is a `claims` word now, not a count in the prompt.
+        self.assertIn("`repeat not-a-stop`, send nothing: it is a normal stop", reports)
+        self.assertNotIn("from the same worker", reports)
 
 
 if __name__ == "__main__":
