@@ -68,8 +68,10 @@ def run(args) -> int:
             undo = "unparked" if outcome == "parked" else "parked"
             try:
                 runlog.append_event(cwd, runlog.PARK, undo, ref=pr, ticket=ticket_of_branch(branch), branch=branch)
-            except (runlog.NoSession, OSError):
-                pass
+            except (runlog.NoSession, OSError) as e2:
+                # The log now says `outcome` over a PR that did not change: say so rather than pass silently (#755).
+                print(f"park-pr: PR #{pr} did not change, but the `{undo}` event that takes back `{outcome}` "
+                      f"could not be written ({common.one_line(str(e2))})", file=sys.stderr)
             raise
         try:
             github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{pr}/comments", "-f",

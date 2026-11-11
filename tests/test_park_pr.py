@@ -108,6 +108,36 @@ class ParkPr(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertEqual([e["outcome"] for e in self.park_events()], ["parked", "unparked"])  # the log agrees with the open PR
 
+    def test_a_failed_undo_is_reported_on_stderr(self):
+        import contextlib
+        import importlib.machinery
+        import importlib.util
+        import io
+        from pathlib import Path
+        from unittest import mock
+        import github
+        loader = importlib.machinery.SourceFileLoader("park_pr_cli", str(Path(runlog.__file__).parent / "park-pr"))
+        spec = importlib.util.spec_from_loader("park_pr_cli", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        view = {"state": "OPEN", "headRefName": "7-x", "isCrossRepository": False}
+        calls = []
+
+        def append(*a, **k):
+            calls.append(a[2])
+            if len(calls) > 1:
+                raise OSError(13, "Permission denied")
+
+        err = io.StringIO()
+        with mock.patch.object(github, "pr_view", return_value=view), \
+                mock.patch.object(github, "set_pr_state", side_effect=github.GhError("other", "boom")), \
+                mock.patch.object(runlog, "append_event", side_effect=append), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = mod.main(["7", "--why", "x"])
+        self.assertEqual((code, calls), (2, ["parked", "unparked"]))
+        self.assertIn("PR #7 did not change, but the `unparked` event that takes back `parked` could not be written",
+                      err.getvalue())
+
     def test_the_reason_or_the_mode_is_required_and_exclusive(self):
         self.gh()
         for args in ((), ("--why", "  "), ("--why", "x", "--unpark"), ("--wh", "x")):
