@@ -1993,6 +1993,11 @@ ORCHESTRATOR_FORMS = (
     # The run skill's greedy-cap check (#754): `launch --check-greedy --greedy[=N]` prints the cap and launches nothing; no other launch call.
     Form("launch", (), {"--check-greedy": "", "--greedy": ""}, need=("--check-greedy", "--greedy")),
     Form("launch", (), {"--check-greedy": "", "--greedy": "cap"}, need=("--check-greedy", "--greedy")),
+    # The developer's waits (#706): the footer (`waiting --repo . [--plain]`), and the lead's and the orchestrator's record
+    # of an ask (`--add "<text>" [--from lead|orchestrator] [--where "<text>"]`, which prints an id) and its clearing (`--done <id>`).
+    Form("waiting", (), {"--repo": "repo", "--plain": "", "--width": "num"}),
+    Form("waiting", (), {"--add": "word", "--from": "word", "--where": "word", "--repo": "repo"}, need=("--add",)),
+    Form("waiting", (), {"--done": "word", "--repo": "repo"}, need=("--done",)),
     Form("scratch", ("pr", "hash"), {"--under": "under", "--repo": "repo"}, need=("--under",)),
     # worker-report: a worker's completion, and a reviewer's (which may post its risk notes once).
     Form("worker-report", ("n",), {"--branch": "word", "--repo": "repo"}, need=("--branch",)),

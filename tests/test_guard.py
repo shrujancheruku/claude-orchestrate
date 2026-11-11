@@ -2221,14 +2221,20 @@ class ScriptFormsTest(unittest.TestCase):
                         f"{SCRIPTS}/issue 7 --repo .", f"{SCRIPTS}/issue 7",
                         f"printf x | {SCRIPTS}/worker-report 12 --reviewer --post-risk-notes",
                         f"printf x | {SCRIPTS}/worker-report 12 --reviewer",
-                        f"{SCRIPTS}/watch-ci 12 abc1234 13 '?'"):
+                        f"{SCRIPTS}/watch-ci 12 abc1234 13 '?'",
+                        f"{SCRIPTS}/waiting", f"{SCRIPTS}/waiting --repo . --plain", f"{SCRIPTS}/waiting --plain --width 80",
+                        f"{SCRIPTS}/waiting --add 'pick a model' --from orchestrator --where 'claude attach x' --repo .",
+                        f"{SCRIPTS}/waiting --add 'ask'", f"{SCRIPTS}/waiting --done a1b2c3", f"{SCRIPTS}/waiting --done a1b2c3 --repo ."):
             with self.subTest(command):
                 self.assertTrue(self.ok(command))
 
     def test_each_new_row_refuses_what_is_not_its_exact_shape(self):
         for command in (f"{SCRIPTS}/park-pr 12", f"{SCRIPTS}/park-pr 12 --why", f"{SCRIPTS}/park-pr 12 --why x --unpark",
                         f"{SCRIPTS}/park-pr 12 --unpark --why x", f"{SCRIPTS}/park-pr --unpark", f"{SCRIPTS}/park-pr 12 --unpark 13",
-                        f"{SCRIPTS}/park-pr 12 --unpark --repo /x", f"{SCRIPTS}/park-pr 12 --unp"):
+                        f"{SCRIPTS}/park-pr 12 --unpark --repo /x", f"{SCRIPTS}/park-pr 12 --unp",
+                        f"{SCRIPTS}/waiting --add", f"{SCRIPTS}/waiting --add x --done y", f"{SCRIPTS}/waiting --from lead",
+                        f"{SCRIPTS}/waiting --done", f"{SCRIPTS}/waiting --repo /x", f"{SCRIPTS}/waiting --plain extra",
+                        f"{SCRIPTS}/waiting --where x", f"{SCRIPTS}/waiting --add x --plain"):
             with self.subTest(command):
                 self.assertFalse(self.ok(command))
         for command in (f"{SCRIPTS}/ci-rerun", f"{SCRIPTS}/ci-rerun 12 --job 111", f"{SCRIPTS}/ci-rerun 12 --job a b",

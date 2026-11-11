@@ -174,5 +174,73 @@ class PromptLog(unittest.TestCase):
         self.assertEqual(sorted(x["session_id"] for x in got), sorted(f"s{i}" for i in range(n)))
 
 
+class PromptWaits(unittest.TestCase):
+    """A prompt puts its session on the developer's waits file and the answer clears it (#706)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name).resolve()
+        (self.repo / ".git").mkdir()
+        self.waits = self.repo / ".claude" / "orchestrate-waits.jsonl"
+        sys.path.insert(0, str(ROOT / "scripts"))
+        self.addCleanup(sys.path.remove, str(ROOT / "scripts"))
+
+    def send(self, event, **kw):
+        p = {"session_id": "sess-1234567", "cwd": str(self.repo), "hook_event_name": event}
+        p.update(kw)
+        r = run_hook(json.dumps(p))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+    def live(self):
+        import waits
+        return waits.live(self.repo)
+
+    def test_hooks_json_registers_the_clearing_events(self):
+        hooks = json.loads((ROOT / "hooks" / "hooks.json").read_text())["hooks"]
+        for event in ("PostToolUse", "Stop"):
+            self.assertIn("hooks/prompt_log.py", hooks[event][0]["hooks"][0]["command"])
+
+    def test_a_prompt_adds_an_entry_that_says_where_to_answer(self):
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "git push origin x\nsecond line"})
+        (entry,) = self.live()
+        self.assertEqual((entry["kind"], entry["from"], entry["session"]), ("prompt", "prompt", "sess-1234567"))
+        self.assertIn("Bash git push origin x", entry["text"])
+        self.assertNotIn("second line", entry["text"])
+        self.assertEqual(entry["where"], "in that session: claude attach sess-123")
+        self.assertEqual(self.waits.stat().st_mode & 0o777, 0o600)
+
+    def test_a_notification_for_a_prompt_already_recorded_adds_nothing(self):
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "x"})
+        self.send("Notification", message="Claude needs your permission", notification_type="permission_prompt")
+        self.assertEqual(len(self.live()), 1)
+
+    def test_a_notification_alone_adds_an_entry(self):
+        self.send("Notification", message="Claude requested permissions to edit /r/hooks/guard.py", notification_type="permission_prompt")
+        (entry,) = self.live()
+        self.assertIn("edit /r/hooks/guard.py", entry["text"])
+
+    def test_the_answer_clears_it_for_that_session_only(self):
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "x"})
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "y"}, session_id="other")
+        self.send("PostToolUse", tool_name="Bash", tool_input={})
+        self.assertEqual([e["session"] for e in self.live()], ["other"])
+
+    def test_a_tool_of_another_agent_in_the_same_session_does_not_clear_it(self):
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "x"})
+        self.send("PostToolUse", tool_name="Read", tool_input={}, agent_type="orchestrate:worker")
+        self.assertEqual(len(self.live()), 1)
+
+    def test_the_end_of_a_main_session_turn_clears_its_own_prompt_only(self):
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "x"})
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "y"}, agent_type="orchestrate:worker")
+        self.send("Stop")
+        self.assertEqual([e["agent_type"] for e in self.live()], ["orchestrate:worker"])
+
+    def test_a_post_tool_event_with_no_waits_file_writes_nothing(self):
+        self.send("PostToolUse", tool_name="Bash", tool_input={})
+        self.assertFalse(self.waits.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

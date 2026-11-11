@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""waiting [--repo DIR] [--plain] [--width N] | --add TEXT [--from WHO] [--where WHERE] | --done ID : what is waiting on the developer (#706).
+
+With no action it prints the footer: one section per source in the order of the config's `Developer waits` section
+(`sections:`; without the section: ready-for-human, needs-triage, lead-asks), each a heading `Ready for you (<n>)`,
+`Needs triage (<n>)` or `Lead asks (<n>)` and one line per item, cut to the terminal width (`--width`, else $COLUMNS,
+else the terminal, else 100). An empty section is left out; when every section is empty the footer is the one line
+`Waiting on you: nothing`. Colours are the config's `colours:` (16-colour ANSI, defaults red, yellow, blue). `--plain`
+has no ANSI codes and puts one square emoji (red, yellow, blue, ...) before each heading, for the markdown box the lead
+prints after every turn (a Stop hook's output is reported not to reach the terminal, untested, so the lead skill prints this itself).
+`enabled: no` prints nothing. A `Developer waits` section that does not parse is one line on stderr, and the defaults.
+
+Sources:
+    ready-for-human  open tickets with the repo's ready-for-human label (`#<n> <title>`)
+    needs-triage     open tickets with the needs-triage label
+    lead-asks        the shared waits file (scripts/waits.py): asks the lead and the orchestrator recorded with --add,
+                     a PR stopped at a config merge gate (written by `merge`), a session stuck on a permission prompt
+                     (written by hooks/prompt_log.py), and `relaunch: ...` while the run's plugin snapshot is stale (#727).
+                     An entry whose PR is merged or closed, or whose ticket is closed, is dropped (and cleared).
+                     An entry that carries a merge command prints `PR #<n> (#<ticket>) <title>: approved, green. Merge: ! <command>`
+                     while the PR's head is the one the command pins, its CI is green and it is not behind; otherwise
+                     `...: not ready: <why>` until `merge` records it again. The command is never cut by the width.
+    merge-gates      optional: open PRs that touch a config merge gate with CI green and no recorded entry
+    release-prs      optional: open release PRs (`chore(main): release`)
+    parked           optional: PRs a `park` event in the run log parked and that are still open
+An optional source is on when `sections:` lists it. A source that cannot be read prints its heading with `(unavailable: <why>)`.
+
+--add records a wait and prints its id (one line); --from says who waits (`lead` by default, or `orchestrator`) and
+--where where the developer answers (printed after ` — `). --done <id> clears it (`done <id>`; exit 1 and `no wait <id>`
+when no live entry has that id). Neither reads the tracker.
+Exit codes: 0 ran; 1 --done found no such wait; 2 could not run (one line on stderr). Stdlib only, Python 3.9+.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import sys
+from datetime import datetime, timezone
+
+import common
+import config
+import github
+import repo as repolib
+import runlog
+import tracker
+import waits
+
+HEADINGS = {"ready-for-human": "Ready for you", "needs-triage": "Needs triage", "lead-asks": "Lead asks",
+            "merge-gates": "Merge gates", "release-prs": "Release PRs", "parked": "Parked"}
+ANSI = {"black": 30, "red": 31, "green": 32, "yellow": 33, "blue": 34, "magenta": 35, "cyan": 36, "white": 37}
+SQUARES = {"black": "⬛", "red": "\U0001f7e5", "green": "\U0001f7e9", "yellow": "\U0001f7e8", "blue": "\U0001f7e6",
+           "magenta": "\U0001f7ea", "cyan": "\U0001fa75", "white": "⬜"}
+DEFAULT_WIDTH = 100
+PROMPT_TTL = 6 * 3600  # seconds: a permission-prompt wait older than this is a lost clear, not a prompt still showing
+RELEASE_PREFIX = "chore(main): release"
+NOTHING = "Waiting on you: nothing"
+
+
+def cut(text: str, width: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= width else text[:max(width - 1, 1)] + "…"
+
+
+class Source:
+    """One section's items (strings) or the reason it could not be read."""
+
+    def __init__(self, items=(), unavailable=None):
+        self.items, self.unavailable = list(items), unavailable
+
+
+class Reader:
+    """The reads one footer needs, each made at most once."""
+
+    def __init__(self, root):
+        self.root = root
+        self.cfg = config.for_checkout(root)
+        self._issues = None
+
+    def issues(self) -> list:
+        if self._issues is None:
+            nodes = github.open_issues(github.repo_info(self.root), cwd=self.root)
+            self._issues = tracker.from_nodes(nodes)
+        return self._issues
+
+    def labelled(self, role: str, fallback: str) -> Source:
+        label = tracker.label_strings(self.root).get(role, fallback)
+        return Source(f"#{i['number']} {i['title']}" for i in self.issues() if label in i["labels"])
+
+
+def width_of(arg) -> int:
+    if arg:
+        return arg
+    try:
+        columns = int(os.environ.get("COLUMNS", ""))
+    except ValueError:
+        columns = 0
+    return columns or (shutil.get_terminal_size((DEFAULT_WIDTH, 24)).columns if sys.stdout.isatty() else DEFAULT_WIDTH)
+
+
+def pr_title(root, pr) -> str:
+    try:
+        return github.pr_view(pr, "title", root).get("title") or ""
+    except github.GhError:
+        return ""
+
+
+def not_ready(root, entry) -> str | None:
+    """Why the PR's recorded merge command no longer holds, or None when it does (the same facts `merge` judged)."""
+    pr = entry["pr"]
+    try:
+        view = github.pr_view(pr, "headRefOid,statusCheckRollup", root)
+        merge_state = github.pr_view(pr, "mergeStateStatus", root).get("mergeStateStatus")
+    except github.GhError as e:
+        return f"could not read the PR ({e.message})"
+    if entry.get("head") and view.get("headRefOid") != entry["head"]:
+        return "the head moved after the review"
+    rollup = view.get("statusCheckRollup")
+    if rollup:  # no checks at all is what `merge` recorded as `ci: none configured`, so it stays ready
+        ci, names = github.ci_verdict(rollup)
+        if ci != "pass":
+            return f"CI {ci}" + (f" on {', '.join(names[:3])}" if names else "")
+    if merge_state == "BEHIND":
+        return "behind the default branch"
+    return None
+
+
+def live_asks(root, reader) -> Source:
+    """The shared waits file, minus what is already settled: a merged or closed PR, a closed ticket, a stale prompt."""
+    items = []
+    stale = runlog.snapshot_stale(root)
+    if stale:
+        items.append(f"relaunch: snapshot behind main (PR #{stale.get('ref')}): fresh `scripts/launch --bg` from the main checkout, not a resume")
+    now = datetime.now(timezone.utc)
+    for e in waits.live(root):
+        if e.get("kind") == "prompt":
+            when = repolib.parse_ts(e.get("ts"))
+            if when and (now - when).total_seconds() > PROMPT_TTL:
+                continue
+        pr = e.get("pr")
+        if pr is not None:
+            try:
+                state = github.pr_view(pr, "state", root).get("state")
+            except github.GhError:
+                state = None
+            if state in ("MERGED", "CLOSED"):
+                waits.clear_pr(root, pr)
+                continue
+        ticket = e.get("ticket")
+        if ticket is not None and pr is None:
+            try:
+                if int(ticket) not in {i["number"] for i in reader.issues()}:
+                    waits.done(root, e["id"])
+                    continue
+            except (github.GhError, KeyError, TypeError, ValueError):
+                pass
+        items.append(e)
+    return Source(items)
+
+
+def render_ask(entry, root, width: int) -> str:
+    """One lead-ask line. A merge entry keeps its whole command: only the title part is cut."""
+    if isinstance(entry, str):
+        return cut(entry, width)
+    text = entry.get("text", "")
+    if entry.get("pr") is not None and entry.get("kind") == "merge-gate":
+        if entry.get("command"):
+            why = not_ready(root, entry)
+            tail = f": not ready: {why}" if why else f": approved, green. Merge: ! {entry['command']}"
+        else:
+            tail = f": held at merge gate {entry.get('gate', '?')}"
+        return cut(text, max(width - len(tail), 20)) + tail
+    who = "" if entry.get("from") in (None, "lead") else f"[{entry['from']}] "
+    where = f" — {entry['where']}" if entry.get("where") else ""
+    return cut(f"{who}{text}{where}", width)
+
+
+def optional(name, root, reader) -> Source:
+    default = repolib.default_branch(root) or "main"
+    if name == "release-prs":
+        return Source(f"PR #{p['number']} {pr_title(root, p['number'])}" for p in github.open_prs(default, root)
+                      if pr_title(root, p["number"]).startswith(RELEASE_PREFIX))
+    if name == "merge-gates":
+        recorded = {str(e.get("pr")) for e in waits.live(root)}
+        items = []
+        for p in github.open_prs(default, root):
+            if str(p["number"]) in recorded or reader.cfg.merge_gate_for(github.pr_touched_paths(p["number"], root)) is None:
+                continue
+            rollup = github.pr_view(p["number"], "statusCheckRollup", root).get("statusCheckRollup")
+            if rollup and github.ci_verdict(rollup)[0] == "pass":
+                items.append(f"PR #{p['number']} {pr_title(root, p['number'])}: CI green, not checked for approval")
+        return Source(items)
+    parked = {}
+    for ev in runlog.read_kinds(root, [runlog.PARK]):
+        parked[ev.get("ref")] = ev
+    items = []
+    for ref, ev in parked.items():
+        if ev.get("outcome") == "parked":
+            items.append(f"PR #{ref} {pr_title(root, ref)} — {ev.get('why') or 'parked'}")
+    return Source(items)
+
+
+def gather(root, reader) -> list:
+    """[(section, Source)] in the configured order."""
+    out = []
+    for name in reader.cfg.waits_sections:
+        try:
+            if name == "ready-for-human":
+                src = reader.labelled("human", "ready-for-human")
+            elif name == "needs-triage":
+                src = reader.labelled("triage", "needs-triage")
+            elif name == "lead-asks":
+                src = live_asks(root, reader)
+            else:
+                src = optional(name, root, reader)
+        except github.GhError as e:
+            src = Source(unavailable=e.message)
+        except (KeyError, TypeError, ValueError) as e:
+            src = Source(unavailable=str(e))
+        out.append((name, src))
+    return out
+
+
+def footer(root, plain: bool, width: int) -> list:
+    reader = Reader(root)
+    for problem in reader.cfg.problems_of(config.WAITS):
+        print(f"waiting: {problem.message}", file=sys.stderr)
+    if not reader.cfg.waits_enabled:
+        return []
+    colours = dict(reader.cfg.waits_colours)
+    blocks = []
+    for name, src in gather(root, reader):
+        if not src.items and not src.unavailable:
+            continue
+        colour = colours.get(name, "white")
+        head = f"{HEADINGS[name]} ({len(src.items)})" if not src.unavailable else f"{HEADINGS[name]} (unavailable: {cut(src.unavailable, 60)})"
+        lines = ["  " + (render_ask(i, root, width - 2) if name == "lead-asks" else cut(i, width - 2)) for i in src.items]
+        if plain:
+            blocks.append([f"{SQUARES[colour]} {head}"] + lines)
+        else:
+            code = ANSI[colour]
+            blocks.append([f"\033[1;{code}m{head}\033[0m"] + [f"\033[{code}m{l}\033[0m" for l in lines])
+    if not blocks:
+        return [NOTHING]
+    return [line for block in blocks for line in block]
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    ap.add_argument("--repo", default=".", help="the repo (default: current directory)")
+    ap.add_argument("--plain", action="store_true", help="no ANSI codes; a square emoji before each heading")
+    ap.add_argument("--width", type=int, help="cut each line to this many characters")
+    ap.add_argument("--add", metavar="TEXT", help="record a wait and print its id")
+    ap.add_argument("--from", dest="source", default="lead", choices=["lead", "orchestrator"], help="who waits (with --add)")
+    ap.add_argument("--where", default="", help="where the developer answers (with --add)")
+    ap.add_argument("--done", metavar="ID", help="clear a wait")
+    args = ap.parse_args(argv)
+    if args.add is not None and args.done is not None:
+        common.die("waiting: --add and --done are exclusive")
+    if args.add is not None:
+        text = " ".join(args.add.split())
+        if not text:
+            common.die("waiting: --add needs some text")
+        print(waits.add(args.repo, text, source=args.source, where=args.where, kind="ask"))
+        return 0
+    if args.done is not None:
+        if waits.done(args.repo, args.done):
+            print(f"done {args.done}")
+            return 0
+        print(f"no wait {args.done}")
+        return 1
+    try:
+        lines = footer(repolib.main_checkout(args.repo), args.plain, width_of(args.width))
+    except OSError as e:
+        common.die(f"waiting: cannot run: {e}")
+    for line in lines:
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

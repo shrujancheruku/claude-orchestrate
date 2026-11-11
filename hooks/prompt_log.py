@@ -14,6 +14,12 @@ Every line has `"source"`: `request` (PermissionRequest) or `notification`. A no
 holds `message`, `title` and `notification_type` (each cut to 500 characters) in place of `tool_name`/`tool_input`.
 scripts/prompts counts a prompt both events saw once.
 
+The same hook keeps the developer's waits file (#706): a prompt adds one `kind: prompt` entry to
+`.claude/orchestrate-waits.jsonl` (the lead's footer, scripts/waiting, lists it with where to answer), and a
+PostToolUse or Stop event of that session (and agent type) clears it, because the prompt was answered or the session
+moved on. A notification for a prompt the request already recorded adds nothing. A PostToolUse or Stop event reads the
+waits file only when it exists and writes nothing else.
+
 A request line holds: time, session_id, agent_type (null for the main session), tool_name, cwd, permission_mode and
 tool_input, cut down: a Bash or Monitor `command` to 2000 characters, `file_path` for an edit or a Read, `path` (null when
 absent) plus the key names for Grep and Glob, and for any other tool the key names only (no file contents, no pattern
@@ -33,6 +39,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 LOG = Path(".claude") / "orchestrate-prompts.jsonl"
+WAITS = Path(".claude") / "orchestrate-waits.jsonl"  # scripts/waits.py's file; this hook keeps its own copy of the append (`python3 -I`)
+CLEAR_EVENTS = ("PostToolUse", "Stop")  # a prompt answered, or the session moved on
 COMMAND_LIMIT = 2000
 MESSAGE_LIMIT = 500
 COMMAND_TOOLS = ("Bash", "Monitor")
@@ -126,14 +134,80 @@ def append(path: Path, line: str) -> None:
         os.close(fd)
 
 
+def prompt_waits(path: Path) -> list:
+    """The live permission-prompt entries of the shared waits file (`kind: prompt`), as (id, session_id, agent_type)."""
+    live = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or not isinstance(rec.get("id"), str):
+            continue
+        if rec.get("op") == "add":
+            live[rec["id"]] = rec
+        elif rec.get("op") == "done":
+            live.pop(rec["id"], None)
+    return [(r["id"], r.get("session"), r.get("agent_type")) for r in live.values() if r.get("kind") == "prompt"]
+
+
+def wait_text(entry: dict) -> str:
+    """What the developer is asked, in one line: the tool and its command or path, or the notification's message."""
+    if entry.get("source") == "notification":
+        return (entry.get("message") or "a permission prompt").replace("\n", " ")[:200]
+    detail = entry.get("tool_input")
+    detail = detail.get("command") or detail.get("file_path") or detail.get("path") if isinstance(detail, dict) else None
+    return f"{entry.get('tool_name') or '?'} {str(detail or '').splitlines()[0] if detail else ''}".strip()[:200]
+
+
+def wait_add(path: Path, entry: dict) -> None:
+    """A session is stuck on a prompt: put it on the developer's waits file (#706; scripts/waits.py reads it).
+
+    One entry per prompt: a notification for a prompt the request already recorded (same session and agent, still live)
+    adds nothing. The footer line says where the developer answers."""
+    session, agent = entry.get("session_id"), entry.get("agent_type")
+    if entry.get("source") == "notification" and any(s == session and a == agent for _, s, a in prompt_waits(path)):
+        return
+    who = (agent or entry.get("role") or "main session").split(":")[-1]
+    wait_id = "prompt-" + os.urandom(3).hex()
+    rec = {"op": "add", "id": wait_id, "ts": entry["time"], "text": f"{who} is waiting on a permission prompt: {wait_text(entry)}",
+           "from": "prompt", "kind": "prompt", "session": session, "agent_type": agent,
+           "where": f"in that session: claude attach {str(session or '?')[:8]}"}
+    append(path, json.dumps(rec, separators=(",", ":")) + "\n")
+
+
+def wait_clear(path: Path, payload: dict) -> None:
+    """The prompt was answered or the session moved on (a tool finished, or the turn stopped): clear its entries.
+    Matched by session and agent type (None for the main session, also on a Stop), since a subagent shares its
+    parent's session id: the orchestrator's end of turn must not clear a worker's open prompt."""
+    agent = payload.get("agent_type")
+    agent = agent if isinstance(agent, str) and agent else None
+    session = payload.get("session_id")
+    for wait_id, s, a in prompt_waits(path):
+        if s == session and a == agent:  # a Stop has no agent type: it ends the main session's turn, never a worker's prompt
+            append(path, json.dumps({"op": "done", "id": wait_id}, separators=(",", ":")) + "\n")
+
+
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
         if not isinstance(payload, dict):
             raise ValueError("payload is not an object")
         cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.environ.get("CLAUDE_PROJECT_DIR", ".")
+        root = main_checkout(cwd)
+        waits = root / WAITS
+        if payload.get("hook_event_name") in CLEAR_EVENTS:
+            # Cheap when nothing waits: the file is read only if it exists. This runs after every tool call.
+            if waits.exists():
+                wait_clear(waits, payload)
+            return 0
         entry = record(payload)
-        append(main_checkout(cwd) / LOG, json.dumps(entry, separators=(",", ":")) + "\n")
+        append(root / LOG, json.dumps(entry, separators=(",", ":")) + "\n")
+        wait_add(waits, entry)
     except Exception as e:  # never block a prompt
         print(f"prompt_log: not recorded: {e}", file=sys.stderr)
     return 0

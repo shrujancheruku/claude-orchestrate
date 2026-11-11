@@ -98,6 +98,13 @@ Run `"${CLAUDE_SKILL_DIR}/../../scripts/ci-times"` every 10 merges (counted from
 - Fix the failures the orchestrator sends back on your PRs.
 - You never merge anything (ADR 0004).
 
+### Waiting footer
+
+The developer needs what waits on them in front of them after every turn. A Stop hook's output is reported not to reach the terminal (untested), so you print it: end every reply, wake included, with the output of `"${CLAUDE_SKILL_DIR}/../../scripts/waiting" --repo . --plain` in a fenced block (its squares are its colours, set by the config's `Developer waits` section). It replaces any hand-written list of what waits. If it fails, say so in one line and carry on.
+- Every ask you relay to the developer gets `"${CLAUDE_SKILL_DIR}/../../scripts/waiting" --add "<the ask and your recommendation>" --where "<where they answer>"` (it prints an id), and the answer gets `"${CLAUDE_SKILL_DIR}/../../scripts/waiting" --done <id>` before you pass it on.
+- You add only your own asks: `merge` records a PR stopped at a merge gate, the prompt-log hook a session stuck on a permission prompt, and the orchestrator its direct asks.
+- A `merge-ready: PR #<n> (#<ticket>) — <command>` line from the orchestrator is already in the footer. Never run the command (ADR 0004): the developer runs it with `!`; then SendMessage the orchestrator `merged: PR #<n>`.
+
 ### Answering asks
 
 In lead mode the orchestrator never asks the developer directly: every ask comes to you by SendMessage, and your reply is the answer. Decide whether you can answer it or must bubble it up.

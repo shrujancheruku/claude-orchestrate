@@ -75,5 +75,39 @@ class SkillCallsAreRows(unittest.TestCase):
         self.assertFalse(approved(None, self.fill('"${CLAUDE_SKILL_DIR}/../../scripts/claims" --bogus <n>'), self.main, session_id=SID))
 
 
+class WaitingFooterProse(unittest.TestCase):
+    """The prose side of the developer-waits footer (#706): who records an ask, and who prints the footer."""
+
+    def setUp(self):
+        self.run_text = SKILLS[0].read_text()
+        self.lead_text = SKILLS[1].read_text()
+
+    def test_every_direct_ask_of_the_orchestrator_goes_through_waiting_add_and_is_cleared(self):
+        for needle in ('scripts/waiting" --add "<the ask, with the choices>" --from orchestrator', '--where "<where they answer',
+                       'scripts/waiting" --done <id>', "Every ask you put to the developer yourself"):
+            with self.subTest(needle):
+                self.assertIn(needle, self.run_text)
+
+    def test_a_ready_gated_pr_is_sent_to_the_lead_and_not_also_asked_in_the_orchestrators_session(self):
+        self.assertIn("`merge-ready: PR #<n> (#<ticket>) — <command>`", self.run_text)
+        self.assertIn("do not also ask the developer to merge in your session", self.run_text)
+        self.assertIn("`merged: PR #<n>`", self.run_text)
+
+    def test_the_orchestrators_pass_report_carries_the_footer_only_when_the_config_says_so(self):
+        self.assertIn("`orchestrator pass reports: yes`", self.run_text)
+        self.assertIn('scripts/waiting" --repo . --plain', self.run_text)
+
+    def test_the_lead_prints_the_plain_footer_after_every_turn_and_records_its_relayed_asks(self):
+        for needle in ('scripts/waiting" --repo . --plain', 'scripts/waiting" --add "', 'scripts/waiting" --done <id>',
+                       "merge-ready: PR #<n> (#<ticket>) — <command>", "Never run the command (ADR 0004)", "merged: PR #<n>"):
+            with self.subTest(needle):
+                self.assertIn(needle, self.lead_text)
+
+    def test_setup_writes_the_section(self):
+        template = (ROOT / "skills" / "setup" / "config-template.md").read_text()
+        self.assertIn("## Developer waits", template)
+        self.assertIn("Developer waits", (ROOT / "skills" / "setup" / "SKILL.md").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
