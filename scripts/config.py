@@ -54,6 +54,7 @@ class Config(NamedTuple):
     idle_window: int = 10  # minutes: the Velocity section's `**Idle window:**`; how long a slot may sit idle with work waiting before the lead is woken (#716)
     hold_threshold: int = 3  # the Velocity section's `**Expensive hold:**`: takeable tickets one held PR blocks before the digest asks the developer
     velocity_watch: bool = True  # the Velocity section's `**Velocity watch:** on|off`; a missing section is on
+    update_required: bool = False  # the PRs and merging section's `**Merge:** up to date: required`; else a behind PR with no file overlap merges without an update (#651)
     pr_title_ticket: bool = False  # the PR title convention ends in ` (#<n>)`: the gate then requires the closed ticket's number (#695)
     problems: tuple = ()  # Problem entries
 
@@ -113,6 +114,7 @@ class Config(NamedTuple):
             board_bad=_board_bad(text),
             trusted_authors=_trusted_authors(common.section_of(text, "Backlog")),
             pr_title_ticket=_pr_title_ticket(common.section_of(text, "PRs and merging")),
+            update_required=_update_required(common.section_of(text, "PRs and merging")),
             problems=tuple(problems),
             **_velocity(common.section_of(text, "Velocity")),
         )
@@ -298,6 +300,12 @@ def _pr_title_ticket(section) -> bool:
     the item's `Body:` part names the closing reference `#<n>` and is cut off."""
     text = _item_text(section, "PR title")
     return "(#<n>)" in re.split(r"\*\*Body", text, maxsplit=1)[0]
+
+
+def _update_required(section) -> bool:
+    """True only for `up to date: required` on the `Merge:` item; a missing item, `when overlapping` or other text is the default (#651)."""
+    # The value is the item's first words; the explanation after it may name `up to date: required` without asking for it.
+    return bool(re.match(r"-\s+\*\*Merge:\*\*\s*`?up to date:\s*required\b", _item_text(section, "Merge:"), re.IGNORECASE))
 
 
 def _tiers(review):

@@ -171,6 +171,16 @@ class ConfigTemplate(unittest.TestCase):
         self.assertEqual(cfg.shared_files, ("<path>",))
         self.assertIsNone(cfg.slots)
 
+    def test_the_merge_line_reads_up_to_date_required_and_defaults_to_when_overlapping(self):
+        cfg = config.Config.parse
+        head = "## PRs and merging\n\n"
+        self.assertTrue(cfg(head + "- **Merge:** up to date: required\n").update_required)
+        self.assertFalse(cfg(head + "- **Merge:** up to date: when overlapping\n").update_required)
+        self.assertFalse(cfg(head + "- **Merge:** up to date: when overlapping. `up to date: required` always updates.\n").update_required)
+        self.assertFalse(cfg(head + "- **Method:** squash\n").update_required)  # a missing line is the default
+        self.assertFalse(cfg("").update_required)
+        self.assertFalse(config.Config.parse(TEMPLATE).update_required)
+
     def test_the_pr_title_ticket_suffix_flag(self):
         def cfg(line):
             return config.Config.parse(f"## PRs and merging\n\n- **Branch:** `<number>-<slug>`\n{line}\n- **Method:** squash\n")
