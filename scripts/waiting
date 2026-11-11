@@ -20,7 +20,7 @@ Sources:
                      An entry that carries a merge command prints `PR #<n> (#<ticket>) <title>: approved, green. Merge: ! <command>`
                      while the PR's head is the one the command pins, its CI is green and it is not behind; otherwise
                      `...: not ready: <why>` until `merge` records it again. The command is never cut by the width.
-    merge-gates      optional: open PRs that touch a config merge gate with CI green and no recorded entry
+    merge-gates      optional: open PRs that touch a config merge gate with CI green, the newest review approving the current head, and no recorded entry
     release-prs      optional: open release PRs (`chore(main): release`)
     parked           optional: PRs a `park` event in the run log parked and that are still open
 An optional source is on when `sections:` lists it. A source that cannot be read prints its heading with `(unavailable: <why>)`.
@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
+import unicodedata
 from datetime import datetime, timezone
 
 import common
@@ -63,6 +65,14 @@ def cut(text: str, width: int) -> str:
     return text if len(text) <= width else text[:max(width - 1, 1)] + "…"
 
 
+def clean(text: str) -> str:
+    """A line safe to print: control characters dropped (an ESC would inject terminal escapes into the coloured footer),
+    and a run of three or more backticks turned into quotes (it would close the lead's fenced block) (#776). The text
+    comes from a worker's command (`prompt_log`) or `--add`; the footer's own colour codes are added after this."""
+    text = "".join(c for c in str(text) if unicodedata.category(c) != "Cc")
+    return re.sub(r"`{3,}", lambda m: "'" * len(m.group()), text)
+
+
 class Source:
     """One section's items (strings) or the reason it could not be read."""
 
@@ -76,17 +86,15 @@ class Reader:
     def __init__(self, root):
         self.root = root
         self.cfg = config.for_checkout(root)
-        self._issues = None
-
-    def issues(self) -> list:
-        if self._issues is None:
-            nodes = github.open_issues(github.repo_info(self.root), cwd=self.root)
-            self._issues = tracker.from_nodes(nodes)
-        return self._issues
+        self._repo = None
 
     def labelled(self, role: str, fallback: str) -> Source:
+        """The open issues carrying the role's label: a label-filtered query for number and title only, never the
+        whole backlog (#776)."""
         label = tracker.label_strings(self.root).get(role, fallback)
-        return Source(f"#{i['number']} {i['title']}" for i in self.issues() if label in i["labels"])
+        if self._repo is None:
+            self._repo = github.repo_info(self.root)
+        return Source(f"#{i['number']} {i['title']}" for i in github.labelled_issues(self._repo, label, cwd=self.root))
 
 
 def width_of(arg) -> int:
@@ -126,6 +134,14 @@ def not_ready(root, entry) -> str | None:
     return None
 
 
+def approves(root, pr, head) -> bool:
+    """True when the PR's newest `review` event (the reviewer's report, which `merge --approved-head` is given the head of)
+    is `approve` and names `head`, the PR's current head. An older head, a `request-changes` or no review: False (#776)."""
+    last = runlog.latest_event(root, runlog.REVIEW, pr, skip_outcomes=("incomplete",))
+    reviewed = str((last or {}).get("head") or "")
+    return bool(last) and last.get("outcome") == "approve" and len(reviewed) >= 7 and bool(head) and head.startswith(reviewed)
+
+
 def live_asks(root, reader) -> Source:
     """The shared waits file, minus what is already settled: a merged or closed PR, a closed ticket, a stale prompt."""
     items = []
@@ -150,7 +166,7 @@ def live_asks(root, reader) -> Source:
         ticket = e.get("ticket")
         if ticket is not None and pr is None:
             try:
-                if int(ticket) not in {i["number"] for i in reader.issues()}:
+                if github.issue_state(int(ticket), root) != "OPEN":  # one REST read of that ticket, never the backlog
                     waits.done(root, e["id"])
                     continue
             except (github.GhError, KeyError, TypeError, ValueError):
@@ -167,7 +183,8 @@ def render_ask(entry, root, width: int) -> str:
     if entry.get("pr") is not None and entry.get("kind") == "merge-gate":
         if entry.get("command"):
             why = not_ready(root, entry)
-            tail = f": not ready: {why}" if why else f": approved, green. Merge: ! {entry['command']}"
+            seen = f" {entry['heads']}" if entry.get("heads") else ""  # both heads, when the head moved since the review
+            tail = f": not ready: {why}" if why else f": approved, green.{seen} Merge: ! {entry['command']}"
         else:
             tail = f": held at merge gate {entry.get('gate', '?')}"
         return cut(text, max(width - len(tail), 20)) + tail
@@ -187,9 +204,11 @@ def optional(name, root, reader) -> Source:
         for p in github.open_prs(default, root):
             if str(p["number"]) in recorded or reader.cfg.merge_gate_for(*github.pr_touched(p["number"], root)) is None:
                 continue
-            rollup = github.pr_view(p["number"], "statusCheckRollup", root).get("statusCheckRollup")
-            if rollup and github.ci_verdict(rollup)[0] == "pass":
-                items.append(f"PR #{p['number']} {pr_title(root, p['number'])}: CI green, not checked for approval")
+            view = github.pr_view(p["number"], "headRefOid,statusCheckRollup", root)
+            head, rollup = view.get("headRefOid") or "", view.get("statusCheckRollup")
+            if rollup and github.ci_verdict(rollup)[0] == "pass" and approves(root, p["number"], head):
+                items.append((f"PR #{p['number']} {pr_title(root, p['number'])}",
+                              f": approved, green. Merge: ! {waits.merge_command(p['number'], 'squash', head)}"))
         return Source(items)
     parked = {}
     for ev in runlog.read_kinds(root, [runlog.PARK]):
@@ -234,8 +253,10 @@ def footer(root, plain: bool, width: int) -> list:
         if not src.items and not src.unavailable:
             continue
         colour = colours.get(name, "white")
-        head = f"{HEADINGS[name]} ({len(src.items)})" if not src.unavailable else f"{HEADINGS[name]} (unavailable: {cut(src.unavailable, 60)})"
-        lines = ["  " + (render_ask(i, root, width - 2) if name == "lead-asks" else cut(i, width - 2)) for i in src.items]
+        head = f"{HEADINGS[name]} ({len(src.items)})" if not src.unavailable else f"{HEADINGS[name]} (unavailable: {clean(cut(src.unavailable, 60))})"
+        lines = ["  " + clean(render_ask(i, root, width - 2) if name == "lead-asks" else
+                              cut(i[0], max(width - 2 - len(i[1]), 20)) + i[1] if isinstance(i, tuple) else cut(i, width - 2))
+                 for i in src.items]  # a (title, tail) item keeps its tail whole: only the title is cut; clean runs after the cut, on both forms
         if plain:
             blocks.append([f"{SQUARES[colour]} {head}"] + lines)
         else:

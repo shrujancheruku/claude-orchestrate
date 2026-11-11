@@ -900,6 +900,8 @@
 {"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:reviewer", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "P=/p/orchestrate/0.7.0; $P/scripts/issue 782 --repo . | head -80", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:worker", "command": "P=/p/orchestrate/0.7.0; $P/scripts/issue 782 --repo .", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:scout", "command": "/p/orchestrate/0.7.0/scripts/issue 7 --repo /elsewhere", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git merge --no-edit origin/main", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:worker", "command": "git merge --no-edit origin/other", "expected": "unapproved", "source": "hand"}
