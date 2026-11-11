@@ -24,9 +24,9 @@ import github
 
 WAYFINDER_PREFIX = "wayfinder:"
 TRIAGE_LABELS = Path("docs/agents/triage-labels.md")
-DEFAULTS = {"ready": "ready-for-agent", "human": "ready-for-human", "lead": "lead"}
+DEFAULTS = {"ready": "ready-for-agent", "human": "ready-for-human", "lead": "lead", "triage": "needs-triage"}
 # The lead label stays fixed (as in scripts/claims): its table row has no role name in column one to match.
-ROLES = {"ready-for-agent": "ready", "ready-for-human": "human"}
+ROLES = {"ready-for-agent": "ready", "ready-for-human": "human", "needs-triage": "triage"}
 # The tracker doc's fallback form: a `Blocked by: #1, #2` line (a bullet, quote or bold lead-in allowed). The colon is
 # required, so prose like "Blocked by the outage, see #12" or "Blocked by #12" is not a blocker (it would hold a ticket silently).
 BLOCKED_LINE = re.compile(r"^[\s>*_-]*blocked[ -]by\b[*_]*:(.*)$", re.I)

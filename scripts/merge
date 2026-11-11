@@ -50,6 +50,11 @@ an exception is this, with the traceback on stderr, never `ask-user`). Before it
 touched (--also-approved, the sweep): `wait-ci <pr> <head>`, `send-back <pr>` or `left <pr> <why>`. The exit codes
 are unchanged: 0 and 4 end `frontier`, 5 `wait-ci`, 6 `re-review`, 3 `retry`, 2 `could-not-run`, and 1 (a refusal)
 `wait-ci`, `send-back` or `ask-user` by its clause.
+A PR under a config Merge gate is never merged by the script (#656), and it goes on the developer's waits file (`scripts/waits.py`, shown by
+`scripts/waiting`; #706) under the id `pr-<n>`. With --approved-head it is first judged by every readiness check but the gate: not ready
+ends with that check's verdict, the entry holding no command; ready prints `PR #<n> is ready: approved, green. Merge: ! gh pr merge <n>
+<--squash|--merge|--rebase by --method> --delete-branch --match-head-commit <head>` and records that command (the pin makes a push after
+the review fail instead of merging unreviewed code), then ends `ask-user gate <glob>`. A merged or closed PR clears its entry.
 After the cleanup it also fast-forwards the main checkout (the first `git worktree list` entry) to origin/<default>, so the
 scripts the orchestrator runs and the files a lead reads are the merged code: one line, `main checkout fast-forwarded to <sha>`
 or `main checkout not updated (<reason>)`. It skips, never stashes, resets or fails the merge, when the checkout is dirty, on
@@ -78,6 +83,7 @@ import replay
 import repo
 import runlog
 import tracker
+import waits
 from repo import remove_scratch, remove_worktree, worktree_gone, worktree_refusal
 
 # "already merged" after a 5xx: the first attempt landed and the retry found it so; wait and re-check.
@@ -256,11 +262,45 @@ def gate_of(cwd, pr):
     return cfg.merge_gate_for(files), None
 
 
-def gate_rule(cwd, pr, branch):
+METHOD_FLAGS = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}
+
+
+def merge_command(pr, method, head):
+    """The command the developer runs for a gated PR (#706): the config's method, the branch deleted, pinned to the
+    reviewed head so a push after the review makes it fail rather than merge unreviewed code."""
+    return f"gh pr merge {pr} {METHOD_FLAGS[method]} --delete-branch --match-head-commit {head}"
+
+
+def record_wait(cwd, pr, v, title, glob, command):
+    """Put the PR on the developer's waits file (scripts/waits.py), so the lead's footer lists it with no relay (#706).
+    The id is the PR's, so recording again replaces the entry. Best effort: an unwritable file loses the footer line only."""
+    ticket = repo.pr_ticket(v.get("headRefName"), v.get("body"))[0]
+    label = f"PR #{pr}" + (f" (#{ticket})" if ticket else "") + f" {title}".rstrip()
+    try:
+        waits.add(cwd, label, source="merge", wait_id=f"pr-{pr}", kind="merge-gate", pr=int(pr), ticket=ticket,
+                  head=v.get("headRefOid") or None, gate=glob, command=command)
+    except OSError as e:
+        print(f"merge: could not record the wait for PR #{pr}: {e}", file=sys.stderr)
+
+
+def clear_wait(cwd, pr):
+    """The PR merged or closed: its waits-file entries are settled."""
+    try:
+        waits.clear_pr(cwd, pr)
+    except OSError as e:
+        print(f"merge: could not clear the wait for PR #{pr}: {e}", file=sys.stderr)
+
+
+def gate_rule(cwd, pr, branch, v=None, approved=None, method="squash"):
     """Exit code 1 (or 2: could not read) when the PR touches a config Merge gates glob, else None.
 
     There is no machine-readable go-ahead (#656): every agent runs `gh` as the developer, so a label or a comment
-    could be forged. A gated PR is always refused; the developer merges it by hand and the next call only cleans up."""
+    could be forged. A gated PR is always refused; the developer merges it by hand and the next call only cleans up.
+
+    The refusal is recorded on the waits file (#706). With `approved` (the reviewed head) the PR is first judged by every
+    readiness check but the gate: a PR that is not ready ends with that check's verdict (`wait-ci`, `send-back`,
+    `re-review`...), as an ungated PR does, and is recorded with no command; a ready PR is recorded with the exact
+    `gh pr merge` command, so the developer can run it from the lead's session."""
     glob, code = gate_of(cwd, pr)
     if code is not None:
         return code
@@ -270,9 +310,18 @@ def gate_rule(cwd, pr, branch):
         title = github.pr_view(pr, "title", cwd).get("title") or ""
     except github.GhError:
         title = ""  # the title only sharpens the message
+    v = v or {}
+    not_ready = readiness(cwd, pr, v, approved) if approved else None
+    head = v.get("headRefOid") or ""
+    ready = bool(approved) and not_ready is None and bool(head)
+    record_wait(cwd, pr, v, title, glob, merge_command(pr, method, head) if ready else None)
+    if not_ready is not None:
+        return not_ready
     kind = "a release PR, " if title.startswith("chore(main): release") else ""
     say(f"PR #{pr} is not merged by a script: {kind}it touches the merge gate {glob}; the developer merges it by hand "
         f"(web UI or `! gh pr merge {pr}`), then run merge again to clean up")
+    if ready:
+        say(f"PR #{pr} is ready: approved, green. Merge: ! {merge_command(pr, method, head)}")
     log_event(cwd, "merge", "gate-hold", ref=pr, branch=branch, gate=glob)
     verdict(f"ask-user gate {glob}")
     return 1
@@ -595,7 +644,7 @@ def run_merge(argv=None) -> int:
     state = v.get("state")
     head_oid = v.get("headRefOid") or ""
     if state == "OPEN":  # with or without --approved-head: a gated PR is never merged by a script
-        code = gate_rule(cwd, pr, branch)
+        code = gate_rule(cwd, pr, branch, v, args.approved_head, args.method)
         if code is not None:
             return code
     if args.approved_head and state == "OPEN":
@@ -635,6 +684,7 @@ def run_merge(argv=None) -> int:
             v, state = nv, nv.get("state")
         if state in ("MERGED", "CLOSED"):
             clear_update(cwd, pr)
+            clear_wait(cwd, pr)  # a gated PR's entry on the developer's waits file (#706)
         if state == "MERGED":
             break
         if state == "CLOSED":

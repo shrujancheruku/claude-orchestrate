@@ -715,6 +715,47 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
         self.assertEqual((self.called(MERGE), self.gate_events()), ([], []))
 
+    # A gated PR goes on the developer's waits file, with the merge command when it is ready (#706).
+    def waits(self):
+        import waits
+        return waits.live(self.repo)
+
+    def test_a_gated_ready_pr_records_the_merge_command_with_the_method_and_the_head(self):
+        for method, flag in (("squash", "--squash"), ("merge", "--merge"), ("rebase", "--rebase")):
+            with self.subTest(method):
+                self.setUp()
+                p = self.merge(self.approved, files=("hooks/guard.py",), more=("--method", method))
+                self.assertEqual(p.stdout.splitlines()[-1], "next: ask-user gate hooks/**", p.stdout + p.stderr)
+                (entry,) = self.waits()
+                want = f"gh pr merge 7 {flag} --delete-branch --match-head-commit {self.approved}"
+                self.assertEqual((entry["id"], entry["kind"], entry["pr"], entry["head"], entry["command"]),
+                                 ("pr-7", "merge-gate", 7, self.approved, want))
+                self.assertIn(f"PR #7 is ready: approved, green. Merge: ! {want}", p.stdout)
+
+    def test_a_gated_pr_that_is_not_ready_records_no_command_and_ends_with_the_readiness_verdict(self):
+        red = [{"name": "verify", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        p = self.merge(self.approved, files=("hooks/guard.py",), checks=red)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: send-back 7", p.stdout + p.stderr)
+        (entry,) = self.waits()
+        self.assertEqual((entry["pr"], entry["gate"], "command" in entry), (7, "hooks/**", False))
+        self.assertEqual(self.called(MERGE), [])
+
+    def test_a_gated_pr_without_the_approved_head_records_no_command(self):
+        self.merge(self.approved, flag=False, files=("gated.txt",))
+        (entry,) = self.waits()
+        self.assertNotIn("command", entry)
+
+    def test_an_ungated_pr_records_no_wait(self):
+        self.merge(self.approved, files=("a.txt",))
+        self.assertEqual(self.waits(), [])
+
+    def test_a_recorded_gated_pr_that_merges_clears_its_entry(self):
+        self.merge(self.approved, files=("hooks/guard.py",))
+        self.assertEqual(len(self.waits()), 1)
+        p = self.merge(self.approved, files=("hooks/guard.py",), state="MERGED")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.waits(), [])
+
     # A merged change to the guard does nothing for a run that loaded its plugin before it (#727).
     def snapshot_events(self):
         return [(e["outcome"], e["ref"], bool(e.get("sha"))) for e in self.env.events() if e["kind"] == "snapshot" and e["outcome"] == "stale"]

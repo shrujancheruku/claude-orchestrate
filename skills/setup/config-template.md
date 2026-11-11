@@ -74,6 +74,17 @@ Optional: a missing section, or a missing line, keeps the default shown here.
 - **Expensive hold:** 3. How many takeable tickets one held PR must block before the digest asks the developer about it.
 - **Velocity watch:** on. `off` stops the `idle-slot:` wake.
 
+## Developer waits
+
+Optional: a missing section is the defaults shown here. The lead prints this footer after every turn (`scripts/waiting`).
+
+- enabled: yes
+- sections: ready-for-human, needs-triage, lead-asks
+- colours: ready-for-human red, needs-triage yellow, lead-asks blue
+- orchestrator pass reports: no
+
+`sections` is ordered: list order is print order. Optional sources, off until listed: `merge-gates`, `release-prs`, `parked`. Colours are black, red, green, yellow, blue, magenta, cyan or white. `orchestrator pass reports: yes` puts the footer in the orchestrator's pass report too.
+
 ## Human-only steps
 
 <Actions only the user performs; workers stop and report when they reach one.>

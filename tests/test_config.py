@@ -237,5 +237,41 @@ class GuardContract(unittest.TestCase):
                 self.assertEqual(guard.posting_enabled(d), config.Config.load(d).post_reviews)
 
 
+class DeveloperWaits(unittest.TestCase):
+    """The `Developer waits` section (#706): present, missing (defaults), and a fault that falls back to the defaults."""
+    SECTION = ("## Developer waits\n\n- enabled: yes\n- sections: lead-asks, ready-for-human, parked\n"
+               "- colours: ready-for-human green, lead-asks magenta\n- orchestrator pass reports: yes\n")
+
+    def test_a_missing_section_is_the_defaults_with_no_problem(self):
+        cfg = config.Config.parse("## Slots\n\n- **Slots:** 2\n")
+        self.assertTrue(cfg.waits_enabled)
+        self.assertEqual(cfg.waits_sections, ("ready-for-human", "needs-triage", "lead-asks"))
+        colours = dict(cfg.waits_colours)
+        self.assertEqual((colours["ready-for-human"], colours["needs-triage"], colours["lead-asks"]), ("red", "yellow", "blue"))
+        self.assertFalse(cfg.waits_pass_reports)
+        self.assertEqual(cfg.problems, ())
+
+    def test_a_present_section_sets_order_colours_and_flags(self):
+        cfg = config.Config.parse(self.SECTION)
+        self.assertEqual(cfg.waits_sections, ("lead-asks", "ready-for-human", "parked"))
+        colours = dict(cfg.waits_colours)
+        self.assertEqual((colours["ready-for-human"], colours["lead-asks"]), ("green", "magenta"))
+        self.assertEqual(colours["needs-triage"], "yellow")  # unlisted: the default stays
+        self.assertTrue(cfg.waits_pass_reports)
+        self.assertEqual(cfg.problems, ())
+        self.assertFalse(config.Config.parse("## Developer waits\n\n- enabled: no\n").waits_enabled)
+
+    def test_a_bad_colour_or_unknown_section_falls_back_to_the_defaults_with_one_problem(self):
+        for bad in ("- colours: lead-asks purple\n", "- sections: lead-asks, nonsense\n", "- enabled: maybe\n",
+                    "- colours: lead-asks\n", "- sections:\n"):
+            with self.subTest(bad):
+                cfg = config.Config.parse("## Developer waits\n\n- orchestrator pass reports: yes\n" + bad)
+                self.assertEqual(cfg.waits_sections, config.WAITS_DEFAULT_SECTIONS)
+                self.assertFalse(cfg.waits_pass_reports)  # the whole section falls back
+                problems = cfg.problems_of(config.WAITS)
+                self.assertEqual(len(problems), 1)
+                self.assertNotIn("\n", problems[0].message)
+
+
 if __name__ == "__main__":
     unittest.main()

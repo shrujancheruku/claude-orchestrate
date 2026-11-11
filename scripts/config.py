@@ -23,8 +23,16 @@ DEFAULT_WORKER_MODEL = "sonnet"  # a config with no Worker row
 DEFAULT_S_FILES = 3  # the S file limit when the config does not set one
 
 
+WAITS = "waits"  # a Problem kind: the `Developer waits` section does not parse (#706)
+WAITS_SECTIONS = ("ready-for-human", "needs-triage", "lead-asks", "merge-gates", "release-prs", "parked")
+WAITS_DEFAULT_SECTIONS = WAITS_SECTIONS[:3]  # the other three are optional sources, off until listed
+WAITS_COLOURS = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")  # the 16-colour ANSI names
+WAITS_DEFAULT_COLOURS = (("ready-for-human", "red"), ("needs-triage", "yellow"), ("lead-asks", "blue"),
+                         ("merge-gates", "magenta"), ("release-prs", "cyan"), ("parked", "white"))
+
+
 class Problem(NamedTuple):
-    kind: str  # RUN | SHARED | GENERATED
+    kind: str  # RUN | SHARED | GENERATED | WAITS
     message: str
 
 
@@ -56,6 +64,10 @@ class Config(NamedTuple):
     velocity_watch: bool = True  # the Velocity section's `**Velocity watch:** on|off`; a missing section is on
     update_required: bool = False  # the PRs and merging section's `**Merge:** up to date: required`; else a behind PR with no file overlap merges without an update (#651)
     pr_title_ticket: bool = False  # the PR title convention ends in ` (#<n>)`: the gate then requires the closed ticket's number (#695)
+    waits_enabled: bool = True  # the `Developer waits` section's `enabled:`; a missing section is on (#706)
+    waits_sections: tuple = WAITS_DEFAULT_SECTIONS  # its `sections:`: print order, and listing an optional source turns it on
+    waits_colours: tuple = WAITS_DEFAULT_COLOURS  # (section, colour) pairs from its `colours:` line over the defaults
+    waits_pass_reports: bool = False  # its `orchestrator pass reports:`: the orchestrator's pass report carries the footer too
     problems: tuple = ()  # Problem entries
 
     @classmethod
@@ -90,6 +102,7 @@ class Config(NamedTuple):
         holds = tuple(re.findall(r"`([^`]+)`", _item_text(common.section_of(text, "Slots"), "Exclusive holds")))
         slots = re.search(r"\*\*Slots:\*\*\s*(\d+)", common.section_of(text, "Slots") or "")
         s_lines, s_files, l_lines = _tiers(review)
+        waits, waits_problems = _developer_waits(common.section_of(text, "Developer waits"))
         return cls(
             slots=int(slots.group(1)) if slots else None,
             shared_files=tuple(paths),
@@ -115,7 +128,8 @@ class Config(NamedTuple):
             trusted_authors=_trusted_authors(common.section_of(text, "Backlog")),
             pr_title_ticket=_pr_title_ticket(common.section_of(text, "PRs and merging")),
             update_required=_update_required(common.section_of(text, "PRs and merging")),
-            problems=tuple(problems),
+            problems=tuple(problems + waits_problems),
+            **waits,
             **_velocity(common.section_of(text, "Velocity")),
         )
 
@@ -313,6 +327,48 @@ def _tiers(review):
     s = re.search(r"S is at most <?(\d+)>? changed lines in at most <?(\d+)>? files", text)
     l = re.search(r"L touches[^;.]*? more than <?(\d+)>? lines", text)
     return (int(s.group(1)) if s else None, int(s.group(2)) if s else None, int(l.group(1)) if l else None)
+
+
+def _waits_item(section, label):
+    m = re.search(r"^[-*]\s+(?:\*\*)?" + re.escape(label) + r"(?:\*\*)?:(?:\*\*)?[ \t]*(.*)$", section or "", re.I | re.M)
+    return m.group(1).strip() if m else None
+
+
+def _developer_waits(section) -> tuple:
+    """(Config fields, problems) for the `Developer waits` section (#706). A missing section is the defaults, quietly.
+    A section that does not parse (an unknown section name, a colour that is not one of the 8 ANSI names, a flag that
+    is not yes or no) is the defaults too, with one WAITS problem naming the first fault, so the footer never goes
+    missing over a typo."""
+    if section is None:
+        return {}, []
+    fields: dict = {}
+    for label, field in (("enabled", "waits_enabled"), ("orchestrator pass reports", "waits_pass_reports")):
+        value = _waits_item(section, label)
+        if value is None:
+            continue
+        word = value.strip("` *").lower()
+        if word not in ("yes", "no"):
+            return {}, [Problem(WAITS, f"Developer waits: `{label}:` must be yes or no, not `{value}`; using the defaults")]
+        fields[field] = word == "yes"
+    value = _waits_item(section, "sections")
+    if value is not None:
+        names = [n.strip("` ").lower() for n in value.split(",") if n.strip("` ")]
+        unknown = [n for n in names if n not in WAITS_SECTIONS]
+        if unknown or not names:
+            why = f"unknown section `{unknown[0]}` (known: {', '.join(WAITS_SECTIONS)})" if unknown else "no section named"
+            return {}, [Problem(WAITS, f"Developer waits: `sections:` has {why}; using the defaults")]
+        fields["waits_sections"] = tuple(dict.fromkeys(names))
+    value = _waits_item(section, "colours")
+    if value is not None:
+        colours = dict(WAITS_DEFAULT_COLOURS)
+        for part in (p.strip() for p in value.split(",") if p.strip()):
+            words = part.replace("`", "").split()
+            if len(words) != 2 or words[0].lower() not in WAITS_SECTIONS or words[1].lower() not in WAITS_COLOURS:
+                return {}, [Problem(WAITS, f"Developer waits: `colours:` entry `{part}` is not `<section> <colour>` "
+                                           f"with a colour of {', '.join(WAITS_COLOURS)}; using the defaults")]
+            colours[words[0].lower()] = words[1].lower()
+        fields["waits_colours"] = tuple(colours.items())
+    return fields, []
 
 
 def _velocity(section) -> dict:
