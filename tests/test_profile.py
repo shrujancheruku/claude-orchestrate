@@ -1555,6 +1555,27 @@ class StopWaitTest(unittest.TestCase):
         st = self.stops()
         self.assertEqual((st["count"], st["median_s"], st["items"]), (0, None, []))
 
+    def viewer_card(self, profile):
+        path = Path(self.tmp.name) / "q.json"
+        path.write_text(json.dumps(profile))
+        out = subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(path), "stopWait"],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout
+
+    def test_viewer_card_shows_a_prompt_only_run_and_keeps_the_empty_state(self):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        self.fx.events([MERGED_50])
+        profile = self.fx.run()
+        st = profile["metrics"]["stops"]
+        self.assertEqual(st["count"], 0)
+        self.assertIn("No stops in this session.", self.viewer_card(profile))
+        st["by_kind"]["prompt"] = {"count": 1, "open": 0, "median_s": 474, "total_s": 474}
+        card = self.viewer_card(profile)
+        self.assertIn("Permission prompt", card)
+        self.assertNotIn("No stops in this session.", card)
+
     def test_viewer_renders_the_tile_and_card_with_zero_stop_kinds_hidden(self):
         if not shutil.which("node"):
             self.skipTest("node not installed")
