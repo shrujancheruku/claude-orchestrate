@@ -72,7 +72,7 @@ def role(entry: dict) -> str:
     """Whose prompt it is (#642, #766): `agent_type` set -> that role; else a session named `lead` in
     `claude agents --json --all` -> `lead`; else the `role` field the hook logged from ORCHESTRATE_ROLE
     (`orchestrator`), only when the session is unnamed there or named `orchestrator` (a session with another name
-    inherited the variable); else `main`, a hand-started session. Lines logged before the `role` field fall to the
+    is hand-started); else `main`, a hand-started session. Lines logged before the `role` field fall to the
     name lookup, then `main`."""
     agent = entry.get("agent_type")
     if isinstance(agent, str) and agent:
@@ -83,8 +83,8 @@ def role(entry: dict) -> str:
     name = session_names().get(entry.get("session_id"))
     if name == LEAD_NAME:
         return LEAD_NAME
-    # The logged role says orchestrator, but a session `claude agents` knows under another name is not the one
-    # scripts/launch named `orchestrator`: it inherited ORCHESTRATE_ROLE from the shell it was started in (#766).
+    # Trust a logged `orchestrator` role only for a session scripts/launch could have named `orchestrator`; a session
+    # `claude agents` knows under another name is a hand-started one (#766), so it falls to `main`.
     if entry.get("role") == "orchestrator" and name in (None, ORCHESTRATOR_NAME):
         return "orchestrator"
     return "main"

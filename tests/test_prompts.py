@@ -136,7 +136,7 @@ class Prompts(unittest.TestCase):
         self.fake_claude([{"sessionId": "H", "name": "mine"}])
         self.write([
             entry("2026-11-09T10:00:00+00:00", tool="AskUserQuestion", session="H"),
-            {**entry("2026-11-09T10:01:00+00:00", session="H", command="x"), "role": "orchestrator"},  # inherited env
+            {**entry("2026-11-09T10:01:00+00:00", session="H", command="x"), "role": "orchestrator"},  # a logged orchestrator role on a session named otherwise
         ])
         self.assertEqual(self.run_prompts().stdout.splitlines()[1], "by role: main 2")
 
