@@ -35,6 +35,7 @@ PARK = "park"  # scripts/park-pr: a PR taken out of the merge queue (`parked`) o
 SNAPSHOT = "snapshot"  # scripts/merge: `stale` after a merged hooks/** or .claude-plugin/** change (sha = origin/<default>); scripts/launch: `launched` on a fresh launch, which clears it (#727)
 RESCUE = "rescue"  # scripts/rescue: one per rescue that ran (ref = the ticket; branch, reason); `sweep` reports the failed ones
 TRANSITION = "transition"  # scripts/transition: one per stop-for-lead, adr-hold or to-info that ran (ref = the ticket; branch, pr); `claims` reads it as a waiting question, ADR conflict or info (#747)
+PAUSE_RESUME = "pause-resume"  # scripts/claims <ticket> --resume: one per resume sent to a paused claim (ref = the ticket; since = the pause it ends); `claims` reads it back (#788)
 GREEDY = "greedy"  # scripts/launch: one per fresh start: `set` (cap = the greedy cap) or `off`; `claims` reads the newest back (#657)
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
@@ -53,6 +54,7 @@ OUTCOMES = {
     PARK: ("parked", "unparked"),
     SNAPSHOT: ("stale", "launched"),
     RESCUE: ("ok", "failed"),
+    PAUSE_RESUME: ("sent",),
     GREEDY: ("set", "off"),
     TRANSITION: ("stop-for-lead", "adr-hold", "to-info"),
 }
