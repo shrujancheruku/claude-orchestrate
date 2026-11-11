@@ -132,7 +132,7 @@ class Prompts(unittest.TestCase):
         ])
         self.assertEqual(self.run_prompts().stdout.splitlines()[0], "prompts: 1")
 
-    def test_a_main_session_with_no_role_is_not_the_orchestrator(self):
+    def test_no_role_and_an_orchestrator_role_under_another_name_are_both_main(self):
         self.fake_claude([{"sessionId": "H", "name": "mine"}])
         self.write([
             entry("2026-11-09T10:00:00+00:00", tool="AskUserQuestion", session="H"),
