@@ -1,6 +1,7 @@
 """scripts/waiting through its CLI, with the fake `gh` (#706): the footer's sections, config, format and the shared waits file."""
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -45,7 +46,17 @@ class Waiting(unittest.TestCase):
         (self.env.repo / ".claude" / "orchestration.md").write_text(text)
 
     def gh(self):
-        self.env.set_gh([gh_repo_rest({"owner": {"login": "o"}, "name": "r"}), issues_reply(self.issues), *self.extra])
+        self.env.set_gh([gh_repo_rest({"owner": {"login": "o"}, "name": "r"}), *self.labelled_replies(), *self.extra])
+
+    def labelled_replies(self):
+        """One reply per label for the label-filtered query: number and title of the open issues carrying it (#776)."""
+        out = []
+        for label in ("ready-for-human", "needs-triage"):
+            nodes = [{"number": n["number"], "title": n["title"]} for n in self.issues
+                     if label in [l["name"] for l in n["labels"]["nodes"]]]
+            out.append({"args": ["api", "graphql", "-f", "query=" + github.LABELLED_ISSUES_QUERY, "-f", "owner=o", "-f", "name=r", "-f", f"label={label}"],
+                        "stdout": json.dumps({"data": {"repository": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}})})
+        return out
 
     def footer(self, *args):
         self.gh()
@@ -128,6 +139,37 @@ class Waiting(unittest.TestCase):
                       pull(20, title="chore(main): release 1.2.0"), pull(21, title="feat: other")]
         self.assertEqual(self.footer("--plain"), ["\U0001fa75 Release PRs (1)", "  PR #20 chore(main): release 1.2.0"])
 
+    def gated_pr(self, head=HEAD):
+        """An open PR 30 touching hooks/**, green, for the optional `merge-gates` source."""
+        self.config("## Gates\n\n- **Merge gates:** PRs touching `hooks/**` are merged by the developer.\n\n"
+                    "## Developer waits\n\n- sections: merge-gates\n")
+        self.extra = [gh_pulls([{"number": 30, "headRefName": "30-x"}], "open"),
+                      {"args": ["api", "~repos/{owner}/{repo}/pulls/30/files"], "stdout": json.dumps([{"filename": "hooks/guard.py"}])},
+                      pull(30, title="fix: gated", headRefOid=head), checks({"headRefOid": head, "statusCheckRollup": GREEN, "state": "OPEN"})]
+
+    def review(self, outcome, head):
+        runlog.append_event(self.env.repo, runlog.REVIEW, outcome, ref=30, session="s1", round=1, head=head)
+
+    def test_merge_gates_lists_a_green_gated_pr_whose_current_head_is_approved(self):
+        self.gated_pr()
+        self.review("approve", HEAD)
+        self.assertEqual(self.footer("--plain"), [
+            "\U0001f7ea Merge gates (1)",
+            f"  PR #30 fix: gated: approved, green. Merge: ! gh pr merge 30 --squash --delete-branch --match-head-commit {HEAD}"])
+
+    def test_merge_gates_does_not_list_a_green_gated_pr_without_an_approval_of_its_head(self):
+        cases = {"no review": None, "approval of an older head": ("approve", "b" * 40),
+                 "sent back": ("request-changes", HEAD), "approval then a send-back": ("request-changes", HEAD)}
+        for name, event in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.gated_pr()
+                if name == "approval then a send-back":
+                    self.review("approve", HEAD)
+                if event:
+                    self.review(*event)
+                self.assertEqual(self.footer("--plain"), ["Waiting on you: nothing"])
+
     def test_an_entry_for_a_closed_pr_is_dropped_and_cleared(self):
         waits.add(self.env.repo, "PR #7 (#3) x", source="merge", kind="merge-gate", pr=7, ticket=3, head=HEAD, command=COMMAND)
         self.extra = [pull(7, state="CLOSED")]
@@ -136,7 +178,45 @@ class Waiting(unittest.TestCase):
 
     def test_an_entry_for_a_closed_ticket_is_dropped(self):
         waits.add(self.env.repo, "answer me", ticket=99)
+        self.extra = [{"args": ["api", "repos/{owner}/{repo}/issues/99"], "stdout": json.dumps({"state": "closed"})}]
         self.assertNotIn("Lead asks", "\n".join(self.footer("--plain")))
+
+    def test_an_entry_for_an_open_ticket_stays(self):
+        waits.add(self.env.repo, "answer me", ticket=98)
+        self.extra = [{"args": ["api", "repos/{owner}/{repo}/issues/98"], "stdout": json.dumps({"state": "open"})}]
+        self.assertIn("  answer me", self.footer("--plain"))
+
+    def test_one_run_reads_only_label_filtered_issues_never_the_backlog(self):
+        waits.add(self.env.repo, "answer me", ticket=98)
+        self.extra = [{"args": ["api", "repos/{owner}/{repo}/issues/98"], "stdout": json.dumps({"state": "open"})}]
+        self.footer("--plain")
+        queries = [c[3] for c in self.env.gh_calls() if c[:2] == ["api", "graphql"]]
+        self.assertEqual(sorted(queries), sorted(["query=" + github.LABELLED_ISSUES_QUERY] * 2))
+        self.assertNotIn("query=" + github.ISSUES_QUERY, queries)
+        self.assertIn("labels: [$label]", github.LABELLED_ISSUES_QUERY)
+        self.assertNotIn("body", github.LABELLED_ISSUES_QUERY)
+        sent = [c for c in self.env.gh_calls() if c[:2] == ["api", "graphql"]]
+        self.assertEqual(sorted(c[-1] for c in sent), ["label=needs-triage", "label=ready-for-human"])
+
+    def test_escape_bytes_and_triple_backticks_are_stripped_in_both_forms(self):
+        waits.add(self.env.repo, "run \x1b[31mred\x1b[0m ```rm -rf``` `ok` \x9b2J", source="prompt", kind="prompt", ts=waits.datetime.now(waits.timezone.utc).isoformat())
+        self.env.run("waiting", "--add", "ask \x1b]0;x\x07 ```fence``` ````")
+        for args in (("--plain",), ()):
+            with self.subTest(args):
+                out = "\n".join(self.footer(*args))
+                body = re.sub(r"\x1b\[(?:1;)?\d+m", "", out, flags=0)  # the footer's own colour codes, which wrap each line
+                for bad in ("\x1b", "\x9b", "```", "\x07"):
+                    self.assertNotIn(bad, body)
+                self.assertIn("[31mred", out)  # the injected escape lost its ESC byte and is plain text now
+                self.assertIn("`ok`", out)
+                self.assertIn("'''fence'''", out)
+
+    def test_a_ready_gated_pr_whose_head_moved_shows_both_heads(self):
+        note = f"(approved head {'b' * 12}, current head {'a' * 12}: a main-only update, no change of the PR's own)"
+        waits.add(self.env.repo, "PR #7 (#3) x", source="merge", kind="merge-gate", pr=7, ticket=3, head=HEAD, command=COMMAND, heads=note)
+        self.extra = [pull(7, mergeStateStatus="CLEAN"), checks({"headRefOid": HEAD, "statusCheckRollup": GREEN, "state": "OPEN"})]
+        line = self.footer("--plain", "--width", "400")[-1]
+        self.assertIn(f": approved, green. {note} Merge: ! {COMMAND}", line)
 
     def test_a_ready_gated_pr_prints_its_merge_command_whole(self):
         waits.add(self.env.repo, "PR #7 (#3) " + "t" * 150, source="merge", kind="merge-gate", pr=7, ticket=3, head=HEAD, command=COMMAND)

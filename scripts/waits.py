@@ -24,6 +24,15 @@ WAITS = Path(".claude") / "orchestrate-waits.jsonl"
 FIELD_LIMIT = 500  # characters kept of any text field: an entry is one footer line
 
 
+METHOD_FLAGS = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}
+
+
+def merge_command(pr, method, head) -> str:
+    """The command the developer runs for a gated PR (#706): the method, the branch deleted, pinned to the reviewed head
+    so a push after the review makes it fail rather than merge unreviewed code. `merge` and `waiting` print this one."""
+    return f"gh pr merge {pr} {METHOD_FLAGS[method]} --delete-branch --match-head-commit {head}"
+
+
 def path_of(repo) -> Path:
     return main_checkout(repo) / WAITS
 

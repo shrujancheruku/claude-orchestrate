@@ -69,6 +69,18 @@ ISSUES_QUERY = """query($owner: String!, $name: String!, $after: String) {
 }"""
 
 
+# The open issues carrying one label, number and title only (`scripts/waiting`, #776): a footer on every lead turn must
+# not read the whole backlog (bodies, 100 comments each) for two labels. `labels: [$label]` takes a single string.
+LABELLED_ISSUES_QUERY = """query($owner: String!, $name: String!, $label: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 100, after: $after, states: OPEN, labels: [$label], orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number title }
+    }
+  }
+}"""
+
+
 # One issue, open or closed (`scripts/issue`, #545): the fields tracker.from_nodes reads, plus the state and the comment
 # count (the 100 newest comments come back; the count says how many older ones are not shown).
 ISSUE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
@@ -1185,6 +1197,17 @@ def open_issues(repo: dict, cwd=None) -> list:
         if after in seen:  # a cursor that does not advance would loop for ever
             raise GhError(MALFORMED, "gh returned a repeated page cursor (issues)")
         seen.add(after)
+
+
+def labelled_issues(repo: dict, label: str, cwd=None) -> list:
+    """[{number, title}] of the open issues carrying `label`, all pages, from `LABELLED_ISSUES_QUERY`. `repo` is `repo_info`'s."""
+    try:
+        owner, name = repo["owner"]["login"], repo["name"]
+    except (KeyError, TypeError):
+        raise GhError(MALFORMED, "gh returned no owner and name for the repository") from None
+    nodes = _connection(LABELLED_ISSUES_QUERY, {"owner": owner, "name": name, "label": label},
+                        ("repository", "issues"), cwd=cwd, what="issues")
+    return [{"number": n["number"], "title": n["title"]} for n in nodes if isinstance(n, dict) and "number" in n]
 
 
 def _connection(query, variables, path, after=None, cwd=None, what: str = "review threads") -> list:
