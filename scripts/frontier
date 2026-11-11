@@ -163,7 +163,7 @@ def run(argv=None) -> int:
             common.die(f"frontier: cannot run: gh failed: {e.message}")
         except (KeyError, TypeError, ValueError) as e:
             common.die(f"frontier: cannot run: {e}")
-        print(claims.slots_line(found, cfg.slots))
+        print(claims.slots_line(found, cfg.slots, claims.greedy_cap(root)))
     try:
         runlog.append_event(root, "frontier", "ran", takeable=len(tracker.takeable(issues, labels)))
     except runlog.NoSession as e:
