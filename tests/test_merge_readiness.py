@@ -73,7 +73,7 @@ class ReadinessTest(unittest.TestCase):
 
     def merge(self, head, behind="0", update=None, approved="", flag=True, checks=GREEN, blockers=(),
               branch="feat-br", closing=(), ticket=9, threads=None, issues=None, workflows=None, fork=False, after_head=None,
-              files=("a.txt",), title=None, state="OPEN", files_reply=None, more=()):
+              files=("a.txt",), title=None, state="OPEN", files_reply=None, more=(), merge_state=None):
         pr_json = {"state": "OPEN", "headRefName": branch, "headRefOid": head, "statusCheckRollup": checks,
                    "isCrossRepository": fork, "closingIssuesReferences": [{"number": n} for n in closing]}
         view = {"stdout": pr_graphql_reply(dict(pr_json, state=state))}
@@ -88,6 +88,8 @@ class ReadinessTest(unittest.TestCase):
                 "seq": [{"stdout": json.dumps(rest_pull(headRefOid=h))}
                         for h in ([after_head] if isinstance(after_head, str) else after_head)]}] if after_head else []),
             gh_repo_view(),
+            *([{"args": ["api", "repos/{owner}/{repo}/pulls/7"],
+                "stdout": json.dumps(rest_pull(mergeStateStatus=merge_state))}] if merge_state else []),
             {"args": ["api", WF + head],
              **(workflows or {"exit": 1, "stderr": "gh: Not Found (HTTP 404)"})},
             {"args": ["api", "graphql", "-f", "query=" + github.ISSUES_QUERY],
@@ -153,6 +155,60 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(self.called(MERGE), [])
         # the head is still the old one right after update-branch: the host may not have applied it yet
         self.assertEqual(p.stdout.splitlines()[-1], "next: wait-ci 7 ?")
+
+    def main_moves(self, path, text="m\n"):
+        """main gains a commit (pushed) that the branch lacks: the branch is behind."""
+        self.env.commit(path, text, f"feat: main changes {path}")
+        git(self.repo, "push", "-q", "origin", "main")
+
+    def test_behind_with_no_file_overlap_merges_without_an_update(self):
+        head = self.push({"b.txt": "x\n"})
+        self.main_moves("m.txt")
+        p = self.merge(head, behind="1", approved=head, merge_state="CLEAN")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("PR #7 is behind main by 1, no file overlap; merging without an update", p.stdout)
+        self.assertEqual(self.called(UPDATE), [])
+        self.assertEqual(len(self.called(MERGE)), 1)
+        self.assertIn(f"sha={head}", self.called(MERGE)[0])  # --match-head-commit stays
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
+
+    def test_behind_with_an_overlapping_file_updates(self):
+        head = self.push({"b.txt": "x\n"})
+        self.main_moves("b.txt", "other\n")
+        p = self.merge(head, behind="1", approved=head, merge_state="CLEAN")
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.called(UPDATE), [UPDATE])
+        self.assertEqual(self.called(MERGE), [])
+
+    def test_behind_with_a_risk_path_file_updates(self):
+        head = self.push({"auth/y.py": "x\n"})
+        self.main_moves("m.txt")
+        p = self.merge(head, behind="1", approved=head, merge_state="CLEAN", flag=True)
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.called(UPDATE), [UPDATE])
+
+    def test_behind_when_the_config_requires_an_update_updates(self):
+        (self.repo / ".claude" / "orchestration.md").write_text(READY_CONFIG + "\n## PRs and merging\n\n- **Merge:** up to date: required\n")
+        head = self.push({"b.txt": "x\n"})
+        self.main_moves("m.txt")
+        p = self.merge(head, behind="1", approved=head, merge_state="CLEAN")
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.called(UPDATE), [UPDATE])
+
+    def test_behind_with_a_merge_state_other_than_clean_updates(self):
+        head = self.push({"b.txt": "x\n"})
+        self.main_moves("m.txt")
+        p = self.merge(head, behind="1", approved=head, merge_state="BLOCKED")
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.called(UPDATE), [UPDATE])
+
+    def test_a_merge_line_that_says_when_overlapping_is_the_default(self):
+        (self.repo / ".claude" / "orchestration.md").write_text(READY_CONFIG + "\n## PRs and merging\n\n- **Merge:** up to date: when overlapping\n")
+        head = self.push({"b.txt": "x\n"})
+        self.main_moves("m.txt")
+        p = self.merge(head, behind="1", approved=head, merge_state="CLEAN")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.called(UPDATE), [])
 
     def test_behind_reports_the_new_head_once_the_host_moved_it(self):
         head = self.push({"b.txt": "x\n"})
@@ -307,13 +363,39 @@ class ReadinessTest(unittest.TestCase):
         git(self.repo, "checkout", "-q", "main")
         return sha
 
-    def test_a_file_added_then_removed_after_approval_is_in_the_delta(self):
-        # The real #411 shape: a leaked 11-line file in the approved head, removed after.
+    def test_a_file_the_pr_added_then_removed_after_approval_counts_for_nothing(self):
+        # The #411 shape (a leaked 11-line file, removed after approval): the file was never on main, so nothing of it lands (#651).
         approved = self.on_br(lambda r: (r / "leak.txt").write_text("x\n" * 11))
         head = self.on_br(lambda r: (r / "leak.txt").unlink())
         p = self.merge(head, approved=approved)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_a_file_that_exists_on_main_deleted_after_approval_still_counts(self):
+        self.env.commit("old.txt", "x\n" * 11, "feat: old on main")
+        git(self.repo, "push", "-q", "origin", "main")
+        self.on_br(lambda r: git(r, "merge", "-q", "main"))
+        head = self.on_br(lambda r: (r / "old.txt").unlink())
+        p = self.merge(head)
         self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
         self.assertIn("changed 11 line(s) in 1 file(s)", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: re-review 7")
+
+    def test_a_whitespace_only_fix_and_a_pr_added_file_removed_on_a_risk_path_is_merged(self):
+        # PR #625's round-3 shape: a space in a risk-path file plus deleting a file the PR itself added.
+        approved = self.on_br(lambda r: ((r / "auth").mkdir(exist_ok=True), (r / "auth" / "guard.py").write_text("if x:\n    y = 1\n"),
+                                         (r / "probe_tmp.py").write_text("print(1)\n" * 12)))
+        head = self.on_br(lambda r: ((r / "auth" / "guard.py").write_text("if x:\n    y  =  1\n\n"), (r / "probe_tmp.py").unlink()))
+        p = self.merge(head, approved=approved)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
+
+    def test_a_behaviour_change_on_a_risk_path_after_approval_names_the_delta_scope(self):
+        approved = self.on_br(lambda r: ((r / "auth").mkdir(exist_ok=True), (r / "auth" / "guard.py").write_text("if x:\n    y = 1\n")))
+        head = self.on_br(lambda r: (r / "auth" / "guard.py").write_text("if x:\n    y = 2\n"))
+        p = self.merge(head, approved=approved)
+        self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
+        self.assertIn(f"re-review scope: delta {approved[:12]}..{head[:12]} (S)", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: re-review 7")
 
     def test_a_file_added_and_removed_after_approval_plus_one_line_fix_is_one_line(self):
         # The #411 shape after a main update: the leak never reaches the head, so only the fix is left.
@@ -358,8 +440,11 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
 
     def test_a_revert_is_in_the_delta(self):
-        approved = self.on_br(lambda r: (r / "auth" / "x.py").parent.mkdir(exist_ok=True) or (r / "auth" / "x.py").write_text("1\n"))
-        head = self.on_br(lambda r: (r / "auth" / "x.py").unlink())
+        # A file main already has, edited in the approved head and restored after: the patch changed back, so it counts.
+        self.env.commit("auth/x.py", "0\n", "feat: x on main")
+        git(self.repo, "push", "-q", "origin", "main")
+        approved = self.on_br(lambda r: (git(r, "merge", "-q", "main"), (r / "auth" / "x.py").write_text("1\n")))
+        head = self.on_br(lambda r: (r / "auth" / "x.py").write_text("0\n"))
         p = self.merge(head, approved=approved)
         self.assertEqual(p.returncode, 6, p.stdout + p.stderr)
         self.assertIn("auth/x.py", p.stdout)
@@ -387,7 +472,9 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn("auth/empty", p.stdout)
 
     def test_an_empty_file_removed_counts_as_a_file(self):
-        approved = self.on_br(lambda r: ((r / "auth").mkdir(exist_ok=True), (r / "auth" / "empty").write_text("")))
+        self.env.commit("auth/empty", "", "feat: empty on main")
+        git(self.repo, "push", "-q", "origin", "main")
+        approved = self.on_br(lambda r: git(r, "merge", "-q", "main"))
         head = self.on_br(lambda r: (r / "auth" / "empty").unlink())
         self.assertEqual(self.merge(head, approved=approved).returncode, 6)
 

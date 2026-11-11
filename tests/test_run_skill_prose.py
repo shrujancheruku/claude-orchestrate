@@ -38,6 +38,14 @@ class RunSkillProse(unittest.TestCase):
         self.assertEqual(SKILL.count("never a sleep"), 1)
         self.assertEqual(SKILL.count("## Rate limits"), 1)
 
+    def test_the_re_review_step_names_the_scripts_delta_scope_and_not_its_rule(self):
+        # #651: `merge` decides what a re-review covers and prints the `re-review scope:` line; the skill applies it.
+        step = re.search(r"`re-review <pr>`:[^`]*`re-review scope:`[^.]*\.", SKILL)
+        self.assertIsNotNone(step)
+        self.assertIn("delta", step.group(0))
+        self.assertIn("S tier", step.group(0))
+        self.assertIsNone(re.search(r"(?i)whitespace-only|git diff -w", SKILL))
+
     def test_named_scripts_exist(self):
         for name in sorted(set(re.findall(r"`scripts/([A-Za-z][A-Za-z0-9_-]*(?:\.py)?)`", SKILL))):
             with self.subTest(name):

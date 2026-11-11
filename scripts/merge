@@ -6,9 +6,13 @@ first decides readiness and merges nothing unless the PR is ready: CI not green 
 pending, failed, cancelled or missing, or no checks at all while the head has workflow files; no checks and no workflow files is green, `ci: none configured`) or an open blocker on the PR's ticket (the
 branch's `<number>-` prefix, else the PR's closing reference), or an unresolved review thread (outdated or not, any author; the count line, then one
 `  <author> <url>` line each), is a refusal (exit 1, the clause named); a PR behind the default branch is
-updated through the host's update-branch (exit 5); the PR's own change since the approved head (what it adds to the
-default branch at each head, compared, so merges of the default branch count for nothing) that touches a config risk path or exceeds the S thresholds
-needs re-review (exit 6). Without the flag it merges as before.
+updated through the host's update-branch (exit 5), unless the host reports it `CLEAN`, none of its files changed on the
+default branch since the merge base, none is a config risk path and the config's `Merge:` line isn't `up to date: required`:
+then it merges without an update (`PR #<n> is behind <default> by <k>, no file overlap; merging without an update`, #651);
+the PR's own change since the approved head (what it adds to the
+default branch at each head, compared, so merges of the default branch count for nothing; a change in whitespace only,
+judged as `git diff -w`, and deleting a file the PR added count for nothing too) that touches a config risk path or exceeds the S thresholds
+needs re-review (exit 6), and a line `re-review scope: delta <approved>..<head> (S)` names what to review. Without the flag it merges as before.
 
 `gh pr merge`'s exit is unreliable (a 502 can hide a merge that landed; a retry can answer "merge
 already in progress"; the branch can survive), so the PR's state is the only truth. The script runs
@@ -30,7 +34,7 @@ branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
 After the sweep, each --also-approved PR=SHA (a PR the reviewer approved at that head, still waiting to merge)
 that is open, at that head (or with only merges of the default branch since) and behind the default branch is brought up to date with `gh pr update-branch`
 too, so their CI runs at the same time instead of one merge after another: one `PR #<n> updated (behind by <k>);
-wait for CI` line each. A PR that is behind and DIRTY is not updated: its line says to hand it back. An
+wait for CI` line each (a PR that needs no update by the rule above is not updated). A PR that is behind and DIRTY is not updated: its line says to hand it back. An
 unapproved PR, or one pushed to since its approval, is left alone. None of this changes the exit code.
 Exit codes: 0 merged and cleaned up; 4 the same, but a swept branch was handed back (resume its worker
 with the printed conflict list); 5 behind the default branch, branch updated: wait for CI, then run
@@ -149,6 +153,17 @@ def why_of(text):
     return common.one_line(text) or "see the output above"
 
 
+def _without_blanks(rows):
+    """A patch's rows with every whitespace character dropped (the +/-/space tag kept) and the rows that held nothing else
+    left out: two patches that are equal here differ in whitespace only, as `git diff -w` judges it."""
+    out = []
+    for row in rows:
+        body = "".join(row[1:].split())
+        if body or row[:1] not in (" ", "+", "-"):
+            out.append(row[:1] + body)
+    return tuple(out)
+
+
 def own_changes(cwd, approved, head, default):
     """(files, lines) the PR changed from `approved` to `head`, or None when git can't say.
 
@@ -168,8 +183,10 @@ def own_changes(cwd, approved, head, default):
     files, lines = set(), 0
     for path in set(old) | set(new):
         a, b = old.get(path, ()), new.get(path, ())
-        if a == b:
-            continue
+        if a == b or _without_blanks(a) == _without_blanks(b):
+            continue  # the same patch, or one that differs in whitespace only (`git diff -w`, #651)
+        if path in old and path not in new and any(r.startswith("new file mode") for r in a):
+            continue  # a file the PR added, deleted again: absent at the merge base, so nothing of it reaches the default branch
         files.add(path)
         # Changed lines only (not context, mode or file-name rows); a file that differs counts at least one,
         # so a moved block (same +/- rows, other context) is one line with its file counted.
@@ -388,6 +405,44 @@ def update_in_flight(cwd, pr, head):
     return age if 0 <= age < UPDATE_WINDOW else None
 
 
+def changed_files(cwd, a, b):
+    """The paths that differ between commits `a` and `b` (a rename counts both names), or None when git can't say."""
+    out = run("git", "diff", "--name-only", "--no-renames", "-z", a, b, cwd=cwd)
+    return None if out.returncode != 0 else {p for p in out.stdout.split("\0") if p}
+
+
+def update_needed(cwd, pr, head, default, cfg=None, state=None):
+    """Why a PR behind `default` must be updated before it merges, or None when the update can't change the outcome (#651).
+
+    The update is skipped only when the host calls the PR mergeable (`CLEAN`), the config doesn't ask for it, no file
+    the PR changed is among the files the default branch changed since their merge base, and none is a risk path.
+    A clash between files no one shares is left to the default branch's own CI run. Anything git or the host can't
+    answer needs the update, as before. `state` is the PR's mergeStateStatus when the caller already read it."""
+    cfg = cfg or config.for_checkout(cwd)
+    if cfg.update_required:
+        return "the config asks for it (Merge: up to date: required)"
+    if state is None:
+        try:
+            state = github.pr_view(pr, "mergeStateStatus", cwd).get("mergeStateStatus")
+        except github.GhError:
+            return "its merge state could not be read"
+    if state != "CLEAN":
+        return f"its merge state is {state or 'unknown'}, not CLEAN"
+    run("git", "fetch", "--quiet", "origin", cwd=cwd)
+    base = run("git", "merge-base", f"origin/{default}", head, cwd=cwd)
+    mine = changed_files(cwd, base.stdout.strip(), head) if base.returncode == 0 and base.stdout.strip() else None
+    theirs = changed_files(cwd, base.stdout.strip(), f"origin/{default}") if mine is not None else None
+    if mine is None or theirs is None:
+        return "git could not compare its files with the default branch"
+    both = sorted(mine & theirs)
+    if both:
+        return f"it shares {', '.join(both[:3])}{' ...' if len(both) > 3 else ''} with the default branch"
+    risky = sorted(f for f in mine if replay.is_shared(f, cfg.risk_paths))
+    if risky:
+        return f"it touches risk path(s) {', '.join(risky[:3])}"
+    return None
+
+
 def readiness(cwd, pr, v, approved, gap=HEAD_GAP):
     """Exit code 1, 2, 5 or 6 when the PR is not ready to merge against `approved`, else None (ready)."""
     default = default_branch(cwd)
@@ -406,6 +461,9 @@ def readiness(cwd, pr, v, approved, gap=HEAD_GAP):
     except github.GhError as e:
         say(f"merge: could not read behind_by for PR #{pr}: {e.message}")
         return 2
+    if behind and update_needed(cwd, pr, head, default) is None:
+        say(f"PR #{pr} is behind {default} by {behind}, no file overlap; merging without an update")
+        behind = 0
     if behind:
         age = update_in_flight(cwd, pr, head)
         if age is not None:
@@ -441,6 +499,7 @@ def readiness(cwd, pr, v, approved, gap=HEAD_GAP):
         why = f"touches risk path(s) {', '.join(risky)}" if risky else \
             f"changed {lines} line(s) in {len(files)} file(s), over the S thresholds"
         say(f"PR #{pr} needs re-review: its change since the approved head {approved[:12]} {why}")
+        say(f"re-review scope: delta {approved[:12]}..{head[:12]} (S)")
         verdict(f"re-review {pr}")
         return 6
     say(f"PR #{pr} is up to date, and its change since the approved head is within the S thresholds")
@@ -787,6 +846,9 @@ def update_approved(cwd, merged_pr, default, specs, gap=HEAD_GAP):
             if v.get("mergeStateStatus") == "DIRTY":
                 say(f"PR #{n} is behind {default} by {behind} and DIRTY; not updated: hand it back to its worker")
                 also(f"send-back {n}")
+                continue
+            if update_needed(cwd, n, v.get("headRefOid") or sha, default, state=v.get("mergeStateStatus")) is None:
+                say(f"PR #{n} is behind {default} by {behind}, no file overlap; not updated (it merges without one)")
                 continue
             github.update_branch(n, cwd)
             say(f"PR #{n} updated (behind by {behind}); wait for CI")
