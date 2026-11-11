@@ -41,6 +41,7 @@ from pathlib import Path
 LOG = Path(".claude") / "orchestrate-prompts.jsonl"
 WAITS = Path(".claude") / "orchestrate-waits.jsonl"  # scripts/waits.py's file; this hook keeps its own copy of the append (`python3 -I`)
 CLEAR_EVENTS = ("PostToolUse", "Stop")  # a prompt answered, or the session moved on
+COMPACT_BYTES = 8192  # a waits file past this is rewritten to its live entries on the next clear event (#782)
 COMMAND_LIMIT = 2000
 MESSAGE_LIMIT = 500
 COMMAND_TOOLS = ("Bash", "Monitor")
@@ -192,6 +193,52 @@ def wait_clear(path: Path, payload: dict) -> None:
             append(path, json.dumps({"op": "done", "id": wait_id}, separators=(",", ":")) + "\n")
 
 
+def compact(path: Path) -> None:
+    """Keep the waits file small: past COMPACT_BYTES, rewrite it as its live `add` records only (#782).
+
+    The file is append-only, so every answered prompt leaves an add and a done behind, and each tool call reads all of
+    it. Rewriting in place under the same exclusive flock every writer takes means no append is lost, and an entry
+    still open (an add with no done after it) is always kept, as the last add for its id, which is how readers
+    resolve a re-recorded id. Lines that do not parse are dropped."""
+    try:
+        if path.stat().st_size <= COMPACT_BYTES:
+            return
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with os.fdopen(os.dup(fd), "r", encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+            live = {}
+            for line in lines:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or not isinstance(rec.get("id"), str):
+                    continue
+                if rec.get("op") == "add":
+                    live.pop(rec["id"], None)  # a re-record moves to the end, as it reads
+                    live[rec["id"]] = rec
+                elif rec.get("op") == "done":
+                    live.pop(rec["id"], None)
+            data = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in live.values()).encode("utf-8")
+            if len(data) == os.fstat(fd).st_size:  # all live already: no rewrite on every call
+                return
+            # Write first, truncate after: a kill or a full disk between the two leaves stale tail lines, never an
+            # empty file that has lost the open entries.
+            done = 0
+            while done < len(data):
+                done += os.pwrite(fd, data[done:], done)
+            os.ftruncate(fd, len(data))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
@@ -204,6 +251,7 @@ def main() -> int:
             # Cheap when nothing waits: the file is read only if it exists. This runs after every tool call.
             if waits.exists():
                 wait_clear(waits, payload)
+                compact(waits)
             return 0
         entry = record(payload)
         append(root / LOG, json.dumps(entry, separators=(",", ":")) + "\n")
