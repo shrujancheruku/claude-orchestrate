@@ -180,6 +180,14 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(self.called(UPDATE), [UPDATE])
         self.assertEqual(self.called(MERGE), [])
 
+    def test_behind_updates_when_the_default_branch_cannot_be_fetched(self):
+        head = self.push({"b.txt": "x\n"})
+        self.main_moves("m.txt")
+        git(self.repo, "remote", "set-url", "origin", str(self.repo / "no-such-remote"))
+        p = self.merge(head, behind="1", approved=head, merge_state="CLEAN")
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.called(UPDATE), [UPDATE])
+
     def test_behind_with_a_risk_path_file_updates(self):
         head = self.push({"auth/y.py": "x\n"})
         self.main_moves("m.txt")

@@ -428,7 +428,8 @@ def update_needed(cwd, pr, head, default, cfg=None, state=None):
             return "its merge state could not be read"
     if state != "CLEAN":
         return f"its merge state is {state or 'unknown'}, not CLEAN"
-    run("git", "fetch", "--quiet", "origin", cwd=cwd)
+    if run("git", "fetch", "--quiet", "origin", cwd=cwd).returncode != 0:
+        return "could not fetch the default branch"  # a stale origin/<default> would hide an overlap
     base = run("git", "merge-base", f"origin/{default}", head, cwd=cwd)
     mine = changed_files(cwd, base.stdout.strip(), head) if base.returncode == 0 and base.stdout.strip() else None
     theirs = changed_files(cwd, base.stdout.strip(), f"origin/{default}") if mine is not None else None
