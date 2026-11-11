@@ -14,6 +14,7 @@ from unittest import mock
 
 from harness import SCRIPTS, ScriptEnv, pr_graphql_reply, rest_pull
 
+ROLLUPS_PREFIX = "query($owner: String!, $name: String!) {\n  repository(owner: $owner, name: $name) {"
 SETTLED = "next: settled"
 OPEN_LIST = ["api", "~repos/{owner}/{repo}/pulls?state=open"]
 
@@ -25,13 +26,13 @@ def canned(steps):
     closed one (or one not listed) by its pull read, and an open one settling by the pull read that gives its merge
     state."""
     ticks = max(len(v) for v in steps.values())
-    lists, graphql, pulls = [], {pr: [] for pr in steps}, {pr: [] for pr in steps}
+    lists, graphql, pulls = [], [], {pr: [] for pr in steps}
     for n in range(ticks):
         picked = {pr: v[min(n, len(v) - 1)] for pr, v in steps.items()}
         if "GH_ERROR" in picked.values():
             lists.append({"stderr": "HTTP 502: bad gateway\n", "exit": 1})
             continue
-        rows = []
+        rows, nodes = [], {}
         for pr, v in picked.items():
             if v == "MISSING":
                 pulls[pr].append({"stderr": "gh: Not Found (HTTP 404)", "exit": 1})
@@ -40,18 +41,20 @@ def canned(steps):
             else:
                 rows.append(rest_pull(number=int(pr), **v))
                 if not v.get("isDraft"):
-                    graphql[pr].append({"stdout": pr_graphql_reply(dict(v, state="OPEN"))})
+                    nodes[f"pr{pr}"] = json.loads(pr_graphql_reply(dict(v, state="OPEN")))["data"]["repository"]["pullRequest"]
         lists.append({"stdout": json.dumps(rows)})
+        if nodes:  # one aliased query answers every ready PR of the tick
+            graphql.append({"stdout": json.dumps({"data": {"repository": nodes}})})
     responses = [{"args": OPEN_LIST, "seq": lists}]
     for pr, v in steps.items():
         last = v[-1]
         if last not in ("MISSING", "GH_ERROR") and last.get("state", "OPEN") == "OPEN":
             pulls[pr].append({"stdout": json.dumps(rest_pull(number=int(pr), **last))})  # the settle read of the merge state
-        if graphql[pr]:
-            responses.append({"args": ["api", "graphql", "-f", "~query=", "-F", "owner={owner}", "-F", "name={repo}",
-                                       "-F", f"number={pr}"], "seq": graphql[pr]})
         if pulls[pr]:
             responses.append({"args": ["api", f"repos/{{owner}}/{{repo}}/pulls/{pr}"], "seq": pulls[pr]})
+    if graphql:
+        responses.append({"args": ["api", "graphql", "-f", "~query=" + ROLLUPS_PREFIX, "-F", "owner={owner}",
+                                   "-F", "name={repo}"], "seq": graphql})
     return responses
 
 
@@ -320,7 +323,7 @@ class WatchCi(unittest.TestCase):
         self.assertIn("also: gave-up 7 pass withheld", r.stdout)
         self.assertEqual(r.returncode, 3)
 
-    def test_three_watched_prs_cost_one_list_read_per_tick_and_one_rollup_query_per_ready_pr(self):
+    def test_three_watched_prs_cost_one_list_read_and_one_rollup_query_per_tick(self):
         self.seq({"1": [view(None), view(None), view("SUCCESS", head="1111111aaa")],
                   "2": [view(None), view("SUCCESS", head="2222222bbb")],
                   "3": [view(None), view(None), view("SUCCESS", head="3333333ccc")]})
@@ -328,12 +331,12 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(r.stdout.splitlines()), 4)  # three settles and the next: line
         calls = self.env.gh_calls()
-        # One list read per tick however many PRs are watched, and a rollup query only for a PR still pending or
-        # settling (1 and 3 on three ticks, 2 on two): 3 + 8 queries, plus one merge-state read per settle.
+        # One list read and one aliased rollup query per tick however many PRs are watched (#770): 3 + 3 calls,
+        # plus one merge-state read per settle.
         lists = [c for c in calls if c[1].startswith("repos/{owner}/{repo}/pulls?state=open")]
         self.assertEqual(len(lists), 3)
-        self.assertEqual(len([c for c in calls if c[1] == "graphql"]), 8)
-        self.assertEqual(len(calls), 3 + 8 + 3)
+        self.assertEqual(len([c for c in calls if c[1] == "graphql"]), 3)
+        self.assertEqual(len(calls), 3 + 3 + 3)
         self.assertEqual(self.env.gh_unmatched(), [])
 
     def test_default_interval_is_30_with_two_prs_and_60_with_three(self):
@@ -413,6 +416,49 @@ def running(url=RUN_URL):
 def jobs_reply(steps, status="in_progress"):
     job = {"id": 901, "name": "validate", "status": status, "steps": [{"status": s} for s in steps]}
     return {"args": ["api"], "stdout": json.dumps({"jobs": [job]})}
+
+
+class PrRollups(unittest.TestCase):
+    """github.pr_rollups (#770): one aliased query, each PR's result equal to the unbatched pr_view."""
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        self.addCleanup(sys.path.remove, str(SCRIPTS))
+        import github
+        self.github = github
+
+    @staticmethod
+    def node(checks=None, rollup=True, more=False):
+        ctx = [dict(c, __typename="CheckRun") for c in checks or []]
+        commit = {"statusCheckRollup": {"contexts": {"nodes": ctx, "pageInfo": {"hasNextPage": more}}}} if rollup else {}
+        return {"state": "OPEN", "headRefOid": "abc", "commits": {"nodes": [{"commit": commit}]}}
+
+    def test_n_prs_make_one_call_and_match_the_unbatched_result(self):
+        skipped = [{"name": "test", "status": "COMPLETED", "conclusion": "SKIPPED"}]
+        done = [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+        reply = {"data": {"repository": {"pr1": self.node(done), "pr2": self.node(skipped), "pr3": self.node(rollup=False)}}}
+        with mock.patch.object(self.github, "call_json", return_value=reply) as call:
+            got = self.github.pr_rollups(["1", "#2", 3])
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(got["1"]["statusCheckRollup"], [dict(done[0], __typename="CheckRun")])
+        self.assertEqual(got["2"]["statusCheckRollup"], [dict(skipped[0], __typename="CheckRun")])
+        self.assertEqual(got["3"], {"state": "OPEN", "headRefOid": "abc", "statusCheckRollup": []})
+        for n in ("1", "2", "3"):  # the unbatched read of the same node gives the same dict
+            with mock.patch.object(self.github, "call_json", return_value={"data": {"repository": {"pullRequest": reply["data"]["repository"][f"pr{n}"]}}}):
+                self.assertEqual(self.github.pr_view(n, "state,headRefOid,statusCheckRollup"), got[n])
+
+    def test_a_pr_with_more_checks_or_no_node_is_read_on_its_own(self):
+        reply = {"data": {"repository": {"pr1": self.node(more=True), "pr2": None}}}
+        with mock.patch.object(self.github, "call_json", return_value=reply), \
+                mock.patch.object(self.github, "pr_view", return_value={"own": 1}) as view:
+            got = self.github.pr_rollups(["1", "2"])
+        self.assertEqual(got, {"1": {"own": 1}, "2": {"own": 1}})
+        self.assertEqual(view.call_count, 2)
+
+    def test_no_ready_pr_makes_no_call(self):
+        with mock.patch.object(self.github, "call_json") as call:
+            self.assertEqual(self.github.pr_rollups([]), {})
+        call.assert_not_called()
 
 
 class StuckJob(unittest.TestCase):
