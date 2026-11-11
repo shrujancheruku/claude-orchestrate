@@ -1073,3 +1073,7 @@
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch --check-greedy", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/launch --check-greedy --greedy", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --method squash --approved-head abc1234abc1234 --worktree /w/agent-x --session 00000000-0000-0000-0000-000000000000", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --session \"$(id)\"", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve T1 --left why --followup 7 --session 00000000-0000-0000-0000-000000000000", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 --session --all", "expected": "silent", "source": "hand"}
