@@ -26,11 +26,15 @@ CLOSES = re.compile(r"\bcloses\s+#(\d+)", re.I)  # the body's closing reference
 
 def pr_ticket(branch, body) -> tuple:
     """(the PR's ticket, the ticket its branch names): the one source for "which ticket is this PR's" (#695). The ticket
-    is the body's first `Closes #<n>`, falling back to the branch's number only when the body has none; the second value
-    is the branch's number (None when the branch has none), so a caller can say when the two disagree."""
+    is the body's `Closes #<n>` that equals the branch's number, else the body's first `Closes #<n>`, falling back to
+    the branch's number only when the body has none. A body may quote another ticket before its own closing reference
+    (#751), so the branch's number wins among several matches. The second value is the branch's number (None when the
+    branch has none), so a caller can say when the two disagree."""
     by_branch = ticket_of_branch(branch)
-    m = CLOSES.search(body or "")
-    return (int(m.group(1)) if m else by_branch), by_branch
+    matches = [int(n) for n in CLOSES.findall(body or "")]
+    if by_branch in matches:
+        return by_branch, by_branch
+    return (matches[0] if matches else by_branch), by_branch
 
 
 def main_checkout(repo) -> Path:
