@@ -28,6 +28,16 @@ RESENT = "> *Resent to lead.*"
 HEAD = "f" * 40  # the PR's current head commit, unless a test names another
 
 
+def transition_module():
+    """scripts/transition, loaded to reach the comment bodies it writes (stop_body, adr_body, undelivered_body, resent_body)."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("transition", str(ROOT / "scripts" / "transition"))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("transition", loader))
+    loader.exec_module(mod)
+    return mod
+
+
 def iso(minutes):
     return (T0 + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -380,6 +390,31 @@ class LeadRoute(unittest.TestCase):
         self.state({})
         self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "LEAD-TICKET #2", "counted: 0 of 2"]))
 
+    # Round trips (#661): the comment `scripts/transition` writes is the comment lead-route routes.
+    def test_a_stop_for_lead_comment_is_routed_as_a_stop(self):
+        body = transition_module().stop_body("Which value?", "1-widget")
+        self.serve([issue(1, labels=["needs-lead"], claimed=True, comments=[comment(10, body)])])
+        self.state({})
+        self.assertEqual(self.route(now=60), (0, ["UNCAP #1", "counted: 0 of 2"]))  # the stop is 50 minutes old
+        self.serve([issue(1, labels=["needs-lead"], claimed=True, comments=[comment(10, "no marker\n\nWhich value?")])])
+        self.assertEqual(self.route(now=60), (0, ["counted: 1 of 2"]))  # without the marker there is no stop to age
+
+    def test_an_adr_hold_comment_is_routed_as_a_hold_of_the_pr(self):
+        body = transition_module().adr_body("ADR-0011 forbids it.", 100)
+        self.serve([issue(3, labels=["needs-lead"], claimed=True, comments=[comment(0, body)])], open_branches=["3-z"])
+        self.state({})
+        self.assertEqual(self.route(now=600), (0, ["HOLD-PR #3 100", "counted: 1 of 2"]))  # no UNCAP however old
+
+    def test_undelivered_then_resent_comments_drive_one_resend_per_head(self):
+        t = transition_module()
+        undelivered = comment(10, t.undelivered_body(HEAD, "ci: test failed"))
+        self.serve([issue(1, labels=["lead"], claimed=True, comments=[undelivered])], open_branches=["1-decision"])
+        self.state({})
+        self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "RESEND #1 100", "counted: 0 of 2"]))
+        self.serve([issue(1, labels=["lead"], claimed=True, comments=[undelivered, comment(11, t.resent_body(HEAD))])],
+                   open_branches=["1-decision"])
+        self.assertEqual(self.route(), (0, ["LEAD-PR #1 100", "counted: 0 of 2"]))
+
     def test_a_lead_pr_failure_not_delivered_is_resent_once_per_head(self):
         self.serve([issue(1, labels=["lead"], claimed=True, comments=[failure(10, UNDELIVERED, HEAD)])],
                    open_branches=["1-decision"])
@@ -521,17 +556,13 @@ class PromptSide(unittest.TestCase):
         self.assertIn("scripts/holds", sentence)
         self.assertIn("never compare paths yourself", sentence)
 
-    def test_the_prompt_writes_the_marker_the_script_reads(self):
-        import importlib.machinery
-        import importlib.util
-        loader = importlib.machinery.SourceFileLoader("lead_route", str(ROOT / "scripts" / "lead-route"))
-        spec = importlib.util.spec_from_loader("lead_route", loader)
-        mod = importlib.util.module_from_spec(spec)
-        loader.exec_module(mod)
-        self.assertIn(mod.STOP_MARKER, SKILL.read_text())
-        self.assertIn(mod.ADR_MARKER, SKILL.read_text())
-        self.assertIn(mod.UNDELIVERED_MARKER, SKILL.read_text())
-        self.assertIn(mod.RESENT_MARKER, SKILL.read_text())
+    def test_the_markers_the_script_reads_are_written_by_transition_not_typed_in_the_prompt(self):
+        # #661: `scripts/transition` writes every marker (from tracker.py); no prompt restates one.
+        import tracker
+        for marker in (tracker.STOP_MARKER, tracker.ADR_MARKER, tracker.UNDELIVERED_MARKER, tracker.RESENT_MARKER):
+            self.assertNotIn(marker, SKILL.read_text())
+        self.assertIn("scripts/transition", SKILL.read_text())
+
 
     def test_run_applies_each_lead_pipeline_verb_and_never_dispatches_a_lead_ticket(self):
         text = SKILL.read_text()

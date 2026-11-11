@@ -103,6 +103,9 @@ class PromptLog(unittest.TestCase):
             ("Monitor", {"command": "tail -f log", "timeout_ms": 5}, {"command": "tail -f log"}),
             ("Edit", {"file_path": "/a/b.py", "old_string": "SECRET", "new_string": "X"}, {"file_path": "/a/b.py"}),
             ("Write", {"file_path": "/a/c.py", "content": "SECRET"}, {"file_path": "/a/c.py"}),
+            ("Read", {"file_path": "/a/d.py", "offset": 3}, {"file_path": "/a/d.py"}),
+            ("Grep", {"pattern": "SECRET", "path": "/a/src"}, {"path": "/a/src", "keys": ["path", "pattern"]}),
+            ("Glob", {"pattern": "SECRET*"}, {"path": None, "keys": ["pattern"]}),
             ("Skill", {"skill": "x", "args": "SECRET"}, ["args", "skill"]),
             ("mcp__srv__tool", {"q": "SECRET", "a": 1}, ["a", "q"]),
         ]

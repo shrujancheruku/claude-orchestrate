@@ -171,6 +171,16 @@ class ConfigTemplate(unittest.TestCase):
         self.assertEqual(cfg.shared_files, ("<path>",))
         self.assertIsNone(cfg.slots)
 
+    def test_the_pr_title_ticket_suffix_flag(self):
+        def cfg(line):
+            return config.Config.parse(f"## PRs and merging\n\n- **Branch:** `<number>-<slug>`\n{line}\n- **Method:** squash\n")
+        body = "**Body:** `Closes #<n>`"
+        self.assertTrue(cfg(f"- **PR title:** Conventional Commits, ending in ` (#<n>)`. {body}").pr_title_ticket)
+        self.assertFalse(cfg(f"- **PR title:** Conventional Commits, same as commits. {body}").pr_title_ticket)
+        self.assertFalse(cfg("- **PR title:** Conventional Commits. **Body:** `Closes #<n>` (#<n>) works").pr_title_ticket)
+        self.assertFalse(config.Config.parse("").pr_title_ticket)
+        self.assertTrue(config.Config.parse(TEMPLATE).pr_title_ticket)  # the template's default asks for it
+
     def test_missing_config_is_empty(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(config.Config.load(d), config.Config())

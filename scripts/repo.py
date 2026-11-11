@@ -21,6 +21,18 @@ STATE = Path(".claude") / "orchestrate-state.json"
 BRANCH_TICKET = re.compile(r"(\d+)-")  # the branch convention `<number>-<slug>`
 
 
+CLOSES = re.compile(r"\bcloses\s+#(\d+)", re.I)  # the body's closing reference
+
+
+def pr_ticket(branch, body) -> tuple:
+    """(the PR's ticket, the ticket its branch names): the one source for "which ticket is this PR's" (#695). The ticket
+    is the body's first `Closes #<n>`, falling back to the branch's number only when the body has none; the second value
+    is the branch's number (None when the branch has none), so a caller can say when the two disagree."""
+    by_branch = ticket_of_branch(branch)
+    m = CLOSES.search(body or "")
+    return (int(m.group(1)) if m else by_branch), by_branch
+
+
 def main_checkout(repo) -> Path:
     """The main checkout that owns the run log for `repo`, which may be a subdirectory or a linked worktree.
 

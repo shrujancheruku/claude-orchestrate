@@ -610,6 +610,87 @@ class GateTest(unittest.TestCase):
         self.prime(body="Closes #41\n", ticket=41, blockers=1)
         self.failed_only(self.gate(), "dependencies merged")
 
+    def test_a_closing_reference_beats_the_branch_number_for_dependencies_and_the_title(self):
+        # PR closes #698 from branch 661-x: #698's blockers are read, and the title must end ` (#698)` (#695).
+        self.suffix_config()
+        self.prime(head="661-x", body="Closes #698\n", ticket=698, blockers=1, title="feat(x): add y (#698)")
+        r = self.gate()
+        self.assertEqual(self.event()["failed"], ["dependencies merged"], r.stdout)
+        self.assertIn("#698 has 1 open blocker", r.stdout)
+        self.assertIn("gate: ticket #698 (branch says #661)", r.stdout)
+
+    def test_the_branch_number_is_the_ticket_only_when_the_body_has_no_closing_reference(self):
+        self.prime(head="270-slug", blockers=1)
+        r = self.gate()
+        self.assertIn("#270 has 1 open blocker", r.stdout)
+        self.assertNotIn("gate: ticket", r.stdout)
+
+    def suffix_config(self):
+        p = self.env.repo / ".claude" / "orchestration.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("## PRs and merging\n\n- **PR title:** Conventional Commits, ending in ` (#<n>)`. "
+                     "**Body:** `Closes #<n>`\n")
+
+    def test_a_title_ending_in_the_closed_ticket_passes_the_suffix_convention(self):
+        self.suffix_config()
+        self.prime(title="feat(x): add y (#41)", body="Closes #41\n")
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("title ends with the ticket number", r.stdout)
+
+    def test_a_missing_wrong_or_doubled_ticket_suffix_fails_with_the_expected_ending(self):
+        self.suffix_config()
+        for title in ("feat(x): add y", "feat(x): add y (#42)", "feat(x): add y (#41) (#41)", "feat(x): add y (#41) later"):
+            with self.subTest(title=title):
+                self.prime(title=title, body="Closes #41\n")
+                r = self.gate()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertIn("title ends with the ticket number", r.stdout)
+                self.assertIn("expected: the title ends with '(#41)', once", r.stdout)
+
+    def test_a_ticket_suffix_with_no_closing_reference_fails(self):
+        self.suffix_config()
+        self.prime(title="feat(x): add y (#41)", body="")
+        r = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("no closing reference", r.stdout)
+
+    def test_titles_without_the_suffix_pass_when_the_convention_does_not_ask_for_it(self):
+        p = self.env.repo / ".claude" / "orchestration.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("## PRs and merging\n\n- **PR title:** Conventional Commits. **Body:** `Closes #<n>`\n")
+        self.prime(title="feat(x): add y", body="Closes #41\n")
+        r = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn("title ends", r.stdout)
+
+    def blocked_by_this(self, number):
+        return {"number": number, "labels": {"nodes": []}, "assignees": {"totalCount": 1},
+                "blockedBy": {"nodes": [{"number": 704, "state": "OPEN"}]}}
+
+    def test_an_older_pr_whose_ticket_is_blocked_by_this_ones_is_waived(self):
+        self.prime(head="704-fix", body="Closes #704\n", others=[{"number": 5, "headRefName": "684-older"}],
+                   issues=[self.blocked_by_this(684)])
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (0, ["next: review " + HEAD]), r.stdout + r.stderr)
+        self.assertIn("gate: overlap with #684 (PR #5) waived (#684 waits on #704)", r.stdout)
+
+    def test_without_the_blocked_by_edge_the_older_pr_still_holds(self):
+        self.prime(head="704-fix", body="Closes #704\n", others=[{"number": 5, "headRefName": "684-older"}],
+                   issues=[{"number": 684, "labels": {"nodes": []}, "assignees": {"totalCount": 1}}])
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (3, ["next: wait-older 7 5"]), r.stdout + r.stderr)
+        self.assertNotIn("waived", r.stdout)
+
+    def test_a_building_ticket_blocked_by_this_ones_is_waived(self):
+        state = self.env.repo / ".claude" / "orchestrate-state.json"
+        state.parent.mkdir(exist_ok=True)
+        state.write_text(json.dumps({"session": "test-session", "tickets": {"684": {"touch_map": "src/a.py"}}}))
+        self.prime(head="704-fix", body="Closes #704\n", issues=[self.blocked_by_this(684)])
+        r = self.gate()
+        self.assertEqual((r.returncode, self.next_lines(r)), (0, ["next: review " + HEAD]), r.stdout + r.stderr)
+        self.assertIn("gate: overlap with #684 waived (#684 waits on #704)", r.stdout)
+
     def test_base_that_is_not_the_default_branch_fails_dependencies(self):
         self.prime(head="270-slug", base="feature-x")
         out = self.failed_only(self.gate(), "dependencies merged")

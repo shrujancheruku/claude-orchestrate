@@ -15,8 +15,9 @@ holds `message`, `title` and `notification_type` (each cut to 500 characters) in
 scripts/prompts counts a prompt both events saw once.
 
 A request line holds: time, session_id, agent_type (null for the main session), tool_name, cwd, permission_mode and
-tool_input, cut down: a Bash or Monitor `command` to 2000 characters, `file_path` for an edit, and for any other tool the
-key names only (no file contents, no MCP arguments). The orchestrator and its workers prompt at the same time,
+tool_input, cut down: a Bash or Monitor `command` to 2000 characters, `file_path` for an edit or a Read, `path` (null when
+absent) plus the key names for Grep and Glob, and for any other tool the key names only (no file contents, no pattern
+text, no MCP arguments). The orchestrator and its workers prompt at the same time,
 so a write is one O_APPEND write under an exclusive flock.
 
 Stdlib only, Python 3.9+; runs under `python3 -I`, so it imports nothing from the plugin.
@@ -36,6 +37,7 @@ COMMAND_LIMIT = 2000
 MESSAGE_LIMIT = 500
 COMMAND_TOOLS = ("Bash", "Monitor")
 PATH_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+SEARCH_TOOLS = ("Grep", "Glob")
 
 
 def main_checkout(cwd: str) -> Path:
@@ -66,6 +68,13 @@ def cut_input(tool: str, tool_input) -> dict | list:
     if tool in PATH_TOOLS:
         path = tool_input.get("file_path", tool_input.get("notebook_path"))
         return {"file_path": path if isinstance(path, str) else None}
+    if tool == "Read":
+        path = tool_input.get("file_path")
+        return {"file_path": path if isinstance(path, str) else None}
+    if tool in SEARCH_TOOLS:
+        # `path` is null when the search runs from the cwd; the pattern text is never kept.
+        path = tool_input.get("path")
+        return {"path": path if isinstance(path, str) else None, "keys": sorted(str(k) for k in tool_input)}
     return sorted(str(k) for k in tool_input)
 
 

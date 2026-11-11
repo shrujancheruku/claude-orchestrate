@@ -33,7 +33,7 @@ import config
 import github
 import touchmap
 import tracker
-from repo import STATE, ticket_of_branch, worktree_changes
+from repo import STATE, pr_ticket, ticket_of_branch, worktree_changes
 
 RELEASE_PLEASE_PREFIX = tracker.RELEASE_PLEASE_PREFIX
 
@@ -69,9 +69,23 @@ class Overlap:
 
 
 @dataclass(frozen=True)
+class Waiver:
+    """A holder left out of the PR's overlap check because its ticket is blocked, by a native `blocked_by` edge, by the
+    PR's own ticket: it waits on this PR, so this PR must not wait on it (#695)."""
+    ticket: int  # the waived holder's ticket
+    on: int  # the PR's ticket, which blocks it
+    pr: int = None  # the holder's open PR, when it has one
+
+    def render(self) -> str:
+        who = f"#{self.ticket}" + (f" (PR #{self.pr})" if self.pr is not None else "")
+        return f"overlap with {who} waived (#{self.ticket} waits on #{self.on})"
+
+
+@dataclass(frozen=True)
 class Result:
     held: list = field(default_factory=list)
     overlaps: list = field(default_factory=list)
+    waived: list = field(default_factory=list)  # Waiver rows: holders of a candidate path that wait on this PR's ticket
 
     @property
     def counted(self) -> list:
@@ -111,6 +125,7 @@ class Result:
         """The CLI's stdout: the held paths (or `none`), each overlap that is not an ordering, then the verdict lines."""
         out = [h.render() for h in self.held] or ["none"]
         out += [o.render() for o in self.overlaps if o.kind not in (WAITS_FOR, WAITS_TICKET)]
+        out += [w.render() for w in self.waived]
         if self.counted:
             return out
         out += self.wait_lines()
@@ -322,8 +337,8 @@ def find(snap, repo, state_file=None, candidates=None, ticket=None, pr=None, cfg
     own_pr, own_ticket = None, ticket
     if pr is not None:
         own_pr = common.pr_ref(pr)[0]
-        view = github.pr_view(own_pr, "headRefName", cwd=repo)
-        own_ticket = ticket_of_branch(view.get("headRefName"))
+        view = github.pr_view(own_pr, "headRefName,body", cwd=repo)
+        own_ticket = pr_ticket(view.get("headRefName"), view.get("body"))[0]  # the closing reference first (#695)
         candidates = github.pr_files(own_pr, cwd=repo)
     open_prs = [p for p in github.own_prs(snap.prs) if isinstance(p, dict) and p.get("baseRefName", base) == base]
     # The claims are read once from the tracker (open issues, open and merged PRs, the state file, the worktrees).
@@ -345,6 +360,21 @@ def find(snap, repo, state_file=None, candidates=None, ticket=None, pr=None, cfg
         prs[p["number"]], off_map[p["number"]] = pr_paths(snap.pr_files(p), record)
     snap.save_cache()
     tickets, others = claimed_paths(found, own_ticket, base, warn=warn)
+    waived = []
+    if own_pr is not None and own_ticket is not None:
+        # A holder whose ticket a native `blocked_by` edge makes wait on this PR's ticket cannot merge first, so it holds
+        # nothing from this PR's view (#695). Prose is not read: only the tracker's edge counts.
+        blocked = {i["number"] for i in snap.issues if own_ticket in i["blockers"]}
+        def hits(paths):
+            return any(covers(h, c) for h in paths for c in candidates or [])
+        for n in sorted(prs):
+            if pr_tickets.get(n) in blocked:
+                if hits(prs.pop(n)):
+                    waived.append(Waiver(pr_tickets[n], own_ticket, n))
+        for group in (tickets, others):
+            for n in sorted(group):
+                if n in blocked and hits(group.pop(n)):
+                    waived.append(Waiver(n, own_ticket))
     held = held_paths(cfg, prs, tickets, others, off_map)
     return Result(held, overlaps(held, candidates or [], cfg,
-                                 own_pr=int(own_pr) if own_pr is not None else None, pr_tickets=pr_tickets))
+                                 own_pr=int(own_pr) if own_pr is not None else None, pr_tickets=pr_tickets), waived)

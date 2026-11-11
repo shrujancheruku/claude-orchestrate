@@ -252,7 +252,8 @@ class LeadBrief(unittest.TestCase):
 
     def test_run_posts_the_fallback_comment_and_calls_lead_brief(self):
         text = SKILL.read_text()
-        self.assertIn(RISK, text)
+        self.assertNotIn(RISK, text, "the marker lives in tracker.py; no prompt restates it (#661)")
+        self.assertIn("--post-risk-notes", text)
         self.assertIn("scripts/lead-brief", text)
         for rule in ("7 days", "at most 20"):
             self.assertNotIn(rule, text, "run calls lead-brief and does not restate its fallback rule (ADR-0006)")

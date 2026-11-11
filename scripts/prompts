@@ -118,9 +118,11 @@ def detail(entry: dict) -> str:
         return common.one_line(str(entry.get("message") or entry.get("title") or ""), DETAIL_WIDTH)
     tool_input = entry.get("tool_input")
     if isinstance(tool_input, dict):
-        for key in ("command", "file_path"):
+        for key in ("command", "file_path", "path"):
             if tool_input.get(key):
                 return common.one_line(tool_input[key], DETAIL_WIDTH)
+        if isinstance(tool_input.get("keys"), list) and tool_input["keys"]:
+            return common.one_line("(" + ", ".join(map(str, tool_input["keys"])) + ")", DETAIL_WIDTH)
     if isinstance(tool_input, list) and tool_input:
         return common.one_line("(" + ", ".join(map(str, tool_input)) + ")", DETAIL_WIDTH)
     return ""

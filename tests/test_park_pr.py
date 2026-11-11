@@ -4,6 +4,7 @@ import json
 import unittest
 
 from harness import ScriptEnv, gh_repo_view, rest_pull
+import runlog  # tests/harness.py puts scripts/ on sys.path
 
 PULL = ["api", "repos/{owner}/{repo}/pulls/7"]
 PATCH = ["api", "--method", "PATCH", "repos/{owner}/{repo}/pulls/7"]
@@ -83,6 +84,29 @@ class ParkPr(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("comment failed", r.stderr)
         self.assertEqual(len(self.park_events()), 1)
+
+    def test_an_unwritable_run_log_fails_the_park_before_the_pr_is_touched(self):
+        # A closed PR with no `park` event reads as a stalled ticket and would be rescued (#661): the event goes first.
+        self.gh()
+        runlog.log_path(self.env.repo, runlog.EVENTS_LOG).mkdir(parents=True)  # a directory where the log file goes
+        r = self.env.run("park-pr", 7, "--why", "x", check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout.splitlines()[-1], "next: could-not-run")
+        self.assertIn("PR #7 is untouched", r.stderr)
+        self.assertEqual(self.writes(), [])
+
+    def test_an_unwritable_run_log_fails_the_unpark_too(self):
+        self.gh(state="CLOSED")
+        runlog.log_path(self.env.repo, runlog.EVENTS_LOG).mkdir(parents=True)
+        r = self.env.run("park-pr", 7, "--unpark", check=False)
+        self.assertEqual((r.returncode, self.writes()), (2, []))
+
+    def test_a_failed_close_takes_the_event_back(self):
+        self.env.set_gh([gh_repo_view(), {"args": PULL, "stdout": json.dumps(rest_pull(state="OPEN", headRefName="7-x"))},
+                         {"args": PATCH, "stderr": "boom\n", "exit": 1}])
+        r = self.env.run("park-pr", 7, "--why", "x", check=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual([e["outcome"] for e in self.park_events()], ["parked", "unparked"])  # the log agrees with the open PR
 
     def test_the_reason_or_the_mode_is_required_and_exclusive(self):
         self.gh()

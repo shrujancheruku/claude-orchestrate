@@ -54,6 +54,7 @@ class Config(NamedTuple):
     idle_window: int = 10  # minutes: the Velocity section's `**Idle window:**`; how long a slot may sit idle with work waiting before the lead is woken (#716)
     hold_threshold: int = 3  # the Velocity section's `**Expensive hold:**`: takeable tickets one held PR blocks before the digest asks the developer
     velocity_watch: bool = True  # the Velocity section's `**Velocity watch:** on|off`; a missing section is on
+    pr_title_ticket: bool = False  # the PR title convention ends in ` (#<n>)`: the gate then requires the closed ticket's number (#695)
     problems: tuple = ()  # Problem entries
 
     @classmethod
@@ -111,6 +112,7 @@ class Config(NamedTuple):
             board=_board(text),
             board_bad=_board_bad(text),
             trusted_authors=_trusted_authors(common.section_of(text, "Backlog")),
+            pr_title_ticket=_pr_title_ticket(common.section_of(text, "PRs and merging")),
             problems=tuple(problems),
             **_velocity(common.section_of(text, "Velocity")),
         )
@@ -289,6 +291,13 @@ def _merge_gates(gates):
     """The backticked globs of the Merge gates item's first sentence; a later sentence may quote a PR title in backticks."""
     text = _item_text(gates, "Merge gates")
     return tuple(re.findall(r"`([^`]+)`", re.split(r"\.\s", text, maxsplit=1)[0]))
+
+
+def _pr_title_ticket(section) -> bool:
+    """Whether the `PR title:` item asks for the ticket suffix, written `(#<n>)` (#695). Only the title sentence counts:
+    the item's `Body:` part names the closing reference `#<n>` and is cut off."""
+    text = _item_text(section, "PR title")
+    return "(#<n>)" in re.split(r"\*\*Body", text, maxsplit=1)[0]
 
 
 def _tiers(review):

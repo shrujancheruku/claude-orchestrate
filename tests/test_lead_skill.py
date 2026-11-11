@@ -120,7 +120,7 @@ class RunSkillLeftThreads(unittest.TestCase):
     def test_every_rescue_call_with_a_title_carries_pr(self):
         calls = self.run.split("scripts/rescue")[1:]
         titled = [tail[:400] for tail in calls if "--title" in tail[:400]]
-        self.assertGreaterEqual(len(titled), 3)
+        self.assertGreaterEqual(len(titled), 2)  # the haiku hand-over and the stalled ticket; the hand-back is `transition handback` (#661)
         for head in titled:
             self.assertIn("--pr <num>", head)
 

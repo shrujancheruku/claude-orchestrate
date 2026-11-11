@@ -14,7 +14,9 @@ Park a PR when it is older than another PR and waits on that PR's fix, so each w
 A parked ticket keeps its slot: it stays claimed (`lead-route` counts it, and `profile record` lists it as held).
 Refused, exit 1 and `next: refused <why>`: a PR that is already closed or merged (park), one that is not closed (unpark),
 or a fork PR. Exit 2: could not run (a failed `gh`, one line on stderr), or `next: retry-after <time>`.
-A failed comment after the state change, or a lost run-log line, says so on stderr and does not undo the change.
+The `park` event is written first (#661): a run log that cannot be written (no session, an unwritable file) is exit 2 with the PR
+untouched, since a closed PR with no `park` event reads as a stalled ticket and would be rescued. A `gh` failure while closing or
+reopening takes the event back with the opposite one. A failed comment after the state change says so on stderr and does not undo it.
 Exit codes: 0 parked or unparked; 1 refused; 2 could not run. Stdlib only, Python 3.9+.
 """
 
@@ -43,13 +45,32 @@ def run(args) -> int:
         if args.unpark:
             if state != "CLOSED":
                 return refuse(f"PR #{pr} is {state.lower()}, not closed")
-            github.set_pr_state(pr, "open", cwd=cwd)
-            outcome, comment = "unparked", "Unparked: reopened and back in the merge queue."
+            outcome, change, comment = "unparked", "open", "Unparked: reopened and back in the merge queue."
         else:
             if state != "OPEN":
                 return refuse(f"PR #{pr} is {state.lower()}, not open")
-            github.set_pr_state(pr, "closed", cwd=cwd)
-            outcome, comment = "parked", f"Parked: {common.one_line(args.why, 300)}"
+            outcome, change, comment = "parked", "closed", f"Parked: {common.one_line(args.why, 300)}"
+        # The event goes first (#661): a closed PR whose `park` event was lost reads as a stalled ticket, which `claims` would
+        # rescue. A log that cannot be written makes the park fail before the PR is touched.
+        extra = {"why": args.why} if outcome == "parked" else {}
+        try:
+            runlog.append_event(cwd, runlog.PARK, outcome, ref=pr, ticket=ticket_of_branch(branch), branch=branch, **extra)
+        except runlog.NoSession as e:
+            print(f"{e}; the PR is untouched", file=sys.stderr)
+            return 2
+        except OSError as e:
+            print(f"park-pr: the run log is unwritable ({e.strerror or e}); PR #{pr} is untouched", file=sys.stderr)
+            return 2
+        try:
+            github.set_pr_state(pr, change, cwd=cwd)
+        except github.GhError:
+            # The state did not change: take the event back with the opposite one, so the log keeps agreeing with the PR.
+            undo = "unparked" if outcome == "parked" else "parked"
+            try:
+                runlog.append_event(cwd, runlog.PARK, undo, ref=pr, ticket=ticket_of_branch(branch), branch=branch)
+            except (runlog.NoSession, OSError):
+                pass
+            raise
         try:
             github.call("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/issues/{pr}/comments", "-f",
                         f"body={comment}", cwd=cwd)
@@ -58,13 +79,6 @@ def run(args) -> int:
     except github.GhError as e:
         print(f"park-pr: gh failed: {common.one_line(e.message)}", file=sys.stderr)
         return 2
-    extra = {"why": args.why} if outcome == "parked" else {}
-    try:
-        runlog.append_event(cwd, runlog.PARK, outcome, ref=pr, ticket=ticket_of_branch(branch), branch=branch, **extra)
-    except runlog.NoSession as e:
-        print(e, file=sys.stderr)  # the state changed; only its log line is lost
-    except OSError as e:
-        print(f"park-pr: {outcome}, but the run log is unwritable: {e.strerror or e}", file=sys.stderr)
     return common.verdict(outcome, pr, exit_code=0)
 
 

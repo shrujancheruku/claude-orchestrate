@@ -163,7 +163,7 @@ The PR head commit the reviewer approved. `scripts/merge --approved-head` measur
 _Avoid_: approved SHA, reviewed commit, last-reviewed head
 
 **Hand-back**:
-A swept branch the script could not update and left untouched, reported as a `HANDBACK PR #n <branch>: <path> (<why>)` line (merge exit 4). Not the same as handing a ticket back to the tracker, not a reviewer's result, and not a **Worker report**. Source: `skills/run/SKILL.md`, `agents/worker.md`.
+A swept branch the script could not update and left untouched, reported as a `HANDBACK PR #n <branch>: <path> (<why>)` line (merge exit 4). Not a reviewer's result and not a **Worker report**. Handing a *ticket* back to the tracker (unassign, comment the branch that holds the work and the blockers, rescue the worktree) is a different thing, done by `scripts/transition handback`, which owns every such write (the other verbs: `fallback`, `abandon`, `stop-for-lead`, `adr-hold`, `undelivered`, `resent`, `to-human`, `to-info`). Source: `skills/run/SKILL.md`, `agents/worker.md`, `scripts/transition`.
 _Avoid_: bounce, kick-back
 
 **Conflict list**:
@@ -251,7 +251,7 @@ How long a **Stop** lasts: from its first sign until work on the ticket resumes 
 _Avoid_: answer time, response time (the answer is only one point inside it)
 
 **Stop comment**:
-The comment a worker's question is posted as when its stop goes to the lead: its first line is `> *Stopped for the lead.*`, and `scripts/lead-route` reads it for the stop's time. Source: `scripts/lead-route`, `skills/run/SKILL.md`.
+The comment a worker's question is posted as when its stop goes to the lead: its first line is `> *Stopped for the lead.*`, and `scripts/lead-route` reads it for the stop's time. `scripts/transition stop-for-lead` is the only writer, and the marker string lives in `scripts/tracker.py`, so a typed copy cannot drift. Source: `scripts/transition`, `scripts/tracker.py`, `scripts/lead-route`.
 _Avoid_: stop note, question comment
 
 **Session gap**:
