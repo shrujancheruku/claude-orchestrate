@@ -139,6 +139,39 @@ def verdict(word, *args, exit_code) -> int:
     return exit_code
 
 
+# Action lines (#662, ADR-0018): after its `next:` line a script may print `action: <verb> <args>`, one per step, the
+# args shlex-quoted. The closed vocabulary: `dispatch <ticket>` · `send <msg-id> <to> [<args>]` · `run <script> <args>` ·
+# `watch <script> <args>` · `decide <question-id>` (the one judgement) · `ask <decision-file>`. A reader that ignores
+# them sees today's output.
+ACTION_VERBS = ("dispatch", "send", "run", "watch", "decide", "ask")
+MESSAGES = Path(__file__).resolve().parent / "messages.txt"
+
+
+def message_templates() -> dict:
+    """{id: text} from scripts/messages.txt: one `<id> <text>` line each; blank lines and `#` lines are skipped."""
+    out = {}
+    for line in MESSAGES.read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            mid, _, text = line.partition(" ")
+            out[mid] = text.strip()
+    return out
+
+
+def render_message(mid, *args) -> str:
+    """The text of template `mid` with each `{k}` replaced by the k-th (1-based) word of `args`."""
+    return re.sub(r"\{(\d+)\}", lambda m: str(args[int(m.group(1)) - 1]), message_templates()[mid])
+
+
+def action_line(verb, *args) -> str:
+    """One `action: <verb> <args>` line. A `send` names a template id that exists in scripts/messages.txt."""
+    import shlex
+    if verb not in ACTION_VERBS:
+        raise ValueError(f"unknown action verb {verb!r}; the list is common.ACTION_VERBS")
+    if verb == "send" and str(args[0]) not in message_templates():
+        raise ValueError(f"unknown message id {args[0]!r}; the templates are scripts/messages.txt")
+    return " ".join(["action:", verb, *(shlex.quote(str(a)) for a in args)])
+
+
 def finish(run, argv, words, on_error=None) -> int:
     """Run a CLI's `run(argv)` and end it with the one `next:` line (ADR-0014), returning its exit code unchanged.
     `words` maps an exit code to its verdict, `(word, *args)` or a callable returning that tuple (read after the run,

@@ -38,6 +38,20 @@ def transition_module():
     return mod
 
 
+def common_module():
+    import common
+    return common
+
+
+def guard_module():
+    """hooks/guard.py, loaded to reach its ORCHESTRATOR_FORMS table (the calls the orchestrator may run unprompted)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("guard_under_test", ROOT / "hooks" / "guard.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def iso(minutes):
     return (T0 + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -108,6 +122,7 @@ class LeadRoute(unittest.TestCase):
         r = self.env.run("lead-route", "--cap", str(cap), "--now", iso(now), check=False)
         lines = r.stdout.splitlines()
         self.assertEqual(lines[:1], [f"lead: {lead}"])
+        self.actions = r.actions  # the `action:` lines after the `next:` line (ADR-0018)
         return r.returncode, lines[1:]
 
     def lead_line(self, rows=None, claude_exit=None):
@@ -482,6 +497,96 @@ class LeadRoute(unittest.TestCase):
             r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False)
         self.assertEqual((r.returncode, r.stdout), (2, ""))
         self.assertRegex(r.verdict, r"^next: retry-after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+
+    # ADR-0018: the verdicts with no judgement in them also print `action:` lines, after the `next:` line.
+
+    def test_resume_sends_the_lead_answered_message_to_the_worker(self):
+        self.serve([issue(1, claimed=True, comments=[stop(10)])])
+        self.state({"1": self.worker(last=5)})
+        self.route()
+        self.assertEqual(self.actions, ["action: send lead-answered agent-a 1"])
+
+    def test_fallback_runs_the_transition_script(self):
+        self.serve([issue(1, labels=["needs-lead", "ready-for-agent"], claimed=True, comments=[stop(10)])])
+        self.state({"1": self.worker(last=5)})
+        self.route(lead="none")
+        self.assertEqual(self.actions, ["action: run transition fallback 1 --repo ."])
+
+    def test_resend_sends_the_failure_again_then_records_the_head(self):
+        self.serve([issue(1, labels=["lead"], claimed=True, comments=[failure(10, UNDELIVERED, HEAD)])],
+                   open_branches=["1-decision"])
+        self.state({})
+        self.route()
+        self.assertEqual(self.actions, ["action: send lead-resend lead 1 100",
+                                        f"action: run transition resent 1 --head {HEAD} --repo ."])
+
+    def test_the_actions_come_after_the_next_line_and_a_reader_that_ignores_them_sees_todays_output(self):
+        self.serve([issue(1, claimed=True, comments=[stop(10)])])
+        self.state({"1": self.worker(last=5)})
+        self.agents({"name": "lead", "sessionId": "L1"})
+        self.env.set_gh(self.responses)
+        r = self.env.run("lead-route", "--cap", "2", "--now", iso(60))
+        self.assertEqual(r.verdict, "next: done")
+        self.assertEqual(r.stdout.splitlines()[-1], "counted: 1 of 2")
+        self.assertEqual(len(r.actions), 1)
+
+    def test_verdicts_with_a_judgement_or_nothing_to_do_print_no_action(self):
+        # REDISPATCH (a brief to write), ELSEWHERE and UNCAP (nothing to do), HOLD-PR (a merge to skip): none is an action list.
+        self.serve([issue(1, claimed=True, comments=[stop(10)]),
+                    issue(2, labels=["needs-lead"], claimed=True, comments=[stop(10)])])
+        self.state({"2": self.worker(last=5)})
+        code, lines = self.route(now=60)
+        self.assertEqual(lines, ["REDISPATCH #1", "UNCAP #2", "counted: 1 of 2"])
+        self.assertEqual(self.actions, [])
+
+    def test_no_actions_when_the_run_could_not_happen(self):
+        self.serve([], gh_exit=1)
+        self.state({})
+        self.agents({"name": "lead", "sessionId": "L1"})
+        self.env.set_gh(self.responses)
+        r = self.env.run("lead-route", "--cap", "2", "--now", iso(0), check=False)
+        self.assertEqual((r.returncode, r.actions), (2, []))
+
+    def test_every_send_names_a_template_and_fills_its_placeholders(self):
+        import shlex
+        templates = common_module().message_templates()
+        self.serve([issue(1, claimed=True, comments=[stop(10)]),
+                    issue(2, labels=["lead"], claimed=True, comments=[failure(10, UNDELIVERED, HEAD)])],
+                   open_branches=["2-decision"])
+        self.state({"1": self.worker(last=5)})
+        self.route()
+        sends = [shlex.split(a)[1:] for a in self.actions if a.startswith("action: send ")]
+        self.assertTrue(sends)
+        for _, mid, _to, *args in sends:
+            self.assertIn(mid, templates)
+            needed = [int(k) for k in re.findall(r"\{(\d+)\}", templates[mid])]
+            self.assertLessEqual(max(needed), len(args))
+        for mid, text in templates.items():  # every template reads without a left-over placeholder
+            n = len(set(re.findall(r"\{\d+\}", text)))
+            self.assertNotRegex(common_module().render_message(mid, *["x"] * n), r"\{\d+\}")
+
+    def test_every_run_names_a_script_and_call_the_guard_approves_for_the_orchestrator(self):
+        import shlex
+        guard = guard_module()
+        self.serve([issue(1, labels=["needs-lead", "ready-for-agent"], claimed=True, comments=[stop(10)]),
+                    issue(2, labels=["lead"], claimed=True, comments=[failure(10, UNDELIVERED, HEAD)])],
+                   open_branches=["2-decision"])
+        self.state({"1": self.worker(last=5)})
+        self.route(lead="live")
+        runs = [shlex.split(a)[2:] for a in self.actions if a.startswith("action: run ")]
+        self.assertTrue(runs)
+        for script, *words in runs:
+            self.assertTrue(guard.script_form_ok(script, words, guard.FormContext()), f"{script} {words}")
+
+    def test_the_vocabulary_is_closed_and_a_send_to_an_unknown_template_is_refused(self):
+        common = common_module()
+        self.assertEqual(common.ACTION_VERBS, ("dispatch", "send", "run", "watch", "decide", "ask"))
+        with self.assertRaises(ValueError):
+            common.action_line("merge", "1")
+        with self.assertRaises(ValueError):
+            common.action_line("send", "no-such-message", "lead")
+        self.assertEqual(common.action_line("run", "x", "a b"), "action: run x 'a b'")
 
 
 class RouteFromClaims(unittest.TestCase):

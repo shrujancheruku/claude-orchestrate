@@ -1,0 +1,5 @@
+# Message templates by id (#662). `lead-route` prints `action: send <id> <to> <args>`; the run skill sends the text below
+# with each `{1}`, `{2}` ... replaced by the matching <args> word. One line per template: the id, a space, the text.
+# Agents quote the id (`[lead-answered]`), never the text; a new message is a line here, not a paragraph in a prompt.
+lead-answered The lead answered on #{1}. Re-read the ticket and its comments, then continue.
+lead-resend A failure on PR {2} (ticket #{1}) was not delivered to you before. Read the newest "Waiting on lead (not delivered)" comment on #{1} and act on it.
