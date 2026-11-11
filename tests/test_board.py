@@ -748,7 +748,7 @@ class Prompts(unittest.TestCase):
     def test_setup_offers_the_board_and_writes_the_line(self):
         text = (ROOT / "skills" / "setup" / "SKILL.md").read_text()
         for phrase in ("! gh auth refresh -h <host> -s project", "`origin`", "`github.com`",
-                       "- **Board:** <project URL>", "gh project create", "gh project link",
+                       "- **Board:** https://github.com/users/<owner>/projects/<n>", "gh project create", "gh project link",
                        "@me", "retry or skip", "gh project list --owner @me", "skip with one line",
                        "lacks the `project` scope", "stays unlinked", "write the line",
                        "Board layout, grouped by `Stage`"):
