@@ -42,7 +42,7 @@ class SkillCallsAreRows(unittest.TestCase):
             (r"<id>\.\.\.", "T1 T2"), (r"<pr>…", "12 abc1234"), (r"<the worker's worktree>", str(self.work)),
             (r"<your scratchpad>", self.pad), (r"<the head commit the reviewer approved>", "abc1234abc1234"),
             (r"<the config's method>", "squash"), (r"<live \| none>", "live"), (r"<the slot count in force>", "3"),
-            (r"<run id>", "111"), (r"<job id>", "222"), (r"<head>", "abc1234"), (r"<branch>", "7-x"), (r"<pr>|<num>|<its merge PR>", "12"), (r"<ticket>|<n>|<donor>|<absorber>", "7"),
+            (r"<run id>", "111"), (r"<job id>", "222"), (r"<head>", "0123456789abcdef0123456789abcdef01234567"), (r"<branch>", "7-x"), (r"<pr>|<num>|<its merge PR>", "12"), (r"<ticket>|<n>|<donor>|<absorber>", "7"),
             (r"\$\{CLAUDE_SESSION_ID\}", SID), (r"<[^<>]*>", "x"),
         )
         for pattern, value in rules:
