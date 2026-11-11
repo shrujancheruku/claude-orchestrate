@@ -823,15 +823,38 @@ def rule_gh_api_writes(p: Parsed, cwd: str) -> str | None:
     return None
 
 
+# The parent session of a subagent (#769): a subagent's transcript is `<project>/<parent session>/subagents/agent-<id>.jsonl`,
+# and a reviewer of a `--bg` orchestrator is handed the parent's scratchpad, whose session id is not the hook input's own
+# `session_id`. Set once per hook run by `_hook` from `transcript_path`; empty for a main session.
+PARENT_SESSION = ""
+SESSION_ID_SHAPE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+
+def parent_session_of(transcript_path: object) -> str:
+    """The parent session id a subagent's transcript path names, or "" (not a subagent's path, or no uuid there)."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return ""
+    path = Path(transcript_path)
+    if path.parent.name != "subagents":
+        return ""
+    name = path.parent.parent.name
+    return name if SESSION_ID_SHAPE.fullmatch(name) else ""
+
+
+def scratch_sessions(session: str) -> tuple:
+    """The session ids whose scratchpad a reviewer or scout may write in: its own, and its parent's (#769)."""
+    return tuple(s for s in (session, PARENT_SESSION) if s)
+
+
 def scratchpad_path_ok(value: str, base: str, session: str) -> bool:
     """A path that, resolved against `base` with symlinks followed, sits inside this session's scratchpad
     (`<tmp>/claude-<uid>/<project>/<session>/scratchpad/...`). With no session id nothing matches."""
     if not value or not session:
         return False
     target = os.path.realpath(os.path.join(base or ".", value))
-    pad = scratchpad_pattern(session)
+    pads = [scratchpad_pattern(s) for s in scratch_sessions(session)]
     for t in TEMP_ROOTS:
-        if target.startswith(t + "/") and pad.fullmatch(target[len(t):]):
+        if target.startswith(t + "/") and any(pad.fullmatch(target[len(t):]) for pad in pads):
             # A `pr-<n>` tree is one the orchestrator runs `gate` and `verify --cwd` in (#624), so a reviewer or scout
             # that read an untrusted diff never writes into one (or makes one): its own writes go in a subdirectory
             # of another name (#713). Case-folded: the temp filesystem on macOS is case-insensitive.
@@ -1947,18 +1970,20 @@ class FormContext(NamedTuple):
 
 
 TICKET_FLAGS = {"--method": "word", "--approved-head": "word", "--ticket": "num", "--also-approved": "word",
-                "--worktree": "word", "--timeout": "float", "--interval": "float"}
+                "--worktree": "word", "--timeout": "float", "--interval": "float", "--session": "word"}
 SESSION_FLAGS = {"--session": "word", "--repo": "repo", "--snapshot": "snapshot"}
 ORCHESTRATOR_FORMS = (
     # The merge (and the first pass's start-up fast-forward of the main checkout, #473: the flag alone, no `--cwd`).
     Form("merge", ("pr",), TICKET_FLAGS, repeat=("--ticket", "--also-approved")),
     Form("merge", (), {"--fast-forward-only": ""}, need=("--fast-forward-only",)),
     # Review threads: list, resolve (fixed, or left with its follow-up ticket or none), and the one follow-up ticket per PR.
-    Form("threads", ("pr",), {"--all": "", "--verbose": ""}, inline=False),
-    Form("threads", ("pr", "resolve", "word+"), {"--fixed": "word", "--verbose": ""}, need=("--fixed",), inline=False),
-    Form("threads", ("pr", "resolve", "word+"), {"--left": "word", "--followup": "num", "--no-followup": "", "--verbose": ""},
+    # `--session` is the run log's session id on all of them (#546, #769).
+    Form("threads", ("pr",), {"--all": "", "--verbose": "", "--session": "word"}, inline=False),
+    Form("threads", ("pr", "resolve", "word+"), {"--fixed": "word", "--verbose": "", "--session": "word"}, need=("--fixed",), inline=False),
+    Form("threads", ("pr", "resolve", "word+"),
+         {"--left": "word", "--followup": "num", "--no-followup": "", "--verbose": "", "--session": "word"},
          need=("--left",), inline=False),  # the script refuses a --left with neither (or both) of the follow-up flags
-    Form("threads", ("pr", "followup", "word*"), {"--gist": "word", "--verbose": ""}, inline=False),
+    Form("threads", ("pr", "followup", "word*"), {"--gist": "word", "--verbose": "", "--session": "word"}, inline=False),
     Form("board", (), {"--repo": "repo", "--dry-run": "", "--verbose": ""}),
     # The lead's breakage sweep (#720): `sweep --repo . [--due]`, and the flags its docstring lists.
     Form("sweep", (), {"--repo": "repo", "--session": "word", "--snapshot": "snapshot", "--due": ""}),
@@ -3096,7 +3121,8 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                     or (role == "worker" and worker_work_ok(sub, here, worktree))
                     or (role in SCRATCH_ROLES and scratch_write_ok(sub, here, session))
                     or (role == "reviewer" and (reviewer_verify_ok(sub, here, cwd)
-                                                or plugin_script_command_ok(sub, here, session, "scratch")))
+                                                or any(plugin_script_command_ok(sub, here, s, "scratch")
+                                                       for s in scratch_sessions(session))))
                     or (role == "scout" and plugin_script_command_ok(sub, here, session, "claims"))
                     or (role is not None and plugin_script_command_ok(sub, here, session, "issue"))):
                 return False
@@ -3329,12 +3355,37 @@ def plugin_scripts_run(parsed: "Parsed") -> list:
     return names
 
 
-def script_reason(role: str, parsed: "Parsed") -> str | None:
+def scratch_reason(parsed: "Parsed", session: str) -> str | None:
+    """Why a reviewer's `scratch` call was refused (#769): a dynamic word (`$P`, `$S`) in it, or an `--under` outside the
+    session scratchpad. None when the call is neither (the generic advice then applies)."""
+    for cmd in parsed.cmds:
+        if not cmd.words or not PLUGIN_SCRIPT_WORD.search(cmd.words[0].text) \
+                or cmd.words[0].text.rpartition("/")[2] != "scratch":
+            continue
+        if any(w.dynamic for w in cmd.words[1:]):
+            return ("a `scratch` call is approved only with literal words: write the head and the `--under` path out in full "
+                    "(no `$VAR`, `$(...)` or glob), as `{p}/scratch <pr> <head> --under <your scratchpad>`".format(p=PLUGIN_SCRIPTS))
+        texts = [w.text for w in cmd.words]
+        if "--under" in texts[:-1]:
+            value = texts[texts.index("--under") + 1]
+            if not any(under_ok(value, s) and not value.startswith("-") for s in scratch_sessions(session)):
+                return (f"`scratch --under {value}` is outside your session scratchpad "
+                        "(`<tmp>/claude-<uid>/<project>/<session>/scratchpad/...` or `~/.claude/jobs/<session>/tmp`, "
+                        "your own session's or your parent session's): "
+                        "name a directory inside it, spelled out in full")
+    return None
+
+
+def script_reason(role: str, parsed: "Parsed", session: str = "") -> str | None:
     """The reason for a denied call that runs a plugin script this role has no form for, or whose form the call
     got wrong: what the role may run (#624). None when the call runs no plugin script."""
     names = plugin_scripts_run(parsed)
     if not names:
         return None
+    if rules_role(role) == "reviewer" and "scratch" in names:
+        why = scratch_reason(parsed, session)
+        if why:
+            return why
     forms = ROLE_SCRIPT_FORMS.get(rules_role(role), {})
     mine = [n for n in names if n in forms]
     if mine and role == "worker" and "threads" in mine and any(
@@ -3474,7 +3525,7 @@ def unapproved_reason(role: str, parsed: "Parsed", cwd: str, session: str, tool:
     forms = ROLE_SCRIPT_FORMS.get(rules_role(role), {})
     if checkout and all(n in forms for n in plugin_scripts_run(parsed)):
         return head + checkout  # a script the role runs, called through the checkout's copy
-    script = script_reason(role, parsed)
+    script = script_reason(role, parsed, session)
     if script:
         return head + script
     if checkout:
@@ -3575,6 +3626,8 @@ def _hook(data: dict) -> None:
     role = role_of(agent_type if isinstance(agent_type, str) else "")
     cwd = data.get("cwd") if isinstance(data.get("cwd"), str) else ""
     session = data.get("session_id") if isinstance(data.get("session_id"), str) else ""
+    global PARENT_SESSION
+    PARENT_SESSION = parent_session_of(data.get("transcript_path")) if session else ""
     if data.get("tool_name") in EDIT_TOOLS:
         decision = edit_decision(data["tool_name"], tool_input, cwd) if role == "worker" else None
         if decision:

@@ -4,7 +4,7 @@ Stdlib only, Python 3.9+. A library: `waiting` (reader and the lead's `--add`/`-
 config merge gate) and, through its own copy of the append (it runs under `python3 -I` and imports nothing from the
 plugin), `hooks/prompt_log.py` (a session stuck on a permission prompt) write it.
 
-The file is `.claude/orchestrate-waits.jsonl` in the main checkout, 0600, append-only under an exclusive flock. A line
+The file is `.claude/orchestrate-waits.jsonl` in the main checkout, 0600, append-only under an exclusive flock (compacted in place by hooks/prompt_log.py past 8 KiB). A line
 is either an add, `{"op":"add","id":...,"text":...,"from":...,"where":...,...}`, or a clear, `{"op":"done","id":...}`.
 An add with an id already live replaces it, so a script re-records an entry by writing it again.
 """

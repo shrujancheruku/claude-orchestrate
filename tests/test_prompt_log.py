@@ -237,6 +237,35 @@ class PromptWaits(unittest.TestCase):
         self.send("Stop")
         self.assertEqual([e["agent_type"] for e in self.live()], ["orchestrate:worker"])
 
+    def test_hooks_json_gives_every_prompt_log_entry_a_short_timeout(self):
+        hooks = json.loads((ROOT / "hooks" / "hooks.json").read_text())["hooks"]
+        for event, groups in hooks.items():
+            for group in groups:
+                for h in group["hooks"]:
+                    if "hooks/prompt_log.py" in h["command"]:
+                        self.assertLessEqual(h.get("timeout", 10**9), 10, event)
+
+    def test_a_waits_file_full_of_cleared_entries_is_read_back_small(self):
+        for i in range(60):  # about 400 bytes each: 24 KB uncompacted
+            self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "x" * 100}, session_id=f"s{i}")
+            self.send("PostToolUse", tool_name="Bash", tool_input={}, session_id=f"s{i}")
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "keep"}, session_id="open")
+        self.assertLess(self.waits.stat().st_size, 8192 + 1024)  # never far past the compaction threshold
+        self.assertEqual([e["session"] for e in self.live()], ["open"])
+
+    def test_compaction_keeps_an_open_entry_that_was_re_recorded(self):
+        self.send("PermissionRequest", tool_name="Bash", tool_input={"command": "keep"}, session_id="open")
+        (before,) = self.live()
+        with self.waits.open("a") as f:
+            f.write(json.dumps({**before, "text": "re-recorded"}) + "\n")
+            for i in range(200):
+                f.write(json.dumps({"op": "add", "id": f"p{i}", "kind": "prompt", "session": "z", "text": "x" * 60}) + "\n")
+                f.write(json.dumps({"op": "done", "id": f"p{i}"}) + "\n")
+        self.send("Stop", session_id="unrelated")
+        (after,) = self.live()
+        self.assertEqual((after["id"], after["text"]), (before["id"], "re-recorded"))
+        self.assertLess(self.waits.stat().st_size, 1000)
+
     def test_a_post_tool_event_with_no_waits_file_writes_nothing(self):
         self.send("PostToolUse", tool_name="Bash", tool_input={})
         self.assertFalse(self.waits.exists())
