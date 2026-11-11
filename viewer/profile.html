@@ -415,6 +415,49 @@ function cost(p) {
   return card;
 }
 
+// Stop wait (#641): from a Stop's first sign until work on the ticket resumes. Open stops are out of the median and in the total.
+const STOP_LABELS = { "question": "Question", "permission-denied": "Permission denied", "transient-exhausted": "Transient exhausted",
+  "adr-conflict": "ADR conflict", "third-review-round": "Third review round", "gate": "Gate" };
+function stopsLine(st) {
+  return `${st.count} stop${st.count === 1 ? "" : "s"}` + (st.open ? ` · ${st.open} open at end, oldest ${fmtDur(st.oldest_open_s)}` : "");
+}
+function stopWaitTile(p) {
+  const st = p.metrics.stops;
+  if (!st) return tile("Stop wait", "–", "not measured in this profile");
+  return tile("Stop wait", st.median_s == null ? "–" : fmtDur(st.median_s), `${st.count} stop${st.count === 1 ? "" : "s"} · ${st.open} open at end`);
+}
+function stopWait(p) {
+  const st = p.metrics.stops;
+  const card = el("section", { class: "card" });
+  card.append(el("h2", {}, "Stop wait"));
+  if (!st || !st.count) {
+    card.append(el("p", { class: "sub" }, st ? "No stops in this session." : "This profile was saved before stops were measured."));
+    return card;
+  }
+  card.append(el("p", { class: "sub" }, `${stopsLine(st)}. Median is over closed stops; open ones count in the total up to the profile's end.`));
+  const entries = Object.entries(st.by_kind).filter(([, v]) => v.count);
+  const med = (v) => (v.median_s == null ? 0 : v.median_s);
+  const max = Math.max(...entries.map(([, v]) => med(v)), 1);
+  const W = 1000, L = 150, R = 80, ROW = 30, BAR = 18;
+  const s = sv("svg", { viewBox: `0 0 ${W} ${entries.length * ROW + 4}`, role: "img", "aria-label": "Median stop wait by kind" });
+  s.append(sv("line", { x1: L, x2: L, y1: 0, y2: entries.length * ROW + 4, stroke: "var(--axis)", "stroke-width": 1 }));
+  entries.forEach(([k, v], i) => {
+    const w = (med(v) / max) * (W - L - R), y = i * ROW + (ROW - BAR) / 2;
+    s.append(sv("text", { x: 0, y: y + BAR / 2 + 4, class: "ink" }, STOP_LABELS[k] || k));
+    const g = sv("g");
+    g.append(sv("rect", { x: L, y, width: Math.max(w, 2), height: BAR, rx: 3, fill: "var(--series-1)" }));
+    g.append(sv("rect", { x: L, y: y - 5, width: Math.max(w, 24), height: BAR + 10, fill: "transparent" }));
+    s.append(sv("text", { x: L + w + 6, y: y + BAR / 2 + 4, class: "ink" }, v.median_s == null ? "–" : fmtDur(v.median_s)));
+    hover(g, STOP_LABELS[k] || k, [["stops", String(v.count)], ["total wait", fmtDur(v.total_s)], ["open at end", String(v.open)]]);
+    s.append(g);
+  });
+  card.append(chart(s));
+  const row = (label, v) => [label, String(v.count), v.median_s == null ? "–" : fmtDur(v.median_s), fmtDur(v.total_s)];
+  card.append(table(["Kind", "Stops", "Median", "Total"], [...entries.map(([k, v]) => row(STOP_LABELS[k] || k, v)), row("Overall", st)], [1, 2, 3]));
+  if (st.open) card.append(el("p", { class: "note" }, `${st.open} open at end, oldest ${fmtDur(st.oldest_open_s)}.`));
+  return card;
+}
+
 // Orchestrator: its turns by job, its context per turn with compactions, and the plugin scripts' events.
 const JOB_LABELS = { ci_wait: "CI waits", review_posting: "Review posting (incl. gate)", state_file: "State file", merge_cleanup: "Merge and cleanup", dispatch: "Dispatch",
   send_message: "SendMessage", tracker: "Tracker", end_of_wake: "End-of-wake text", no_tool_call: "No tool call", other: "Other" };
@@ -637,10 +680,11 @@ function compare(list = profiles) {
   const rows = Array.isArray(list) ? list : [list];
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Sessions compared"));
-  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "Merged / hour", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Peak 5-hour", "Limit hits"],
+  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "Merged / hour", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Median stop wait", "Stops", "Peak 5-hour", "Limit hits"],
     rows.map((p) => [p.session.slice(0, 8), new Date(t(p.start)).toLocaleString(), fmtDur(p.metrics.span_s), String(p.slots), pct(p.metrics.occupancy),
       String(p.metrics.tickets_merged), perHour(p.metrics.throughput_per_hour), usd(p.metrics.cost.per_merged_ticket), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
-      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 10, 11]));
+      p.metrics.stops && p.metrics.stops.median_s != null ? fmtDur(p.metrics.stops.median_s) : "–", p.metrics.stops ? stopsLine(p.metrics.stops) : "–",
+      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 10, 12, 13]));
   return card;
 }
 
@@ -663,6 +707,7 @@ function render() {
     tile("Slots occupied", pct(m.occupancy), `building ${pct(m.building_share)}`),
     tile("Tickets merged", String(m.tickets_merged), m.tokens_per_merged_ticket ? `${fmtTok(m.tokens_per_merged_ticket)} tokens each` : ""),
     throughputTile(p),
+    stopWaitTile(p),
     tile("Tokens", fmtTok(m.tokens_total), `orchestrator ${pct(m.orchestrator_share)}`),
     tile("Peak 5-hour usage", m.five_hour_peak == null ? "–" : Math.round(m.five_hour_peak) + "%", m.five_hour_start == null ? "no samples" : `${Math.round(m.five_hour_start)}% → ${Math.round(m.five_hour_end)}%`),
     tile("Limit hits", String(m.limit_hits), p.orchestrator.compactions ? `${p.orchestrator.compactions} compaction${p.orchestrator.compactions === 1 ? "" : "s"}` : "no compactions"),
@@ -671,7 +716,7 @@ function render() {
   if (p.recommendation) view.append(el("div", { class: "advice" }, p.recommendation));
   view.append(silenceBanners(p));
   if (p.warnings && p.warnings.length) for (const w of p.warnings) view.append(el("div", { class: "advice status-critical" }, w));
-  view.append(cost(p), orchestrator(p), quality(p), timeline(p), tokens(p), usage(p));
+  view.append(cost(p), stopWait(p), orchestrator(p), quality(p), timeline(p), tokens(p), usage(p));
   if (profiles.length > 1) view.append(compare());
 }
 

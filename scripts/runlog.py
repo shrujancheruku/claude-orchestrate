@@ -34,6 +34,7 @@ SWEEP = "sweep"  # scripts/sweep: `ran` is the watermark `--due` counts merges f
 PARK = "park"  # scripts/park-pr: a PR taken out of the merge queue (`parked`) or put back (`unparked`); ref = the PR; ticket, branch, why
 SNAPSHOT = "snapshot"  # scripts/merge: `stale` after a merged hooks/** or .claude-plugin/** change (sha = origin/<default>); scripts/launch: `launched` on a fresh launch, which clears it (#727)
 RESCUE = "rescue"  # scripts/rescue: one per rescue that ran (ref = the ticket; branch, reason); `sweep` reports the failed ones
+TRANSITION = "transition"  # scripts/transition: one per stop-for-lead, adr-hold or to-info that ran (ref = the ticket; branch, pr); `claims` reads it as a waiting question, ADR conflict or info (#747)
 GREEDY = "greedy"  # scripts/launch: one per fresh start: `set` (cap = the greedy cap) or `off`; `claims` reads the newest back (#657)
 PASS, FAIL, UNKNOWN, MERGED, TIMEOUT, CLOSED = "pass", "fail", "unknown", "merged", "timeout", "closed"
 OUTCOMES = {
@@ -53,6 +54,7 @@ OUTCOMES = {
     SNAPSHOT: ("stale", "launched"),
     RESCUE: ("ok", "failed"),
     GREEDY: ("set", "off"),
+    TRANSITION: ("stop-for-lead", "adr-hold", "to-info"),
 }
 GREEDY_DEFAULT, GREEDY_MAX = 5, 8  # `--greedy` alone caps at 5; `--greedy=N` takes N from 1 to 8 (ADR 0007)
 

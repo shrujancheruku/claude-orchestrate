@@ -256,11 +256,11 @@ class WaitingAndIdle(unittest.TestCase):
         lines[-1] = json.dumps(dict(json.loads(lines[-1]), ts=ts), separators=(",", ":"))
         path.write_text("\n".join(lines) + "\n")
 
-    def one(self, n, state=None, prs=(), locked=None):
+    def one(self, n, state=None, prs=(), locked=None, labels=()):
         wt = {"path": f"/wt/{n}", "branch": f"{n}-x", "locked": locked}
         if state is not None:
             self.state.write_text(json.dumps({"tickets": state}))
-        return claims.claims(self.tmp.name, self.state, [issue(n)], list(prs), [], [wt], lambda p, b: (0, 0))[n]
+        return claims.claims(self.tmp.name, self.state, [issue(n, labels=labels)], list(prs), [], [wt], lambda p, b: (0, 0))[n]
 
     def worker(self, dispatched="2026-01-01T10:00:00Z"):
         return dict(WORKER, dispatched=dispatched) if dispatched else dict(WORKER)
@@ -377,6 +377,30 @@ class WaitingAndIdle(unittest.TestCase):
         self.assertEqual(self.one(7, prs=[self.pr(7, "7-x")]).state, "in-review")
         self.event("merge", "gate-hold", 107)
         self.assertEqual(self.one(7).state, "stalled")
+
+    def test_t_each_transition_makes_its_waiting_word_while_its_label_is_on(self):
+        for verb, reason, label in (("stop-for-lead", "question", "needs-lead"), ("adr-hold", "adr-conflict", "needs-lead"),
+                                    ("to-info", "info", "needs-info")):
+            with self.subTest(verb=verb):
+                n = {"stop-for-lead": 21, "adr-hold": 22, "to-info": 23}[verb]
+                self.event("transition", verb, n)
+                self.assertNotEqual(self.one(n, state={str(n): WORKER}).state, "waiting")  # no label: answered
+                c = self.one(n, state={str(n): WORKER}, labels=[label])
+                self.assertEqual((c.state, c.reason), ("waiting", reason))
+                self.assertTrue(c.since.endswith("Z"))
+                self.assertEqual(self.one(n, labels=[label]).state, "waiting")  # a stalled claim too
+                self.assertNotEqual(self.one(n, labels=["needs-info" if label == "needs-lead" else "needs-lead"]).state,
+                                    "waiting")
+
+    def test_t_the_newest_transition_decides_and_a_gate_on_a_ready_pr_still_wins(self):
+        self.event("transition", "stop-for-lead", 24)
+        self.event("transition", "adr-hold", 24)
+        self.assertEqual(self.one(24, labels=["needs-lead"]).reason, "adr-conflict")
+        self.event("transition", "stop-for-lead", 25)
+        c = self.one(25, prs=[self.pr(25, "25-x")], labels=["needs-lead"])
+        self.assertEqual((c.state, c.reason), ("waiting", "question"))  # a ready PR waits too
+        self.event("merge", "gate-hold", 125)
+        self.assertEqual(self.one(25, prs=[self.pr(25, "25-x")], labels=["needs-lead"]).reason, "gate")
 
     def test_r_a_round_two_request_for_changes_makes_the_third_round_wait(self):
         self.event("review", "request-changes", 108, round=1)
