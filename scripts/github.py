@@ -210,10 +210,24 @@ def actor_login(actor) -> str:
     return login
 
 
+_trusted_by_cwd = {}  # absolute cwd -> the trusted logins read for it; one read per directory for the process's life
+
+
 def trusted_logins(cwd=None) -> tuple:
     """The config's extra trusted logins (lowercase), read from the main checkout that owns `cwd` (#546): a PR's own
-    worktree must not be able to add its author to the trust list (ADR-0015); none when there is no config."""
-    return config.for_checkout(cwd or ".").trusted_authors
+    worktree must not be able to add its author to the trust list (ADR-0015); none when there is no config.
+
+    Cached per `cwd` for the process's lifetime (#757): the read spawns `git` to find the main checkout, and a caller that
+    checks many authors would spawn it per author. A loop caller reads it once and passes `trusted=` down; a test that
+    rewrites the config calls `forget_trusted_logins()`."""
+    key = os.path.abspath(str(cwd or "."))
+    if key not in _trusted_by_cwd:
+        _trusted_by_cwd[key] = config.for_checkout(key).trusted_authors
+    return _trusted_by_cwd[key]
+
+
+def forget_trusted_logins() -> None:
+    _trusted_by_cwd.clear()
 
 
 def own_prs(prs) -> list:
@@ -1105,8 +1119,11 @@ def merged_prs(base, cwd=None, limit: int = 200) -> list:
     return merged[:limit]
 
 
+PR_FILES_CAP = 3000  # the host lists at most this many files of a PR (30 pages of 100), however many it changes
+
+
 def _pr_file_rows(pr, cwd=None) -> list:
-    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/files?per_page=100", cwd, max_pages=30)
+    rows = _pages(f"repos/{{owner}}/{{repo}}/pulls/{_pr_number(pr)}/files?per_page=100", cwd, max_pages=PR_FILES_CAP // 100)
     if not all(isinstance(f, dict) and isinstance(f.get("filename"), str) for f in rows):
         raise GhError(MALFORMED, "gh returned no file list for the PR")
     return rows
@@ -1120,6 +1137,15 @@ def pr_files(pr, cwd=None) -> list:
 def pr_touched_paths(pr, cwd=None) -> list:
     """Every path a PR's diff touches: each file's new name and, for a rename, the old one too (moving a file out of a path still changes that path)."""
     return [p for f in _pr_file_rows(pr, cwd) for p in (f["filename"], f.get("previous_filename")) if isinstance(p, str)]
+
+
+def pr_touched(pr, cwd=None) -> tuple:
+    """(`pr_touched_paths`, truncated): `truncated` is True when the host's file list reached PR_FILES_CAP, so a path past
+    it is not in the list and a gate judged on the list alone could miss it (#757). A caller that judges a gate treats
+    a truncated list as a gate hit (`Config.merge_gate_for`)."""
+    rows = _pr_file_rows(pr, cwd)
+    paths = [p for f in rows for p in (f["filename"], f.get("previous_filename")) if isinstance(p, str)]
+    return paths, len(rows) >= PR_FILES_CAP
 
 
 def repo_info(cwd=None) -> dict:

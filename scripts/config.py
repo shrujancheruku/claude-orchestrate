@@ -18,6 +18,8 @@ import common
 
 # Kinds of Problem, so a caller can act on the ones it cares about.
 RUN, SHARED, GENERATED = "run", "shared", "generated"
+GATES = "gates"  # a Problem kind: the Merge gates item names no glob (#757)
+GATE_TRUNCATED = "more-than-3000-files"  # what `merge_gate_for` returns for a PR whose file list the host cut off (#757)
 SIZES = ("S", "M", "L")  # in order: a `size:` label is a floor on this scale
 DEFAULT_WORKER_MODEL = "sonnet"  # a config with no Worker row
 DEFAULT_S_FILES = 3  # the S file limit when the config does not set one
@@ -32,7 +34,7 @@ WAITS_DEFAULT_COLOURS = (("ready-for-human", "red"), ("needs-triage", "yellow"),
 
 
 class Problem(NamedTuple):
-    kind: str  # RUN | SHARED | GENERATED | WAITS
+    kind: str  # RUN | SHARED | GENERATED | WAITS | GATES
     message: str
 
 
@@ -103,6 +105,8 @@ class Config(NamedTuple):
         slots = re.search(r"\*\*Slots:\*\*\s*(\d+)", common.section_of(text, "Slots") or "")
         s_lines, s_files, l_lines = _tiers(review)
         waits, waits_problems = _developer_waits(common.section_of(text, "Developer waits"))
+        gates = _merge_gates(common.section_of(text, "Gates"))
+        problems += _gates_problems(common.section_of(text, "Gates"), gates)
         return cls(
             slots=int(slots.group(1)) if slots else None,
             shared_files=tuple(paths),
@@ -112,7 +116,7 @@ class Config(NamedTuple):
             # Same pattern as hooks/guard.py's POST_FLAG, over the whole file as the guard reads it.
             post_reviews=_post_reviews(text),
             risk_paths=_risk_paths(review),
-            merge_gates=_merge_gates(common.section_of(text, "Gates")),
+            merge_gates=gates,
             tier_s_lines=s_lines,
             tier_s_files=s_files,
             tier_l_lines=l_lines,
@@ -165,14 +169,16 @@ class Config(NamedTuple):
         """Whether any of `paths` matches a risk path glob (a `dir/` touch-map entry stands for a file under it)."""
         return any(shared_match(p + "x" if p.endswith("/") else p, self.risk_paths) for p in paths)
 
-    def merge_gate_for(self, paths):
+    def merge_gate_for(self, paths, truncated=False):
         """The first Merge gates glob (config order) that any of `paths` matches, else None (a `dir/` entry stands for a file under it).
 
-        A gated PR is never merged by a script (#656): `merge` refuses it and the developer merges it by hand."""
+        A gated PR is never merged by a script (#656): `merge` refuses it and the developer merges it by hand.
+        `truncated`: the host cut the PR's file list off (`github.pr_touched`), so a gated path may lie past the end;
+        with any gate configured the PR is gated, by GATE_TRUNCATED, when no listed path hits one (#757)."""
         for glob in self.merge_gates:
             if any(shared_match(p + "x" if p.endswith("/") else p, (glob,)) for p in paths):
                 return glob
-        return None
+        return GATE_TRUNCATED if truncated and self.merge_gates else None
 
     def tier_for(self, lines, files, labels=(), risk_hit=False) -> str:
         """The reviewer tier `S`, `M` or `L` from a diff's changed lines and file count.
@@ -307,6 +313,17 @@ def _merge_gates(gates):
     """The backticked globs of the Merge gates item's first sentence; a later sentence may quote a PR title in backticks."""
     text = _item_text(gates, "Merge gates")
     return tuple(re.findall(r"`([^`]+)`", re.split(r"\.\s", text, maxsplit=1)[0]))
+
+
+def _gates_problems(gates, globs):
+    """A Merge gates item that names no glob and does not say `none` is a Problem (#757): dropping it silently would ungate
+    every PR, so `merge` stops (`could-not-run`) until the line is fixed."""
+    text = _item_text(gates, "Merge gates")
+    value = re.sub(r"^-\s+\*\*Merge gates:?\*\*:?\s*", "", text).strip()
+    # `none` is the "no gate" spelling; a value that opens with `<` is the template's own unfilled placeholder (setup fills it).
+    if text and not globs and not re.match(r"`?none\b|<", value, re.IGNORECASE):
+        return [Problem(GATES, f"Merge gates names no backticked glob and is not `none`: {common.one_line(value)[:80]}")]
+    return []
 
 
 def _pr_title_ticket(section) -> bool:

@@ -58,7 +58,7 @@ import github
 import config
 import runlog
 import tracker
-from repo import parse_ts, ticket_of_branch
+from repo import STATE, parse_ts, ticket_of_branch
 from repo import unpushed as unpushed_commits  # the one count rescue shares (#546)
 
 LEAD_LABEL = "lead"  # a ticket the lead owns: no worker is dispatched for it
@@ -440,3 +440,33 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.incomplete = _incomplete(events, shown["number"]) if pr is not None else 0
         out[n] = claim
     return out
+
+
+def worker_busy(repo, branch, state_file=None, session=None) -> str | None:
+    """Why a worker may still be fixing on `branch`, else None (#757).
+
+    `merge` and its sweep push, or ask the host to merge, the default branch into a PR's branch; a worker with commits of
+    its own then finds its push rejected non-fast-forward. Only a ready PR reaches them (a draft is skipped), and a ready
+    PR's claim reads in-review whatever the worker does, so the signal is the ticket's worktree: uncommitted paths or
+    unpushed commits mean a worker still fixing. A branch with no ticket number, and a ticket with no worktree, has no
+    worker to wait for. Only the host-free parts of the claim are read (the state file, `git worktree list`, the run
+    log), so no host call is made; a worktree whose git state can't be read counts as busy (fail closed: the update
+    waits for the next call)."""
+    ticket = ticket_of_branch(branch)
+    if ticket is None:
+        return None
+    repo = Path(repo)
+    prs = [{"number": 0, "headRefName": branch, "isDraft": False}]
+    found = claims(repo, state_file or repo / STATE, [{"number": ticket, "claimed": True, "labels": []}], prs, [],
+                   session=session, changes=lambda path, br: (0, 0))
+    claim = found.get(ticket)
+    if claim is None:
+        return None
+    if claim.worktree and claim.branch == branch:
+        try:
+            dirty, unpushed = worktree_state(claim.worktree, branch)
+        except ValueError:
+            return "its worktree could not be read"
+        if dirty or unpushed:
+            return f"its worktree holds {dirty} uncommitted path(s) and {unpushed} unpushed commit(s)"
+    return None

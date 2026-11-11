@@ -25,6 +25,18 @@ class WorkerTurnRules(unittest.TestCase):
         self.assertIn("status: pr-opened | stopped", report)
         self.assertNotIn("changed:", report)
 
+    def test_the_push_step_fetches_and_merges_the_workers_own_branch_first(self):
+        # #757: merge/sweep may have pushed to the branch; a worker never diverges from its own remote branch.
+        s = (ROOT / "agents/worker.md").read_text()
+        pushing = s[s.index("## Pushing"):s.index("## Stop and report")]
+        fetch = pushing.index("`git fetch origin <your branch>`")
+        merge = pushing.index("`git merge --no-edit origin/<your branch>`")
+        push = pushing.index("Only then push")
+        self.assertLess(fetch, merge)
+        self.assertLess(merge, push)
+        brief = (ROOT / "skills/run/brief.md").read_text()
+        self.assertIn("Before every push except a new branch's first, `git fetch origin <Branch>` then `git merge --no-edit origin/<Branch>`", brief)
+
     def test_worker_never_ends_its_turn_to_wait_and_the_rate_limit_notice_is_advisory(self):
         s = (ROOT / "agents/worker.md").read_text()
         rules = s[s.index("## Turn rules"):s.index("## Pushing")]

@@ -5,7 +5,9 @@ Generated files are in test_merge_regenerate.py.
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -78,6 +80,16 @@ class SweepTest(SweepMixin, unittest.TestCase):
         self.assertIn("HANDBACK PR #9 pr-b: src.txt (not a shared file)", p.stdout)
 
     def test_a_gated_pr_is_not_swept_and_an_ungated_one_beside_it_is(self):
+        self.gated_sweep(waiting=True)
+
+    def test_a_gated_pr_not_yet_waiting_for_the_developer_is_left_alone(self):
+        self.gated_sweep(waiting=False)
+
+    def gated_sweep(self, waiting):
+        if waiting:
+            import waits
+            waits.add(self.env.repo, "PR #8", source="merge", wait_id="pr-8", kind="merge-gate", pr=8, head="b" * 40,
+                      gate="hooks/**")
         (self.env.repo / ".claude" / "orchestration.md").write_text(
             "## Shared files\n\n- **Shared files:**\n  - `CHANGELOG.md`: one line under Unreleased\n- **Generated:** none\n\n"
             "## Gates\n\n- **Merge gates:** PRs touching `hooks/**` are merged by the developer.\n")
@@ -96,12 +108,38 @@ class SweepTest(SweepMixin, unittest.TestCase):
             {"args": list(REPO_VIEW), "seq": REPO},
             {"args": ["api", "-X", "DELETE"], "seq": [OK]},
             {"args": list(PR_MERGE), "exit": 0},
+            {"args": ["api", "repos/{owner}/{repo}/compare/main...pr-a", "--jq", ".behind_by"], "stdout": "1\n"},
+            {"args": ["api", "-X", "PUT", "repos/{owner}/{repo}/pulls/8/update-branch"], "exit": 0},
         ])
         p = self.merge()
         self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
-        self.assertIn("sweep: PR #8 pr-a left alone: it touches the merge gate hooks/**", p.stdout)
+        self.assertIn("sweep: PR #8 pr-a touches the merge gate hooks/**; the developer merges it by hand", p.stdout)
         self.assertIn("HANDBACK PR #9 pr-b: src.txt (not a shared file)", p.stdout)
         self.assertNotIn("HANDBACK PR #8", p.stdout)
+        update = ["api", "-X", "PUT", "repos/{owner}/{repo}/pulls/8/update-branch"]
+        if waiting:
+            # #757: the gated PR waits for the developer, so the host's update-branch keeps it current; replay never pushes to it.
+            self.assertIn("sweep: PR #8 pr-a updated (behind by 1); wait for CI", p.stdout)
+            self.assertIn(update, self.env.gh_calls())
+        else:  # still in review or being fixed: a push would move the head under the reviewer
+            self.assertNotIn("PR #8 pr-a updated", p.stdout)
+            self.assertNotIn(update, self.env.gh_calls())
+
+    def test_a_pr_whose_worker_holds_unpushed_work_is_not_swept(self):
+        # #757: a push of ours would make the worker's own push non-fast-forward (PR #724).
+        self.pr_branch("8-pr-a", {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n"})
+        self.land({"CHANGELOG.md": "# Changes\n## Unreleased\n- main item\n- old\n"})
+        wt = Path(tempfile.mkdtemp()).resolve() / "wt"
+        self.addCleanup(shutil.rmtree, wt.parent, True)
+        git(self.env.repo, "worktree", "add", "-q", str(wt), "8-pr-a")
+        (wt / "w.txt").write_text("work\n")
+        git(wt, "add", "w.txt")
+        git(wt, "commit", "-q", "-m", "wip")
+        old = git(self.env.repo, "rev-parse", "origin/8-pr-a")
+        p = self.sweep(branches=("8-pr-a",))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("sweep: PR #8 8-pr-a left alone: its worktree holds 0 uncommitted path(s) and 1 unpushed commit(s)", p.stdout)
+        self.assertEqual(git(self.env.repo, "rev-parse", "origin/8-pr-a"), old)
 
     def sweep_with(self, method):
         self.pr_branch("pr-a", {"CHANGELOG.md": "# Changes\n## Unreleased\n- pr item\n- old\n"})

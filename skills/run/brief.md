@@ -14,7 +14,7 @@ Merged dependencies: <ticket → PR, one per line | none>
 Verify: '<absolute path of scripts/verify in the plugin, from the base directory of this skill>' --config --branch <the Branch line's name>
 Plugin root: <the plugin's root as an absolute path: this skill's base directory (${CLAUDE_SKILL_DIR}) without its trailing `/skills/run`, the same directory `Verify:` points into>. Call the plugin's scripts only as `<Plugin root>/scripts/<name>`, never through the checkout's `scripts/`.
 Shared files: <the config's shared-file rules>
-Commits: <convention>. No attribution lines or trailers. Stage files by explicit path.
+Commits: <convention>. No attribution lines or trailers. Stage files by explicit path. Before every push except a new branch's first, `git fetch origin <Branch>` then `git merge --no-edit origin/<Branch>`.
 PR: title <convention>; body includes "<closing reference>"; body written with the skill whose name ends in `:pr` (e.g. `mattpocock-skills:pr`) when one is listed, else plain; no attribution lines.
 Human-only steps: <from the config>
 Repo rules: .claude/orchestration.md, the instruction files it names, and the domain docs (normally docs/agents/domain.md).

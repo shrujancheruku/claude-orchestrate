@@ -359,6 +359,18 @@ class WaitingAndIdle(unittest.TestCase):
         self.report(5, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
         self.assertEqual(self.one(5).state, "waiting")
 
+    def test_p_a_resume_message_does_not_end_the_pause_so_the_skill_sends_it_once_per_since(self):
+        # #747/#757: a SendMessage resume leaves no event `claims` reads; only the worker's newer report ends the pause.
+        # `claims` keeps saying `paused limit since <ts>` with the same ts, and Running out of usage tells the orchestrator
+        # to send one resume per `since` time instead of one per pass.
+        self.report(6, "limit")
+        first = self.one(6, state={"6": WORKER})
+        self.event("ci", "pass", 106)  # other traffic in the log, even on this ticket
+        again = self.one(6, state={"6": WORKER})
+        self.assertEqual((again.state, again.reason, again.since), (first.state, first.reason, first.since))
+        self.report(6, "valid")
+        self.assertNotEqual(self.one(6, state={"6": WORKER}).state, "paused")
+
     def test_p_a_paused_claim_occupies_a_slot(self):
         self.report(6, "limit")
         found = {6: self.one(6, state={"6": WORKER})}
