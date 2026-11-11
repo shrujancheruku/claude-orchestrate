@@ -69,9 +69,11 @@ def session_names() -> dict:
 
 
 def role(entry: dict) -> str:
-    """Whose prompt it is (#642): `agent_type` set -> that role; else the `role` field the hook logged from
-    ORCHESTRATE_ROLE (`orchestrator`); else a session named `lead` in `claude agents --json --all` -> `lead`; else
-    `main`, a hand-started session. Lines logged before the `role` field fall to the name lookup, then `main`."""
+    """Whose prompt it is (#642, #766): `agent_type` set -> that role; else a session named `lead` in
+    `claude agents --json --all` -> `lead`; else the `role` field the hook logged from ORCHESTRATE_ROLE
+    (`orchestrator`), only when the session is unnamed there or named `orchestrator` (a session with another name
+    inherited the variable); else `main`, a hand-started session. Lines logged before the `role` field fall to the
+    name lookup, then `main`."""
     agent = entry.get("agent_type")
     if isinstance(agent, str) and agent:
         return agent.split(":", 1)[-1]
