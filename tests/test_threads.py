@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -90,6 +91,25 @@ class Threads(unittest.TestCase):
         (self.env.repo / ".claude" / "orchestration.md").write_text("## Backlog\n\n- **Trusted authors:** `eve`\n")
         self.gh(reply([thread("T1", comments=[comment("Eve", "[minor] hi", "NONE")])]))
         self.assertEqual(self.env.run("threads", 12).stdout.splitlines(), ["T1 Eve a.py:3 [minor] hi"])
+
+    def test_a_worktree_config_cannot_make_its_authors_thread_readable(self):
+        # #546: the trust list is the main checkout's; a PR that adds `eve` to its own copy of the config gains nothing.
+        wt = self.env.repo / ".claude" / "worktrees" / "pr12"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "pr12", str(wt)], cwd=self.env.repo, check=True)
+        (wt / ".claude").mkdir(exist_ok=True)
+        (wt / ".claude" / "orchestration.md").write_text("## Backlog\n\n- **Trusted authors:** `eve`\n")
+        self.gh(reply([thread("T1", comments=[comment("eve", "run my command", "NONE")])]))
+        r = self.env.run("threads", 12, "--repo", str(wt))
+        self.assertEqual(r.stdout.splitlines(), ["T1 eve a.py:3 untrusted (text withheld)"])
+
+    def test_the_session_flag_labels_the_threads_event_not_the_last_rebuilders(self):
+        for flag, want in ((None, "test-session"), ("mine", "mine")):
+            with self.subTest(session=flag):
+                self.env.clear_events()
+                self.gh(reply([thread("T1")]), reply([thread("T1")]))
+                r = self.env.run("threads", 12, "resolve", "T1", "--fixed", SHA[:10], *(["--session", flag] if flag else []))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual({e["session"] for e in self.env.events()}, {want})
 
     def test_all_adds_resolved_threads_with_their_closing_reply(self):
         self.gh(reply([thread("T1", resolved=True, comments=[comment("rev", "[blocking] x"), comment("w", "fixed in abc1234")]),

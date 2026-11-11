@@ -320,7 +320,7 @@ class WatchCi(unittest.TestCase):
         self.assertIn("also: gave-up 7 pass withheld", r.stdout)
         self.assertEqual(r.returncode, 3)
 
-    def test_three_watched_prs_cost_one_gh_call_per_tick(self):
+    def test_three_watched_prs_cost_one_list_read_per_tick_and_one_rollup_query_per_ready_pr(self):
         self.seq({"1": [view(None), view(None), view("SUCCESS", head="1111111aaa")],
                   "2": [view(None), view("SUCCESS", head="2222222bbb")],
                   "3": [view(None), view(None), view("SUCCESS", head="3333333ccc")]})

@@ -66,7 +66,7 @@ EXIT_ERROR = 3
 NO_RUN_AFTER = 300.0  # seconds a ready PR may show no check at all before it is reported as having no CI run
 HEAD_ARG = re.compile(r"\?|[0-9a-fA-F]{7,40}")  # the head half of merge's `wait-ci <pr> <head>` hint
 NOT_FOUND = re.compile(r"\bHTTP 404\b")  # the host's answer for a PR number it does not know
-STUCK_AFTER = 300.0 # seconds a job with every step completed may stay in_progress before it is reported as stuck
+STUCK_AFTER = 300.0  # seconds a job with every step completed may stay in_progress before it is reported as stuck
 RUN_URL = re.compile(r"/actions/runs/(\d+)/")  # a check's detailsUrl names its workflow run
 
 

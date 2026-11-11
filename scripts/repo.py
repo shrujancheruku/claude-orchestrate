@@ -90,7 +90,7 @@ def unpushed(path, branch) -> int | None:
     return len(r.stdout.split()) if r.code == 0 else None
 
 
-LEAD_NAME = "lead" # the name `scripts/launch --lead` gives the lead session
+LEAD_NAME = "lead"  # the name `scripts/launch --lead` gives the lead session
 
 
 def lead_session(repo) -> tuple:
