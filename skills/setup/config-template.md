@@ -56,14 +56,22 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 
 - **Branch:** `<number>-<slug>`
 - **Commits:** <convention>
-- **PR title:** <convention>. **Body:** <closing reference, e.g. "Closes #<n>">
+- **PR title:** Conventional Commits, ending in ` (#<n>)`, where `<n>` is the ticket the PR closes (`scripts/gate` checks the ending against the body's closing reference; drop the suffix clause to turn that check off). **Body:** <closing reference, e.g. "Closes #<n>">
 - **Method:** <squash | merge | rebase>
 - **Orchestrator merges:** <yes | no>. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date, review threads resolved, reviewer approved.
 
 ## Gates
 
 - **Start gates:** <tickets or labels that wait for the user before a worker starts>
-- **Merge gates:** <tickets, labels or paths that wait for the user's go-ahead to merge>
+- **Merge gates:** <path globs in backticks, in the first sentence; a PR touching one is merged by the developer, not the orchestrator>. `scripts/merge` reads the globs through `config.merge_gate_for` and ends `next: ask-user gate <glob>` for such a PR; tickets and labels are not read.
+
+## Velocity
+
+Optional: a missing section, or a missing line, keeps the default shown here.
+
+- **Idle window:** 10m. How long a slot may sit free with a takeable ticket waiting before the lead is woken.
+- **Expensive hold:** 3. How many takeable tickets one held PR must block before the digest asks the developer about it.
+- **Velocity watch:** on. `off` stops the `idle-slot:` wake.
 
 ## Human-only steps
 
