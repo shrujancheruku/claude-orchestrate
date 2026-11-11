@@ -1924,12 +1924,13 @@ SNAPSHOT_FILE = ".claude/orchestrate-snapshot.json"
 # with the kind of value it takes. A call matches a row only when every word fits: an unknown flag, a short flag, a
 # repeated flag the row does not repeat, a value of the wrong kind or a missing required flag leaves the whole call to the
 # permission layer. The sets of forms replace the former merge, threads and board functions and the loose read-only list.
-# launch, sandbox-git, rescue, verify and guard-corpus have no row, so they fall to the permission layer as before.
+# launch has one row (`--check-greedy`, #754); sandbox-git, rescue, verify and guard-corpus have none, so they fall to the permission layer as before.
 #
 # Positional tokens: "pr" and "n" (a number), "word" (any plain word), "hash" (7 to 40 hex digits), "target" (watch-ci's
 # `<pr>` or its head), or a literal word such as "resolve"; a trailing "+", "*" or "?" repeats the last token.
 # Flag value kinds, one per value, space separated: "" (a switch), "word", "num", "float", "hash", "repo" (only `.`),
-# "snapshot" (only the pass's own snapshot file), "cwd" (gate's: a worktree of this repo), "under" (scratch's: this
+# "snapshot" (only the pass's own snapshot file), "branch" (the branch grammar `<n>-<slug>`), "sha" (all 40 hex digits),
+# "cap" (a greedy cap, 1 to 8), "cwd" (gate's: a worktree of this repo), "under" (scratch's: this
 # session's scratchpad), "own" (only the caller's own session id), and "word*" / "word+" / "num*" for a list.
 class Form(NamedTuple):
     script: str
@@ -1972,23 +1973,26 @@ ORCHESTRATOR_FORMS = (
     Form("park-pr", ("pr",), {"--unpark": "", "--repo": "repo"}, need=("--unpark",)),
     # The tracker writes of a stop, a hand-back and a marker comment (#661): one row per verb of `transition`. A file flag
     # ("under") names a file in this session's scratchpad, so the text a comment carries is text the run itself wrote.
-    Form("transition", ("handback", "n"), {"--branch": "word", "--pr": "num", "--blocked-by": "num*", "--title": "word", "--repo": "repo"},
+    Form("transition", ("handback", "n"), {"--branch": "branch", "--pr": "num", "--blocked-by": "num*", "--title": "word", "--repo": "repo"},
          need=("--branch",)),
     Form("transition", ("fallback", "n"), {"--repo": "repo"}),
     Form("transition", ("abandon", "n"), {"--pr": "num", "--repo": "repo"}),
-    Form("transition", ("stop-for-lead", "n"), {"--question-file": "under", "--branch": "word", "--repo": "repo"},
+    Form("transition", ("stop-for-lead", "n"), {"--question-file": "under", "--branch": "branch", "--repo": "repo"},
          need=("--question-file", "--branch")),
     Form("transition", ("adr-hold", "n"), {"--pr": "num", "--conflicts-file": "under", "--repo": "repo"},
          need=("--pr", "--conflicts-file")),
-    Form("transition", ("undelivered", "n"), {"--head": "hash", "--gist-file": "under", "--repo": "repo"},
+    Form("transition", ("undelivered", "n"), {"--head": "sha", "--gist-file": "under", "--repo": "repo"},
          need=("--head", "--gist-file")),
-    Form("transition", ("resent", "n"), {"--head": "hash", "--repo": "repo"}, need=("--head",)),
-    Form("transition", ("to-human", "n"), {"--question-file": "under", "--branch": "word", "--repo": "repo"},
+    Form("transition", ("resent", "n"), {"--head": "sha", "--repo": "repo"}, need=("--head",)),
+    Form("transition", ("to-human", "n"), {"--question-file": "under", "--branch": "branch", "--repo": "repo"},
          need=("--question-file",)),
-    Form("transition", ("to-info", "n"), {"--question-file": "under", "--branch": "word", "--repo": "repo"},
+    Form("transition", ("to-info", "n"), {"--question-file": "under", "--branch": "branch", "--repo": "repo"},
          need=("--question-file",)),
     # fold <from> <into>: the lead's and the orchestrator's duplicate fold (#660), on any main session.
     Form("fold", ("n", "n"), {"--repo": "repo", "--session": "word", "--snapshot": "snapshot"}),
+    # The run skill's greedy-cap check (#754): `launch --check-greedy --greedy[=N]` prints the cap and launches nothing; no other launch call.
+    Form("launch", (), {"--check-greedy": "", "--greedy": ""}, need=("--check-greedy", "--greedy")),
+    Form("launch", (), {"--check-greedy": "", "--greedy": "cap"}, need=("--check-greedy", "--greedy")),
     Form("scratch", ("pr", "hash"), {"--under": "under", "--repo": "repo"}, need=("--under",)),
     # worker-report: a worker's completion, and a reviewer's (which may post its risk notes once).
     Form("worker-report", ("n",), {"--branch": "word", "--repo": "repo"}, need=("--branch",)),
@@ -2022,6 +2026,7 @@ FORM_SCRIPTS = frozenset(f.script for f in ORCHESTRATOR_FORMS)
 # The scripts any role may run as a read (the form is the same for every role).
 READ_FORMS = frozenset(("issue",))
 HEX = re.compile(r"[0-9a-fA-F]{7,40}")
+FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
 FLOAT = re.compile(r"\d+(?:\.\d+)?")
 WATCH_TARGET = re.compile(r"#?\d+|[0-9a-fA-F]{7,40}|\?")
 
@@ -2049,7 +2054,8 @@ def value_ok(kind: str, value: str, ctx: FormContext) -> bool:
         return value.isascii() and value.isdigit()
     return {"own": lambda: bool(ctx.session) and value == ctx.session,
             "float": lambda: FLOAT.fullmatch(value) is not None, "hash": lambda: HEX.fullmatch(value) is not None,
-            "repo": lambda: value == ".", "snapshot": lambda: value == SNAPSHOT_FILE,
+            "repo": lambda: value == ".", "branch": lambda: BRANCH_NAME.fullmatch(value) is not None,
+            "sha": lambda: FULL_SHA.fullmatch(value) is not None, "cap": lambda: re.fullmatch(r"[1-8]", value) is not None, "snapshot": lambda: value == SNAPSHOT_FILE,
             "cwd": lambda: gate_cwd_ok(value, ctx.cwd, ctx.session), "under": lambda: under_ok(value, ctx.session)}.get(kind, lambda: False)()
 
 

@@ -444,7 +444,7 @@ def saved_transcript(session_id):
 
 
 def parse(argv):
-    ap = argparse.ArgumentParser(prog="launch", description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(prog="launch", description=__doc__.split("\n")[0], allow_abbrev=False)  # the guard approves `--check-greedy` by its full name (#754)
     ap.add_argument("ticket", nargs="?", help="a ticket number: run narrows to it")
     ap.add_argument("--greedy", nargs="?", const="", default=None, metavar="N", help="greedy mode, as --greedy=N")
     ap.add_argument("--check-greedy", action="store_true",

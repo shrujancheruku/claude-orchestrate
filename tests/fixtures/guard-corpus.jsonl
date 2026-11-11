@@ -1040,11 +1040,18 @@
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition stop-for-lead 7 --question-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/question.md --branch 7-x --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition stop-for-lead 7 --question-file /tmp/elsewhere --branch 7-x --repo .", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition adr-hold 7 --pr 12 --conflicts-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/conflicts.md --repo .", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition undelivered 7 --head abc1234 --gist-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/gist.md --repo .", "expected": "approve", "source": "hand"}
-{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition resent 7 --head abc1234 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition undelivered 7 --head 0000000000000000000000000000000000000000 --gist-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/gist.md --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition resent 7 --head 0000000000000000000000000000000000000000 --repo .", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition resent 7 --head abc1234 --repo .", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition handback 7 --branch \"not a branch\" --repo .", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition handback 7 --branch main --repo .", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition to-human 7 --question-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/question.md --branch 7-x --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition to-info 7 --question-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/question.md --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition to-info 7", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition stop-for-lead 7 --question-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/question.md --branch \"not a branch\" --repo .", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition to-human 7 --question-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/question.md --branch main --repo .", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition to-info 7 --question-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/question.md --branch Bad/Branch --repo .", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/transition to-info 7 --question-file /private/tmp/claude-0/-Users-owner-code-claude-orchestrate/00000000-0000-0000-0000-000000000000/scratchpad/question.md --branch 7-x --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/transition fallback 7 --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/transition fallback 7 --repo /other", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/transition fallback $(id) --repo .", "expected": "unapproved", "source": "hand"}
@@ -1058,3 +1065,11 @@
 {"role": "orchestrate:lead-session", "command": "/p/orchestrate/0.7.0/scripts/fold 7 9 --repo .", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator-run", "command": "/p/orchestrate/0.7.0/scripts/fold 7 9 --repo /other", "expected": "unapproved", "source": "hand"}
 {"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/fold 7 9 --repo .", "expected": "unapproved", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/fold 7 other-ticket --repo .", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch --check-greedy --greedy", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch --check-greedy --greedy=8", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch --check-greedy --greedy=9", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch --check-greedy --greedy --bg", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch --check-greedy", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/launch", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:worker", "command": "/p/orchestrate/0.7.0/scripts/launch --check-greedy --greedy", "expected": "unapproved", "source": "hand"}
