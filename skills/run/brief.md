@@ -1,6 +1,6 @@
 # Brief template
 
-`scripts/brief <n> --touch-map <entry>... --held <lines> [--dep "<ticket> → PR <n>"]... --shared <rules> --commits <convention> --pr-title <convention> --human-only <steps> [--findings <text>] [--notes <text>] [--lead]` prints the brief below. Until the guard has a form for it (follow-up to #659), write the brief by hand to this shape; afterwards send what it prints, unedited. It computes `Ticket`, `Branch`, `Verify`, `Plugin root` and the PR's closing reference, writes `Touch map` with the grammar `holds` parses (an entry off it is refused, naming it), and refuses any value that still holds a `<...>` slot. Use **pointers** (URLs, config sections, merged PRs), not copies. The preamble stays word-for-word across briefs, so the workers share a prompt-cache prefix.
+`scripts/brief <n> --touch-map <entry>... --held <lines> [--dep "<ticket> → PR <n>"]... --shared <rules> --commits <convention> --pr-title <convention> --human-only <steps> [--findings <text>] [--notes <text>] [--lead]` prints the brief below; you send what it prints, unedited. It computes `Ticket`, `Branch`, `Verify`, `Plugin root` and the PR's closing reference, writes `Touch map` with the grammar `holds` parses (an entry off it is refused, naming it), and refuses any value that still holds a `<...>` slot. Use **pointers** (URLs, config sections, merged PRs), not copies. The preamble stays word-for-word across briefs, so the workers share a prompt-cache prefix.
 
 ```
 You are an orchestrate worker. Your instructions are your agent definition; this brief is your ticket.

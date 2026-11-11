@@ -2027,6 +2027,14 @@ ORCHESTRATOR_FORMS = (
     # worker-report: a worker's completion, and a reviewer's (which may post its risk notes once).
     Form("worker-report", ("n",), {"--branch": "word", "--repo": "repo"}, need=("--branch",)),
     Form("worker-report", ("n",), {"--reviewer": "", "--post-risk-notes": "", "--repo": "repo"}, need=("--reviewer",)),
+    # The review body check (#659): the body on stdin, nothing logged or posted. A reviewer may run this row only (REVIEW_BODY_FLAG).
+    Form("worker-report", ("n",), {"--reviewer": "", "--review-body": "", "--repo": "repo"}, need=("--reviewer", "--review-body")),
+    # The brief writer (#659): the run skill's Dispatch. Every value is one quoted word; --plugin-root is not offered (the
+    # script derives it from where it is called), and a bad value is the script's refusal, not the guard's.
+    Form("brief", ("n",), {"--touch-map": "word+", "--held": "word", "--dep": "word", "--shared": "word", "--commits": "word",
+                           "--pr-title": "word", "--human-only": "word", "--findings": "word", "--notes": "word", "--lead": "",
+                           "--repo": "repo"},
+         need=("--touch-map", "--shared", "--commits", "--pr-title", "--human-only"), repeat=("--dep",)),
     # The read-only pass scripts, with the exact flags the run and lead skills pass.
     Form("snapshot", (), {"--repo": "repo", "--out": "snapshot"}),
     Form("rebuild-state", ("word?",), {"--session": "word", "--repo": "repo"}),
@@ -3016,6 +3024,15 @@ def plugin_script_command_ok(cmd: Command, cwd: str, session: str, name: str) ->
     return script_form_ok(name, [w.text for w in cmd.words[1:]], FormContext(cwd or "", session))
 
 
+REVIEW_BODY_FLAG = "--review-body"
+
+
+def reviewer_body_check_ok(cmd: Command, cwd: str, session: str) -> bool:
+    """A reviewer's `<plugin>/scripts/worker-report <pr> --reviewer --review-body` (#659): the one worker-report row a
+    reviewer may run. Only that row has the flag, so the others (which log, or post a comment) never match."""
+    return REVIEW_BODY_FLAG in [w.text for w in cmd.words] and plugin_script_command_ok(cmd, cwd, session, "worker-report")
+
+
 def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str = "") -> bool:
     """True when every simple command of the line is approved for the role (see the section comment). The
     loop form is `for NAME in WORD...; do ...; done`, with literal words and one level."""
@@ -3121,6 +3138,7 @@ def compound_approved(role: str | None, parsed: "Parsed", cwd: str, session: str
                     or (role == "worker" and worker_work_ok(sub, here, worktree))
                     or (role in SCRATCH_ROLES and scratch_write_ok(sub, here, session))
                     or (role == "reviewer" and (reviewer_verify_ok(sub, here, cwd)
+                                                or reviewer_body_check_ok(sub, here, session)
                                                 or any(plugin_script_command_ok(sub, here, s, "scratch")
                                                        for s in scratch_sessions(session))))
                     or (role == "scout" and plugin_script_command_ok(sub, here, session, "claims"))

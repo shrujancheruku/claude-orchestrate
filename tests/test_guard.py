@@ -2270,6 +2270,26 @@ class ScriptFormsTest(unittest.TestCase):
         self.assertFalse(self.ok(command, "orchestrate:worker", cwd=self.work))
         self.assertFalse(self.ok(command, "orchestrate:scout"))
 
+    def test_the_orchestrator_may_print_a_brief_and_the_reviewer_may_check_a_review_body(self):
+        brief = (f"{SCRIPTS}/brief 7 --touch-map 'a.py:1-2 (x)' b.py --held none --dep '#5 -> PR 9' --shared 'README.md: its section' "
+                 "--commits 'Conventional Commits' --pr-title 'Conventional Commits ending in (#7)' --human-only 'release PRs' --lead")
+        self.assertTrue(self.ok(brief))
+        self.assertFalse(self.ok(brief + " --plugin-root /tmp/evil"))
+        self.assertFalse(self.ok(brief.replace("--shared 'README.md: its section' ", "")))  # a required flag
+        self.assertFalse(self.ok(brief.replace("--held none", '--held "$(id)"')))
+        self.assertFalse(self.ok(brief, "orchestrate:reviewer"))
+        check = f"printf '%s' 'Round 1 · verdict: changes' | {SCRIPTS}/worker-report 12 --reviewer --review-body"
+        self.assertTrue(self.ok(check, "orchestrate:reviewer"))
+        self.assertTrue(self.ok(check))
+        # A multi-line body with an apostrophe (`'\''`) is still one single-quoted word.
+        multi = f"printf '%s' 'Round 1 · tier: M\n\nspec:\n- it'\\''s met' | {SCRIPTS}/worker-report 12 --reviewer --review-body"
+        self.assertTrue(self.ok(multi, "orchestrate:reviewer"))
+        # The other worker-report rows log or post: a reviewer gets none of them.
+        for other in (f"{SCRIPTS}/worker-report 12 --reviewer", f"{SCRIPTS}/worker-report 12 --reviewer --post-risk-notes",
+                      f"{SCRIPTS}/worker-report 12 --branch 12-x", f"{SCRIPTS}/worker-report 12 --reviewer --review-body --post-risk-notes"):
+            with self.subTest(other):
+                self.assertFalse(self.ok(f"printf x | {other}", "orchestrate:reviewer"))
+
     def test_merge_and_threads_take_the_session_flag_with_a_plain_id_only(self):
         for command in (f"{SCRIPTS}/merge 12 --method squash --session {self.SID}",
                         f"{SCRIPTS}/merge 12 --approved-head abc1234 --worktree {self.work} --session {self.SID}",
