@@ -247,8 +247,12 @@ A ticket's work halted until a human (the developer, or the lead when one is liv
 _Avoid_: pause (the orchestrator's own state), block
 
 **Stop wait**:
-How long a **Stop** lasts: from its first sign until work on the ticket resumes (the next worker or reviewer on it, or its merge or close), so it includes the pickup after the answer. Source: `scripts/profile.py`.
+How long a **Stop** lasts: from its first sign until work on the ticket resumes (the next worker or reviewer on it, or its merge or close), so it includes the pickup after the answer. The profile's Stop wait card also shows a `prompt` bar ("Permission prompt"): that is the **Prompt stall** total, not a stop kind, and it stays out of the stop count and median. Source: `scripts/profile.py`.
 _Avoid_: answer time, response time (the answer is only one point inside it)
+
+**Prompt stall**:
+A stretch the orchestrator's own thread sat on a permission prompt: from the prompt-log request to the matching call's result, with overlapping stretches merged so clock time counts once. It belongs to no ticket, so it is not a **Stop**; the profile keeps it under `stops.by_kind.prompt` and reports merges per hour both raw and net of it. A prompt with no matching call or no result yet is left out. Source: `scripts/profile.py` (`prompt_stalls`).
+_Avoid_: prompt stop, permission stop (a stop belongs to a ticket)
 
 **Stop comment**:
 The comment a worker's question is posted as when its stop goes to the lead: its first line is `> *Stopped for the lead.*`, and `scripts/lead-route` reads it for the stop's time. `scripts/transition stop-for-lead` is the only writer, and the marker string lives in `scripts/tracker.py`, so a typed copy cannot drift. Source: `scripts/transition`, `scripts/tracker.py`, `scripts/lead-route`.
