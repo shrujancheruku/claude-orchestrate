@@ -19,6 +19,7 @@ SKILLS = [ROOT / "skills" / "run" / "SKILL.md", ROOT / "skills" / "lead" / "SKIL
 SID = "00000000-0000-0000-0000-0000000000aa"
 CALL = re.compile(r'(python3 -I )?"\$\{CLAUDE_SKILL_DIR\}/\.\./\.\./scripts/([a-z][a-z.-]*)"([^`\n]*)')
 # Calls with no row on purpose: launch starts sessions (#407), rescue pushes and opens PRs. They stay with the permission layer.
+# The one launch call with a row is `--check-greedy` (#754); it is checked, the rest of launch stays exempt.
 EXEMPT = {"launch", "rescue", "sandbox-git"}
 
 
@@ -43,7 +44,7 @@ class SkillCallsAreRows(unittest.TestCase):
             (r"<your scratchpad>", self.pad), (r"<the head commit the reviewer approved>", "abc1234abc1234"),
             (r"<the config's method>", "squash"), (r"<live \| none>", "live"), (r"<the slot count in force>", "3"),
             (r"<run id>", "111"), (r"<job id>", "222"), (r"<head>", "0123456789abcdef0123456789abcdef01234567"), (r"<branch>", "7-x"), (r"<pr>|<num>|<its merge PR>", "12"), (r"<ticket>|<n>|<donor>|<absorber>", "7"),
-            (r"\$\{CLAUDE_SESSION_ID\}", SID), (r"<[^<>]*>", "x"),
+            (r"--greedy=N", "--greedy=5"), (r"\$\{CLAUDE_SESSION_ID\}", SID), (r"<[^<>]*>", "x"),
         )
         for pattern, value in rules:
             text = re.sub(pattern, value, text)
@@ -58,7 +59,7 @@ class SkillCallsAreRows(unittest.TestCase):
     def test_every_call_the_skills_prescribe_is_approved_for_the_orchestrator(self):
         seen = set()
         for where, name, call in self.calls():
-            if name in EXEMPT:
+            if name in EXEMPT and not (name == "launch" and "--check-greedy" in call):
                 continue
             seen.add(name)
             command = self.fill(call).rstrip(" ,;:")
