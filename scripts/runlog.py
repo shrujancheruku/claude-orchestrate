@@ -43,7 +43,7 @@ OUTCOMES = {
     MERGE: (MERGED, TIMEOUT, CLOSED, "gate-hold"),  # "gate-hold": scripts/merge refused a PR under a config Merge gate (gate, branch ride along)
     REPLAY: ("line-replay", "word-merge", "regenerated", "handed-back"),
     # scripts/worker-report: the first word of its verdict line.
-    WORKER_REPORT: ("valid", "interim", "not-a-stop", "not-a-pr-opened", "duplicate", "missing-report", "limit", "error"),
+    WORKER_REPORT: ("valid", "interim", "not-a-stop", "not-a-pr-opened", "fix-report", "duplicate", "missing-report", "limit", "error"),
     REVIEW: ("approve", "request-changes", "incomplete"),
     THREADS: ("resolved", "reopened"),  # scripts/threads: the thread id and its author ride as extra fields
     FRONTIER: ("ran",),  # scripts/frontier: the takeable count rides as an extra field

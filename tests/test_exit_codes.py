@@ -50,7 +50,7 @@ class VerdictHelperTest(unittest.TestCase):
         ("done", (), 0), ("elsewhere", (), 3),
         ("valid", ("pr-opened", "7", "abc"), 0), ("interim", (), 0), ("not-a-stop", (), 0), ("not-a-pr-opened", (), 0),
         ("duplicate", ("valid", "stopped", "held-path"), 0), ("missing-report", ("none",), 0), ("limit", (), 0),
-        ("error", ("overloaded",), 0), ("incomplete", ("suite-missing",), 0), ("recorded", (), 0),
+        ("error", ("overloaded",), 0), ("incomplete", ("suite-missing",), 0), ("fix-report", ("discovered: bad",), 0), ("recorded", (), 0),
     )
 
     def run_verdict(self, word, args, code):

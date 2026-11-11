@@ -63,6 +63,63 @@ class WorkerReport(unittest.TestCase):
         self.assertIn("RISK_MARKER = tracker.RISK_MARKER", text)
         self.assertNotRegex(text, r'(?m)^\s*RISK_MARKER\s*=\s*["\']')  # no second copy of the literal
 
+    def review_body(self, body):
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "worker-report"), "494", "--reviewer", "--review-body"],
+                           cwd=self.env.repo, input=body, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return one_verdict(r)
+
+    GOOD_BODY = ("Round 1 · verdict: changes · tier: M · head: d91fa7498cba · suite: pass\n\n"
+                 "spec:\n- criterion -> met\n\nstandards:\n- ADR-0017 -> holds\n")
+
+    def test_a_well_formed_review_body_is_valid_and_parsed_by_lead_brief(self):
+        self.assertEqual(self.review_body(self.GOOD_BODY), "valid")
+        self.assertEqual(self.review_body(self.GOOD_BODY.replace("pass", "not run (S tier)", 1)), "valid")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import reviewreport
+        self.assertEqual(reviewreport.tier_of(self.GOOD_BODY), "M")
+
+    def test_a_malformed_review_body_is_a_fix_report_and_logs_nothing(self):
+        cases = {
+            "no header": "verdict: approve\nspec:\nstandards:\n",
+            "tier: XL": self.GOOD_BODY.replace("tier: M", "tier: XL"),
+            "no tier": self.GOOD_BODY.replace(" · tier: M", ""),
+            "verdict: maybe": self.GOOD_BODY.replace("verdict: changes", "verdict: maybe"),
+            "head": self.GOOD_BODY.replace("d91fa7498cba", "latest"),
+            "suite": self.GOOD_BODY.replace("suite: pass", "suite: ok"),
+            "spec": self.GOOD_BODY.replace("spec:", "criteria:"),
+            "standards": self.GOOD_BODY.replace("standards:", "rules:"),
+        }
+        for name, body in cases.items():
+            with self.subTest(name):
+                self.assertTrue(self.review_body(body).startswith("fix-report review body: "), name)
+
+    def test_the_stop_reasons_are_the_modules_one_list(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import workerreport
+        for reason in workerreport.STOP_REASONS:
+            if reason in ("permission-denied", "transient"):
+                continue  # these two need their own lines (denied-command, failed-command)
+            with self.subTest(reason):
+                self.assertEqual(one_verdict(self.report(f"status: stopped\nstop-reason: {reason}\n")), f"valid stopped {reason}")
+
+    def test_a_bad_discovered_or_adr_conflicts_line_is_a_fix_report(self):
+        opened = f"status: pr-opened\npr: https://github.com/o/r/pull/12\n"
+        for line in ("discovered: a bug in x", "discovered: 2", "adr-conflicts: ADR-0003 is wrong", "adr-conflicts:  -> why"):
+            with self.subTest(line):
+                v = one_verdict(self.report(opened + line + "\n"))
+                self.assertTrue(v.startswith("fix-report "), v)
+                self.assertIn(line.split(":")[0], v)
+        stopped = "status: stopped\nstop-reason: ambiguous\ndiscovered: 1 gist\n"
+        self.assertTrue(one_verdict(self.report(stopped)).startswith("fix-report discovered:"))
+
+    def test_well_formed_discovered_and_adr_conflicts_lines_pass(self):
+        opened = "status: pr-opened\npr: https://github.com/o/r/pull/12\n"
+        for lines in ("discovered: 2 — a bug in x; a refactor in y\nadr-conflicts: ADR-0003 -> departs, because z\n",
+                      "discovered: none\nadr-conflicts: none\n", "discovered: 1 - a gist\n"):
+            with self.subTest(lines):
+                self.assertEqual(one_verdict(self.report(opened + lines, ticket=str(900 + len(lines)))), f"valid pr-opened 12 {HEAD}")
+
     def test_reviewer_report_with_a_suite_line_is_valid(self):
         for suite in ("pass", "fail 2", "fail", "not run (S tier)", "`pass`",
                       "pass (py_compile, run_parallel, plugin validate)", "fail (run_parallel: 2 modules)"):

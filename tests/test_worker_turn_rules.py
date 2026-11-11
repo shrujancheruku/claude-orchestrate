@@ -1,9 +1,13 @@
 """Structural checks: the worker has no Agent tool, and the mechanic is retired (#43)."""
 import pathlib
 import re
+import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from workerreport import STOP_REASONS  # noqa: E402  the one list (#659)
 
 
 class WorkerTurnRules(unittest.TestCase):
@@ -87,12 +91,13 @@ class WorkerTurnRules(unittest.TestCase):
         s = (ROOT / "agents/worker.md").read_text()
         report = s[s.index("## Report"):]
         line = next(l for l in report.splitlines() if l.startswith("stop-reason:"))
-        reasons = ("held-path", "no-spec", "ambiguous", "adr-conflict", "human-only",
-                   "verify-outside-ticket", "already-done", "no-primary-source", "permission-denied", "worktree-gone")
         self.assertIn("denied-command:", report)
-        for r in reasons:
-            self.assertIn(r, line)
-            self.assertIn(f"`stop-reason: {r}`", s[s.index("## Stop and report"):s.index("## Discovered work")])
+        stop = s[s.index("## Stop and report"):s.index("## Discovered work")]
+        # The doc names exactly the module's set, in the report line and in the stop bullets: adding a reason to
+        # workerreport.STOP_REASONS fails here until agents/worker.md names it.
+        listed = set(re.findall(r"[\w-]+", line.split("when stopped:", 1)[1]))
+        self.assertEqual(listed, set(STOP_REASONS))
+        self.assertEqual(set(re.findall(r"\(`stop-reason: ([\w-]+)`\)", stop)), set(STOP_REASONS))
         rules = s[s.index("## Turn rules"):s.index("## Pushing")]
         self.assertIn("The guard refuses a backgrounded command", rules)
 
