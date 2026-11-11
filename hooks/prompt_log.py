@@ -225,8 +225,14 @@ def compact(path: Path) -> None:
                 elif rec.get("op") == "done":
                     live.pop(rec["id"], None)
             data = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in live.values()).encode("utf-8")
-            os.ftruncate(fd, 0)
-            os.pwrite(fd, data, 0)
+            if len(data) == os.fstat(fd).st_size:  # all live already: no rewrite on every call
+                return
+            # Write first, truncate after: a kill or a full disk between the two leaves stale tail lines, never an
+            # empty file that has lost the open entries.
+            done = 0
+            while done < len(data):
+                done += os.pwrite(fd, data[done:], done)
+            os.ftruncate(fd, len(data))
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
