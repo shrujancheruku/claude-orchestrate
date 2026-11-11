@@ -209,9 +209,12 @@ def handback(t, a):
 def fallback(t, a):
     if tracker.NEEDS_LEAD not in t.labels:
         return 0  # already swapped (or never held): the evidence is the label
-    t.comment("\n".join([tracker.TRIAGE_MARKER, "", "The lead is gone, so this stop is handed back to the ticket's author: "
-                         "`needs-info` in place of `needs-lead`."]), dedupe=False)
+    # Order: needs-info, comment, then needs-lead off last: needs-lead is the gate that makes a rerun act, and needs-info
+    # being on lets the rerun dedupe the comment a half-done call already posted.
+    seen = tracker.NEEDS_INFO in t.labels
     t.add_label(tracker.NEEDS_INFO)
+    t.comment("\n".join([tracker.TRIAGE_MARKER, "", "The lead is gone, so this stop is handed back to the ticket's author: "
+                         "`needs-info` in place of `needs-lead`."]), dedupe=seen)
     t.remove_label(tracker.NEEDS_LEAD)
     t.unassign()
     return 0
@@ -235,15 +238,17 @@ def abandon(t, a):
 
 def stop_for_lead(t, a):
     question = read_text(a.question_file, "question")
-    t.comment(stop_body(question, a.branch), dedupe=tracker.NEEDS_LEAD in t.labels)
+    seen = tracker.NEEDS_LEAD in t.labels  # label first, so a rerun after a failed comment dedupes instead of doubling it
     t.add_label(tracker.NEEDS_LEAD)
+    t.comment(stop_body(question, a.branch), dedupe=seen)
     return 0
 
 
 def adr_hold(t, a):
     conflicts = read_text(a.conflicts_file, "conflicts")
-    t.comment(adr_body(conflicts, a.pr), dedupe=tracker.NEEDS_LEAD in t.labels)
+    seen = tracker.NEEDS_LEAD in t.labels
     t.add_label(tracker.NEEDS_LEAD)
+    t.comment(adr_body(conflicts, a.pr), dedupe=seen)
     return 0
 
 
