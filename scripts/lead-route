@@ -25,6 +25,12 @@ the state file and the worktrees); the stop comment is the newest comment whose 
     LEAD-PR #<n> <pr>        open `lead` ticket with its open PR: the PR joins the pipeline (CI, gate, review, merge)
     RESEND #<n> <pr>         live lead, a lead PR whose newest `> *Waiting on lead (not delivered).*` names its current
                              head and no `> *Resent to lead.*` names that head yet: send the failure again, once per head
+After the `next:` line, a verdict with no judgement in it prints its steps as `action:` lines (ADR-0018; the grammar is
+common.action_line, the message texts are scripts/messages.txt), in verdict order:
+    RESUME    action: send lead-answered <agent-id> <n>
+    FALLBACK  action: run transition fallback <n> --repo .
+    RESEND    action: send lead-resend lead <n> <pr>, then action: run transition resent <n> --head <head> --repo .
+Every other verdict prints none: its steps hold a judgement (a worker to stop or a brief to write) or nothing to do.
 A claim `claims` reports as `waiting` (a permission-denied or exhausted stop: the developer must act) gets none of
 RESUME, ESCALATE or REDISPATCH, whatever its stop comment says.
 A narrowed or reworded ticket needs no verdict of its own: it is a RESUME. The ADR-conflict comment is the one
@@ -141,10 +147,16 @@ def elsewhere_line(n, claim) -> str:
     return f"ELSEWHERE #{n} pid {pid} {claim.worktree}"
 
 
-def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
+def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset(), actions=None):
     """The verdict lines, then the counted line. found: {ticket: claims.Claim} from scripts/claims.py, which decides each
-    claimed ticket's state (worker, PR, lock). prs: {ticket: {"number", "head"}} for every open PR (open_pr_heads)."""
+    claimed ticket's state (worker, PR, lock). prs: {ticket: {"number", "head"}} for every open PR (open_pr_heads).
+    actions: a list the `action:` lines of the verdicts that have no judgement are appended to (see the module docstring)."""
     prs = prs or {}
+    actions = [] if actions is None else actions
+
+    def act(verb, *args):
+        actions.append(common.action_line(verb, *args))
+
     lines, claimed, freed = [], set(), set()
     for n in sorted(abandoned):
         lines.append(f"ABANDON #{n}")
@@ -159,6 +171,8 @@ def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
                 lines.append(f"LEAD-PR #{n} {pr['number']}")
                 if lead == "live" and resend_due(issue, pr["head"]):
                     lines.append(f"RESEND #{n} {pr['number']}")
+                    act("send", "lead-resend", "lead", n, pr["number"])
+                    act("run", "transition", "resent", n, "--head", pr["head"], "--repo", ".")
             else:
                 lines.append(f"LEAD-TICKET #{n}")
             continue
@@ -180,6 +194,7 @@ def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
                 continue
             if lead == "none":
                 lines.append(f"FALLBACK #{n}")
+                act("run", "transition", "fallback", n, "--repo", ".")
                 freed.add(n)
             elif issue["claimed"] and since and now - since > UNCAP_AFTER:
                 lines.append(f"UNCAP #{n}")
@@ -207,11 +222,12 @@ def route(issues, found, lead, cap, now, prs=None, abandoned=frozenset()):
             lines.append(f"ESCALATE #{n}")
         else:
             lines.append(f"RESUME #{n} {worker['agent_id']}")
+            act("send", "lead-answered", worker["agent_id"], n)
     lines.append(f"counted: {len(claimed - freed)} of {cap}")
     return lines
 
 
-def run(argv=None) -> int:
+def run(argv=None, actions=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     ap.add_argument("--cap", required=True, type=int, help="the slot cap in force (config slots, or the greedy cap)")
     ap.add_argument("--repo", default=".", help="repo root; gh runs there and the state file is read under it")
@@ -247,14 +263,18 @@ def run(argv=None) -> int:
     if not sid:
         print(f"lead-route: no lead: {why}", file=sys.stderr)
     print(f"lead: {lead}")
-    for line in route(issues, found, lead, args.cap, now, open_pr_heads(prs), abandoned):
+    for line in route(issues, found, lead, args.cap, now, open_pr_heads(prs), abandoned, actions):
         print(line)
     return 0
 
 
 def main(argv=None) -> int:
-    """Run, then end with the one `next:` line (see the module docstring)."""
-    return common.finish(run, argv, {0: ("done",)})
+    """Run, then end with the one `next:` line (see the module docstring), then the `action:` lines (ADR-0018)."""
+    actions = []
+    code = common.finish(lambda a: run(a, actions), argv, {0: ("done",)})
+    for line in actions if code == 0 else ():
+        print(line)
+    return code
 
 
 if __name__ == "__main__":

@@ -196,6 +196,12 @@ class Run:
 
     def __init__(self, r):
         lines = r.stdout.splitlines(keepends=True)
+        # `action:` lines (ADR-0018) may follow the `next:` line; they are kept apart, in `actions`.
+        tail = len(lines)
+        while tail and lines[tail - 1].startswith("action: "):
+            tail -= 1
+        self.actions = [l.strip() for l in lines[tail:]]
+        lines = lines[:tail]
         if not lines or not lines[-1].startswith("next: ") or any(l.startswith("next: ") for l in lines[:-1]):
             raise AssertionError(f"not exactly one closing next: line: {r.stdout!r}")
         self.returncode, self.stderr = r.returncode, r.stderr
