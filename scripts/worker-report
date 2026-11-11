@@ -46,6 +46,7 @@ import sys
 
 import common
 import github
+import reviewreport
 import runlog
 import session
 import tracker
@@ -173,16 +174,7 @@ def classify_reviewer(text: str) -> tuple:
     return ("incomplete", "suite-unrecognised")
 
 
-def _field(name, text):
-    """The last `<name>: value` line of a reviewer's report, backticks and blanks trimmed; None when there is none."""
-    found = re.findall(rf"^[ \t>*-]*{name}:[ \t]*`*(.*?)`*[ \t]*$", text, re.I | re.M)
-    return found[-1].strip() if found and found[-1].strip() else None
-
-
-def _count(name, text):
-    value = _field(name, text)
-    m = re.match(r"\d+", value or "")
-    return int(m.group()) if m else None
+_field, _count = reviewreport.field, reviewreport.count  # the one report-line grammar, shared with profile.py (#546)
 
 
 def review_fields(words, text) -> tuple:

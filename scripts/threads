@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""threads [<pr>] [--all] | resolve <thread>... (--fixed <sha> | --left <why> (--followup <issue> | --no-followup)) | reopen <thread>... --why <why> | followup [<thread>...] [--gist <text>] [--verbose] [--repo DIR]
+"""threads [<pr>] [--all] | resolve <thread>... (--fixed <sha> | --left <why> (--followup <issue> | --no-followup)) | reopen <thread>... --why <why> | followup [<thread>...] [--gist <text>] [--verbose] [--session ID] [--repo DIR]
 
 The one place a review thread is read, closed or reopened (ADR-0006; the rule "a review thread is closed with a reply by
 whoever acts on it" lives here, not in the prompts).
@@ -53,6 +53,7 @@ import argparse
 import re
 import sys
 
+import claims
 import common
 import github
 import runlog
@@ -167,7 +168,7 @@ def followup(pr, threads, args, cwd) -> int:
     first = f"Left from PR #{pr}"
     entries = [thread_entry(t) for t in chosen]
     trusted = github.trusted_logins(cwd)
-    existing = next((i for i in github.recent_open_issues(cwd=cwd)
+    existing = next((i for i in github.followup_candidates(pr, cwd=cwd)
                      if str(i.get("body") or "").strip().split("\n", 1)[0].strip() == first
                      and github.is_trusted(i.get("author_association"), (i.get("user") or {}).get("login"), trusted)), None)
     if existing is None:
@@ -212,7 +213,9 @@ def run(argv=None) -> int:
     ap.add_argument("--gist", metavar="TEXT", help="followup: the worker's `followup-needed` gist, put in the ticket")
     ap.add_argument("--verbose", action="store_true", help="print `writes: <n>` (mutation requests sent) on stderr")
     ap.add_argument("--repo", default=".", help="a directory of the repository (default: the current one)")
+    claims.add_session_arg(ap)
     args = ap.parse_args(argv)
+    claims.use_session(args.session)  # the run log events carry this session, not the last rebuilder's (#546)
     words = list(args.words)
     pr = words.pop(0).lstrip("#") if words and words[0].lstrip("#").isdigit() else None
     args.action = words.pop(0) if words and words[0] in ("resolve", "reopen", "followup") else None

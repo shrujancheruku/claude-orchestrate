@@ -19,10 +19,12 @@ class Followup(unittest.TestCase):
         self.env = verdict_runs(ScriptEnv())
         self.addCleanup(self.env.close)
 
-    def gh(self, threads, issues=([],), pr_body=("",)):
+    def gh(self, threads, issues=([],), pr_body=("",), found=None):
+        """issues: the newest-open-issues reply per call; found: what the search reply holds (default: the same rows)."""
         self.env.set_gh([
             gh_repo_view(), {"args": Q, "stdout": reply(threads)["stdout"]},
             {"args": ["api", "~" + ISSUES + "?state=open"], "seq": [{"stdout": json.dumps(i)} for i in issues]},
+            {"args": ["api", "~search/issues"], "seq": [{"stdout": json.dumps({"items": i})} for i in (found or issues)]},
             {"args": ["api", "--method", "POST", ISSUES], "stdout": json.dumps({"number": 99})},
             {"args": ["api", "repos/{owner}/{repo}/pulls/12"],
              "seq": [{"stdout": json.dumps(rest_pull(number=12, body=b))} for b in pr_body]},
@@ -79,6 +81,14 @@ class Followup(unittest.TestCase):
         before = len(self.calls("api", "--method", "PATCH"))
         self.env.run("threads", 12, "followup", "T1", "T2")
         self.assertEqual(len(self.calls("api", "--method", "PATCH")), before)
+
+    def test_a_ticket_older_than_the_newest_open_issues_is_found_by_the_search_and_no_second_is_filed(self):
+        # #681: the newest-issues window no longer holds it (it is empty here); the search does.
+        self.gh(self.threads(), issues=([],), found=([issue_row(7, FIRST + "\n\n## Left threads\n- `a.py:3` (thread T1)")],),
+                pr_body=("Left for #7",))
+        r = self.env.run("threads", 12, "followup", "T1")
+        self.assertEqual(r.stdout.splitlines(), ["7"])
+        self.assertEqual(self.calls("api", "--method", "POST", ISSUES), [])
 
     def test_a_strangers_ticket_with_the_first_line_is_not_appended_to(self):
         self.gh(self.threads(), issues=([issue_row(50, FIRST, "NONE")],))

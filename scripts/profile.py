@@ -34,6 +34,7 @@ if _HERE not in sys.path:
     sys.path.append(_HERE)
 import common  # noqa: E402
 import config  # noqa: E402
+import reviewreport  # noqa: E402
 import runlog  # noqa: E402
 import session  # noqa: E402
 from repo import iso, parse_ts  # noqa: E402
@@ -513,13 +514,13 @@ def review_verdicts(t: Transcript | None, first_round: int) -> list:
         if not m:
             continue
         said = ROUND_LINE.search(text)
-        minor = re.search(r"^\W*non-blocking:\s*(\d+)", text, re.I | re.M)
-        blocking = re.search(r"^\W*blocking:\s*(\d+)", text, re.I | re.M)
+        minor = reviewreport.count("non-blocking", text)  # the line grammar worker-report reads too (#546)
+        blocking = reviewreport.count("blocking", text)
         out.append({
             "round": int(said.group(1)) if said else first_round + len(out),
             "verdict": m.group(1).lower(),
-            "blocking": int(blocking.group(1)) if blocking else len([f for f in FINDING.findall(text) if f.lower() == "blocking"]),
-            "minor": int(minor.group(1)) if minor else len([f for f in FINDING.findall(text) if f.lower() == "minor"]),
+            "blocking": blocking if blocking is not None else len([f for f in FINDING.findall(text) if f.lower() == "blocking"]),
+            "minor": minor if minor is not None else len([f for f in FINDING.findall(text) if f.lower() == "minor"]),
             # A second verdict from the same agent means the orchestrator continued it.
             "continued": bool(out),
         })

@@ -81,6 +81,56 @@ class Rest(unittest.TestCase):
         self.assertEqual(len(github.open_prs("main")), 101)
         self.assertEqual(len(calls), 2)
 
+    def test_open_prs_read_to_the_end_past_two_pages(self):
+        # 250 open PRs: 3 pages. A cap of 2 pages left PR 200-249 out of holds and claims (#546).
+        base = f"{PULLS}?state=open&per_page=100"
+        calls = self.gh({f"{base}&page=1": [pull(n) for n in range(100)], f"{base}&page=2": [pull(n) for n in range(100, 200)],
+                        f"{base}&page=3": [pull(n) for n in range(200, 250)]})
+        self.assertEqual([r["number"] for r in github.open_prs_with_heads()], list(range(250)))
+        self.assertEqual(len(calls), 3)
+        base = f"{PULLS}?state=open&base=main&per_page=100"
+        self.gh({f"{base}&page=1": [pull(n) for n in range(100)], f"{base}&page=2": [pull(n) for n in range(100, 200)],
+                 f"{base}&page=3": [pull(200)]})
+        self.assertEqual(len(github.open_prs("main")), 201)
+
+    def test_a_pull_row_carries_its_body(self):
+        self.gh({f"{PULLS}?state=open&per_page=100&page=1": [pull(7, body="Closes #3")]})
+        self.assertEqual(github.open_prs_with_heads()[0]["body"], "Closes #3")
+
+    def test_followup_candidates_find_a_ticket_older_than_the_newest_open_issues(self):
+        # The search names the follow-up although the newest-100 window does not hold it; a just-filed ticket the search
+        # index has not caught up with comes from the window; a pull request row is dropped; a repeat is one row.
+        old = {"number": 5, "body": "Left from PR #9\n\nx", "author_association": "OWNER", "user": {"login": "o"}}
+        fresh = {"number": 900, "body": "Left from PR #9\n\ny", "author_association": "OWNER", "user": {"login": "o"}}
+        pr_row = {"number": 901, "body": "Left from PR #9", "pull_request": {}}
+        window = f"repos/{{owner}}/{{repo}}/issues?state=open&sort=created&direction=desc&per_page=100&page=1"
+        calls = self.gh({"": {"items": [old, dict(fresh)]}, window: [fresh, pr_row]})
+        rows = github.followup_candidates("#9")
+        self.assertEqual([r["number"] for r in rows], [5, 900])
+        search = next(c for c in calls if "search/issues" in " ".join(c))
+        query = next(a for a in search if a.startswith("search/issues"))
+        self.assertIn("%22Left%20from%20PR%20%239%22", query)
+        self.assertIn("repo:{owner}/{repo}", query)
+
+    def test_trusted_logins_read_the_main_checkouts_config_not_a_worktrees(self):
+        # A PR that adds its author to its own copy of the config must not make that author trusted (ADR-0015, #546).
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            main = Path(d).resolve() / "main"
+            main.mkdir()
+            run = lambda *a, cwd=main: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+            run("init", "-q", "-b", "main")
+            run("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "--allow-empty", "-m", "i")
+            (main / ".claude").mkdir()
+            (main / ".claude" / "orchestration.md").write_text("## Backlog\n\n- **Trusted authors:** `alice`\n")
+            wt = main / ".claude" / "worktrees" / "pr"
+            run("worktree", "add", "-q", "-b", "pr", str(wt))
+            (wt / ".claude").mkdir(exist_ok=True)
+            (wt / ".claude" / "orchestration.md").write_text("## Backlog\n\n- **Trusted authors:** `alice`, `mallory`\n")
+            self.assertEqual(github.trusted_logins(main), ("alice",))
+            self.assertEqual(github.trusted_logins(wt), ("alice",))
+
     def test_open_prs_with_heads_has_sha_and_base(self):
         self.gh({f"{PULLS}?state=open&per_page=100&page=1": [pull(7, "b7", "abc", base="dev")]})
         [row] = github.open_prs_with_heads()
@@ -495,10 +545,9 @@ class Abandoned(unittest.TestCase):
         self.assertIn("after=C1", calls[1])
 
 
-# The one `gh pr|issue|repo` subcommand left in scripts/, with why; nothing else is added without a REST form to point at.
-SUBCOMMAND_ALLOWED = {
-    ("watch-ci", "pr", "list"): "its check rollup has no single REST call (N+1)",
-}
+# No script runs a `gh pr|issue|repo` subcommand any more (watch-ci moved to REST pulls and `github.ci_verdict`, #546);
+# a new one needs a REST form to point at, or an entry here saying why.
+SUBCOMMAND_ALLOWED = {}
 SUBCOMMAND = re.compile(r'(?:\bcall(?:_json)?|\bgh_json|common\.run)\(\s*(?:"gh",\s*)?(?:root,\s*)?"(pr|issue|repo)",\s*"([a-z-]+)"')
 
 

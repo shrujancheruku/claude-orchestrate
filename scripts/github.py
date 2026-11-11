@@ -211,8 +211,9 @@ def actor_login(actor) -> str:
 
 
 def trusted_logins(cwd=None) -> tuple:
-    """The config's extra trusted logins (lowercase), read from `cwd`'s repository; none when there is no config."""
-    return config.Config.load(cwd or ".").trusted_authors
+    """The config's extra trusted logins (lowercase), read from the main checkout that owns `cwd` (#546): a PR's own
+    worktree must not be able to add its author to the trust list (ADR-0015); none when there is no config."""
+    return config.for_checkout(cwd or ".").trusted_authors
 
 
 def own_prs(prs) -> list:
@@ -794,11 +795,20 @@ def conversation_comments(pr, cwd=None) -> list:
             if isinstance(c, dict)]
 
 
-def recent_open_issues(cwd=None, pages: int = 3) -> list:
-    """The newest open issues (REST rows with `number`, `title`, `body`, `author_association`; pull requests left out),
-    up to `pages` x 100: where a follow-up ticket filed for a PR is looked for before another is created."""
-    rows = _pages("repos/{owner}/{repo}/issues?state=open&sort=created&direction=desc&per_page=100", cwd, max_pages=pages)
-    return [r for r in rows if isinstance(r, dict) and "pull_request" not in r]
+def followup_candidates(pr, cwd=None) -> list:
+    """Open issues that may be the follow-up ticket of PR `pr` (REST rows with `number`, `title`, `body`, `user`,
+    `author_association`; pull requests left out): the search API on the first line `Left from PR #<pr>`, so a ticket
+    older than the newest 300 open issues is still found (#681), plus the newest 100 open issues, because the search
+    index lags a just-filed ticket by seconds and a second follow-up would follow. The caller checks the first line
+    and the author (ADR-0015); the search only narrows. Rows are deduplicated by number."""
+    query = urllib.parse.quote(f'"Left from PR #{int(_pr_number(pr))}" in:body is:issue is:open', safe="")
+    found = call_json("api", f"search/issues?q={query}+repo:{{owner}}/{{repo}}&per_page=100", cwd=cwd).get("items")
+    newest = _pages("repos/{owner}/{repo}/issues?state=open&sort=created&direction=desc&per_page=100", cwd, max_pages=1)
+    rows = {}
+    for r in [*(found if isinstance(found, list) else []), *newest]:
+        if isinstance(r, dict) and "pull_request" not in r and r.get("number") is not None:
+            rows.setdefault(r["number"], r)
+    return list(rows.values())
 
 
 def create_issue(title: str, body: str, labels, cwd=None) -> int:
@@ -924,13 +934,13 @@ CI_SKIPPED = {"SKIPPED", "NEUTRAL"}  # a check that did not run: alone it is not
 CI_PENDING = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
 
-def ci_verdict(checks) -> tuple:
+def ci_verdict(checks, wait_for_all: bool = False) -> tuple:
     """("pass" | "pending" | "failed", [names of the checks that decide it]) from a statusCheckRollup list.
 
     A PR with no checks at all is pending here, as `watch-ci` counts it; `scripts/merge` turns that into a pass
     when the head has no workflow files (`has_workflows`: a repo that cannot report checks is green). Unlike
-    `watch-ci`, which waits while any check is pending, a failed check outranks a pending one here, so a
-    refusal names the real reason."""
+    `watch-ci`, which waits while any check is pending (`wait_for_all=True`), a failed check outranks a pending
+    one here by default, so a refusal names the real reason."""
     if not checks:
         return "pending", []
     bad, pending, skipped, ran = [], [], [], False
@@ -946,6 +956,8 @@ def ci_verdict(checks) -> tuple:
             skipped.append(name)
         else:
             ran = True
+    if pending and wait_for_all:
+        return "pending", pending
     if bad:
         return "failed", bad
     if pending:
@@ -1000,18 +1012,22 @@ def _pull(p: dict) -> dict:
     """A REST pull row in the names `gh pr list --json` used: what the callers read."""
     return {"number": p.get("number"), "headRefName": (p.get("head") or {}).get("ref"),
             "headRefOid": (p.get("head") or {}).get("sha"), "baseRefName": (p.get("base") or {}).get("ref"),
-            "isDraft": bool(p.get("draft")), "isCrossRepository": _cross_repo(p), "mergedAt": p.get("merged_at")}
+            "isDraft": bool(p.get("draft")), "isCrossRepository": _cross_repo(p), "mergedAt": p.get("merged_at"),
+            "body": p.get("body")}
+
+
+OPEN_PR_PAGES = 100  # pages of open PRs read at most (10,000): the list ends the loop, never a small cap that hides a PR (#546)
 
 
 def open_prs(base: str, cwd=None) -> list:
     rows = _pages(f"repos/{{owner}}/{{repo}}/pulls?state=open&base={urllib.parse.quote(base, safe='')}&per_page=100",
-                  cwd, max_pages=2)
+                  cwd, max_pages=OPEN_PR_PAGES)
     return [_pull(p) for p in rows if isinstance(p, dict)]
 
 
 def open_prs_with_heads(cwd=None) -> list:
     """Every open PR (any base) with its number, branch and head commit: what a worker's report is checked against."""
-    return [_pull(p) for p in _pages("repos/{owner}/{repo}/pulls?state=open&per_page=100", cwd, max_pages=2)
+    return [_pull(p) for p in _pages("repos/{owner}/{repo}/pulls?state=open&per_page=100", cwd, max_pages=OPEN_PR_PAGES)
             if isinstance(p, dict)]
 
 

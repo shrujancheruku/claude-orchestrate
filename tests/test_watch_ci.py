@@ -12,9 +12,47 @@ import time
 import unittest
 from unittest import mock
 
-from harness import SCRIPTS, ScriptEnv
+from harness import SCRIPTS, ScriptEnv, pr_graphql_reply, rest_pull
 
 SETTLED = "next: settled"
+OPEN_LIST = ["api", "~repos/{owner}/{repo}/pulls?state=open"]
+
+
+def canned(steps):
+    """The `gh` replies for watch-ci's reads (#546). steps is {"<pr>": [view, ...]}: tick N shows each PR's step
+    min(N, last). "GH_ERROR" fails the open-PR list for that tick; "MISSING" leaves a PR out of the list and answers
+    its own read 404. An open, ready PR is answered by its rollup query in the order of its ready steps; a merged or
+    closed one (or one not listed) by its pull read, and an open one settling by the pull read that gives its merge
+    state."""
+    ticks = max(len(v) for v in steps.values())
+    lists, graphql, pulls = [], {pr: [] for pr in steps}, {pr: [] for pr in steps}
+    for n in range(ticks):
+        picked = {pr: v[min(n, len(v) - 1)] for pr, v in steps.items()}
+        if "GH_ERROR" in picked.values():
+            lists.append({"stderr": "HTTP 502: bad gateway\n", "exit": 1})
+            continue
+        rows = []
+        for pr, v in picked.items():
+            if v == "MISSING":
+                pulls[pr].append({"stderr": "gh: Not Found (HTTP 404)", "exit": 1})
+            elif v.get("state", "OPEN") != "OPEN":
+                pulls[pr].append({"stdout": json.dumps(rest_pull(number=int(pr), **v))})
+            else:
+                rows.append(rest_pull(number=int(pr), **v))
+                if not v.get("isDraft"):
+                    graphql[pr].append({"stdout": pr_graphql_reply(dict(v, state="OPEN"))})
+        lists.append({"stdout": json.dumps(rows)})
+    responses = [{"args": OPEN_LIST, "seq": lists}]
+    for pr, v in steps.items():
+        last = v[-1]
+        if last not in ("MISSING", "GH_ERROR") and last.get("state", "OPEN") == "OPEN":
+            pulls[pr].append({"stdout": json.dumps(rest_pull(number=int(pr), **last))})  # the settle read of the merge state
+        if graphql[pr]:
+            responses.append({"args": ["api", "graphql", "-f", "~query=", "-F", "owner={owner}", "-F", "name={repo}",
+                                       "-F", f"number={pr}"], "seq": graphql[pr]})
+        if pulls[pr]:
+            responses.append({"args": ["api", f"repos/{{owner}}/{{repo}}/pulls/{pr}"], "seq": pulls[pr]})
+    return responses
 
 
 def view(result, merge="CLEAN", head="abcdef1234567", state="OPEN", draft=False):
@@ -32,18 +70,7 @@ class WatchCi(unittest.TestCase):
         self.addCleanup(self.env.close)
 
     def seq(self, steps):
-        """{"<pr>": [view, ...]}: the Nth `pr list` reply holds each PR's step min(N, last).
-        "GH_ERROR" fails the whole call; "MISSING" leaves that PR out of the reply."""
-        ticks = max(len(v) for v in steps.values())
-        replies = []
-        for n in range(ticks):
-            picked = {pr: v[min(n, len(v) - 1)] for pr, v in steps.items()}
-            if "GH_ERROR" in picked.values():
-                replies.append({"stderr": "HTTP 502: bad gateway\n", "exit": 1})
-            else:
-                rows = [dict(v, number=int(pr)) for pr, v in picked.items() if v != "MISSING"]
-                replies.append({"stdout": json.dumps(rows)})
-        self.env.set_gh([{"args": ["pr", "list"], "seq": replies}])
+        self.env.set_gh(canned(steps))
 
     def watch(self, *prs):
         return self.env.run("watch-ci", "--interval", "0", *prs)
@@ -140,7 +167,7 @@ class WatchCi(unittest.TestCase):
         self.seq({"504": [view("SUCCESS", head="1111111aaa")]})
         r = self.watch_any("504", "?")
         self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 504 1111111aaa", SETTLED])
-        self.assertEqual(len(self.env.gh_calls()), 1)
+        self.assertEqual(len(self.env.gh_calls()), 3)  # the list, the rollup query, the merge state at settle
 
     WF = ["api", "~repos/{owner}/{repo}/contents/.github/workflows?ref="]
 
@@ -228,7 +255,7 @@ class WatchCi(unittest.TestCase):
         r = self.watch("6")
         self.assertEqual(r.stdout.splitlines(), ["also: ci-pass 6 6666666ccc", SETTLED])
         self.assertIn("gh failed: HTTP 502", r.stderr)
-        self.assertEqual(len(self.env.gh_calls()), 3)
+        self.assertEqual(len([c for c in self.env.gh_calls() if c[1].startswith("repos/{owner}/{repo}/pulls?state=open")]), 3)
 
     def test_unwritable_event_log_still_prints_every_line(self):
         # A file where the profiles directory should be makes append_event raise OSError.
@@ -250,7 +277,7 @@ class WatchCi(unittest.TestCase):
     def test_reply_that_is_not_a_pr_object_is_could_not_run(self):
         for reply in ("{}","<html>not json"):
             with self.subTest(reply=reply):
-                self.env.set_gh([{"args": ["pr", "list"], "stdout": reply}])
+                self.env.set_gh([{"args": ["api"], "stdout": reply}])
                 r = self.env.run("watch-ci", "--interval", "0", "7", check=False)
                 self.assertEqual(r.returncode, 2, r.stdout)
                 self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
@@ -293,7 +320,7 @@ class WatchCi(unittest.TestCase):
         self.assertIn("also: gave-up 7 pass withheld", r.stdout)
         self.assertEqual(r.returncode, 3)
 
-    def test_three_watched_prs_cost_one_gh_call_per_tick(self):
+    def test_three_watched_prs_cost_one_list_read_per_tick_and_one_rollup_query_per_ready_pr(self):
         self.seq({"1": [view(None), view(None), view("SUCCESS", head="1111111aaa")],
                   "2": [view(None), view("SUCCESS", head="2222222bbb")],
                   "3": [view(None), view(None), view("SUCCESS", head="3333333ccc")]})
@@ -301,8 +328,13 @@ class WatchCi(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(r.stdout.splitlines()), 4)  # three settles and the next: line
         calls = self.env.gh_calls()
-        self.assertEqual(len(calls), 3)  # three ticks, one request each
-        self.assertTrue(all(c[:2] == ["pr", "list"] for c in calls))
+        # One list read per tick however many PRs are watched, and a rollup query only for a PR still pending or
+        # settling (1 and 3 on three ticks, 2 on two): 3 + 8 queries, plus one merge-state read per settle.
+        lists = [c for c in calls if c[1].startswith("repos/{owner}/{repo}/pulls?state=open")]
+        self.assertEqual(len(lists), 3)
+        self.assertEqual(len([c for c in calls if c[1] == "graphql"]), 8)
+        self.assertEqual(len(calls), 3 + 8 + 3)
+        self.assertEqual(self.env.gh_unmatched(), [])
 
     def test_default_interval_is_30_with_two_prs_and_60_with_three(self):
         sys.path.insert(0, str(SCRIPTS))
@@ -331,14 +363,14 @@ class WatchCi(unittest.TestCase):
                 self.assertEqual(slept, [want])
 
     def test_no_repository_failure_ends_at_once(self):
-        self.env.set_gh([{"args": ["pr", "list"], "stderr": "fatal: not a git repository\n", "exit": 1}])
+        self.env.set_gh([{"args": ["api"], "stderr": "fatal: not a git repository\n", "exit": 1}])
         r = self.watch_any("6")
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "next: could-not-run\n")
         self.assertEqual(len(self.env.gh_calls()), 1)
 
     def test_a_rate_limit_over_the_wait_budget_ends_retry_after_its_time(self):
-        self.env.set_gh([{"args": ["pr", "list"], "exit": 1,
+        self.env.set_gh([{"args": ["api"], "exit": 1,
                           "stderr": "gh: You have exceeded a secondary rate limit. (HTTP 403)\nretry-after: 300\n"}])
         with tempfile.TemporaryDirectory() as cache, mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}):
             r = self.watch_any("6")
@@ -384,13 +416,15 @@ def jobs_reply(steps, status="in_progress"):
 
 
 class StuckJob(unittest.TestCase):
+    def jobs_reads(self):
+        return [c for c in self.env.gh_calls() if "/actions/runs/" in c[1]]
+
     def setUp(self):
         self.env = ScriptEnv()
         self.addCleanup(self.env.close)
 
     def stuck_watch(self, jobs, after, ticks=3, url=RUN_URL):
-        rows = [dict(running(url), number=5)] * ticks + [dict(view("SUCCESS", head="5555555aaa"), number=5)]
-        self.env.set_gh([{"args": ["pr", "list"], "seq": [{"stdout": json.dumps([r])} for r in rows]}, jobs])
+        self.env.set_gh([*canned({"5": [running(url)] * ticks + [view("SUCCESS", head="5555555aaa")]}), jobs])
         return self.env.run("watch-ci", "--interval", "0", "--stuck-after", str(after), "5")
 
     def test_a_job_with_all_steps_done_still_in_progress_is_reported_once(self):
@@ -401,19 +435,18 @@ class StuckJob(unittest.TestCase):
 
     def test_a_reported_run_is_not_read_again_until_its_checks_change(self):
         self.stuck_watch(jobs_reply(["completed"]), 0, ticks=4)
-        reads = [c for c in self.env.gh_calls() if c[0] == "api"]
+        reads = self.jobs_reads()
         self.assertEqual(reads, [["api", "repos/{owner}/{repo}/actions/runs/900/jobs?per_page=100"]])
 
     def test_a_sibling_job_that_sticks_on_a_later_tick_is_reported_too(self):
         def job(i, steps):
             return {"id": i, "name": f"job{i}", "status": "in_progress", "steps": [{"status": x} for x in steps]}
         urls = [f"https://github.com/o/r/actions/runs/900/job/{i}" for i in (901, 902)]
-        pending = dict(view(None), number=5, statusCheckRollup=[
+        pending = dict(view(None), statusCheckRollup=[
             {"status": "IN_PROGRESS", "conclusion": "", "detailsUrl": u} for u in urls])
-        rows = [pending] * 4 + [dict(view("SUCCESS", head="5555555aaa"), number=5)]
         first = {"stdout": json.dumps({"jobs": [job(901, ["completed"]), job(902, ["completed", "in_progress"])]})}
         later = {"stdout": json.dumps({"jobs": [job(901, ["completed"]), job(902, ["completed", "completed"])]})}
-        self.env.set_gh([{"args": ["pr", "list"], "seq": [{"stdout": json.dumps([r])} for r in rows]},
+        self.env.set_gh([*canned({"5": [pending] * 4 + [view("SUCCESS", head="5555555aaa")]}),
                          {"args": ["api"], "seq": [first, later]}])
         r = self.env.run("watch-ci", "--interval", "0", "--stuck-after", "0", "5")
         self.assertEqual(r.stdout.splitlines(), [
@@ -422,12 +455,12 @@ class StuckJob(unittest.TestCase):
     def test_a_check_without_a_run_id_makes_no_jobs_call(self):
         for url in ("", "https://ci.example.com/build/7"):
             self.stuck_watch(jobs_reply(["completed"]), 0, url=url)
-            self.assertEqual([c for c in self.env.gh_calls() if c[0] == "api"], [])
+            self.assertEqual(self.jobs_reads(), [])
 
     def test_a_settled_pr_makes_no_jobs_call(self):
-        self.env.set_gh([{"args": ["pr", "list"], "stdout": json.dumps([dict(view("SUCCESS"), number=5)])}, jobs_reply(["completed"])])
+        self.env.set_gh([*canned({"5": [view("SUCCESS")]}), jobs_reply(["completed"])])
         self.env.run("watch-ci", "--interval", "0", "5")
-        self.assertEqual([c for c in self.env.gh_calls() if c[0] == "api"], [])
+        self.assertEqual(self.jobs_reads(), [])
 
     def test_nothing_is_reported_before_the_wait_is_over(self):
         r = self.stuck_watch(jobs_reply(["completed"]), 3600)

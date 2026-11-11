@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge <pr> [--method squash|merge|rebase] [--approved-head SHA] [--ticket N]... [--worktree DIR] : merge a PR, then clean up.
+"""merge <pr> [--method squash|merge|rebase] [--approved-head SHA] [--ticket N]... [--worktree DIR] [--session ID] : merge a PR, then clean up.
 
 With --approved-head (the PR head the reviewer approved; the orchestrator always passes it) the script
 first decides readiness and merges nothing unless the PR is ready: CI not green on the head (a check
@@ -69,6 +69,7 @@ import sys
 import time
 import traceback
 
+import claims
 import common
 import config
 import github
@@ -98,12 +99,24 @@ def view(pr, cwd):
         return None, e.message
 
 
+_DEFAULT = {}  # cwd -> the default branch, read once per run (#546): readiness and the post-merge cleanup both ask
+
+
 def default_branch(cwd):
-    """The repo's default branch name, or None when gh can't say (callers then delete nothing)."""
-    try:
-        return github.default_branch(cwd)
-    except github.GhError:
-        return None
+    """The repo's default branch name, or None when neither git nor gh can say (callers then delete nothing).
+    Git first (`repo.default_branch`), the host only when git has no `origin/HEAD` and no main or master."""
+    key = str(cwd)
+    if key not in _DEFAULT:
+        def from_host():
+            try:
+                return github.default_branch(cwd)
+            except github.GhError:
+                return None
+        name = repo.default_branch(cwd, fallback=from_host)
+        if name is None:
+            return None  # not remembered: a later ask may find the host answering
+        _DEFAULT[key] = name
+    return _DEFAULT[key]
 
 
 def delete_remote_branch(branch, cwd):
@@ -562,7 +575,9 @@ def run_merge(argv=None) -> int:
     ap.add_argument("--cwd", default=".", help="the repo (default: current directory)")
     ap.add_argument("--timeout", type=float, default=300, help="seconds to wait for MERGED")
     ap.add_argument("--interval", type=float, default=5, help="seconds between state checks")
+    claims.add_session_arg(ap)
     args = ap.parse_args(argv)
+    claims.use_session(args.session)  # the run log events carry this session, not the last rebuilder's (#546)
     pr, ref = common.pr_ref(args.pr)
     VERDICT["pr"] = pr
     cwd = args.cwd

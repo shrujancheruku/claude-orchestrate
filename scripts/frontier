@@ -140,7 +140,7 @@ def run(argv=None) -> int:
             fix_drift(issues, scope, root)
     except github.GhError as e:
         common.die(f"frontier: cannot run: gh failed: {e.message}")
-    cfg = config.Config.load(root)
+    cfg = config.for_checkout(root)  # the main checkout's config, whatever directory --repo names (#546)
     lines = render(issues, scope, labels, args.all, cfg, touch_map)
     if args.ticket is not None and not scope:
         lines.insert(0, f"#{args.ticket} not open")

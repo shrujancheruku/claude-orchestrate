@@ -492,7 +492,7 @@ def main(argv=None) -> int:
     root = plugin_root()
     model = None
     if not args.no_model:
-        cfg = config.Config.load(args.repo)
+        cfg = config.for_checkout(args.repo)  # the main checkout's config (#546)
         model, role = (cfg.lead_model, "Lead") if args.lead else (cfg.orchestrator_model, "Orchestrator")
         if model is not None and not TOKEN.fullmatch(model):
             common.die(f"launch: cannot run: the config's {role} model {model!r} is not a model name")

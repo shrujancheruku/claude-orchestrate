@@ -32,6 +32,87 @@ class TicketOfBranch(unittest.TestCase):
         self.assertEqual(repo.first_line(None), "")
 
 
+class DefaultBranchAndUnpushed(unittest.TestCase):
+    """The one default-branch and unpushed-count source `rescue`, `claims`, `merge` and `holds` share (#546)."""
+
+    def repo_with_commit(self, branch):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        _vcs(root, "init", "-q", "-b", branch)
+        for k, v in (("user.name", "T"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")):
+            _vcs(root, "config", k, v)
+        (root / "a").write_text("a")
+        _vcs(root, "add", "a")
+        _vcs(root, "commit", "-q", "-m", "init")
+        return root
+
+    def test_origin_head_wins_and_the_fallback_is_not_asked(self):
+        root = self.repo_with_commit("main")
+        _vcs(root, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+        _vcs(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+        asked = []
+        self.assertEqual(repo.default_branch(root, fallback=lambda: asked.append(1) or "other"), "trunk")
+        self.assertEqual(asked, [])
+
+    def test_without_origin_head_main_or_master_is_found_by_git(self):
+        for name in ("main", "master"):
+            with self.subTest(name):
+                self.assertEqual(repo.default_branch(self.repo_with_commit(name), fallback=lambda: "x"), name)
+
+    def test_a_repo_without_origin_head_main_or_master_asks_the_fallback_then_none(self):
+        root = self.repo_with_commit("trunk")
+        self.assertEqual(repo.default_branch(root, fallback=lambda: "trunk-from-host"), "trunk-from-host")
+        self.assertIsNone(repo.default_branch(root))
+
+    def test_unpushed_counts_commits_past_the_remote_branch_or_every_unremoted_commit(self):
+        root = self.repo_with_commit("main")
+        self.assertEqual(repo.unpushed(root, "main"), 1)  # never pushed: the one commit no remote has
+        _vcs(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertEqual(repo.unpushed(root, "main"), 0)
+        (root / "b").write_text("b")
+        _vcs(root, "add", "b")
+        _vcs(root, "commit", "-q", "-m", "two")
+        self.assertEqual(repo.unpushed(root, "main"), 1)
+
+    def test_unpushed_is_none_when_git_cannot_say(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(repo.unpushed(d, "main"))
+
+
+class LeadSession(unittest.TestCase):
+    """`lead_session` returns the live lead's session id, and says why when it has none (#634, #546)."""
+
+    def ask(self, rows, here):
+        import common
+        real = common.run
+
+        def fake(*cmd, **kw):
+            if cmd[:2] == ("claude", "agents"):
+                return common.Run(0, rows if isinstance(rows, str) else __import__("json").dumps(rows), "")
+            return real(*cmd, **kw)
+
+        with unittest.mock.patch.object(repo.shutil, "which", return_value="/bin/claude"), \
+                unittest.mock.patch.object(common, "run", fake):
+            return repo.lead_session(here)
+
+    def test_the_live_lead_in_the_main_checkout_gives_its_session_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            here = Path(d).resolve()
+            _vcs(here, "init", "-q")
+            rows = [{"name": "other", "pid": 1, "cwd": str(here), "sessionId": "x"},
+                    {"name": "lead", "pid": 7, "cwd": str(here), "sessionId": "sess-1"}]
+            self.assertEqual(self.ask(rows, here), ("sess-1", "one live lead in this repo's main checkout"))
+
+    def test_a_lead_row_without_a_session_id_is_not_a_session(self):
+        with tempfile.TemporaryDirectory() as d:
+            here = Path(d).resolve()
+            _vcs(here, "init", "-q")
+            for row in ({"name": "lead", "pid": 7, "cwd": str(here)}, {"name": "lead", "pid": 7, "cwd": str(here), "sessionId": ""}):
+                with self.subTest(row=row):
+                    self.assertEqual(self.ask([row], here), (None, "the live lead row has no sessionId"))
+
+
 class PrTicket(unittest.TestCase):
     """The PR's ticket is its body's closing reference; the branch's number breaks a tie among several (#751)."""
 
