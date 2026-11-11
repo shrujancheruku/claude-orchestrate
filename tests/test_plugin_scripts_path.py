@@ -27,7 +27,7 @@ class PluginScriptsPath(unittest.TestCase):
         self.assertRegex((ROOT / "skills/run/brief.md").read_text(), r"(?m)^Plugin root: ")
         skill = (ROOT / "skills/run/SKILL.md").read_text()
         self.assertGreaterEqual(skill.count("`Plugin root:"), 2)  # reviewer and scout; the worker's comes with the brief
-        self.assertIn("with its `Plugin root:` line filled in", skill)
+        self.assertIn("it computes Branch, Verify and Plugin root", skill)  # scripts/brief fills the worker's line (#659)
 
 
 if __name__ == "__main__":
