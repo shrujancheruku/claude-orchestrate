@@ -186,6 +186,20 @@ class LeadBrief(unittest.TestCase):
         self.assertNotIn("planted", out)
         self.assertNotIn("the rebase path", out)
 
+    def test_a_malformed_review_body_prints_tier_unknown_not_the_size_label(self):
+        for body in ("Round 1 · verdict: approve · tier: XL\n\nok", "Round 2 · verdict: approve\n\nok"):
+            with self.subTest(body=body):
+                self.serve([pr(10, 1, reviews=[body], labels=["size:S"])])
+                code, out, _ = self.brief()
+                self.assertEqual(code, 0)
+                self.assertIn("tier: unknown (malformed review body)", out)
+                self.assertNotIn("tier S", out)
+
+    def test_a_review_that_is_not_a_review_body_still_falls_back_to_the_size_label(self):
+        self.serve([pr(10, 1, reviews=["looks fine to me"], labels=["size:S"])])
+        _, out, _ = self.brief()
+        self.assertIn("tier S", out)
+
     def test_an_m_merge_has_no_risk_notes(self):
         self.serve([pr(10, 1, reviews=["Round 1 · verdict: approve · tier: M"])])
         _, out, _ = self.brief()

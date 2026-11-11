@@ -114,6 +114,16 @@ def format(entries) -> str:
     return ", ".join(str(e) for e in entries) or "none"
 
 
+def write(items) -> str:
+    """The `Touch map:` line value for a brief: each item (one entry, or a comma list of them) is parsed by this
+    module's own grammar and the lot is returned in canonical form. The writer is the parser, so a brief never
+    carries a map `holds` or `rebuild-state` would read differently. Raises TouchMapError naming the bad entry."""
+    entries = []
+    for item in items:
+        entries.extend(parse(item))
+    return format(entries)
+
+
 def overlaps(a: Entry, b: Entry) -> bool:
     """Whether two entries name the same file (a `dir/` entry covers what is under it); lines are ignored."""
     return HOLDS_ALL in (a.path, b.path) or a.path == b.path or (a.path.endswith("/") and b.path.startswith(a.path)) or \

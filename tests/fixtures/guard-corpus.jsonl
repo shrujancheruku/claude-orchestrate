@@ -1079,3 +1079,7 @@
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/merge 12 --session \"$(id)\"", "expected": "silent", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 resolve T1 --left why --followup 7 --session 00000000-0000-0000-0000-000000000000", "expected": "approve", "source": "hand"}
 {"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/threads 12 --session --all", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/brief 7 --touch-map a.py:1-2 b.py --shared 'README.md: its section' --commits 'Conventional Commits' --pr-title 'Conventional Commits ending in (#7)' --human-only 'release PRs' --lead", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:orchestrator", "command": "/p/orchestrate/0.7.0/scripts/brief 7 --touch-map a.py --shared x --commits x --pr-title x --human-only x --plugin-root /tmp/evil", "expected": "silent", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "printf '%s' 'Round 1 body' | /p/orchestrate/0.7.0/scripts/worker-report 12 --reviewer --review-body", "expected": "approve", "source": "hand"}
+{"role": "orchestrate:reviewer", "command": "printf '%s' 'Round 1 body' | /p/orchestrate/0.7.0/scripts/worker-report 12 --reviewer --post-risk-notes", "expected": "unapproved", "source": "hand"}

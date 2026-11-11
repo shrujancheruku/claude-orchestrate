@@ -119,6 +119,7 @@ VERDICT_WORDS = {
     "valid": "pr-opened <pr> <head> | stopped <stop-reason> [exhausted]", "interim": "", "not-a-stop": "",
     "not-a-pr-opened": "", "duplicate": "<verdict>", "missing-report": "pr <pr> <head> | none",
     "limit": "[<reset time>]", "error": "<gist>", "incomplete": "<why>",
+    "fix-report": "<what>",
     # profile.py record
     "recorded": "",
     # every script: a rate limit, and a run that could not happen

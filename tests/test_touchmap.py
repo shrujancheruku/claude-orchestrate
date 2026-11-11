@@ -90,6 +90,14 @@ class Grammar(unittest.TestCase):
                 with self.subTest(text):
                     self.assertEqual(touchmap.format(touchmap.parse(want)), want)
 
+    def test_write_is_the_parsers_canonical_form_and_refuses_a_bad_entry_naming_it(self):
+        self.assertEqual(touchmap.write(["a.py:1; b.py", "c.py (x, y)"]), "a.py:1, b.py, c.py (x, y)")
+        self.assertEqual(touchmap.write(["none"]), "none")
+        self.assertEqual(touchmap.parse(touchmap.write(["a b/c.py:3-4 (x)"])), touchmap.parse("a b/c.py:3-4 (x)"))
+        with self.assertRaises(TouchMapError) as caught:
+            touchmap.write(["a.py", "also the docs"])
+        self.assertIn("also the docs", str(caught.exception))
+
     def test_overlaps_ignores_lines_and_honours_directories(self):
         a, b = touchmap.parse("x.py:1")[0], touchmap.parse("x.py:90-99 (other)")[0]
         self.assertTrue(touchmap.overlaps(a, b))

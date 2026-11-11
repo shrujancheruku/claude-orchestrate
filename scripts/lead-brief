@@ -52,6 +52,7 @@ import common
 import config
 import github
 import holds
+import reviewreport
 import tracker
 from repo import STATE, first_line, parse_ts
 
@@ -62,7 +63,7 @@ FALLBACK_CAP = 20
 WATCH_INTERVAL = 300  # seconds: the least time between two snapshot reads of --watch
 MERGED_LIMIT = 100  # the newest merged PRs by update, one `gh api graphql`
 RISK_LINE = re.compile(r"^\s*[-*]?\s*(\S+:\d+(?:-\d+)?\s+—\s+\S.*)$")
-TIER = re.compile(r"\btier:\s*([SML])\b")
+UNKNOWN_TIER = "unknown (malformed review body)"
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.I)
 
 MERGED_QUERY = """query($owner: String!, $name: String!, $limit: Int!) {
@@ -227,10 +228,12 @@ def tier_and_notes(pr):
     with an L review that holds no notes, or none posted, the fallback comment is the L-tier record."""
     is_l = False
     for r in reversed(pr["reviews"]):
-        m = TIER.search(first_line(r["body"]))
-        if m:
-            if m.group(1) != "L" and not is_l:
-                return m.group(1), [], None
+        found = reviewreport.tier_of(r["body"])
+        if found == reviewreport.MALFORMED and not is_l:
+            return UNKNOWN_TIER, [], None  # a review body with no readable tier is said so, never guessed from a label (#659)
+        if found in ("S", "M", "L"):
+            if found != "L" and not is_l:
+                return found, [], None
             is_l = True
             notes = risk_lines(r["body"])
             if notes:
@@ -281,7 +284,7 @@ def section_merges(root, repo, now) -> list:
     for p in shown:
         tier, notes, link = tier_and_notes(p)
         ticket = f"#{p['ticket']}" if p["ticket"] else "no ticket"
-        lines.append(f"{p['title']} {p['url']} · {ticket} · tier {tier} · discovered: {discovered_count(p)}")
+        lines.append(f"{p['title']} {p['url']} · {ticket} · {'tier: ' if tier == UNKNOWN_TIER else 'tier '}{tier} · discovered: {discovered_count(p)}")
         if tier == "L":
             lines.append(f"  risk notes: {p['title']} {p['url']} · ticket {ticket} · review {link or 'none'}")
             lines.extend(f"    {n}" for n in notes or ["none found in the review or the fallback comment"])
