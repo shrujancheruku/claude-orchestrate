@@ -36,8 +36,9 @@ the `rescue` lines), then the verdict:
     next: elsewhere                 exit 3: `rescue` found the ticket's worktree held by another live session; the hand-back is done
     next: retry-after <time> | could-not-run [<why>]   exit 2
 A question or conflicts file longer than 4000 characters is cut and says so; an `@login` in it is defused so it notifies no one.
-Run-log events for `stop-for-lead`, `adr-hold` and `to-info` (what `claims` will read as waiting) are not written yet: they need a
-new `runlog` event kind, which #657 is changing. Stdlib only, Python 3.9+.
+`stop-for-lead`, `adr-hold` and `to-info` also write a `transition` run-log event (ref = the ticket), which `claims` reads as
+`waiting question`, `waiting adr-conflict` or `waiting info` while the verb's label is on the ticket (#747). A log that cannot be
+written is a warning on stderr, never a failed transition. Stdlib only, Python 3.9+.
 """
 
 import argparse
@@ -49,6 +50,7 @@ from pathlib import Path
 import common
 import github
 import repo
+import runlog
 import tracker
 
 LIMIT = 4000  # characters of a question, a conflicts list or a gist
@@ -328,6 +330,14 @@ def run(argv=None) -> int:
         common.die(f"transition: cannot run: gh failed: {common.one_line(e.message)}")
     except (KeyError, TypeError, ValueError) as e:
         common.die(f"transition: cannot run: {e}")
+    if code == 0 and args.verb in runlog.OUTCOMES[runlog.TRANSITION]:
+        # After the writes, so the log never claims a wait the ticket does not show; every run logs, the newest event decides.
+        try:
+            extra = {k: v for k, v in (("branch", args.branch), ("pr", args.pr)) if v is not None}
+            runlog.append_event(root, runlog.TRANSITION, args.verb, ref=args.ticket, **extra)
+        except (runlog.NoSession, OSError) as e:
+            print(f"transition: the {args.verb} run-log event was not written ({common.one_line(str(e))}); "
+                  f"`claims` will not show the wait", file=sys.stderr)
     if code == 0:
         RESULT["word"] = ("transitioned" if ticket.changed else "unchanged", args.verb, args.ticket)
     return code

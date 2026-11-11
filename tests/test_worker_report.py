@@ -58,6 +58,11 @@ class WorkerReport(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return one_verdict(r)
 
+    def test_the_risk_notes_marker_is_tracker_s_alone(self):
+        text = (ROOT / "scripts" / "worker-report").read_text()
+        self.assertIn("RISK_MARKER = tracker.RISK_MARKER", text)
+        self.assertNotRegex(text, r'(?m)^\s*RISK_MARKER\s*=\s*["\']')  # no second copy of the literal
+
     def test_reviewer_report_with_a_suite_line_is_valid(self):
         for suite in ("pass", "fail 2", "fail", "not run (S tier)", "`pass`",
                       "pass (py_compile, run_parallel, plugin validate)", "fail (run_parallel: 2 modules)"):

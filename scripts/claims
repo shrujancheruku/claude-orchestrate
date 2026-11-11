@@ -9,6 +9,8 @@ state: with-lead | in-review | done | building | idle | paused | waiting | elsew
        `waiting <permission-denied | exhausted> since <ts>`: the newest worker-report needs the developer; it never expires.
        `waiting <gate | round-3> since <ts>` (a ready PR): the PR's newest `merge` event is `gate-hold`, or its newest `review` event asked
        for changes in round 2 or later so the next review is a third round; the user decides, and a newer event ends it.
+       `waiting <question | adr-conflict | info> since <ts>`: the ticket's newest `transition` event (stop-for-lead, adr-hold, to-info) while its
+       label (`needs-lead`, `needs-info`) is still on; the lead or author answers, then removes the label.
        `paused <limit | error> since <ts>`: the newest worker-report is a usage-limit or API error; a pass resumes it.
        `idle since <ts> [nudged <ts>]`: a building claim whose worker ended its turn with an `interim` report after its dispatch and has reported nothing since;
        `nudged` is the pass log's `record --nudged` time. Both timestamps are UTC, `YYYY-MM-DDTHH:MM:SSZ`.
