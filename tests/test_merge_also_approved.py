@@ -125,7 +125,25 @@ class AlsoApprovedTest(unittest.TestCase):
         head = git(repo, "rev-parse", "HEAD")
         git(repo, "push", "-q", "origin", "br-8")
         git(repo, "checkout", "-q", "main")
-        p = self.merge([self.other(8, head), self.behind(8, 1)], "8=" + approved)
+        # BLOCKED: the host wants the update, so the no-overlap skip does not apply and only the spec match is under test.
+        p = self.merge([self.other(8, head, merge_state="BLOCKED"), self.behind(8, 1)], "8=" + approved)
+        self.assertEqual(self.updated(), ["8"], p.stdout)
+
+    def test_a_behind_pr_with_no_file_overlap_is_not_updated(self):
+        approved = self.branch()
+        self.env.commit("other.txt", "x\n", "feat: main moves")
+        git(self.env.repo, "push", "-q", "origin", "main")
+        p = self.merge([self.other(8, approved), self.behind(8, 1)], "8=" + approved)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.updated(), [])
+        self.assertIn("PR #8 is behind main by 1, no file overlap; not updated", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-1], "next: frontier")
+
+    def test_a_behind_pr_sharing_a_file_with_main_is_still_updated(self):
+        approved = self.branch()
+        self.env.commit("pr.txt", "main's\n", "feat: main edits the file")
+        git(self.env.repo, "push", "-q", "origin", "main")
+        p = self.merge([self.other(8, approved), self.behind(8, 1)], "8=" + approved)
         self.assertEqual(self.updated(), ["8"], p.stdout)
 
     def test_a_pr_with_its_own_push_after_the_approval_is_left_alone(self):

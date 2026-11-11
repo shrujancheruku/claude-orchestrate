@@ -58,7 +58,8 @@ A **shared file** is one many PRs edit. The `merge` script resolves collisions i
 - **Commits:** <convention>
 - **PR title:** Conventional Commits, ending in ` (#<n>)`, where `<n>` is the ticket the PR closes (`scripts/gate` checks the ending against the body's closing reference; drop the suffix clause to turn that check off). **Body:** <closing reference, e.g. "Closes #<n>">
 - **Method:** <squash | merge | rebase>
-- **Orchestrator merges:** <yes | no>. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date, review threads resolved, reviewer approved.
+- **Merge:** up to date: <when overlapping | required>. `when overlapping` (the default, also when the line is missing) lets a behind PR the host calls mergeable merge without an update when none of its files changed on the default branch since the merge base and none is a Risk path; `required` always updates first.
+- **Orchestrator merges:** <yes | no>. Rule: decided by `scripts/merge`: CI green, every dependency merged, branch up to date (see **Merge**), review threads resolved, reviewer approved.
 
 ## Gates
 
