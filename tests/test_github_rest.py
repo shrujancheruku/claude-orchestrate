@@ -131,6 +131,18 @@ class Rest(unittest.TestCase):
             self.assertEqual(github.trusted_logins(main), ("alice",))
             self.assertEqual(github.trusted_logins(wt), ("alice",))
 
+    def test_two_trusted_logins_calls_for_one_cwd_read_the_config_once(self):
+        # #757: the read spawns git; a caller that checks many authors must not pay for it per author.
+        github.forget_trusted_logins()
+        self.addCleanup(github.forget_trusted_logins)
+        cfg = unittest.mock.Mock(trusted_authors=("alice",))
+        with unittest.mock.patch.object(github.config, "for_checkout", return_value=cfg) as read:
+            self.assertEqual(github.trusted_logins("/x/y"), ("alice",))
+            self.assertEqual(github.trusted_logins("/x/y"), ("alice",))
+            self.assertEqual(read.call_count, 1)
+            github.trusted_logins("/x/z")
+            self.assertEqual(read.call_count, 2)  # another cwd is its own entry
+
     def test_open_prs_with_heads_has_sha_and_base(self):
         self.gh({f"{PULLS}?state=open&per_page=100&page=1": [pull(7, "b7", "abc", base="dev")]})
         [row] = github.open_prs_with_heads()

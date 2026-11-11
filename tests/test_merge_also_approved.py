@@ -1,7 +1,9 @@
 """scripts/merge --also-approved: after a merge, other approved PRs that are behind are updated at once."""
 
 import json
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -85,7 +87,8 @@ class AlsoApprovedTest(unittest.TestCase):
         self.assertIn("PR #8 not updated", p.stdout)
         self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 not updated: boom", "next: frontier"])
 
-    def test_a_gated_pr_is_left_alone_even_when_behind(self):
+    def test_a_gated_pr_is_updated_when_behind_and_its_waits_entry_loses_the_command(self):
+        # #757: it waits for the developer, so it is brought up to date to be mergeable when they get to it.
         cfg = self.env.repo / ".claude" / "orchestration.md"
         cfg.parent.mkdir(exist_ok=True)
         cfg.write_text("## Gates\n\n- **Merge gates:** PRs touching `hooks/**` are merged by the developer.\n")
@@ -93,13 +96,51 @@ class AlsoApprovedTest(unittest.TestCase):
         def files(n, *names):
             return {"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{n}/files"],
                     "stdout": json.dumps([{"filename": f} for f in names])}
-        p = self.merge([files(7, "a.txt"), files(8, "hooks/guard.py"), files(9, "b.txt"),
+        import waits
+        waits.add(self.env.repo, "PR #8", source="merge", wait_id="pr-8", kind="merge-gate", pr=8, head="b" * 40,
+                  gate="hooks/**", command="gh pr merge 8 --squash --match-head-commit " + "b" * 40)
+        p = self.merge([files(7, "a.txt"), files(8, "hooks/guard.py"), self.other(8, "b" * 40), self.behind(8, 3)], "8=" + "b" * 40)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.updated(), ["8"])
+        self.assertIn("PR #8 updated (behind by 3); wait for CI", p.stdout)
+        (entry,) = waits.live(self.env.repo)
+        self.assertEqual((entry["pr"], "command" in entry), (8, False))
+
+    def test_a_behind_pr_whose_worker_has_unpushed_work_is_not_updated(self):
+        # #757: the update would make the worker's push non-fast-forward; the worker's report comes first.
+        repo = self.env.repo
+        git(repo, "branch", "8-feat")
+        wt = Path(tempfile.mkdtemp()).resolve() / "wt"
+        self.addCleanup(shutil.rmtree, wt.parent, True)
+        git(repo, "worktree", "add", "-q", str(wt), "8-feat")
+        (wt / "w.txt").write_text("work\n")
+        git(wt, "add", "w.txt")
+        git(wt, "commit", "-q", "-m", "wip")
+        other = gh_pr_view(8, {"state": "OPEN", "headRefName": "8-feat", "headRefOid": "b" * 40,
+                               "isCrossRepository": False, "mergeStateStatus": "BLOCKED"})
+        behind = {"args": ["api", "repos/{owner}/{repo}/compare/main...8-feat", "--jq", ".behind_by"], "stdout": "2\n"}
+        p = self.merge([other, behind], "8=" + "b" * 40)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(self.updated(), [])
+        self.assertIn("PR #8 is behind main by 2; not updated: its worktree holds 0 uncommitted path(s) and 1 unpushed commit(s)", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-2:], ["also: left 8 not updated: worker building", "next: frontier"])
+
+    def test_a_gated_pr_is_left_alone_when_its_gate_cannot_be_judged(self):
+        cfg = self.env.repo / ".claude" / "orchestration.md"
+        cfg.parent.mkdir(exist_ok=True)
+        cfg.write_text("## Gates\n\n- **Merge gates:** PRs touching `hooks/**` are merged by the developer.\n")
+
+        def files(n, *names):
+            return {"args": ["api", f"~repos/{{owner}}/{{repo}}/pulls/{n}/files"],
+                    "stdout": json.dumps([{"filename": f} for f in names])}
+        unreadable = {"args": ["api", "~repos/{owner}/{repo}/pulls/8/files"], "exit": 1, "stderr": "boom"}
+        p = self.merge([files(7, "a.txt"), unreadable, files(9, "b.txt"),
                         self.other(8, "b" * 40), self.behind(8, 3), self.other(9, "c" * 40), self.behind(9, 1)],
                        "8=" + "b" * 40, "9=" + "c" * 40)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(self.updated(), ["9"])
-        self.assertIn("PR #8 left alone: it touches the merge gate hooks/**", p.stdout)
-        self.assertEqual(p.stdout.splitlines()[-3:], ["also: left 8 gated by hooks/**", "also: wait-ci 9 " + p.stdout.split("also: wait-ci 9 ")[1].split()[0], "next: frontier"])
+        self.assertIn("PR #8 left alone: its merge gate could not be judged", p.stdout)
+        self.assertEqual(p.stdout.splitlines()[-3:], ["also: left 8 merge gate unknown", "also: wait-ci 9 " + p.stdout.split("also: wait-ci 9 ")[1].split()[0], "next: frontier"])
 
     def test_a_malformed_spec_is_skipped(self):
         p = self.merge([], "nonsense")

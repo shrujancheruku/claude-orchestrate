@@ -31,6 +31,11 @@ file and outcome (line-replay|word-merge|handed-back). The method decides how: s
 merge main into the branch (a plain push); rebase rebases it and pushes with --force-with-lease.
 A conflict the script can't resolve (a file that isn't shared, or overlapping words) aborts that
 branch's update and prints `HANDBACK PR #n <branch>: <path> (<why>)` per file.
+No update goes to a branch while a worker may be building or fixing on it (`claims.worker_busy`, #757): the ticket's claim is
+building, idle or paused, or its worktree holds uncommitted paths or unpushed commits. Readiness then ends `next: retry` (exit 3)
+and the sweep and --also-approved leave the PR alone, so the worker's own push is never rejected non-fast-forward.
+A gated PR is kept up to date too, by the host's update-branch under the same rules, so it is mergeable when the developer gets to it.
+A Merge gates line that names no glob (and is not `none`) is `could-not-run`; a PR whose file list the host cut off at 3000 files is gated.
 After the sweep, each --also-approved PR=SHA (a PR the reviewer approved at that head, still waiting to merge)
 that is open, at that head (or with only merges of the default branch since) and behind the default branch is brought up to date with `gh pr update-branch`
 too, so their CI runs at the same time instead of one merge after another: one `PR #<n> updated (behind by <k>);
@@ -252,14 +257,29 @@ def gate_of(cwd, pr):
     the file list can't be read (the PR is then not merged: a gate we can't judge is a gate)."""
     # The main checkout's config, never the PR's own copy (#535): a PR can't edit the gate that judges it.
     cfg = config.for_checkout(cwd)
+    bad = cfg.problems_of(config.GATES)
+    if bad:  # a gate line that names no glob must not quietly ungate every PR (#757)
+        say(f"merge: cannot judge the merge gate of PR #{pr}: {bad[0].message}")
+        return None, 2
     if not cfg.merge_gates:
         return None, None  # no gate configured: no file list to read
     try:
-        files = github.pr_touched_paths(pr, cwd)  # a rename out of a gated path counts: its old name is in the list
+        files, truncated = github.pr_touched(pr, cwd)  # a rename out of a gated path counts: its old name is in the list
     except github.GhError as e:
         say(f"merge: could not read the changed files of PR #{pr} to judge its merge gate: {e.message}")
         return None, 2
-    return cfg.merge_gate_for(files), None
+    # A file list the host cut off may hide a gated path past its end: such a PR is gated (#757).
+    return cfg.merge_gate_for(files, truncated), None
+
+
+def worker_building(cwd, branch):
+    """Why no update may go to `branch` now, or None: its worker may be building or fixing on it (`claims.worker_busy`,
+    #757). A pushed merge of the default branch would make the worker's own push non-fast-forward, so the update waits
+    for the worker's report. A state that can't be read counts as busy: the update waits for the next call."""
+    try:
+        return claims.worker_busy(repo.main_checkout(cwd), branch)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return f"its claim could not be read ({common.one_line(e)})"
 
 
 METHOD_FLAGS = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}
@@ -281,6 +301,16 @@ def record_wait(cwd, pr, v, title, glob, command):
                   head=v.get("headRefOid") or None, gate=glob, command=command)
     except OSError as e:
         print(f"merge: could not record the wait for PR #{pr}: {e}", file=sys.stderr)
+
+
+def refresh_wait(cwd, pr, v, glob):
+    """A gated PR's branch was just updated: its head moved, so the command on its waits entry (pinned to the old head)
+    would fail. Record the entry again with no command; the next `merge --approved-head` on it prints the new one (#757)."""
+    try:
+        title = github.pr_view(pr, "title", cwd).get("title") or ""
+    except github.GhError:
+        title = ""
+    record_wait(cwd, pr, v, title, glob, None)
 
 
 def clear_wait(cwd, pr):
@@ -534,6 +564,11 @@ def readiness(cwd, pr, v, approved, gap=HEAD_GAP):
                 f"not asking again within {UPDATE_WINDOW}s; wait for CI, then run merge again")
             verdict(f"wait-ci {pr} ?")
             return 5
+        busy = worker_building(cwd, v.get("headRefName"))
+        if busy:
+            say(f"PR #{pr} is behind {default} by {behind}; not updated: {busy}; wait for the worker's report, then run merge again")
+            verdict("retry")
+            return 3
         try:
             github.update_branch(pr, cwd)
         except github.GhError as e:
@@ -901,11 +936,12 @@ def update_approved(cwd, merged_pr, default, specs, gap=HEAD_GAP):
                 also(f"left {n} pushed to since the approval")
                 continue
             glob, code = gate_of(cwd, n)
-            if glob is not None or code is not None:  # a gate that can't be judged holds too
-                say(f"PR #{n} left alone: " + (f"it touches the merge gate {glob}; the developer merges it by hand"
-                                               if glob else "its merge gate could not be judged"))
-                also(f"left {n} " + (f"gated by {glob}" if glob else "merge gate unknown"))
+            if code is not None:  # a gate that can't be judged holds
+                say(f"PR #{n} left alone: its merge gate could not be judged")
+                also(f"left {n} merge gate unknown")
                 continue
+            # A gated PR waits for the developer: it is brought up to date like any other, so it is mergeable when they
+            # get to it, and the entry on the waits file loses its command, which pinned the old head (#757).
             behind = github.behind_by(default, v.get("headRefName") or sha, cwd)
             if not behind:
                 continue
@@ -916,13 +952,50 @@ def update_approved(cwd, merged_pr, default, specs, gap=HEAD_GAP):
             if update_needed(cwd, n, v.get("headRefOid") or sha, default, state=v.get("mergeStateStatus")) is None:
                 say(f"PR #{n} is behind {default} by {behind}, no file overlap; not updated (it merges without one)")
                 continue
+            busy = worker_building(cwd, v.get("headRefName") or "")
+            if busy:
+                say(f"PR #{n} is behind {default} by {behind}; not updated: {busy}")
+                also(f"left {n} not updated: worker building")
+                continue
             github.update_branch(n, cwd)
             say(f"PR #{n} updated (behind by {behind}); wait for CI")
             record_update(cwd, n, v.get("headRefOid"))
+            if glob is not None:
+                refresh_wait(cwd, n, v, glob)
             also(f"wait-ci {n} {new_head(cwd, n, v.get('headRefOid'), gap)}")
         except github.GhError as e:
             say(f"PR #{n} not updated: {e.message}")
             also(f"left {n} not updated: {why_of(e.message)}")
+
+
+def refresh_gated(cwd, n, branch, default, glob, head, gap=HEAD_GAP):
+    """Bring a gated PR that waits for the developer up to date through the host's update-branch, so it is mergeable
+    (and its CI has run again) when they get to it (#757). The rules are the ungated PR's: nothing when it is not behind,
+    when `update_needed` says the update can't change the outcome, when an update is already in flight, or while a worker
+    may be building on the branch. Never fails the merge that triggered it."""
+    try:
+        behind = github.behind_by(default, branch, cwd)
+        if not behind:
+            return
+        if update_needed(cwd, n, head or "", default) is None:
+            say(f"sweep: PR #{n} {branch} is behind {default} by {behind}, no file overlap; not updated (it merges without one)")
+            return
+        busy = worker_building(cwd, branch)
+        if busy:
+            say(f"sweep: PR #{n} {branch} is behind {default} by {behind}; not updated: {busy}")
+            return
+        age = update_in_flight(cwd, n, head or "")
+        if age is not None:
+            say(f"sweep: PR #{n} {branch} was updated {age:.0f}s ago; not asking again")
+            return
+        github.update_branch(n, cwd)
+        record_update(cwd, n, head or "")
+        refresh_wait(cwd, n, {"headRefName": branch, "headRefOid": head}, glob)
+        say(f"sweep: PR #{n} {branch} updated (behind by {behind}); wait for CI")
+        also(f"wait-ci {n} {new_head(cwd, n, head, gap)}")
+    except github.GhError as e:
+        say(f"sweep: PR #{n} {branch} not updated: {e.message}")
+        also(f"left {n} not updated: {why_of(e.message)}")
 
 
 def sweep(cwd, merged_pr, merged_branch, default, method):
@@ -949,8 +1022,16 @@ def sweep(cwd, merged_pr, merged_branch, default, method):
         if r.get("isDraft"):
             continue  # a draft is still being built: its worker is pushing, and it enters review when marked ready
         glob, code = gate_of(cwd, n)
-        if glob is not None or code is not None:  # the developer merges a gated PR; no script pushes to it meanwhile
-            say(f"sweep: PR #{n} {b} left alone: " + (f"it touches the merge gate {glob}" if glob else "its merge gate could not be judged"))
+        if code is not None:
+            say(f"sweep: PR #{n} {b} left alone: its merge gate could not be judged")
+            continue
+        if glob is not None:  # the developer merges a gated PR: replay never pushes to it, but it is kept up to date (#757)
+            say(f"sweep: PR #{n} {b} touches the merge gate {glob}; the developer merges it by hand")
+            refresh_gated(cwd, n, b, default, glob, r.get("headRefOid"))
+            continue
+        busy = worker_building(cwd, b)
+        if busy:  # the worker's own push would be rejected after ours (#757)
+            say(f"sweep: PR #{n} {b} left alone: {busy}")
             continue
         result = replay.sweep_branch(cwd, default, b, method, rules)
         if result.status == "skipped":

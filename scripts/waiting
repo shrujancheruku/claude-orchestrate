@@ -185,7 +185,7 @@ def optional(name, root, reader) -> Source:
         recorded = {str(e.get("pr")) for e in waits.live(root)}
         items = []
         for p in github.open_prs(default, root):
-            if str(p["number"]) in recorded or reader.cfg.merge_gate_for(github.pr_touched_paths(p["number"], root)) is None:
+            if str(p["number"]) in recorded or reader.cfg.merge_gate_for(*github.pr_touched(p["number"], root)) is None:
                 continue
             rollup = github.pr_view(p["number"], "statusCheckRollup", root).get("statusCheckRollup")
             if rollup and github.ci_verdict(rollup)[0] == "pass":

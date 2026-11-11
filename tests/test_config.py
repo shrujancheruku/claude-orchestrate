@@ -89,6 +89,36 @@ class MergeGates(unittest.TestCase):
         self.assertIsNone(cfg.merge_gate_for(["scripts/merge"]))
 
 
+class MergeGates(unittest.TestCase):
+    """#757: a gate entry that names no glob must fail loudly, and a cut-off file list must gate."""
+
+    def parse(self, line):
+        return config.Config.parse(f"## Gates\n\n- **Merge gates:** {line}\n")
+
+    def test_a_line_with_globs_has_no_problem(self):
+        cfg = self.parse("PRs touching `hooks/**` or `a.txt` are merged by the developer.")
+        self.assertEqual((cfg.merge_gates, cfg.problems_of(config.GATES)), (("hooks/**", "a.txt"), []))
+
+    def test_a_line_with_no_glob_is_a_problem_not_silence(self):
+        for line in ("PRs touching the hooks directory are merged by the developer.", "hooks/** is gated.", ""):
+            with self.subTest(line):
+                cfg = self.parse(line)
+                self.assertEqual(cfg.merge_gates, ())
+                self.assertEqual(len(cfg.problems_of(config.GATES)), 1)
+
+    def test_none_and_a_missing_line_are_not_problems(self):
+        self.assertEqual(self.parse("none").problems_of(config.GATES), [])
+        self.assertEqual(self.parse("None. Nothing is gated.").problems_of(config.GATES), [])
+        self.assertEqual(config.Config.parse("## Gates\n\n- **Other:** x\n").problems_of(config.GATES), [])
+
+    def test_a_truncated_file_list_is_gated_when_a_gate_is_configured(self):
+        cfg = self.parse("PRs touching `hooks/**` are merged by the developer.")
+        self.assertIsNone(cfg.merge_gate_for(["src/a.py"]))
+        self.assertEqual(cfg.merge_gate_for(["src/a.py"], truncated=True), config.GATE_TRUNCATED)
+        self.assertEqual(cfg.merge_gate_for(["hooks/x"], truncated=True), "hooks/**")  # a real hit names its glob
+        self.assertIsNone(self.parse("none").merge_gate_for(["src/a.py"], truncated=True))
+
+
 class TrustedAuthors(unittest.TestCase):
     def test_logins_on_the_backlog_line_are_read_lowercase(self):
         text = "## Backlog\n\n- **Trusted authors:** `Alice`, `@bob`, `ci-bot[bot]`\n\n## Slots\n- **Trusted authors:** `nope`\n"

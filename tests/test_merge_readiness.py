@@ -704,6 +704,69 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (1, "next: ask-user gate hooks/**"), p.stdout + p.stderr)
         self.assertEqual(self.called(MERGE), [])
 
+    def test_a_file_list_cut_off_at_the_host_cap_is_gated(self):
+        # #757: the host lists at most 3000 files, so a gated path past the end is not in the list. Thirty full pages, none gated.
+        rows = [{"filename": f"src/f{n}.py"} for n in range(100)]
+        p = self.merge(self.approved, files_reply={"stdout": json.dumps(rows)})
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (1, "next: ask-user gate more-than-3000-files"), p.stdout + p.stderr)
+        self.assertEqual(self.called(MERGE), [])
+
+    def test_a_short_file_list_is_not_taken_for_a_cut_off_one(self):
+        rows = [{"filename": f"src/f{n}.py"} for n in range(99)]
+        p = self.merge(self.approved, files_reply={"stdout": json.dumps(rows)})
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_a_merge_gates_line_that_names_no_glob_is_could_not_run_not_ungated(self):
+        (self.repo / ".claude" / "orchestration.md").write_text(
+            "## Gates\n\n- **Merge gates:** PRs touching the hooks directory are merged by the developer.\n")
+        p = self.merge(self.approved, files=("hooks/guard.py",))
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (2, "next: could-not-run"), p.stdout + p.stderr)
+        self.assertIn("Merge gates names no backticked glob", p.stdout)
+        self.assertEqual(self.called(MERGE), [])
+
+    def test_a_merge_gates_line_that_says_none_gates_nothing(self):
+        (self.repo / ".claude" / "orchestration.md").write_text("## Gates\n\n- **Merge gates:** none\n")
+        p = self.merge(self.approved, files=("hooks/guard.py",))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def ticket_worktree(self, unpushed=True):
+        """Branch `9-feat` (the approved commit) pushed, with a worker's worktree on it holding a commit the remote lacks."""
+        git(self.repo, "checkout", "-q", "-b", "9-feat", "feat-br")
+        git(self.repo, "push", "-q", "origin", "9-feat")
+        git(self.repo, "checkout", "-q", "main")
+        head = git(self.repo, "rev-parse", "9-feat")
+        wt = Path(tempfile.mkdtemp()).resolve() / "wt"
+        self.addCleanup(__import__("shutil").rmtree, wt.parent, True)
+        git(self.repo, "worktree", "add", "-q", str(wt), "9-feat")
+        if unpushed:
+            (wt / "w.txt").write_text("work\n")
+            git(wt, "add", "w.txt")
+            git(wt, "commit", "-q", "-m", "wip")
+        return head
+
+    def test_no_update_branch_while_the_workers_worktree_holds_unpushed_work(self):
+        # #757: merge's update would make the worker's own push non-fast-forward; it waits for the worker's report.
+        head = self.ticket_worktree()
+        p = self.merge(head, behind="1", approved=head, branch="9-feat", merge_state="BLOCKED")
+        self.assertEqual((p.returncode, p.stdout.splitlines()[-1]), (3, "next: retry"), p.stdout + p.stderr)
+        self.assertIn("not updated: its worktree holds 0 uncommitted path(s) and 1 unpushed commit(s)", p.stdout)
+        self.assertEqual((self.called(UPDATE), self.called(MERGE)), ([], []))
+
+    def test_update_branch_goes_ahead_when_the_workers_worktree_is_all_pushed(self):
+        head = self.ticket_worktree(unpushed=False)
+        p = self.merge(head, behind="1", approved=head, branch="9-feat", merge_state="BLOCKED")
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.called(UPDATE), [UPDATE])
+
+    def test_a_building_claim_blocks_the_update(self):
+        # A draft PR is building (ADR 0011): the claim, not only the worktree, holds the update.
+        import claims
+        self.ticket_worktree(unpushed=False)
+        (self.repo / ".claude" / "orchestrate-state.json").write_text(json.dumps({"tickets": {"9": {"agent_id": "agent-x"}}}))
+        self.assertEqual(claims.worker_busy(self.repo, "9-feat", draft=True), "its ticket's claim is building")
+        self.assertIsNone(claims.worker_busy(self.repo, "9-feat"))  # a ready PR is in review, and the tree is all pushed
+        self.assertIsNone(claims.worker_busy(self.repo, "feat-br", draft=True))  # no ticket number: no worker to wait for
+
     def test_a_release_pr_says_so(self):
         p = self.merge(self.approved, files=(".release-please-manifest.json", "hooks/x"), title="chore(main): release 1.2.3")
         self.assertIn("a release PR", p.stdout)
