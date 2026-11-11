@@ -125,7 +125,13 @@ const profiles = [];
 const rejected = []; // files the viewer refused, shown as a banner
 const $ = (id) => document.getElementById(id);
 const SVG = "http://www.w3.org/2000/svg";
-const ROLES = ["orchestrator", "worker", "reviewer", "scout"];
+// The lead layer (#633) follows the orchestrator's own roles, on the same scale, in series 2.
+const LEAD_ROLES = ["lead", "lead-scout"];
+const ROLES = ["orchestrator", "worker", "reviewer", "scout", ...LEAD_ROLES];
+const roleColour = (r) => (LEAD_ROLES.includes(r) ? "var(--series-2)" : "var(--series-1)");
+// Lead mode of a profile: the lead's session id, or null (also for a profile saved before the lead was folded in).
+const hasLead = (p) => Boolean(p.lead);
+const leadLegend = () => legend([["Orchestrator layer", "--series-1", "swatch"], ["Lead layer", "--series-2", "swatch"]]);
 const CLASSES = { total: "All tokens", output: "Output", cache_read: "Cache read", cache_write: "Cache write", input: "Input" };
 let tokenClass = "total";
 
@@ -203,6 +209,12 @@ function throughputTile(p) {
   const m = p.metrics;
   return tile("Throughput", m.throughput_per_hour == null ? "–" : perHour(m.throughput_per_hour) + " merged/hour", `${m.tickets_merged} merged over ${fmtDur(m.span_s)}`);
 }
+// "lead X%" is the lead layer's share of the cost in all (inside the window); left out with no lead.
+function costTile(p) {
+  const m = p.metrics;
+  const share = hasLead(p) && m.lead && m.lead.share != null ? ` · lead ${pct(m.lead.share)}` : "";
+  return tile("Proxy $ per merged ticket", usd(m.cost.per_merged_ticket), `${usd(m.cost.total)} in all${share}`);
+}
 function legend(items) {
   const l = el("div", { class: "legend" });
   for (const [label, key, cls] of items) {
@@ -232,7 +244,7 @@ function subtitleText(p) {
   const gap = p.metrics.session_gap;
   return `Session ${p.session.slice(0, 8)} · ${new Date(t(p.start)).toLocaleString()} · ${fmtDur(p.metrics.span_s)}` +
     (gap && gap.intervals.length ? ` · session gap ${fmtDur(gap.total_s)}, outside the span` : "") +
-    ` · ${p.slots} slots${p.greedy ? " (greedy)" : ""}`;
+    ` · ${p.slots} slots${p.greedy ? " (greedy)" : ""}` + (hasLead(p) ? ` · lead ${p.lead.slice(0, 8)}` : " · no lead");
 }
 
 // An unexplained transcript silence (a hand `claude --resume` logs no event) is a warning: it stays inside the span.
@@ -259,12 +271,14 @@ function timeline(p) {
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Slots over time"));
   card.append(el("p", { class: "sub" }, `${pct(p.metrics.occupancy)} occupied: building ${pct(p.metrics.building_share)}, in review or waiting to merge ${pct(p.metrics.review_share)}.`));
-  card.append(legend([["Building", "--series-1", "swatch"], ["Review / merge", "--series-2", "swatch"], ["Reviewer or scout run", "--muted", "ring"], ["Usage limit", "--critical"]]));
+  const ll = p.lead_layer;
+  card.append(legend([["Building", "--series-1", "swatch"], ["Review / merge", "--series-2", "swatch"], ["Reviewer or scout run", "--muted", "ring"], ...(ll ? [["Lead layer", "--series-2", "swatch"]] : []), ["Usage limit", "--critical"]]));
   const a = t(p.start), b = t(p.end);
   const W = 1000, L = 64, R = 12, ROW = 34, BAR = 18, TOP = 16;
   const rows = Math.max(p.slots, ...p.tickets.map((x) => x.slot + 1), 1);
   const helpersY = TOP + rows * ROW + 8;
-  const H = helpersY + 26 + 24;
+  const LROW = 26; // the lead and its scouts, two thin rows under the helpers, clipped to the window by profile.py
+  const H = helpersY + 26 + 24 + (ll ? 2 * LROW : 0);
   const x = (ms) => L + ((ms - a) / Math.max(b - a, 1)) * (W - L - R);
   const s = sv("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Slot timeline" });
   for (const v of timeTicks(a, b, 8)) {
@@ -307,6 +321,20 @@ function timeline(p) {
     hover(g, ag.description || ag.role, [[ag.role, ""], [ag.model || "", ""], ["tokens", fmtTok(sum(ag.tokens))]]);
     s.append(g);
   }
+  if (ll) {
+    const lead = [["Lead", ll.segments, helpersY + 26 + 6, null], ["Lead scouts", ll.scouts.flatMap((sc) => sc.segments.map((sg) => [sg, sc])), helpersY + 26 + LROW + 6, true]];
+    for (const [name, segs, y, scouts] of lead) {
+      s.append(sv("text", { x: 0, y: y + 12, class: "ink" }, name));
+      for (const item of segs) {
+        const [s0, s1] = scouts ? item[0] : item;
+        const g = sv("g");
+        g.append(sv("rect", { x: x(t(s0)), y, width: Math.max(x(t(s1)) - x(t(s0)), 2), height: 14, rx: 3, fill: "var(--series-2)" }));
+        g.append(sv("rect", { x: x(t(s0)), y: y - 4, width: Math.max(x(t(s1)) - x(t(s0)), 12), height: 22, fill: "transparent" }));
+        hover(g, scouts ? `Lead scout ${item[1].id.slice(0, 8)}` : "Lead", [[scouts ? item[1].agent_type || "" : "", ""], [`${clock(t(s0))} → ${clock(t(s1))}`, ""]]);
+        s.append(g);
+      }
+    }
+  }
   for (const lim of p.limits) {
     const ms = t(lim.ts);
     if (ms == null) continue;
@@ -346,6 +374,7 @@ function tokens(p) {
   card.append(head);
   const byRole = p.metrics.tokens_by_role;
   const roles = ROLES.filter((r) => byRole[r]);
+  if (roles.some((r) => LEAD_ROLES.includes(r))) card.append(leadLegend());
   const val = (r) => (tokenClass === "total" ? sum(byRole[r]) : byRole[r][tokenClass] || 0);
   const max = Math.max(...roles.map(val), 1);
   const W = 1000, L = 104, R = 70, ROW = 34, BAR = 20;
@@ -357,7 +386,7 @@ function tokens(p) {
     s.append(sv("text", { x: 0, y: y + BAR / 2 + 4, class: "ink" }, r));
     const g = sv("g");
     // Rounded at the data end, square at the baseline.
-    g.append(sv("path", { d: `M${L},${y}h${Math.max(w - 4, 0)}a4,4 0 0 1 4,4v${BAR - 8}a4,4 0 0 1 -4,4h${-Math.max(w - 4, 0)}z`, fill: "var(--series-1)" }));
+    g.append(sv("path", { d: `M${L},${y}h${Math.max(w - 4, 0)}a4,4 0 0 1 4,4v${BAR - 8}a4,4 0 0 1 -4,4h${-Math.max(w - 4, 0)}z`, fill: roleColour(r) }));
     g.append(sv("rect", { x: L, y: y - 6, width: Math.max(w, 24), height: BAR + 12, fill: "transparent" }));
     s.append(sv("text", { x: L + w + 6, y: y + BAR / 2 + 4, class: "ink" }, fmtTok(v)));
     hover(g, r, Object.entries(CLASSES).filter(([k]) => k !== "total").map(([k, lbl]) => [lbl.toLowerCase(), fmtTok(byRole[r][k])]));
@@ -379,12 +408,17 @@ function cost(p) {
   const c = p.metrics.cost;
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Proxy $ per merged ticket"));
-  card.append(el("p", { class: "sub" }, `${usd(c.per_merged_ticket)} per merged ticket · ${usd(c.total)} in all, orchestrator and every agent. Prices as of ${c.prices_as_of}.`));
-  const rows = (map) => Object.entries(map).filter(([, v]) => v).sort((a, b) => b[1] - a[1]);
+  const lead = p.metrics.lead;
+  // The lead's cost outside the profile's window is a figure, not a bar: it stays out of $ per merged ticket.
+  const outside = hasLead(p) && lead ? ` Lead outside the window: ${usd(lead.outside_window_usd)}, not in $ per merged ticket.` : "";
+  card.append(el("p", { class: "sub" }, `${usd(c.per_merged_ticket)} per merged ticket · ${usd(c.total)} in all, orchestrator and every agent${hasLead(p) ? " and the lead layer inside the window" : ""}. Prices as of ${c.prices_as_of}.${outside}`));
+  // The lead roles come after the others, which stay largest first.
+  const rows = (map) => Object.entries(map).filter(([, v]) => v).sort((a, b) => (LEAD_ROLES.includes(a[0]) - LEAD_ROLES.includes(b[0])) || (LEAD_ROLES.includes(a[0]) ? ROLES.indexOf(a[0]) - ROLES.indexOf(b[0]) : b[1] - a[1]));
   for (const [title, map] of [["By role", c.per_merged_ticket_by_role], ["By model", c.per_merged_ticket_by_model]]) {
     const entries = rows(map);
     if (!entries.length) continue;
     card.append(el("h2", { style: "margin-top:12px" }, title));
+    if (map === c.per_merged_ticket_by_role && entries.some(([k]) => LEAD_ROLES.includes(k))) card.append(leadLegend());
     const max = Math.max(...entries.map(([, v]) => v), 0.0001);
     const W = 1000, L = 104, R = 70, ROW = 30, BAR = 18;
     const s = sv("svg", { viewBox: `0 0 ${W} ${entries.length * ROW + 4}`, role: "img", "aria-label": title });
@@ -393,7 +427,7 @@ function cost(p) {
       const w = (v / max) * (W - L - R), y = i * ROW + (ROW - BAR) / 2;
       s.append(sv("text", { x: 0, y: y + BAR / 2 + 4, class: "ink" }, k));
       const g = sv("g");
-      g.append(sv("rect", { x: L, y, width: Math.max(w, 2), height: BAR, rx: 3, fill: "var(--series-1)" }));
+      g.append(sv("rect", { x: L, y, width: Math.max(w, 2), height: BAR, rx: 3, fill: map === c.per_merged_ticket_by_role ? roleColour(k) : "var(--series-1)" }));
       g.append(sv("rect", { x: L, y: y - 5, width: Math.max(w, 24), height: BAR + 10, fill: "transparent" }));
       s.append(sv("text", { x: L + w + 6, y: y + BAR / 2 + 4, class: "ink" }, usd(v)));
       hover(g, k, [["per merged ticket", usd(v)], ["in all", usd(map === c.per_merged_ticket_by_role ? c.by_role[k] : c.by_model[k])]]);
@@ -404,6 +438,7 @@ function cost(p) {
   const m = p.metrics.meters;
   const meter = (k) => (m[k].per_merged_ticket == null ? "not measured" : m[k].per_merged_ticket.toFixed(1) + " points");
   card.append(el("p", { class: "note" }, `Plan meters per merged ticket (unweighted): 5-hour ${meter("five_hour")} · 7-day ${meter("seven_day")}.`));
+  card.append(el("p", { class: "note" }, "The developer's own time is not measured and is never estimated."));
   const det = el("details");
   det.setAttribute("open", "");
   det.append(el("summary", {}, "Per-ticket table"));
@@ -435,7 +470,8 @@ function stopWait(p) {
     return card;
   }
   card.append(el("p", { class: "sub" }, `${stopsLine(st)}. Median is over closed stops; open ones count in the total up to the profile's end.`));
-  const entries = Object.entries(st.by_kind).filter(([, v]) => v.count);
+  // `prompt` is the run's permission-prompt stall, not a ticket stop: it is outside the count and Overall median, so no row here.
+  const entries = Object.entries(st.by_kind).filter(([k, v]) => v.count && k !== "prompt");
   const med = (v) => (v.median_s == null ? 0 : v.median_s);
   const max = Math.max(...entries.map(([, v]) => med(v)), 1);
   const W = 1000, L = 150, R = 80, ROW = 30, BAR = 18;
@@ -676,15 +712,26 @@ function usage(p) {
   return card;
 }
 
+// Lead $ per merged ticket (roles lead + lead-scout), $0.00 for a lead: null profile.
+function leadPerTicket(p) {
+  const c = p.metrics.cost;
+  return LEAD_ROLES.reduce((acc, r) => acc + ((c.per_merged_ticket_by_role || {})[r] || 0), 0);
+}
+
 function compare(list = profiles) {
   const rows = Array.isArray(list) ? list : [list];
   const card = el("section", { class: "card" });
   card.append(el("h2", {}, "Sessions compared"));
-  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "Merged / hour", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Median stop wait", "Stops", "Peak 5-hour", "Limit hits"],
+  card.append(table(["Session", "Start", "Length", "Slots", "Occupied", "Merged", "Merged / hour", "$ / ticket", "Tokens / ticket", "Orchestrator share", "Lead mode", "Lead $ / ticket", "Median stop wait", "Stops", "Peak 5-hour", "Limit hits"],
     rows.map((p) => [p.session.slice(0, 8), new Date(t(p.start)).toLocaleString(), fmtDur(p.metrics.span_s), String(p.slots), pct(p.metrics.occupancy),
       String(p.metrics.tickets_merged), perHour(p.metrics.throughput_per_hour), usd(p.metrics.cost.per_merged_ticket), fmtTok(p.metrics.tokens_per_merged_ticket), pct(p.metrics.orchestrator_share),
+      hasLead(p) ? `lead ${p.lead.slice(0, 8)}` : "no lead", usd(leadPerTicket(p)),
       p.metrics.stops && p.metrics.stops.median_s != null ? fmtDur(p.metrics.stops.median_s) : "–", p.metrics.stops ? stopsLine(p.metrics.stops) : "–",
-      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 10, 12, 13]));
+      p.metrics.five_hour_peak == null ? "–" : Math.round(p.metrics.five_hour_peak) + "%", String(p.metrics.limit_hits)]), [3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15]));
+  // Lead outside the window, per side with a lead: a note under the table, never a row or a delta.
+  for (const p of rows.filter(hasLead)) {
+    card.append(el("p", { class: "note" }, `${p.session.slice(0, 8)}: lead outside the window: ${usd(p.metrics.lead && p.metrics.lead.outside_window_usd)}, not in $ per merged ticket.`));
+  }
   return card;
 }
 
@@ -703,7 +750,7 @@ function render() {
   const m = p.metrics;
   const tiles = el("div", { class: "tiles" });
   tiles.append(
-    tile("Proxy $ per merged ticket", usd(m.cost.per_merged_ticket), `${usd(m.cost.total)} in all`),
+    costTile(p),
     tile("Slots occupied", pct(m.occupancy), `building ${pct(m.building_share)}`),
     tile("Tickets merged", String(m.tickets_merged), m.tokens_per_merged_ticket ? `${fmtTok(m.tokens_per_merged_ticket)} tokens each` : ""),
     throughputTile(p),

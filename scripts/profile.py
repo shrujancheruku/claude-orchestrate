@@ -1,6 +1,6 @@
 """Profile an orchestrator session: slot efficiency, token use and plan headroom.
 
-    profile.py <session id | transcript.jsonl> [--repo PATH] [--slots N] [--threshold PCT] [--out DIR] [--quiet]
+    profile.py <session id | transcript.jsonl> [--repo PATH] [--slots N] [--threshold PCT] [--out DIR] [--lead ID] [--quiet]
     profile.py record --repo PATH --session ID '<pass json>'
     profile.py compare <before.json> <after.json> [--max-cost USD] [--max-orchestrator-cost USD]
 
@@ -37,7 +37,7 @@ import config  # noqa: E402
 import reviewreport  # noqa: E402
 import runlog  # noqa: E402
 import session  # noqa: E402
-from repo import iso, parse_ts  # noqa: E402
+from repo import iso, main_checkout, parse_ts  # noqa: E402
 from session import TOKEN_KEYS, Transcript  # noqa: E402
 
 SCHEMA = 3
@@ -155,6 +155,11 @@ def seconds(intervals) -> float:
 
 def clip(intervals, start, end) -> list:
     return [[max(s, start), min(e, end)] for s, e in intervals if e > start and s < end]
+
+
+def clip_all(intervals, window) -> list:
+    """`intervals` clipped to each interval of `window` (a list of [start, end]), in order."""
+    return [c for a, b in window for c in clip(intervals, a, b)]
 
 
 def dispatched_round(text: str) -> int:
@@ -320,6 +325,48 @@ def claimed_stop_kind(word) -> str | None:
     return WAITING_KINDS.get(reason) if head == "waiting" else None
 
 
+PROMPT_LOG = Path(".claude") / "orchestrate-prompts.jsonl"  # hooks/prompt_log.py; one line per permission prompt
+
+
+def prompt_stalls(repo: Path | None, main: Transcript, sid: str, window: list) -> list:
+    """The stretches the orchestrator sat on a permission prompt, as merged [start, end] intervals clipped to `window`.
+
+    Each request line of the prompt log for this session's main thread (no `agent_type`) is matched to its call in the
+    transcript: the newest unmatched call of that tool made before the prompt (a Bash or Monitor call must also carry the
+    prompt's `command`). The stall runs from the prompt to that call's tool_result. Overlapping stalls merge, so a
+    stretch counts once as clock time. A prompt with no matching call or no result yet is left out."""
+    path = (main_checkout(repo) / PROMPT_LOG) if repo else None  # the log is in the main checkout, whichever worktree the run was in
+    if not path or not path.is_file():
+        return []
+    uses, results = [], {}
+    for r in main.records:
+        ts = parse_ts(r.get("timestamp"))
+        for b in common.blocks(r):
+            if b.get("type") == "tool_use" and ts:
+                uses.append((ts, b.get("id"), b.get("name"), b.get("input") or {}))
+            elif b.get("type") == "tool_result" and ts:
+                results.setdefault(b.get("tool_use_id"), ts)
+    uses.sort(key=lambda u: u[0])
+    taken, stalls = set(), []
+    lines = sorted(((parse_ts(e.get("time")), e) for e in common.read_jsonl(path)
+                    if e.get("session_id") == sid and not e.get("agent_type") and e.get("source") == "request"),
+                   key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc))
+    for at, e in lines:
+        if not at:
+            continue
+        cmd = (e.get("tool_input") or {}).get("command") if isinstance(e.get("tool_input"), dict) else None
+        for ts, use_id, name, inp in reversed(uses):
+            if ts > at + timedelta(seconds=1) or use_id in taken or name != e.get("tool_name"):
+                continue
+            if cmd is not None and str(inp.get("command", ""))[:len(cmd)] != cmd:
+                continue
+            if use_id in results and results[use_id] >= at:
+                taken.add(use_id)
+                stalls.append([at, results[use_id]])
+            break
+    return clip_all(merge_intervals(stalls), window)
+
+
 def stop_block(stops: list) -> dict:
     """count, median and total (seconds) for the stops. Open stops are out of the median and in the total."""
     closed = [s["wait_s"] for s in stops if not s["open"]]
@@ -327,7 +374,7 @@ def stop_block(stops: list) -> dict:
             "median_s": statistics.median(closed) if closed else None, "total_s": sum(s["wait_s"] for s in stops)}
 
 
-def stop_metrics(events: list | None, passes: list, tickets: list, agents: list, end: datetime) -> dict:
+def stop_metrics(events: list | None, passes: list, tickets: list, agents: list, end: datetime, stalls: list = ()) -> dict:
     """Stops by kind. Matched by ticket number, not claim, so a question stop that unassigns the ticket is still the run's.
 
     A stop starts at the `worker-report` stopped event, or with no report (a third review round, an ADR-conflict hold, a
@@ -363,7 +410,10 @@ def stop_metrics(events: list | None, passes: list, tickets: list, agents: list,
     return {
         **stop_block(items),
         "oldest_open_s": max((s["wait_s"] for s in open_), default=None),
-        "by_kind": {k: stop_block([s for s in items if s["kind"] == k]) for k in STOP_KINDS},
+        "by_kind": {**{k: stop_block([s for s in items if s["kind"] == k]) for k in STOP_KINDS},
+                    # The orchestrator waiting on a permission prompt belongs to the run, not to a ticket: it is a kind
+                    # of its own here and stays out of `count`, `median_s` and `items` above.
+                    "prompt": stop_block([{"open": False, "wait_s": (e - s).total_seconds()} for s, e in stalls])},
         "items": items,
     }
 
@@ -434,10 +484,22 @@ def meter_use(usage: list, key: str) -> float | None:
     return sum(max(b - a, 0.0) for a, b in zip(vals, vals[1:]))
 
 
-def cost_metrics(orch: Transcript, agents: list, merged: int) -> dict:
-    """Proxy $ for the whole session: the orchestrator and every agent, split by role and model."""
+def lead_costs(layer: dict | None) -> list:
+    """[(role, proxy $ by model family)] for the lead and its scouts, inside the window only; [] with no lead."""
+    if not layer or not layer["lead"]:
+        return []
+    scouts = {}
+    for s in layer["scouts"]:
+        for k, v in s["cost"].items():
+            scouts[k] = scouts.get(k, 0.0) + v
+    return [("lead", layer["lead"]["cost"]), ("lead-scout", scouts)]
+
+
+def cost_metrics(orch: Transcript, agents: list, merged: int, layer: dict | None = None) -> dict:
+    """Proxy $ for the whole session: the orchestrator, every agent and the lead layer's requests inside the window,
+    split by role and model. The lead's cost outside the window is not here (see `lead_block`)."""
     by_role, by_model, by_role_model = {}, {}, {}
-    for role, cost in [("orchestrator", cost_of(orch))] + [(a["role"], a["cost"]) for a in agents]:
+    for role, cost in [("orchestrator", cost_of(orch))] + [(a["role"], a["cost"]) for a in agents] + lead_costs(layer):
         for model, usd in cost.items():
             by_role[role] = by_role.get(role, 0.0) + usd
             by_model[model] = by_model.get(model, 0.0) + usd
@@ -459,7 +521,8 @@ def cost_metrics(orch: Transcript, agents: list, merged: int) -> dict:
         # Requests with no usage at all (the harness's <synthetic> messages) cost nothing and don't count.
         "unpriced_models": sorted({
             m for t in [orch] + [a["transcript"] for a in agents if a["transcript"]]
-            for m, u in t.requests.values() if m and not model_family(m) and any(u.get(k) for k in TOKEN_KEYS)}),
+            for m, u in t.requests.values() if m and not model_family(m) and any(u.get(k) for k in TOKEN_KEYS)}
+            | {m for part in ([layer["lead"]] + layer["scouts"] if layer and layer["lead"] else []) for m in part["unpriced"]}),
         # Models priced at an older sibling's rate because their own version isn't listed.
         "approximate_models": sorted({
             m for t in [orch] + [a["transcript"] for a in agents if a["transcript"]]
@@ -527,25 +590,54 @@ def review_verdicts(t: Transcript | None, first_round: int) -> list:
     return out
 
 
-def review_metrics(agents: list, tickets: list, merged_prs: set) -> dict:
-    """The review quality floor, from reviewer transcripts alone (so it holds with posting on or off)."""
+VERDICT_OF_OUTCOME = {"approve": "approve", "request-changes": "changes"}
+
+
+def event_verdicts(events: list | None) -> dict:
+    """PR number -> the verdicts the run log's `review` events record (`worker-report <pr> --reviewer`), in order.
+
+    An `incomplete` report is no verdict. A report with no round follows the previous one's. Empty with no events log:
+    the caller then reads the reviewer transcripts (older runs)."""
+    out = {}
+    for e in events or ():
+        if e.get("kind") != runlog.REVIEW or e.get("outcome") not in VERDICT_OF_OUTCOME or not str(e.get("ref", "")).isdigit():
+            continue
+        got = out.setdefault(int(e["ref"]), [])
+        rnd = e.get("round") if isinstance(e.get("round"), int) else (got[-1]["round"] + 1 if got else 1)
+        got.append({"round": rnd, "verdict": VERDICT_OF_OUTCOME[e["outcome"]], "blocking": e.get("blocking") or 0,
+                    "minor": e.get("non_blocking") or 0, "suite": e.get("suite"), "continued": False})
+    return out
+
+
+def review_metrics(agents: list, tickets: list, merged_prs: set, events: list | None = None) -> dict:
+    """The review quality floor. A PR with `review` events in the run log reads its rounds, verdicts and suite from them;
+    every other PR (an older run, or events lost) from the reviewer transcripts alone (so it holds with posting on or off)."""
     last_model = {tk["ticket"]: tk["worker_models"][-1] for tk in tickets if tk["worker_models"]}
     first_model = {tk["ticket"]: tk["worker_models"][0] for tk in tickets if tk["worker_models"]}
+    logged = event_verdicts(events)
     by_pr = {}
     unparsed = 0  # reviewer agents that returned no verdict the parser could read: a parser miss shows here
+    reviewers = {}  # PR -> reviewer agents dispatched on it
     for a in agents:
         if a["role"] != "reviewer":
             continue
         key = a.get("pr") or a["id"]
+        reviewers[key] = reviewers.get(key, 0) + 1
         pr = by_pr.setdefault(key, {"pr": a.get("pr"), "ticket": a.get("ticket"), "verdicts": [], "tier": None})
         # The PR's tier is the first one a reviewer was dispatched at.
         pr["tier"] = pr["tier"] or a.get("tier")
+        if a.get("pr") in logged:
+            continue  # the run log has this PR's verdicts
         # A second reviewer whose brief parses to a round already seen follows the highest one.
         seen = {v["round"] for v in pr["verdicts"]}
         first = a["round"] if a["round"] not in seen else max(seen) + 1
         got = review_verdicts(a["transcript"], first)
         unparsed += not got
         pr["verdicts"] += got
+    for n, got in logged.items():
+        pr = by_pr.setdefault(n, {"pr": n, "ticket": next((tk["ticket"] for tk in tickets if tk["pr"] == n), None), "verdicts": [], "tier": None})
+        # One reviewer agent for the PR and a later round: the orchestrator continued it.
+        pr["verdicts"] = [{**v, "continued": i > 0 and reviewers.get(n) == 1} for i, v in enumerate(got)]
     prs = []
     for pr in by_pr.values():
         v = sorted(pr["verdicts"], key=lambda x: x["round"])
@@ -1049,7 +1141,79 @@ def outside_gaps(start: datetime, end: datetime, gaps: list) -> list:
     return out
 
 
-def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: float, now: datetime) -> dict:
+def lead_session_of(passes: list, override: str | None) -> str | None:
+    """The lead's session id: `--lead`, else the newest pass record that names one (`lead: null` names none)."""
+    if override:
+        return override
+    return next((p["lead"] for p in reversed(passes) if isinstance(p.get("lead"), str) and p["lead"]), None)
+
+
+def split_window(t: Transcript, window: list) -> dict:
+    """One lead transcript's requests (each once, at its first record) split by the window's intervals: tokens, proxy $
+    by model family and the request count inside, and the proxy $ of everything outside. A request with no
+    timestamp is outside."""
+    seen = {}
+    for r in t.records:
+        msg = r.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
+            seen.setdefault(msg.get("id") or id(r), (parse_ts(r.get("timestamp")), msg.get("model"), msg["usage"]))
+    out = {"tokens": {v: 0 for v in TOKEN_KEYS.values()}, "cost": {}, "requests": 0, "outside_usd": 0.0, "unpriced": set()}
+    for ts, model, usage in seen.values():
+        c = request_cost(model, usage)
+        if not (ts and any(a <= ts <= b for a, b in window)):
+            out["outside_usd"] += c or 0.0
+            continue
+        out["requests"] += 1
+        for k, v in TOKEN_KEYS.items():
+            out["tokens"][v] += usage.get(k) or 0
+        key = model_family(model) if c is not None else "unpriced"
+        out["cost"][key] = out["cost"].get(key, 0.0) + (c or 0.0)
+        if c is None and model and any(usage.get(k) for k in TOKEN_KEYS):
+            out["unpriced"].add(model)
+    return out
+
+
+DEVELOPER_TIME = "The developer's own time is not measured and is never estimated."
+
+
+def lead_block(layer: dict | None, cost: dict, window: list) -> dict:
+    """The lead's part of a profile. Inside-window cost is already in `cost` (lead and lead-scout roles), so it counts in
+    $ per merged ticket; `outside_window_usd` (the lead's and its scouts' requests outside the window) is the one figure
+    kept out of it. With no lead the cost fields are 0 and `session` is null; the statement is there in both modes."""
+    present = bool(layer and layer["lead"])
+    parts = ([layer["lead"]] + layer["scouts"]) if present else []
+    inside = cost["by_role"].get("lead", 0.0) + cost["by_role"].get("lead-scout", 0.0)
+    return {
+        "session": layer["session"] if layer else None,
+        "cost": inside,
+        "share": inside / cost["total"] if present and cost["total"] else None,
+        "outside_window_usd": sum(x["outside_usd"] for x in parts),
+        "requests": sum(x["requests"] for x in parts),
+        "scouts": len(layer["scouts"]) if present else 0,
+        "window_s": seconds(window),
+        "developer_time": "unmeasured",
+        "statement": DEVELOPER_TIME,
+    }
+
+
+def lead_layer(sid: str | None, window: list) -> dict | None:
+    """The lead and its subagents (role `lead-scout`, kept apart from the orchestrator's `scout`), clipped to `window`
+    (the profile's span minus its Session gaps). None with no lead; `missing` when its transcript can't be found."""
+    if not sid:
+        return None
+    path = common.find_transcript(sid)
+    layer = {"session": sid, "missing": path is None, "lead": None, "scouts": []}
+    if path is None:
+        return layer
+    lead = Transcript(path)
+    layer["lead"] = {**split_window(lead, window), "segments": clip_all(lead.segments(), window)}
+    for role, t in session.subagents(lead):
+        layer["scouts"].append({**split_window(t, window), "id": t.path.stem.removeprefix("agent-"), "agent_type": role,
+                                "segments": clip_all(t.segments(), window)})
+    return layer
+
+
+def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: float, now: datetime, lead: str | None = None) -> dict:
     main = Transcript(transcript)
     sid = transcript.stem
     repo = repo or repo_of(main)
@@ -1075,14 +1239,21 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     gaps = session_gaps(main.times, events)
     silences = unexplained_silences(main.times, gaps)
     # The span per-hour figures use leaves the Session gaps out: a resumed run's downtime is not slow work.
-    span = max(seconds(outside_gaps(start, end, gaps)), 1.0)
+    window = outside_gaps(start, end, gaps)
+    span = max(seconds(window), 1.0)
+    stalls = prompt_stalls(repo, main, sid, window)
+    stalled = seconds(stalls)
+    # The span without the time the orchestrator sat on a permission prompt: raw merges per hour mostly measures prompts (#516).
+    net_span = max(span - stalled, 1.0)
+    lead_sid = lead_session_of(passes, lead)
+    layer = lead_layer(lead_sid, window)
     capacity = sum(n * (b - a).total_seconds() for a, b, n in segments) or span
     occupied = sum(seconds(clip([[tk["start"], tk["end"]]], start, end)) for tk in tickets)
     building = sum(seconds(tk["building"]) for tk in tickets)
     usage = read_usage(start, end)
     wins = windows(usage, passes, threshold, now)
     limits = limit_events(main, agents, passes)
-    review = review_metrics(agents, tickets, set(ticket_endings(main, events)[0]))
+    review = review_metrics(agents, tickets, set(ticket_endings(main, events)[0]), events)
     depth2 = depth2_agents(main, agents)
     pr_tier = {p["ticket"]: p["tier"] for p in review["prs"] if p["tier"]}
     for tk in tickets:
@@ -1098,8 +1269,16 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
 
     by_role, by_model = {}, {}
     orch = {"role": "orchestrator", "model": main.models[0] if main.models else None, "tokens": main.tokens}
-    for a in [orch] + agents:
+    # The lead layer counts by role only: its tokens inside the window, none by model.
+    lead_parts = []
+    if layer and layer["lead"]:
+        scout_tokens = {v: sum(s["tokens"][v] for s in layer["scouts"]) for v in TOKEN_KEYS.values()}
+        lead_parts = [{"role": "lead", "model": None, "tokens": layer["lead"]["tokens"]},
+                      {"role": "lead-scout", "model": None, "tokens": scout_tokens}]
+    for a in [orch] + agents + lead_parts:
         for bucket, key in ((by_role, a["role"]), (by_model, a["model"] or "unknown")):
+            if bucket is by_model and a in lead_parts:
+                continue
             acc = bucket.setdefault(key, {v: 0 for v in TOKEN_KEYS.values()})
             for k, v in a["tokens"].items():
                 acc[k] += v
@@ -1109,7 +1288,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
     merged = [tk for tk in tickets if tk["outcome"] == "merged"]
     occupancy = occupied / capacity
     five = [float(u["five_hour"]) for u in usage if u.get("five_hour") is not None]
-    cost = cost_metrics(main, agents, len(merged))
+    cost = cost_metrics(main, agents, len(merged), layer)
+    lead_metrics = lead_block(layer, cost, window)
     # Agents can write after the orchestrator's last record (or the session is still running).
     last = max([end] + [a["last_record"] for a in agents if a["last_record"]])
     warnings = []
@@ -1119,6 +1299,8 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         warnings.append("no price for model(s) " + ", ".join(cost["unpriced_models"]) + ": their cost counts as $0")
     if cost["approximate_models"]:
         warnings.append("version not in PRICES for " + ", ".join(cost["approximate_models"]) + ": priced at the nearest older version's rates")
+    if layer and layer["missing"]:
+        warnings.append(f"no transcript for lead session {lead_sid}: its cost is not counted")
     if depth2:
         warnings.append(f"{len(depth2)} agent(s) spawned by another agent (depth 2): plugin agents must not delegate further")
     meters = {}
@@ -1147,6 +1329,13 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
         "threshold": threshold,
         "sources": {"pass_log": bool(passes), "usage_tap": bool(usage)},
         "orchestrator": {"model": orch["model"], "tokens": main.tokens, "compactions": main.compactions()},
+        # Lead mode: the lead's session id, or null with no lead (#633).
+        "lead": lead_sid,
+        # Timeline rows for the lead and its scouts, clipped to the window; null with no lead (or no transcript).
+        "lead_layer": None if not layer or not layer["lead"] else {
+            "segments": interval(layer["lead"]["segments"]),
+            "scouts": [{"id": s["id"], "agent_type": s["agent_type"], "segments": interval(s["segments"]),
+                        "tokens": s["tokens"]} for s in layer["scouts"] if s["segments"]]},
         "agents": [
             {
                 "id": a["id"], "role": a["role"], "model": a["model"], "description": a["description"],
@@ -1188,6 +1377,9 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             # Merged tickets per hour of span_s (session gaps left out), the same span and merged count as $ per
             # merged ticket. Occupied-time throughput was rejected: it hides stops. Same with or without a lead.
             "throughput_per_hour": len(merged) / (span / 3600) if merged else None,
+            # The same count over span_s minus the permission-prompt stalls (overlapping ones counted once).
+            "prompt_stall_s": stalled,
+            "throughput_net_per_hour": len(merged) / (net_span / 3600) if merged else None,
             "merges_unverified": sum(1 for tk in merged if tk["merge_unverified"]),
             "tokens_per_merged_ticket": sum(tk["tokens"] for tk in merged) / len(merged) if merged else None,
             "five_hour_start": five[0] if five else None,
@@ -1196,6 +1388,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "windows": wins,
             "limit_hits": len(limits),
             "cost": cost,
+            "lead": lead_metrics,
             "meters": meters,
             "review": review,
             "tiers": tier_metrics(tickets, review),
@@ -1204,7 +1397,7 @@ def profile(transcript: Path, repo: Path | None, slots: int | None, threshold: f
             "depth2": depth2,
             **orchestrator_metrics(main, agents, passes, len(merged), events),
             "events": event_metrics(events, review),
-            "stops": stop_metrics(events, passes, tickets, agents, end),
+            "stops": stop_metrics(events, passes, tickets, agents, end, stalls),
             "gh_calls": gh_metrics(events, passes),
         },
         "recommendation": recommend(slots, occupancy, wins, limits),
@@ -1243,9 +1436,12 @@ def summary(p: dict, saved: Path) -> str:
         spend += f" · orchestrator {fmt_usd(orch)}"
     tph = m.get("throughput_per_hour")
     throughput = "no tickets merged" if tph is None else f"{tph:.2f} merged/hour"
+    lead = m.get("lead") or {}
+    lead_line = (f"lead {p['lead'][:8]}: {fmt_usd(lead.get('cost'))} proxy in the window, {fmt_usd(lead.get('outside_window_usd'))} outside it "
+                 f"(not in $ per merged ticket). {DEVELOPER_TIME}" if p.get("lead") else f"no lead. {DEVELOPER_TIME}")
     lines = [
         f"Profile · session {p['session'][:8]} · {p['start'][:16]}Z → {p['end'][:16]}Z ({fmt_dur(m['span_s'])}) · {throughput} · {slots_label(p)}",
-        f"proxy $ {spend}",
+        f"proxy $ {spend} · {lead_line}",
         f"slots   occupied {m['occupancy']:.0%}  (building {m['building_share']:.0%}, review/merge {m['review_share']:.0%})  idle: {idle}",
         f"plan    {plan}",
         *gh_lines(m.get("gh_calls") or {"available": False}),
@@ -1301,11 +1497,12 @@ def cmd_profile(argv: list) -> None:
     ap.add_argument("--slots", type=int, help="slot count (default: the pass log, then the config)")
     ap.add_argument("--threshold", type=float, default=50.0, help="a 5h window resetting below this %% is underused")
     ap.add_argument("--out", type=Path, help="directory to save into (default: <repo>/.claude/orchestrate-profiles)")
+    ap.add_argument("--lead", help="the lead's session id when the pass log names none (profiling by hand)")
     ap.add_argument("--quiet", action="store_true", help="save without printing the summary")
     args = ap.parse_args(argv)
     transcript = find_transcript(args.session)
     now = datetime.now(timezone.utc)
-    data = profile(transcript, args.repo, args.slots, args.threshold, now)
+    data = profile(transcript, args.repo, args.slots, args.threshold, now, args.lead)
     out = args.out or (Path(data["repo"]) / PROFILES if data["repo"] else Path.cwd())
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{data['start'][:10]}-{data['session'][:8]}.json"
@@ -1352,6 +1549,16 @@ def argv_is_only_nudge(args) -> bool:
             and not args.merged and args.suggestion is None and not args.limit_hit and args.reset_at is None)
 
 
+def lead_id_now(root: Path):
+    """The live lead's session id for this repo, else None. A lookup that fails never stops a pass."""
+    import repo as repo_lib
+    try:
+        sid, _ = repo_lib.lead_session(root)
+    except Exception:  # noqa: BLE001  lead mode off is the safe answer to any failure
+        return None
+    return sid if isinstance(sid, str) and sid else None
+
+
 def derive_pass(args) -> dict:
     """The pass record from the flags (what only the orchestrator knows) and the libraries (everything else): `claimed`
     from `claims`, `slots` and `free` from the config and the claimed, `takeable_waiting` from the snapshot, `greedy` from
@@ -1385,6 +1592,8 @@ def derive_pass(args) -> dict:
     held = [n for n, c in found.items() if c.state not in claims.NO_SLOT]
     entry = {
         "scope": args.scope,
+        # The lead's session id (repo.lead_session, #634), null with no lead or a failed lookup: the profile reads it back.
+        "lead": lead_id_now(root),
         "slots": slots,
         "greedy": args.greedy,
         # A waiting claim carries its reason (`waiting round-3`): the profile reads the stop kind from it (#641).
@@ -1441,8 +1650,14 @@ def figures(p: dict) -> dict:
     return {
         "merged": merged,
         "throughput": m.get("throughput_per_hour"),
+        "throughput_net": m.get("throughput_net_per_hour"),  # None for a profile saved before prompt stalls were measured
         "cost": c["per_merged_ticket"],
         "orchestrator": c["per_merged_ticket_by_role"].get("orchestrator"),
+        # The lead layer (roles lead + lead-scout, inside the window), informational: no gate, `$0.00` for a `lead: null`
+        # run or a profile saved before the lead was folded in. Its outside-window cost is a note, never a row.
+        "lead": sum(c["per_merged_ticket_by_role"].get(r_) or 0.0 for r_ in ("lead", "lead-scout")),
+        "lead_id": p.get("lead"),
+        "lead_outside": (m.get("lead") or {}).get("outside_window_usd") if p.get("lead") else None,
         "changes": r["round1_changes_rate"],
         "outright": r["round1_outright_rate"],
         "approvals": None if r["round1_changes_rate"] is None else 1 - r["round1_changes_rate"],
@@ -1561,16 +1776,24 @@ def stops_line(st) -> str:
 
 def compare_report(before_name: str, after_name: str, r: dict) -> str:
     b, a = r["before"], r["after"]
-    lines = [f"Compare · before {before_name} → after {after_name}",
+    mode = lambda f: f"lead {f['lead_id'][:8]}" if f["lead_id"] else "no lead"
+    lines = [f"Compare · before {before_name} ({mode(b)}) → after {after_name} ({mode(a)})",
              f"{'':38}{'before':>10}{'after':>10}{'delta':>12}"]
 
     def row(label, bv, av, kind):
         lines.append(f"{label:38}{_show(bv, kind):>10}{_show(av, kind):>10}{_delta(bv, av, kind):>12}")
     lines.append(f"{'merged tickets':38}{b['merged']:>10}{a['merged']:>10}{a['merged'] - b['merged']:>+12}")
     # Informational: no gate and no mix adjustment, so it is not in ROWS.
-    row("throughput (merged/hour)", b["throughput"], a["throughput"], "num")
+    row("merges/h raw", b["throughput"], a["throughput"], "num")
+    row("merges/h net of prompt stalls", b["throughput_net"], a["throughput_net"], "num")
     for key, label, kind, _ in ROWS:
         row(label, b[key], a[key], kind)
+        if key == "orchestrator":
+            # Informational, no gate; a side with no lead (or no merged ticket) reads $0.00.
+            row("lead $ per merged ticket", b["lead"], a["lead"], "usd")
+    for name, f in (("before", b), ("after", a)):
+        if f["lead_id"]:
+            lines.append(f"  {name}: lead outside the window: {fmt_usd(f['lead_outside'])}, not in $ per merged ticket")
     row("median stop wait", b["stop_median"], a["stop_median"], "dur")
     for name, f in (("before", b), ("after", a)):
         lines.append(f"  {name}: {stops_line(f['stops'])}")

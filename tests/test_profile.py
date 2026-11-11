@@ -98,7 +98,7 @@ class Fixture:
 
     def run(self, now_minutes=120, **kw):
         os.environ["ORCHESTRATE_USAGE_LOG"] = str(self.usage)
-        return prof.profile(self.main, None, kw.get("slots"), kw.get("threshold", 50.0), T0 + timedelta(minutes=now_minutes))
+        return prof.profile(self.main, None, kw.get("slots"), kw.get("threshold", 50.0), T0 + timedelta(minutes=now_minutes), kw.get("lead"))
 
 
 class ProfileTest(unittest.TestCase):
@@ -385,6 +385,28 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(cmp.returncode, 0, cmp.stderr)
         self.assertIn("Merged / hour", cmp.stdout)
         self.assertIn(f"{p['metrics']['throughput_per_hour']:.2f}", cmp.stdout)
+
+    def test_merges_per_hour_net_of_prompt_stalls_counts_overlapping_stalls_once(self):
+        records = [json.loads(l) for l in self.fx.main.read_text().splitlines()]
+        records += [tool_result(38, "u4", "merged"), tool_result(36, "u5", "ok")]
+        write_jsonl(self.fx.main, records)
+        plain = self.fx.run()["metrics"]
+        self.assertEqual(plain["prompt_stall_s"], 0)
+        self.assertEqual(plain["throughput_net_per_hour"], plain["throughput_per_hour"])
+        prompt = lambda minutes, tool, command, **kw: {"time": at(minutes), "session_id": SESSION, "agent_type": None, "source": "request",
+                                                        "tool_name": tool, "tool_input": {"command": command}, **kw}
+        write_jsonl(self.fx.repo / ".claude" / "orchestrate-prompts.jsonl", [
+            prompt(30.1, "Bash", "gh pr merge 50 --squash"),   # waits until minute 38
+            prompt(31.2, "Bash", "gh issue edit 11 --add-label needs-info --remove-assignee @me"),  # inside the first: counted once
+            prompt(35, "Bash", "gh pr merge 50 --squash", agent_type="worker"),  # a worker's prompt is not the orchestrator's
+            prompt(33, "Bash", "something never run"),  # no matching call
+        ])
+        m = self.fx.run()["metrics"]
+        self.assertAlmostEqual(m["prompt_stall_s"], (38 - 30.1) * 60)
+        self.assertGreater(m["throughput_net_per_hour"], m["throughput_per_hour"])
+        self.assertAlmostEqual(m["throughput_net_per_hour"], m["tickets_merged"] / ((m["span_s"] - m["prompt_stall_s"]) / 3600))
+        self.assertEqual(m["stops"]["by_kind"]["prompt"]["count"], 1)
+        self.assertEqual(m["stops"]["count"], 0)  # the stall is the run's, not a ticket's
 
     def test_a_silence_over_30_minutes_with_no_event_is_noted_and_not_excluded(self):
         self.late_entry(80)
@@ -681,6 +703,23 @@ class QualityTest(unittest.TestCase):
                               "transcript": prof.Transcript(sub / f"agent-{name}.jsonl")}
         r = prof.review_metrics([agent("r22a"), agent("r22b")], [], set())  # both briefs parse to round 1
         self.assertEqual([v["round"] for v in r["prs"][0]["verdicts"]], [1, 2])
+
+    def test_review_events_are_read_in_place_of_the_reviewer_transcripts(self):
+        ev = lambda pr, outcome, **kw: {"kind": "review", "ref": pr, "outcome": outcome, **kw}
+        events = [ev(60, "request-changes", round=1, blocking=2, non_blocking=1, suite="pass"),
+                  ev(60, "incomplete", round=1), ev(60, "approve", round=2, blocking=0, non_blocking=0, suite="pass 12/12"),
+                  ev(61, "approve", blocking=0, non_blocking=3)]
+        sub = self.fx.main.with_suffix("") / "subagents"
+        # The transcript of #60's reviewer says approve in one round; the log says two rounds and wins. #62 has no events.
+        agent = lambda name, pr: {"role": "reviewer", "id": name, "pr": pr, "ticket": None, "round": 1,
+                                  "transcript": prof.Transcript(sub / f"agent-{name}.jsonl")}
+        r = prof.review_metrics([agent("r21", 60), agent("r22a", 62)], [], {60, 61}, events)
+        prs = {x["pr"]: x for x in r["prs"]}
+        self.assertEqual((prs[60]["rounds"], prs[60]["round1"]), (2, "changes"))
+        self.assertEqual([v["suite"] for v in prs[60]["verdicts"]], ["pass", "pass 12/12"])
+        self.assertEqual((prs[61]["rounds"], prs[61]["verdicts"][0]["minor"]), (1, 3))  # a PR with only events, no reviewer agent
+        self.assertEqual(prs[62]["rounds"], 1)  # no events: read from its transcript
+        self.assertEqual(r["unparsed_reviewers"], 0)
 
     def test_usage_rounds_and_round_1_approvals_split_by_worker_model(self):
         wm = self.m["worker_models"]
@@ -1000,6 +1039,22 @@ class CommandTest(unittest.TestCase):
         path = runlog.log_path(repo, runlog.PASS_LOG)
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def record_with_lookup(self, repo, lookup):
+        from unittest import mock
+        import repo as repo_lib
+        with mock.patch.object(repo_lib, "lead_session", lookup):
+            prof.cmd_record(["--repo", str(repo), "--session", "s", "--idle", "overlap=1"])
+        return self.rows(repo)[-1]
+
+    def test_record_writes_the_lead_session_or_null(self):
+        repo = self.record_repo()
+        self.assertEqual(self.record_with_lookup(repo, lambda r: ("lead-uuid", "one live lead"))["lead"], "lead-uuid")
+        self.assertIsNone(self.record_with_lookup(repo, lambda r: (None, "no live session named lead"))["lead"])
+
+        def boom(r):
+            raise OSError("claude agents failed")
+        self.assertIsNone(self.record_with_lookup(repo, boom)["lead"])  # a failed lookup is lead mode off, never a stop
+
     def test_record_names_the_waiting_reason_in_claimed(self):
         repo = self.record_repo()
         runlog.append_event(repo, runlog.WORKER_REPORT, "valid", ref="1", session="s", status="stopped",
@@ -1175,6 +1230,39 @@ class CompareTest(unittest.TestCase):
         path.write_text(json.dumps(data))
         return path
 
+    def with_lead(self, path, lead_id, per_ticket, outside):
+        data = json.loads(path.read_text())
+        c = data["metrics"]["cost"]
+        c["per_merged_ticket"] += per_ticket
+        c["per_merged_ticket_by_role"]["lead"] = per_ticket
+        data["lead"] = lead_id
+        data["metrics"]["lead"] = {"outside_window_usd": outside}
+        path.write_text(json.dumps(data))
+        return path
+
+    def test_compare_of_a_lead_run_against_a_lead_null_run_prints_the_lead_row_and_both_modes(self):
+        before = self.profile("b.json", {"M": (20, 1.0)})
+        after = self.with_lead(self.profile("a.json", {"M": (20, 1.0)}), "abcdef1234", 0.4, 7.5)
+        r = self.compare(before, after)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("(no lead) → after a.json (lead abcdef12)", r.stdout)
+        row = self.line(r.stdout, "lead $ per merged ticket")
+        self.assertEqual(row.split()[-3:], ["$0.00", "$0.40", "+$0.40"])
+        self.assertLess(r.stdout.index("orchestrator $ per merged ticket"), r.stdout.index("lead $ per merged ticket"))
+        self.assertIn("after: lead outside the window: $7.50, not in $ per merged ticket", r.stdout)
+        self.assertNotIn("before: lead outside", r.stdout)
+        self.assertNotIn("INCONCLUSIVE", r.stdout)  # a mode mismatch is not inconclusive
+
+    def test_the_orchestrator_gate_ignores_lead_cost_and_the_cost_gate_includes_it(self):
+        before = self.profile("b.json", {"M": (20, 1.0)})
+        after = self.with_lead(self.profile("a.json", {"M": (20, 1.0)}), "abcdef1234", 0.4, 0.0)  # orchestrator $0.50, total $1.90
+        r = self.compare(before, after, "--max-orchestrator-cost", "0.60", "--max-cost", "1.60")
+        self.assertIn("pass", self.gate(r.stdout, "orchestrator $ per merged ticket"))
+        self.assertIn("FAIL", self.gate(r.stdout, "proxy $ per merged ticket"))
+        # The lead's cost stays in overhead, which the mix adjustment carries over unchanged.
+        res = prof.compare(prof.load_profile(before), prof.load_profile(after))
+        self.assertAlmostEqual(res["after"]["overhead"], 0.9)
+
     def test_compare_prints_the_median_stop_wait_row_and_a_stop_line_per_side(self):
         before = self.with_stops(self.profile("b.json", {"M": (20, 1.0)}), 1800, 4)
         after = self.with_stops(self.profile("a.json", {"M": (20, 1.0)}), 600, 3, 1, 7200)
@@ -1208,7 +1296,7 @@ class CompareTest(unittest.TestCase):
         before = self.profile("b.json", {"L": (20, 4.0), "M": (20, 1.0)}, span_h=8.0)
         after = self.profile("a.json", {"L": (20, 4.0), "M": (20, 1.0)}, span_h=4.0)
         out = self.compare(before, after).stdout
-        self.assertRegex(self.line(out, "throughput (merged/hour)"), r"5\.00\s+10\.00\s+\+5\.00")
+        self.assertRegex(self.line(out, "merges/h raw"), r"5\.00\s+10\.00\s+\+5\.00")
         self.assertNotIn("throughput", out[out.index("gating,"):])
 
     def test_targets_come_from_the_flags_not_from_code(self):
@@ -1448,7 +1536,7 @@ class StopWaitTest(unittest.TestCase):
         # #10: question 2-20, permission-denied 22-30 (the passes at 24 and 26 are inside it); #11: transient exhausted 3-31
         # (the adr-conflict report at 9 is inside it).
         self.assertEqual(kinds, {"question": 1, "permission-denied": 1, "transient-exhausted": 1, "adr-conflict": 0,
-                                 "third-review-round": 0, "gate": 0})
+                                 "third-review-round": 0, "gate": 0, "prompt": 0})
         events = [self.report(5, 10, "worktree-gone"), self.report(6, 10, "transient"), self.report(7, 11, "adr-conflict")]
         passes = [{"ts": at(21), "slots": 2, "free": 0, "idle": {}, "claimed": {"10": "waiting gate"}},
                   {"ts": at(31), "slots": 2, "free": 0, "idle": {}, "claimed": {}}]
@@ -1496,6 +1584,122 @@ class ClaimedStopKindTest(unittest.TestCase):
     def test_words(self):
         self.assertEqual([prof.claimed_stop_kind(w) for w in ("with-lead", "waiting gate", "waiting info", "waiting exhausted", "building", "paused limit", None)],
                          ["question", "gate", "question", "transient-exhausted", None, None, None])
+
+
+class LeadTest(unittest.TestCase):
+    """The lead and its scouts folded into the run's profile (#638). The run's window is minute 1 to 41."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.fx = Fixture(self.root)
+        self.lead = self.root / "projects" / "-repo" / "lead-1.jsonl"
+        sonnet = "claude-sonnet-5-5"
+        # Lead requests at minutes 0 and 45 are outside the window; 5 and 10 inside. Its scout: 8 inside, 50 outside.
+        write_jsonl(self.lead, [assistant(m, f"l{m}", sonnet, []) for m in (0, 5, 10, 45)])
+        write_agent(self.lead.with_suffix("") / "subagents", "sc1", [assistant(m, f"s{m}", sonnet, []) for m in (8, 50)],
+                    {"agentType": "general-purpose", "toolUseId": "x"})
+        self.one = prof.request_cost(sonnet, assistant(0, "x", sonnet, [])["message"]["usage"])
+
+    def tearDown(self):
+        os.environ.pop("ORCHESTRATE_USAGE_LOG", None)
+        self.tmp.cleanup()
+
+    def test_lead_cost_inside_the_window_is_in_per_ticket_and_the_rest_is_the_outside_figure(self):
+        p = self.fx.run(lead=str(self.lead))
+        c, lead = p["metrics"]["cost"], p["metrics"]["lead"]
+        self.assertAlmostEqual(c["by_role"]["lead"], 2 * self.one)
+        self.assertAlmostEqual(c["by_role"]["lead-scout"], self.one)
+        self.assertAlmostEqual(lead["outside_window_usd"], 3 * self.one)
+        # $ per merged ticket counts the inside cost and never the outside figure.
+        base = self.fx.run()["metrics"]["cost"]
+        self.assertAlmostEqual(c["total"] - base["total"], 3 * self.one)
+        self.assertAlmostEqual(c["per_merged_ticket"] - base["per_merged_ticket"], 3 * self.one / p["metrics"]["tickets_merged"])
+        self.assertAlmostEqual(lead["share"], 3 * self.one / c["total"])
+        self.assertEqual(p["lead"], str(self.lead))
+        self.assertEqual(p["metrics"]["tokens_by_role"]["lead"]["output"], 200)
+        self.assertEqual(p["metrics"]["tokens_by_role"]["lead-scout"]["output"], 100)
+        self.assertEqual(sorted(p["metrics"]["tokens_by_model"]), sorted(self.fx.run()["metrics"]["tokens_by_model"]))
+        self.assertEqual(p["lead_layer"]["segments"], [[at(5), at(5)], [at(10), at(10)]])  # the request at 0 and 45 are clipped out
+        self.assertEqual(len(p["lead_layer"]["scouts"]), 1)
+
+    def test_a_resume_gap_inside_the_span_is_out_of_the_lead_window(self):
+        self.fx.main.write_text(self.fx.main.read_text() + json.dumps(assistant(80, "late", "claude-opus-5-5", [])) + "\n")
+        self.fx.events([{"ts": at(79), "session": SESSION, "kind": "resume", "ref": None, "outcome": "resumed"}])
+        # The gap is minute 41 to 79: a lead request at 60 is in the span but not in the window.
+        write_jsonl(self.lead, [assistant(m, f"l{m}", "claude-sonnet-5-5", []) for m in (5, 60)])
+        p = self.fx.run(lead=str(self.lead))
+        self.assertAlmostEqual(p["metrics"]["cost"]["by_role"]["lead"], self.one)
+        self.assertAlmostEqual(p["metrics"]["lead"]["outside_window_usd"], 2 * self.one)  # the lead's 60 and the scout's 50, both in the gap
+        self.assertEqual(p["metrics"]["lead"]["requests"], 2)  # the lead's 5 and the scout's 8, not the 60
+
+    def test_the_lead_comes_from_the_pass_log_and_lead_null_records_no_lead_cost(self):
+        self.fx.passes([{"ts": at(10), "slots": 2, "free": 1, "idle": {"empty": 1}, "lead": str(self.lead)}])
+        named = self.fx.run()
+        self.assertEqual(named["lead"], str(self.lead))
+        self.assertGreater(named["metrics"]["cost"]["by_role"]["lead"], 0)
+        self.fx.passes([{"ts": at(10), "slots": 2, "free": 1, "idle": {"empty": 1}, "lead": None}])
+        none = self.fx.run()
+        self.assertIsNone(none["lead"])
+        self.assertIsNone(none["lead_layer"])
+        self.assertNotIn("lead", none["metrics"]["cost"]["by_role"])
+        self.assertEqual(none["metrics"]["lead"]["cost"], 0)
+        self.assertEqual(none["metrics"]["lead"]["outside_window_usd"], 0)
+        # The unmeasured-time statement is there in both modes.
+        for p in (named, none):
+            self.assertEqual(p["metrics"]["lead"]["developer_time"], "unmeasured")
+            self.assertIn("not measured and is never estimated", prof.summary(p, Path("x.json")))
+
+    def test_profiling_by_hand_with_lead_and_no_pass_log_folds_the_lead_in(self):
+        out = subprocess.run([sys.executable, "-I", str(SCRIPTS / "profile.py"), str(self.fx.main), "--lead", str(self.lead), "--out", str(self.root / "o")],
+                             capture_output=True, text=True, env={**os.environ, "ORCHESTRATE_USAGE_LOG": str(self.fx.usage)})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        saved = json.loads(next((self.root / "o").glob("*.json")).read_text())
+        self.assertGreater(saved["metrics"]["cost"]["by_role"]["lead"], 0)
+        self.assertIn("outside it", out.stdout)
+
+    def test_a_lead_without_a_transcript_warns_and_costs_nothing(self):
+        p = self.fx.run(lead="no-such-lead")
+        self.assertTrue(any("no transcript for lead" in w for w in p["warnings"]))
+        self.assertNotIn("lead", p["metrics"]["cost"]["by_role"])
+
+    def viewer(self, p, card):
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        path = self.root / "p.json"
+        path.write_text(json.dumps(p))
+        out = subprocess.run(["node", str(Path(__file__).parent / "viewer_quality.js"), str(prof.VIEWER), str(path), card],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout
+
+    def test_the_viewer_renders_the_lead_layer_and_leaves_it_out_for_no_lead(self):
+        p = self.fx.run(lead=str(self.lead))
+        p["lead"] = "abcdef123456"
+        self.assertIn("lead abcdef12", self.viewer(p, "subtitleText"))
+        self.assertRegex(self.viewer(p, "costTile"), r"lead \d+%")
+        cost = self.viewer(p, "cost")
+        self.assertIn("Lead outside the window", cost)
+        self.assertIn("not in $ per merged ticket", cost)
+        self.assertIn("Lead layer", cost)
+        self.assertIn("lead-scout", cost)
+        self.assertIn("Lead layer", self.viewer(p, "tokens"))
+        timeline = self.viewer(p, "timeline")
+        self.assertIn("Lead layer", timeline)
+        compared = self.viewer(p, "compare")
+        self.assertIn("lead abcdef12", compared)
+        self.assertIn("Lead $ / ticket", compared)
+        self.assertIn("lead outside the window", compared)
+        none = self.fx.run()
+        self.assertIn("no lead", self.viewer(none, "compare"))
+        self.assertNotIn("lead outside", self.viewer(none, "compare"))
+        self.assertIn("no lead", self.viewer(none, "subtitleText"))
+        self.assertNotIn("lead", self.viewer(none, "costTile"))
+        for card in ("cost", "tokens", "timeline"):
+            out = self.viewer(none, card)
+            self.assertNotIn("outside the window", out)
+            self.assertNotIn("Lead layer", out)
+        self.assertIn("never estimated", self.viewer(none, "cost"))
 
 
 if __name__ == "__main__":
