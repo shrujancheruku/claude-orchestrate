@@ -2270,6 +2270,50 @@ class ScriptFormsTest(unittest.TestCase):
         self.assertFalse(self.ok(command, "orchestrate:worker", cwd=self.work))
         self.assertFalse(self.ok(command, "orchestrate:scout"))
 
+    def test_merge_and_threads_take_the_session_flag_with_a_plain_id_only(self):
+        for command in (f"{SCRIPTS}/merge 12 --method squash --session {self.SID}",
+                        f"{SCRIPTS}/merge 12 --approved-head abc1234 --worktree {self.work} --session {self.SID}",
+                        f"{SCRIPTS}/threads 12 --session {self.SID}", f"{SCRIPTS}/threads 12 --all --session {self.SID}",
+                        f"{SCRIPTS}/threads 12 resolve T1 T2 --fixed abc1234 --session {self.SID}",
+                        f"{SCRIPTS}/threads 12 resolve T1 --left why --followup 7 --session {self.SID}",
+                        f"{SCRIPTS}/threads 12 followup T1 --gist x --session {self.SID}"):
+            with self.subTest(command):
+                self.assertTrue(self.ok(command))
+        for command in (f"{SCRIPTS}/merge 12 --session", f"{SCRIPTS}/merge 12 --session --method", f'{SCRIPTS}/merge 12 --session "$(id)"',
+                        f"{SCRIPTS}/threads 12 --session $X", f"{SCRIPTS}/threads 12 followup --session",
+                        f"{SCRIPTS}/threads 12 resolve T1 --fixed abc1234 --session -x"):
+            with self.subTest(command):
+                self.assertFalse(self.ok(command))
+
+    def reviewer_reason(self, command, session=None, transcript=None):
+        out = raw("orchestrate:reviewer", command, self.main, session_id=session or self.SID, transcript=transcript, full=True)
+        return out["permissionDecisionReason"] if out else ""
+
+    def test_a_refused_scratch_call_says_why(self):
+        dynamic = self.reviewer_reason(f"{SCRIPTS}/scratch 12 abc1234 --under $P")
+        self.assertIn("literal words", dynamic)
+        self.assertIn("literal words", self.reviewer_reason(f"{SCRIPTS}/scratch 12 abc1234 --under {self.pad}/$S"))
+        outside = self.reviewer_reason(f"{SCRIPTS}/scratch 12 abc1234 --under /tmp/elsewhere")
+        self.assertIn("outside your session scratchpad", outside)
+        other_job = os.path.join(os.path.realpath(os.path.expanduser("~")), ".claude", "jobs", "other-session", "tmp")
+        self.assertIn("outside your session scratchpad", self.reviewer_reason(f"{SCRIPTS}/scratch 12 abc1234 --under {other_job}"))
+
+    def test_a_background_orchestrators_reviewer_may_use_the_parents_scratchpad(self):
+        parent = "11111111-1111-1111-1111-111111111111"
+        pad = f"/private/tmp/claude-0/-proj/{parent}/scratchpad"
+        transcript = self.root / "proj" / parent / "subagents" / "agent-a1.jsonl"
+        command = f"{SCRIPTS}/scratch 12 abc1234 --under {pad}"
+        out = raw("orchestrate:reviewer", command, self.main, session_id=self.SID, transcript=transcript, full=True)
+        self.assertEqual(out["permissionDecision"], "allow")
+        # Without the subagent transcript naming that parent it is another session's pad: refused, and says so.
+        self.assertFalse(approved("orchestrate:reviewer", command, self.main, session_id=self.SID))
+        self.assertIn("outside your session scratchpad", self.reviewer_reason(command))
+        # A transcript that is not a subagent's names no parent.
+        flat = self.root / "proj" / parent / "agent-a1.jsonl"
+        out = raw("orchestrate:reviewer", command, self.main, session_id=self.SID, transcript=flat, full=True)
+        self.assertNotEqual(out["permissionDecision"], "allow")
+        self.assertIn("outside your session scratchpad", out["permissionDecisionReason"])
+
     def test_every_role_reads_a_ticket_with_the_issue_script(self):
         for role, cwd in (("orchestrate:worker", self.work), ("orchestrate:reviewer", self.main), ("orchestrate:scout", self.main)):
             with self.subTest(role):

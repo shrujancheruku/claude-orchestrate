@@ -70,6 +70,16 @@ class SkillCallsAreRows(unittest.TestCase):
                                        "lead-route", "merge", "profile.py", "prompts", "rebuild-state", "scratch", "snapshot",
                                        "threads", "watch-ci", "worker-report"})
 
+    def test_every_merge_and_threads_call_of_the_run_skill_passes_the_session(self):
+        # #546/#769: the run log events carry this session, not the last rebuilder's. The start-up fast-forward has no session.
+        seen = set()
+        for where, name, call in self.calls():
+            if name in ("merge", "threads") and where.startswith("run:") and "--fast-forward-only" not in call:
+                seen.add(name)
+                with self.subTest(f"{where} {name}"):
+                    self.assertIn("--session ${CLAUDE_SESSION_ID}", call)
+        self.assertEqual(seen, {"merge", "threads"})
+
     def test_a_call_with_an_unknown_flag_would_fail_the_check(self):
         # The check can fail: the same extraction on a call the table does not know.
         self.assertFalse(approved(None, self.fill('"${CLAUDE_SKILL_DIR}/../../scripts/claims" --bogus <n>'), self.main, session_id=SID))
