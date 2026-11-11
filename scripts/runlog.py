@@ -251,6 +251,8 @@ def validate_pass(entry) -> None:
         "reset_at": lambda v: v is None or isinstance(v, str), "suggestion": lambda v: v is None or isinstance(v, str),
         "dispatched": _tickets, "merged": _tickets, "nudged": _tickets,
         "ts": lambda v: isinstance(v, str), "session": lambda v: isinstance(v, str),
+        # The lead's session id when the run has one, else null: the profile folds that transcript in (#638).
+        "lead": lambda v: v is None or isinstance(v, str),
     }
     unknown = sorted(set(entry) - set(types) - {"scope"})
     if unknown:
