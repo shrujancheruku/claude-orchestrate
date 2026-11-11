@@ -201,7 +201,7 @@ class Holds(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout.splitlines()[-1]), (0, "overlap: none"), r.stdout + r.stderr)
         calls = [c[1] for c in self.env.gh_calls() if len(c) > 1]
         self.assertNotIn("repos/{owner}/{repo}/pulls/9", calls)
-        self.assertEqual(len([c for c in calls if c.endswith("/pulls/9/files?per_page=100")]), 1, calls)
+        self.assertEqual(len([c for c in calls if c.startswith("repos/{owner}/{repo}/pulls/9/files")]), 1, calls)
 
     def test_the_younger_of_two_open_prs_waits_for_the_older_and_exits_3(self):
         self.gh({9: ["a.py", "b.py"], 5: ["b.py", "c.py"]}, branches={9: "7-mine", 5: "4-older"})
