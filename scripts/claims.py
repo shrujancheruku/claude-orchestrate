@@ -370,7 +370,7 @@ def claims(repo, state_file, issues, prs, merged, worktrees=None, changes=worktr
             claim.state = "in-review"
         elif n in merged_branch or n not in open_issues:
             claim.state = "done"
-        elif n in parked:
+        elif n in parked and shown is None:  # a `park` event over a still-open (draft) PR is not trusted (#755)
             claim.state = "parked"
         elif record is not None:
             claim.state = "building"

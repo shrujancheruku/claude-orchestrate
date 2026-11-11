@@ -293,6 +293,11 @@ class WaitingAndIdle(unittest.TestCase):
         self.park(3)
         self.assertEqual(self.one(3, prs=[self.pr(3, "3-x")]).state, "in-review")
 
+    def test_a_park_event_over_a_still_open_draft_pr_is_not_parked(self):
+        self.park(3)
+        draft = dict(self.pr(3, "3-x"), isDraft=True)
+        self.assertNotEqual(self.one(3, prs=[draft]).state, "parked")
+
     def test_w_permission_denied_replaces_building(self):
         self.report(1, status="stopped", stop_reason="permission-denied", denied_command="gh pr create")
         c = self.one(1, state={"1": WORKER})
