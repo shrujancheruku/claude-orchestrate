@@ -301,6 +301,13 @@ class Launch(unittest.TestCase):
         self.launch("--print", "--greedy=4")
         self.assertEqual(self.greedy_events(), [])
 
+    def test_check_greedy_writes_nothing(self):  # #754: the guard approves `launch --check-greedy` only because it exits first
+        before = sorted(self.cache.rglob("*"))
+        r = self.launch("--check-greedy", "--greedy=4")
+        self.assertEqual((r.returncode, r.stdout.strip(), r.stderr), (0, "greedy cap 4", ""))
+        self.assertEqual(self.greedy_events(), [])  # no run-log write
+        self.assertEqual(sorted(self.cache.rglob("*")), before)  # no snapshot export or link
+
     def test_a_fresh_launch_logs_the_greedy_cap_or_off_and_a_resume_logs_none(self):  # #657
         self.assertEqual(self.launch("--bg", "--greedy=4").returncode, 0)
         self.assertEqual(self.launch("--bg", "--greedy").returncode, 0)
