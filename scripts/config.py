@@ -56,7 +56,8 @@ class Config(NamedTuple):
     orchestrator_model: str | None = None  # the Models table's Orchestrator row; None when blank, the old wording or missing
     lead_model: str | None = None  # the Models table's Lead row, read the same way; None when blank or missing
     worker_model: str | None = None  # the Worker row's first word: the model of every ticket that is not small
-    worker_small_model: str | None = None  # the Worker row's `; <model> for S tickets` clause; None when absent or unparsed
+    worker_small_model: str | None = None  # the Worker row's `; <model> for S tickets` or `; <model> off risk paths` clause; None when absent or unparsed
+    worker_small_rule: str | None = None  # which clause named it: "S" or "off-risk"; None with no small model (#797)
     ci_wait_limit: int | None = None  # minutes: the optional `**CI wait limit:**` line; None when absent or not a number
     board: str | None = None  # the `- **Board:** <project URL>` line setup writes; None when absent
     board_bad: str | None = None  # the Board line's text when it is present but names no URL; None when it parses or is absent (#738)
@@ -125,7 +126,7 @@ class Config(NamedTuple):
             orchestrator_model=_model_row(common.section_of(text, "Models"), "orchestrator"),
             lead_model=_model_row(common.section_of(text, "Models"), "lead"),
             worker_model=_model_row(common.section_of(text, "Models"), "worker"),
-            worker_small_model=_worker_small_model(common.section_of(text, "Models")),
+            **_worker_small_model(common.section_of(text, "Models")),
             ci_wait_limit=_ci_wait_limit(text),
             board=_board(text),
             board_bad=_board_bad(text),
@@ -145,18 +146,23 @@ class Config(NamedTuple):
 
         `labels`: the ticket's labels. `touch_map_paths`: the touch map's paths, or None while the scout has not
         produced one (an unlabelled ticket then takes the default; `frontier --touch-map` asks again). `investigate`:
-        the title or body says "investigate" or "design". The small model (the Worker row's `; <model> for S tickets`
-        clause) goes to a `size:S` ticket, or an unlabelled one whose touch map is within the S file limit, and only
-        when the touch map hits no risk path; everything else gets the default (the row's first word, else `sonnet`).
-        A cell that does not parse has no small model, so a guess never routes toward haiku."""
+        the title or body says "investigate" or "design". The Worker row's small model goes only to a ticket whose
+        touch map hits no risk path. Its `; <model> for S tickets` clause gives it to a `size:S` ticket, or an
+        unlabelled one whose touch map is within the S file limit; its `; <model> off risk paths` clause gives it to
+        any ticket with a touch map, whatever its size. Everything else gets the default (the row's first word, else
+        `sonnet`). A cell that does not parse has no small model, so a guess never routes toward haiku."""
         default = self.worker_model or DEFAULT_WORKER_MODEL
         if investigate or not self.worker_small_model:
             return default
+        paths = None if touch_map_paths is None else list(touch_map_paths)
+        if paths is not None and self.risk_hit(paths):
+            return default
+        if self.worker_small_rule == "off-risk":
+            return default if paths is None else self.worker_small_model
         sized = [x for x in SIZES if f"size:{x}" in set(labels or ())]
         if sized and sized != ["S"]:  # any bigger label wins (ADR-0016: a label is a floor)
             return default
-        paths = None if touch_map_paths is None else list(touch_map_paths)
-        if paths is not None and (self.risk_hit(paths) or len(set(paths)) > self._s_files()):
+        if paths is not None and len(set(paths)) > self._s_files():
             return default
         if sized or paths is not None:  # `size:S`, or an unlabelled ticket whose known map is small and safe
             return self.worker_small_model
@@ -453,17 +459,20 @@ def _trusted_authors(backlog):
 _OLD_ORCHESTRATOR ="the session's model"  # the template's wording before the lead layer: means no model
 
 
-_SMALL_CLAUSE = re.compile(r";\s*`?([\w.\-]+)`?\s+for\s+S\s+tickets", re.IGNORECASE)
+_SMALL_CLAUSE = re.compile(r";\s*`?([\w.\-]+)`?\s+(?:(?P<s>for\s+S\s+tickets)|off\s+risk\s+paths)", re.IGNORECASE)
 
 
 def _worker_small_model(models):
-    """The model of the Worker row's `; <model> for S tickets` clause, or None (no clause, or a cell that doesn't parse)."""
+    """The Worker row's small model and the rule its clause names: `; <model> for S tickets` is "S", `; <model> off
+    risk paths` is "off-risk". Both None with no clause or a cell that doesn't parse."""
     for line in (models or "").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) >= 2 and cells[0].lower() == "worker":
             m = _SMALL_CLAUSE.search(cells[1])
-            return m.group(1).lower() if m else None
-    return None
+            if m:
+                return {"worker_small_model": m.group(1).lower(), "worker_small_rule": "S" if m.group("s") else "off-risk"}
+            break
+    return {"worker_small_model": None, "worker_small_rule": None}
 
 
 def _model_row(models, role):

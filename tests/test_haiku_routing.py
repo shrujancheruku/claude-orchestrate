@@ -10,6 +10,7 @@ import claims  # noqa: E402
 import config  # noqa: E402
 
 SMALL = "sonnet; haiku for S tickets (at most 3 files, the **Tiers** file limit)"
+OFF_RISK = "sonnet; haiku off risk paths"
 
 
 def cfg(worker=SMALL, s_files=3):
@@ -50,10 +51,40 @@ class ModelFor(unittest.TestCase):
             ((), one, False, cfg(worker="opus; the small ones go cheap"), "opus"),  # an unparsed clause is never haiku
             ((), one, False, cfg(worker=""), "sonnet"),    # a blank cell
             ((), one, False, config.Config(), "sonnet"),   # no config at all
+            # the `off risk paths` clause: every ticket whose map hits no risk path, whatever its size
+            ((), four, False, cfg(worker=OFF_RISK), "haiku"),           # over the S file limit
+            ((), one, False, cfg(worker=OFF_RISK), "haiku"),
+            ((), [], False, cfg(worker=OFF_RISK), "haiku"),
+            (("size:M",), four, False, cfg(worker=OFF_RISK), "haiku"),  # a size label is no bar
+            (("size:L",), four, False, cfg(worker=OFF_RISK), "haiku"),
+            (("size:S",), one, False, cfg(worker=OFF_RISK), "haiku"),
+            ((), risky, False, cfg(worker=OFF_RISK), "sonnet"),         # a risk path takes the default
+            ((), ["hooks/"], False, cfg(worker=OFF_RISK), "sonnet"),
+            (("size:L",), risky, False, cfg(worker=OFF_RISK), "sonnet"),
+            ((), None, False, cfg(worker=OFF_RISK), "sonnet"),          # no map yet: the default
+            (("size:S",), None, False, cfg(worker=OFF_RISK), "sonnet"),  # nor does the S label stand in for one
+            ((), one, True, cfg(worker=OFF_RISK), "sonnet"),            # investigate / design
+            ((), four, False, cfg(worker="opus; `haiku` off risk paths"), "haiku"),
+            (("size:L",), risky, False, cfg(worker="opus; haiku off risk paths"), "opus"),
         ]
         for labels, paths, investigate, c, want in rows:
-            with self.subTest(labels=labels, paths=paths, investigate=investigate, worker=c.worker_model, small=c.worker_small_model):
+            with self.subTest(labels=labels, paths=paths, investigate=investigate, worker=c.worker_model,
+                              small=c.worker_small_model, rule=c.worker_small_rule):
                 self.assertEqual(c.model_for(labels, paths, investigate), want)
+
+    def test_the_clause_names_its_rule(self):
+        # (Worker cell, (small model, rule))
+        rows = [
+            (SMALL, ("haiku", "S")),
+            (OFF_RISK, ("haiku", "off-risk")),
+            ("sonnet; Haiku Off Risk Paths", ("haiku", "off-risk")),
+            ("sonnet", (None, None)),
+            ("sonnet; haiku off the risky bits", (None, None)),  # neither clause: no small model
+        ]
+        for cell, want in rows:
+            with self.subTest(cell=cell):
+                c = cfg(worker=cell)
+                self.assertEqual((c.worker_small_model, c.worker_small_rule), want)
 
 
 class TierFor(unittest.TestCase):

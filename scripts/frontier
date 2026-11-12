@@ -5,8 +5,8 @@ Default: one line per takeable ticket, `#<n> <title> model <name>`, ascending, t
 `model <name>` is the model to dispatch the ticket's worker with (Config.model_for: the Worker row of the config's Models
 table, the ticket's `size:` label, "investigate"/"design" in its title or body, and the touch map). The scout's map is not
 known yet when the line first prints, so an unlabelled ticket shows the default model; `--ticket <n> --touch-map '<map>'`
-prints the line again with the model the map earns (the small model only for a map within the S file limit and off every
-risk path).
+prints the line again with the model the map earns (the small model only for a map off every risk path, and within the S file
+limit unless the Worker row says `off risk paths`).
 --all appends four sections, each `<name>:` then one line per item, or `none`:
     not-takeable:    `#<n> <reason>` for every other `ready-for-agent` ticket (claimed, blocked-by #<m>..., parent, lead, wayfinder)
     ready-for-human: `#<n> <title>`
@@ -103,8 +103,8 @@ def run(argv=None) -> int:
                     help="add the not-takeable, ready-for-human, parents-closed and drift sections")
     ap.add_argument("--fix-drift", action="store_true",
                     help="add the native blocked_by edge for each drift line (prints each edge added)")
-    ap.add_argument("--touch-map", help="with --ticket: the scout's touch map; the line's model then follows it (a small, "
-                    "risk-free map lets an unlabelled ticket take the small model)")
+    ap.add_argument("--touch-map", help="with --ticket: the scout's touch map; the line's model then follows it (a risk-free map, "
+                    "small unless the Worker row says `off risk paths`, lets a ticket take the small model)")
     ap.add_argument("--slots", action="store_true",
                     help="after the ticket lines, print `slots: <building>/<cap> building, <k> parked` (parked claims are not counted)")
     ap.add_argument("--state", help="with --slots: the state file (default: <repo>/.claude/orchestrate-state.json)")
